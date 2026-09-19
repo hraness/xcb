@@ -16,7 +16,7 @@ const initialPalette = getDesignPaletteTheme("paper", "light");
 
 const title = "xcb — Excalibur for your coding agents";
 const description =
-  "A local, terminal-first workspace for coding agents. Bring your accounts, choose your models, and shape your interface with composable panes and extensions.";
+  "A metaharness and SDK for AI subscriptions, with a customizable terminal workspace, account custody, and token observability. Native xcb is in development.";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://xcb.dev"),

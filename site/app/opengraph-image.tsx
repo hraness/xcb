@@ -18,7 +18,7 @@ function XcbMark() {
 
 export default function OpengraphImage() {
   return createSocialImageResponse({
-    description: "A local, composable workspace for coding agents.",
+    description: "A metaharness and SDK for AI subscriptions.",
     domain: "xcb.dev",
     eyebrow: "xcb / Excalibur",
     mark: <XcbMark />,
