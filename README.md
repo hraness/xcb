@@ -1,10 +1,11 @@
 <!-- hraness:xcb-landing:start -->
 # xcb
 
-xcb (Excalibur) is a local, terminal-first workspace for coding agents, built
-with Rust and Ratatui. Named accounts, local sessions, and composable extensions
-share one interface. It is in development: Claude is the only native execution
-candidate; Codex and Devin execution remain unavailable.
+Excalibur (`xcb`) is a metaharness and SDK for working with AI subscriptions.
+Its local, terminal-first workspace brings named accounts, local sessions,
+token observability, and composable extensions into one Rust and Ratatui
+interface. It is in development: Claude is the only native execution candidate;
+Codex and Devin execution remain unavailable.
 <!-- hraness:xcb-landing:end -->
 
 [Project site](https://xcb.dev) · [Source](https://github.com/hraness/xcb) ·

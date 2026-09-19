@@ -1,7 +1,7 @@
 {
   "name": "@hraness/xcb",
   "version": "0.4.0",
-  "description": "Provider-neutral agent routing, account custody and scoped tool contracts.",
+  "description": "Excalibur: a metaharness and SDK for AI subscriptions, with a customizable terminal workspace, account custody, and token observability. Native xcb is in development.",
   "type": "module",
   "license": "MIT",
   "packageManager": "bun@1.3.14",
