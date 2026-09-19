@@ -5,6 +5,19 @@ import Home from "../app/page";
 import Docs from "../app/docs/page";
 import { publishedRelease } from "../app/publication";
 import RootLayout from "../app/layout";
+import { siteDefaultPalette } from "../palette";
+
+test("the appearance menu starts with the bootstrap's Paper/system preference", () => {
+  const html = renderToStaticMarkup(<RootLayout><Home /></RootLayout>);
+  const selected: string[] = [];
+  new HTMLRewriter()
+    .on('.hraness-design-palette-menu input[type="radio"][checked]', {
+      element(element) { selected.push(element.getAttribute("value") ?? ""); },
+    })
+    .transform(html);
+  expect(siteDefaultPalette).toEqual({ palette: "paper", mode: "system" });
+  expect(selected).toEqual([siteDefaultPalette.palette, siteDefaultPalette.mode]);
+});
 
 test("every public route has one optional support footer without product signup", () => {
   for (const Page of [Home, Docs]) {

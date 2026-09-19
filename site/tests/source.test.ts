@@ -147,9 +147,8 @@ test("adopts the shared palette contract with Paper as the default appearance", 
   expect(layout).toContain("suppressHydrationWarning");
   // The single appearance control sits at the rightmost header action.
   expect(home).toContain('trailing={<ThemeMenuButton aria-label="Appearance" />}');
-  // The blocking bootstrap keeps Paper as the system-following default.
+  // The blocking bootstrap installs appearance before the React menu hydrates.
   expect(bootstrap).toContain("initDesignPalette");
-  expect(bootstrap).toContain('palette: "paper", mode: "system"');
   // Palette themes and the semantic bridge load before the vendored theme.
   expect(css).toContain('@import "@hraness/design-kit/palettes.css";');
   expect(css.indexOf('palettes.css')).toBeLessThan(css.indexOf("vendor/paper-theme"));
