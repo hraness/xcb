@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { getDesignPaletteTheme } from "@hraness/design-kit";
 import { DesignPaletteProvider, ThemeColorSync } from "@hraness/design-kit/react";
 import { HranessSiteFooter } from "@hraness/site-footer/react";
+import { siteDefaultPalette } from "../palette";
 import { supportProfile } from "../../src/support-profile";
 import { FoilController } from "./foil-controller";
 import "./globals.css";
@@ -65,7 +66,7 @@ export default function RootLayout({
         <script src="/theme-bootstrap.js" />
       </head>
       <body>
-        <DesignPaletteProvider>
+        <DesignPaletteProvider defaultPreference={siteDefaultPalette}>
           <ThemeColorSync />
           {children}
           <div className="network-footer">
