@@ -1,393 +1,107 @@
 import {
   MarketingCallToAction,
   MarketingInstallPanel,
-  MarketingInterfaceGrid,
-  MarketingMaker,
   MarketingPage,
-  MarketingPrimitives,
-  MarketingProofFrame,
   MarketingQuestionList,
   MarketingSection,
-  MarketingSiteHeader,
-  MarketingTrustBoundary,
   ProductHero,
 } from "@hraness/design-kit/react/server";
-import { ThemeMenuButton } from "@hraness/design-kit/react";
 import { AskAiAboutThis } from "@hraness/ui";
-
 import { publishedRelease } from "./publication";
-import { readmeLead, readmeTitle } from "./readme.generated";
+import { SiteHeader } from "./site-header";
+import { WorkspacePreview } from "./workspace-preview";
 
-function TopicIcon({ slug }: Readonly<{ slug: string }>) {
-  return (
-    <img className="xcb-topic-icon" src={`/icons/${slug}.svg`} alt="" aria-hidden="true" width="88" height="88" loading="lazy" decoding="async" />
-  );
-}
-
-const releaseVersion = publishedRelease?.version;
 const repository = "https://github.com/hraness/xcb";
-const archiveUrl = publishedRelease?.archiveUrl ?? null;
-
-const heading = "Your agents. Your terminal. Your edge.";
-const footnote = "Excalibur, for short. Local-first and MIT licensed. Source preview: native Claude, Codex, and Devin adapters with scoped workspace tools. Installed Claude and Codex coding workflows passed on macOS ARM64 with the tested accounts, alongside the command backend’s 12-case VM boundary suite. The tested Devin account reached its quota.";
-
-const primitives = [
-  {
-    icon: "account-custody",
-    label: "Bring your accounts",
-    summary: "Keep named coding-agent accounts together without mixing their credentials. See subscription windows and usage freshness in one compact view.",
-  },
-  {
-    icon: "model-selection",
-    label: "Choose your models",
-    summary: "Favorites first, the rest below. Choose a model from an admitted provider's catalog, with explicit account and model selection. Native Devin currently supports fixed ACP choices.",
-  },
-  {
-    icon: "capability-profiles",
-    label: "Make it your pane",
-    summary: "Choose, edit, or generate a userspace pane with /pane. Reload a valid change without rebuilding the terminal; an invalid edit keeps the last working view.",
-  },
-  {
-    icon: "public-web-port",
-    label: "See the pace",
-    summary: "Session token velocity, a share of observed local throughput, and subscription runway estimates. Unknown quota stays unknown, not a reassuring full meter.",
-  },
-  {
-    icon: "tool-broker",
-    label: "Keep context useful",
-    summary: "Gobstopper supplies the context-management strategy. Apply supported compaction at settled boundaries, with the full local transcript retained.",
-  },
-  {
-    icon: "provider-adapters",
-    label: "Compose the behavior",
-    summary: "Continuation, usage, and context management are separate extensions. Add trusted lifecycle hooks without turning the renderer into the execution kernel.",
-  },
-] as const;
-
-const trust = [
-  {
-    label: "Local by default",
-    detail: "Accounts, session history, configuration, and panes stay on this machine. No cloud synchronization or required daemon. aiCharts publishing is a separate opt-in, not a condition of local measurement.",
-  },
-  {
-    label: "Continue, not blindly repeat",
-    detail: "Automatic continuation stops for questions, authentication, approvals, cancellation, and budget limits. A quota failure can trigger a settled handoff; an uncertain effect cannot authorize replay.",
-  },
-  {
-    label: "A pane is not permission",
-    detail: "Pane declarations are bounded presentation data. Generating a view cannot grant credential access, execute a hook, or change provider admission. Executable extensions require a separate trust decision.",
-  },
-] as const;
-
+const releaseVersion = publishedRelease?.version;
+const summary = "Bring your Claude, Codex, and Devin accounts into one local workspace. Choose a model, work on your project, and keep your sessions and usage in view.";
 const questions = [
-  {
-    question: "What is xcb?",
-    answer: "xcb is Excalibur: a local, terminal-first workspace for coding agents. It is AgentMixer's new name and direction, with a native Rust kernel and a composable terminal interface in development.",
-  },
-  {
-    question: "Is this Oompa in a terminal?",
-    answer: "No. xcb carries forward useful ideas about accounts, usage, response state, and handoffs without Oompa's cloud control plane. The core is local; optional extensions add behavior.",
-  },
-  {
-    question: "Can I use Adaptive and Fusion?",
-    answer: "Native Devin currently supports fixed ACP model choices. The TypeScript compatibility catalog represents Adaptive and Fusion, but its Devin task adapter remains unqualified. A catalog entry alone does not establish native execution support.",
-  },
-  {
-    question: "Does usage go to aiCharts automatically?",
-    answer: "No. Local measurement and publishing are separate. The design supports opt-in idle-boundary exports using aiCharts formats; its upload service is not yet live-qualified. Session text and credentials are not numeric usage data.",
-  },
-  {
-    question: "What can I install today?",
-    answer: "Build native xcb from source. No xcb binary release or @hraness/xcb npm package is published. The existing v0.3.0 archive is AgentMixer. xcb cannot yet replace the three provider CLIs for daily coding work.",
-  },
-  {
-    question: "Who made it?",
-    answer: "Ben Guo, a musician and builder, formerly a founder and engineering leader at companies including Venmo and Stripe, now building from Puerto Rico. xcb is published by Hraness under the MIT license.",
-  },
+  { question: "What is xcb?", answer: "xcb, short for Excalibur, is an open-source terminal workspace for coding agents. It brings your provider accounts, model choices, local sessions, and usage into a common interface. The native Rust app is available as a source preview." },
+  { question: "Is it a multi-agent orchestrator?", answer: "Its focus is the workspace around your coding agents: accounts, models, sessions, tools, and controlled continuation. It is not a hosted fleet of parallel agents or a visual workflow builder. Use a dedicated orchestrator when coordinating a task graph is your main need." },
+  { question: "Do I still need provider accounts?", answer: "Yes. Connect your own supported provider accounts and installed runtimes. xcb does not include model access, pool unrelated subscriptions, or remove provider usage limits. Provider pricing and terms still apply." },
+  { question: "What stays on my computer?", answer: "xcb keeps its account state, session history, configuration, and panes locally. Model requests still go to the provider you choose. There is no required xcb cloud account, and local usage measurement does not automatically publish your data." },
+  { question: "Can I use it for daily work today?", answer: "The tested Claude and Codex setups passed real coding workflows on macOS ARM64. Native xcb is still a source preview: provider builds are restricted, command execution uses offline Linux, and the tested Devin account reached quota before a coding turn. Read the setup guide to decide whether those boundaries fit your projects." },
+  { question: "What does it cost?", answer: "xcb is MIT licensed and free to build from source. Your provider subscriptions, model usage, and any services you choose are separate. There is no xcb subscription required to use the local workspace." },
 ] as const;
-
-const navigation = [
-  { href: "#readiness", label: "Readiness" },
-  { href: "#model", label: "Building blocks" },
-  { href: "#interfaces", label: "Make it yours" },
-  { href: "#install", label: "Get started" },
-  { href: "/docs", label: "Docs" },
-  { href: repository, label: "GitHub" },
-] as const;
-
-function BrandMark() {
-  // eslint-disable-next-line @next/next/no-img-element -- the canonical mark is a fixed-size authored SVG
-  return <img alt="" aria-hidden="true" height={20} src="/marks/xcb.svg" width={20} />;
-}
 
 export default function Home() {
   const structuredData = [
-    {
-      "@context": "https://schema.org",
-      "@type": "SoftwareSourceCode",
-      codeRepository: repository,
-      description: readmeLead,
-      license: "https://opensource.org/license/mit",
-      name: readmeTitle,
-      programmingLanguage: ["Rust", "TypeScript"],
-      url: "https://xcb.dev",
-    },
-    {
-      "@context": "https://schema.org",
-      "@type": "FAQPage",
-      mainEntity: questions.map(({ answer, question }) => ({
-        "@type": "Question",
-        acceptedAnswer: { "@type": "Answer", text: answer },
-        name: question,
-      })),
-    },
+    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: "xcb", description: summary, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.dev" },
+    { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: questions.map(({ question, answer }) => ({ "@type": "Question", name: question, acceptedAnswer: { "@type": "Answer", text: answer } })) },
   ];
-
   return (
     <div data-hraness-marketing-preset="editorial">
-      <script
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }}
-        type="application/ld+json"
-      />
-      <a className="skip-link" href="#main">Skip to content</a>
-      <MarketingSiteHeader
-        className="hraness-material-chrome"
-        action={{ href: "#install", label: "Explore xcb" }}
-        brand={<><BrandMark />xcb</>}
-        brandLabel="xcb home"
-        links={navigation}
-        trailing={<ThemeMenuButton aria-label="Appearance" />}
-      />
-
+      <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }} />
+      <SiteHeader active="home" />
       <main id="main" tabIndex={-1}>
         <MarketingPage>
-          <div className="hraness-material-wall">
-          <ProductHero
-            align="start"
-            actions={[
-              { href: "#install", label: "Explore xcb" },
-              { href: "/docs", label: "Read the docs" },
-            ]}
-            boundary={footnote}
-            className="xcb-marketing-hero"
-            eyebrow="xcb / Excalibur"
-            frame={(
-              <MarketingProofFrame
-                className="hraness-material-pane"
-                caption="An illustrative focus pane. Quiet by default; yours to reshape."
-                credit="Native interface design"
-                title="Less activity. More signal."
-              >
-                <pre className="transcript" tabIndex={0}><code>{`xcb · factory / renderer             usage: unmeasured
-
-You
-Make the interface feel like mine.
-
-▸ Thinking                           collapsed
-▸ Earlier responses                  collapsed
-
-The pane is a declaration, not a fork of the harness.
-Edit it here. Keep working. See it reload.
-
-Subagents    renderer: working · tests: complete
-
-───────────────────────────────────────────────────
-› /pane focus
-───────────────────────────────────────────────────
-Claude · selected observed model  [ working ]`}</code></pre>
-              </MarketingProofFrame>
-            )}
-            heading={heading}
-            headingId="hero-title"
-            name=""
-            summary={readmeLead}
-          />
-          </div>
-
-          <MarketingSection
-            heading="A source preview, with clear limits."
-            headingId="readiness-title"
-            id="readiness"
-            label="Current readiness"
-            summary="xcb is not yet a daily-driver replacement for Codex, Claude Code, and Devin."
-          >
-            <ul>
-              <li><strong>Claude:</strong> installed coding workflow verified on macOS ARM64 with the tested account. Linux remains an execution candidate after sign-in, binary admission, and per-run confinement checks.</li>
-              <li><strong>Codex:</strong> native app-server candidate on macOS for exact build 0.155.0-alpha.2.6, with supervised ChatGPT sign-in or explicit credential import. Authenticated read/write/read acceptance passed, followed by the installed coding workflow on macOS ARM64 with the tested account.</li>
-              <li><strong>Devin:</strong> native ACP candidate on macOS for exact build 3000.10.31, with explicit credential import. Authenticated discovery passed; the tested account reached provider quota before a coding turn.</li>
-              <li><strong>Compatibility CLI:</strong> Codex and Devin task execution remains disabled pending qualification.</li>
-              <li><strong>Workspace tools:</strong> list, read, search, write, create directories, and remove or rename regular files with revision checks. The isolated Linux runner for offline tests and builds passed its 12-case VM boundary suite, including filtered read-only Git inspection, public dependency fetching, and offline Cargo/Bun use from immutable caches. Installed Claude and Codex coding workflows passed: expected test failure, exact repair, passing test, and filtered Git status, with joined processes and settled effects.</li>
-            </ul>
-            <p>A model in the catalog or a successful metadata probe does not qualify a provider. <a href="/docs#readiness">Read the current limits and source quick start</a>.</p>
-          </MarketingSection>
-
-          <MarketingPrimitives
-            heading="A small core. The parts you choose."
-            headingId="model-title"
-            id="model"
-            items={primitives.map((primitive) => ({
-              example: <TopicIcon slug={primitive.icon} />,
-              label: primitive.label,
-              summary: primitive.summary,
-            }))}
-            label=""
-            summary="The native direction: accounts and sessions in the kernel, behavior in extensions, presentation in userspace. No cloud control plane required."
-          />
-
-          <MarketingInterfaceGrid
-            heading="Shape the harness from inside it."
-            headingId="interfaces-title"
-            id="interfaces"
-            interfaces={[
-              {
-                label: "Panes",
-                summary: "A layout you can read, edit, and reload. Keep the prompt and safety controls in trusted terminal chrome.",
-                example: (
-                  <>
-                    <TopicIcon slug="sdk" />
-                    <pre tabIndex={0}><code>{`/pane
-/pane focus
-/pane edit
-/pane generate a compact swarm view`}</code></pre>
-                  </>
-                ),
-              },
-              {
-                label: "Models",
-                summary: "Choose an observed model and its matching account. Catalog discovery and authenticated task acceptance remain separate checks.",
-                example: (
-                  <>
-                    <TopicIcon slug="model-selection" />
-                    <pre tabIndex={0}><code>{`Claude      observed models · execution candidate
-Codex       0.155.0-alpha.2.6 · macOS candidate
-Devin       3000.10.31 · macOS candidate
-Live proof  Claude and Codex coding passed · Devin quota blocked
-Commands    Offline Linux · filtered Git · prepared public deps`}</code></pre>
-                  </>
-                ),
-              },
-              {
-                label: "Extensions",
-                summary: "Useful defaults, individually switchable. Publishing and executable hooks need their own explicit opt-in.",
-                example: (
-                  <>
-                    <TopicIcon slug="capability-profiles" />
-                    <pre tabIndex={0}><code>{`auto-continue    on · bounded
-gobstopper       on · safe boundaries
-usage           local
-aiCharts upload off`}</code></pre>
-                    <p className="interface-link"><a href="/docs#native-xcb">Read the native interface guide</a></p>
-                  </>
-                ),
-              },
-            ]}
-            label=""
-            summary="These are the native interface's design targets. See the docs for the current implementation and provider qualification limits."
-          />
-
-          <MarketingSection
-            heading="Malleable, without being fragile."
-            headingId="boundary-title"
-            id="boundary"
-            label=""
-            summary="Make the interface personal. Keep the important boundaries explicit."
-          >
-            <MarketingTrustBoundary
-              heading="The kernel keeps custody."
-              headingId="kernel-title"
-              id="kernel"
-              items={trust}
-              label=""
-              summary="A prompt is not isolation. A timeout is not proof that a process stopped. A fresh view is not permission to repeat a mutation."
+          <div className="hraness-material-wall xcb-opening">
+            <ProductHero className="xcb-marketing-hero" align="center" name=""
+              heading="One terminal. Your coding agents." headingId="hero-title" summary={summary}
+              actions={[{ href: "/docs/getting-started", label: "Get started ↗" }, { href: "/compare", label: "See how it compares" }]}
+              boundary="Open source · local workspace · native source preview"
+              frame={<WorkspacePreview />}
             />
+          </div>
+          <MarketingSection id="workspace" heading="Less switching. More making." headingId="workspace-title" layout="split" summary="One place to choose an account, open a project, and get back to the work.">
+            <div className="xcb-story-list">
+              <div><span className="xcb-story-number">01</span><div><h3>Your accounts, together.</h3><p>Name your accounts and select the model you want. Keep credentials separate while using a familiar workflow across supported providers.</p></div></div>
+              <div><span className="xcb-story-number">02</span><div><h3>Context you can come back to.</h3><p>Save sessions locally. Resume the project, inspect earlier work, and decide what happens next from the same terminal.</p></div></div>
+              <div><span className="xcb-story-number">03</span><div><h3>Usage with an honest answer.</h3><p>See observed usage and known quota windows. Exhausted Claude accounts wait for their reported reset. Unknown usage stays unknown.</p></div></div>
+              <a className="xcb-text-link" href="/docs/providers">Accounts, models, and provider support ↗</a>
+            </div>
           </MarketingSection>
-
-          <MarketingInstallPanel
-            eyebrow=""
-            heading="Start with the source."
-            headingId="install-title"
-            id="install"
-          >
-            <p className="install-note">Native xcb is a source preview. With Git, Rust 1.97.1, and platform build tools installed:</p>
+          <MarketingSection id="workflow" heading="From a failing test to a change you can review." headingId="workflow-title" layout="split-reverse" summary="Read, edit, and test with workspace tools. Keep the result close enough to inspect.">
+            <div className="xcb-workflow-proof">
+              <div className="xcb-proof-line"><span>Project files</span><strong>Read &amp; edit</strong></div>
+              <div className="xcb-proof-connector" aria-hidden="true">↓</div>
+              <div className="xcb-proof-line"><span>Isolated Linux runner</span><strong>Test &amp; build</strong></div>
+              <div className="xcb-proof-connector" aria-hidden="true">↓</div>
+              <div className="xcb-proof-line"><span>Filtered Git view</span><strong>Inspect the diff</strong></div>
+              <p>Commands run offline with prepared public dependencies. Native macOS tools and Git writes remain outside this runner.</p>
+              <a className="xcb-text-link" href="/docs/workspace">Set up workspace commands ↗</a>
+            </div>
+          </MarketingSection>
+          <MarketingSection id="make-it-yours" heading="A terminal that feels like yours." headingId="customize-title" layout="split" summary="Choose a focused pane, edit its layout, or generate a new one. Keep the working view while you try something different.">
+            <div className="xcb-pane-example">
+              <div className="xcb-pane-options" aria-label="Example pane commands"><code>/pane focus</code><code>/pane edit</code><code>/pane generate a compact view</code></div>
+              <p>Your presentation can change without rebuilding the app. A layout cannot grant access to credentials or turn on executable hooks.</p>
+              <a className="xcb-text-link" href="/docs/customization">Panes, sessions, and extensions ↗</a>
+            </div>
+          </MarketingSection>
+          <MarketingSection id="compare" heading="Choose the right layer for your work." headingId="compare-title" summary="Coding assistants, cloud agents, and orchestration frameworks solve different problems. xcb focuses on your local coding workspace.">
+            <div className="xcb-fit-grid">
+              <div><h3>Work inside one provider</h3><p>A provider CLI gives you its native experience and newest provider-specific capabilities.</p></div>
+              <div><h3>Delegate or build workflows</h3><p>Cloud agents take work into remote environments. Orchestration frameworks help you build coordinated agent applications.</p></div>
+              <div><h3>Bring your workspace together</h3><p>xcb puts supported accounts, model choice, local history, and usage behind one terminal interface.</p></div>
+            </div>
+            <a className="xcb-text-link" href="/compare">Compare with Codex, Claude Code, OpenCode, Devin, and LangGraph ↗</a>
+          </MarketingSection>
+          <MarketingSection id="readiness" heading="Useful today. Clear about the edges." headingId="readiness-title" summary="Native xcb is a source preview. The current evidence covers specific builds and tested accounts, not every provider or machine.">
+            <div className="xcb-readiness">
+              <div><span className="xcb-status-dot" aria-hidden="true" /><h3>Claude &amp; Codex</h3><p>Installed coding workflows passed on macOS ARM64: failing test, repair, passing test, and Git inspection.</p><a href="/docs/providers">Supported builds and setup ↗</a></div>
+              <div><span className="xcb-status-dot xcb-status-caution" aria-hidden="true" /><h3>Devin</h3><p>Authentication and model discovery passed. The tested account hit provider quota before a coding turn.</p><a href="/docs/providers#devin">Current Devin boundary ↗</a></div>
+              <div><span className="xcb-status-dot xcb-status-neutral" aria-hidden="true" /><h3>Tests &amp; builds</h3><p>Offline Linux ARM64 commands, prepared public dependencies, and read-only Git inspection. No native macOS command execution.</p><a href="/docs/workspace">What the runner supports ↗</a></div>
+            </div>
+          </MarketingSection>
+          <MarketingInstallPanel heading="Make room for better work." headingId="install-title" id="install">
+            <p className="install-note">Start with the native source build. You’ll need Git, Rust 1.97.1, platform build tools, and a supported provider setup.</p>
             <pre className="install-command" tabIndex={0}><code>{`git clone https://github.com/hraness/xcb.git
 cd xcb
+rustup toolchain install 1.97.1 --profile minimal
 ./scripts/install-native.sh
 export PATH="$HOME/.local/bin:$PATH"
 xcb --help`}</code></pre>
-            <p><a href={repository}>Follow the native work</a> · <a href="/docs#native-xcb">Read the native interface guide</a></p>
-            <p><a href={`${repository}/blob/main/docs/application-api.md`}>Application API guide</a> · <a href="https://github.com/hraness/textbutler">TextButler reference application</a></p>
-            <h3>xcb compatibility package</h3>
-            <p className="install-note">{releaseVersion === undefined ? "First xcb package release in preparation" : `Current verified compatibility release · v${releaseVersion}`}</p>
-            {publishedRelease !== null && archiveUrl !== null ? (
-              <>
-                <pre className="install-command" tabIndex={0}><code>{`bun add ${archiveUrl}`}</code></pre>
-                <p className="install-note">
-                  <a href={publishedRelease.verificationRun}>Public release verification</a>.{" "}
-                  This verified archive installs the <code>@hraness/xcb</code> compatibility package.{" "}
-                  <a href="/docs#standalone-package">Compatibility package reference</a>.
-                </p>
-              </>
-            ) : (
-              <p className="install-note">
-                No xcb package or native binary release is published. Existing v0.3.0 assets belong to AgentMixer.{" "}
-                <a href={`${repository}/releases`}>Check published releases</a> or{" "}
-                <a href="/docs">read the documentation</a>.
-              </p>
-            )}
+            <a className="xcb-text-link" href="/docs/getting-started">Follow the complete setup guide ↗</a>
+            <details className="xcb-release-details"><summary>Package and release details</summary>
+              <p>{releaseVersion === undefined ? "First xcb package release in preparation" : `Current verified compatibility release · v${releaseVersion}`}</p>
+              {publishedRelease === null ? <p>No native xcb binary or <code>@hraness/xcb</code> npm package is published. The historical v0.3.0 archive is AgentMixer. <a href={`${repository}/releases`}>Check releases</a>.</p> : <p><a href={publishedRelease.archiveUrl}>Download the verified TypeScript compatibility archive</a> · <a href={publishedRelease.verificationRun}>Public release verification</a>. This is separate from the native Rust app.</p>}
+            </details>
           </MarketingInstallPanel>
-
-          <MarketingQuestionList
-            heading="Before you start."
-            headingId="questions-title"
-            id="questions"
-            label=""
-            questions={questions.map(({ answer, question }) => ({
-              answer: <p>{answer}</p>,
-              question,
-            }))}
-          />
-
-          <MarketingMaker
-            heading="Built by Ben Guo"
-            headingId="maker-title"
-            id="maker"
-            label=""
-            links={[
-              { href: "https://hraness.com", label: "hraness.com" },
-              { href: "https://x.com/hraness", label: "@hraness" },
-              { href: repository, label: "GitHub" },
-            ]}
-          >
-            <p>
-              xcb is built by Ben Guo, a musician and builder, formerly a founder and engineering
-              leader at companies including Venmo and Stripe, now building from Puerto Rico.
-              Published by Hraness under the MIT license.
-            </p>
-          </MarketingMaker>
-
-          <MarketingCallToAction
-            actions={[
-              { href: "/docs", label: "Read the docs" },
-              { href: repository, label: "Explore the source" },
-            ]}
-            footnote={footnote}
-            heading="An edge of your own."
-            headingId="cta-title"
-            summary="Keep the accounts. Choose the models. Make the terminal yours."
-          />
+          <MarketingQuestionList heading="Before you begin." headingId="questions-title" id="questions" questions={questions.map(({ question, answer }) => ({ question, answer: <p>{answer}</p> }))} />
+          <MarketingCallToAction heading="Your accounts. Your workflow." headingId="cta-title" summary="A local workspace for developers who work with more than one coding agent." actions={[{ href: "/docs/getting-started", label: "Get started ↗" }, { href: repository, label: "Explore the source" }]} footnote="xcb / Excalibur · Built by Hraness · MIT licensed" />
         </MarketingPage>
       </main>
-
       <AskAiAboutThis className="ask-ai" url="https://xcb.dev" />
-
-      <div className="site-footer">
-        <p>xcb — Excalibur. Open source for developers and their coding agents.</p>
-        <nav aria-label="Project links">
-          <a href="/docs">Docs</a>
-          <a href={repository}>Source on GitHub</a>
-          <a href="https://hraness.com/projects">Hraness projects</a>
-        </nav>
-      </div>
     </div>
   );
 }

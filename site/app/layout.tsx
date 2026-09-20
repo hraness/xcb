@@ -6,6 +6,8 @@ import { siteDefaultPalette } from "../palette";
 import { supportProfile } from "../../src/support-profile";
 import { FoilController } from "./foil-controller";
 import "./globals.css";
+import "./docs/docs.css";
+import "./compare/compare.css";
 
 /**
  * Paper is the site's own palette; the initial class supplies its compiled
@@ -15,9 +17,9 @@ import "./globals.css";
  */
 const initialPalette = getDesignPaletteTheme("paper", "light");
 
-const title = "xcb — Excalibur for your coding agents";
+const title = "xcb — One terminal for your coding agents";
 const description =
-  "A metaharness and SDK for AI subscriptions, with a customizable terminal workspace, account custody, and token observability. Native xcb is in development.";
+  "Bring your Claude, Codex, and Devin accounts into one local workspace. Choose models, resume sessions, and see usage. Open-source native preview, with setup guides and comparisons.";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://xcb.dev"),

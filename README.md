@@ -1,14 +1,19 @@
 <!-- hraness:xcb-landing:start -->
 # xcb
 
-Excalibur (`xcb`) is a metaharness and SDK for working with AI subscriptions.
-Its local, terminal-first workspace brings named accounts, local sessions,
-token observability, and composable extensions into one Rust and Ratatui
-interface. Native adapters for Claude, Codex, and Devin are in development,
-with restricted workspace tools and explicit runtime admission.
+Excalibur (`xcb`) brings your coding-agent accounts, model choices, sessions,
+and usage into one local terminal workspace. Choose an account, work on your
+project, and pick up where you left off without changing interfaces.
+
+The native Rust app is a source preview for supported Claude, Codex, and Devin
+runtimes. It includes workspace file tools, an isolated Linux command runner,
+customizable panes, and a separate application API. Provider support and
+execution boundaries are explicit; it is not a replacement for every feature
+of the original provider tools.
 <!-- hraness:xcb-landing:end -->
 
-[Project site](https://xcb.dev) · [Source](https://github.com/hraness/xcb) ·
+[Project site](https://xcb.dev) · [Getting started](https://xcb.dev/docs/getting-started) ·
+[Compare tools](https://xcb.dev/compare) · [Source](https://github.com/hraness/xcb) ·
 [Application API](docs/application-api.md) · [Compatibility reference](docs/compatibility.md) · [Contributing](CONTRIBUTING.md)
 
 ## Readiness

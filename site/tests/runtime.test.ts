@@ -116,9 +116,40 @@ describe("built xcb site", () => {
       expect(llmsResponse.status).toBe(200);
       expect(llms).toContain("https://xcb.dev/docs");
       expect(docs).toContain('og:site_name" content="xcb"');
-      expect(docs).toContain('twitter:title" content="xcb documentation"');
+      expect(docs).toContain('twitter:title" content="Documentation · XCB"');
       expect(docs).toContain('twitter:card" content="summary_large_image"');
       expect(missingResponse.status).toBe(404);
+
+      // Follow every local link across the actual built public pages. Broken
+      // doc routes or fragments must fail before publishing the marketing site.
+      const paths = ["/", "/compare", "/docs", "/docs/getting-started", "/docs/providers", "/docs/workspace", "/docs/customization", "/docs/application-api", "/docs/reference"];
+      const documents = new Map<string, string>();
+      for (const path of paths) {
+        const response = await fetch(`${server.origin}${path}`, { redirect: "manual" });
+        expect(response.status).toBe(200);
+        const body = await response.text();
+        expect(body.match(/<h1\b/gu)).toHaveLength(1);
+        expect(body).toContain('href="https://xcb.dev' + (path === "/" ? "" : path) + '"');
+        documents.set(path, body);
+      }
+      for (const [path, body] of documents) {
+        const links: string[] = [];
+        new HTMLRewriter().on("a[href]", { element(element) { links.push(element.getAttribute("href") ?? ""); } }).transform(body);
+        for (const href of links) {
+          const url = new URL(href.replaceAll("&amp;", "&"), `${server.origin}${path}`);
+          if (url.origin !== server.origin) continue;
+          if (!documents.has(url.pathname)) {
+            const target = await fetch(`${server.origin}${url.pathname}`, { redirect: "manual" });
+            expect(target.status).toBe(200);
+            documents.set(url.pathname, await target.text());
+          }
+          if (url.hash) expect(documents.get(url.pathname)).toContain(`id="${decodeURIComponent(url.hash.slice(1))}"`);
+        }
+      }
+      const sitemapResponse = await fetch(`${server.origin}/sitemap.xml`);
+      expect(sitemapResponse.status).toBe(200);
+      const sitemap = await sitemapResponse.text();
+      for (const path of paths) expect(sitemap).toContain(`<loc>https://xcb.dev${path}</loc>`);
     } finally {
       await stopBuiltSite(server);
     }
