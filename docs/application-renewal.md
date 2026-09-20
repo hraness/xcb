@@ -59,7 +59,13 @@ After review and coordination with the native account owner, install explicitly:
 This publishes one exact owned LaunchAgent in `~/Library/LaunchAgents` and
 bootstraps it in the current user's GUI domain. Installation verifies current
 pins and qualification again. `RunAtLoad` is false: installation launches no
-provider request. Launchd checks hourly while the user is logged in; it does not
+provider request. The job uses launchd’s default Standard process policy and
+normal I/O priority. Background throttling can make repeated executable hash
+verification exceed an otherwise healthy discovery deadline. Capability reads
+have a bounded 90-second deadline; every executable, provider, account and evidence
+pin is still checked. Inspection, help and renewal phase deadlines are unchanged.
+Heavy collection and provider phases still acquire their existing HRA leases.
+Launchd checks hourly while the user is logged in; it does not
 wake a sleeping Mac, renew while logged out, or promise network availability.
 An explicit `run --directory ...` uses exactly the same runner when needed.
 Invoke `run` directly: it schedules its own host phases, so an outer scheduler
@@ -69,6 +75,15 @@ coordinated live acceptance. This explicitly starts fresh collection even when
 the existing receipt has more than12hours remaining; every source, account,
 custody, evidence, and expiry gate still applies. The LaunchAgent never passes
 this option.
+
+After installation, validate the actual LaunchAgent entrypoint once. First check
+that the job is idle, no attempt is pending, and the selected qualification has
+more than 12 hours remaining. Then invoke `launchctl kickstart gui/<uid>/<label>`
+without `-k`. Wait for its natural successful exit and require a new `current`
+status (or `deferred` with `native_account_busy`), unchanged qualification bytes,
+and no new attempt or pending intent. A loaded plist and a manual first renewal
+do not prove the scheduled interpreter, environment and process policy work.
+Preserve and diagnose any failure instead of repeatedly starting the job.
 
 ## What a run does
 
@@ -150,6 +165,11 @@ per-artifact bounds. Retain qualification evidence during any disk cleanup.
 Uninstall requires an exact matching ownership receipt and plist and a successful
 native `launchctl bootout`. It will not remove a changed/foreign job. Binding,
 attempts, pending intent, account state, and qualification receipts are preserved.
+When upgrading this helper or its launchd policy, use the previously bound helper
+and interpreter to uninstall its exact owned job before replacing those files.
+The new helper refuses to remove a plist with a different policy, even if it has
+the same label. Preserve the old binding and evidence, then explicitly bind and
+install the new helper after normal qualification checks.
 If bootstrap or bootout returns an uncertain result, inspect the retained job;
 do not delete launchd or scheduler state as a workaround.
 

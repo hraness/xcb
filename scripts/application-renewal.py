@@ -318,7 +318,9 @@ def capabilities(binding, required=False, *, allow_busy=False):
     # Only completed-renewal verification may ignore a newly acquired lease.
     # This reads native-validated evidence and grants no execution authority.
     require(not allow_busy or required, "busy exemption requires final qualification validation")
-    code, raw = command(xcb_argv(binding, "generate", "--capabilities"), binding["source"], binding["environment"], 30)
+    # Capability discovery rehashes exact runtime/provider pins. A bounded
+    # allowance covers this CPU work without weakening identity validation.
+    code, raw = command(xcb_argv(binding, "generate", "--capabilities"), binding["source"], binding["environment"], 90)
     require(code == 0, "capability read failed")
     value = decode(raw)
     require(value.get("version") == 1 and isinstance(value.get("accounts"), list)
@@ -527,8 +529,7 @@ def job(binding, directory):
     path = Path(binding["home"]) / "Library/LaunchAgents" / (label + ".plist")
     value = {"Label": label, "ProgramArguments": [binding["python"], "-I", binding["script"], "run", "--directory", str(directory)],
              "WorkingDirectory": binding["source"], "EnvironmentVariables": binding["environment"],
-             "StartInterval": 3600, "RunAtLoad": False, "ProcessType": "Background", "LowPriorityIO": True,
-             "ExitTimeOut": 75}
+             "StartInterval": 3600, "RunAtLoad": False, "ExitTimeOut": 75}
     return label, path, plistlib.dumps(value, sort_keys=True)
 
 

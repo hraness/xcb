@@ -125,6 +125,10 @@ class RenewalTests(unittest.TestCase):
         self.assertEqual(job["StartInterval"], 3600)
         self.assertNotIn("KeepAlive", job)
         self.assertNotIn("StandardOutPath", job)
+        self.assertNotIn("ProcessType", job)
+        self.assertNotIn("LowPriorityIO", job)
+        self.assertEqual(set(job), {"Label", "ProgramArguments", "WorkingDirectory",
+                                  "EnvironmentVariables", "StartInterval", "RunAtLoad", "ExitTimeOut"})
 
     def test_environment_omits_ambient_credentials_and_rust_overrides(self):
         env = r.environment(str(self.root), "/synthetic/scheduler/hra-host-run", "/synthetic/node-bin/node", "/synthetic/bun-bin/bun")
@@ -288,6 +292,20 @@ class RenewalTests(unittest.TestCase):
         with patch.object(r, "command", return_value=(0, b"  --expected-generation <HEX>\n")):
             r.require_conditional_qualifier(self.binding)
 
+    def test_capability_read_has_ninety_second_bound_without_retry(self):
+        response = {"version": 1, "accounts": [{"id": "a_synthetic", "provider": "claude",
+            "enabled": True, "connected": True, "runtimeAdmitted": True,
+            "available": False, "busy": False, "qualification": None}]}
+        with patch.object(r, "command", return_value=(0, r.encoded(response))) as child:
+            self.assertIsNone(r.capabilities(self.binding))
+        child.assert_called_once_with(r.xcb_argv(self.binding, "generate", "--capabilities"),
+                                      self.binding["source"], self.binding["environment"], 90)
+        with patch.object(r, "command", side_effect=ValueError("command deadline")) as child:
+            with self.assertRaisesRegex(ValueError, "command deadline"):
+                r.capabilities(self.binding)
+        self.assertEqual(child.call_count, 1)
+        self.assertEqual(child.call_args.args[3], 90)
+
     def test_capabilities_require_exact_enabled_idle_model_and_bounded_expiry(self):
         expiry = r.now_ms() + 5000
         row = {"id": "a_synthetic", "provider": "claude", "enabled": True, "connected": True,
@@ -408,6 +426,21 @@ class RenewalTests(unittest.TestCase):
         child.assert_not_called()
         self.assertEqual(r.read(path), b"foreign changed job")
 
+    def test_uninstall_refuses_prior_background_profile_without_changing_it(self):
+        self.launch_agents()
+        label, path, current = r.job(self.binding, self.directory)
+        previous = plistlib.loads(current)
+        previous.update(ProcessType="Background", LowPriorityIO=True)
+        raw = plistlib.dumps(previous, sort_keys=True)
+        r.write_once(path, raw)
+        r.write_once(self.directory / "launchd.json", r.encoded({"label": label, "path": str(path), "sha256": r.sha(raw)}))
+        with patch.object(r.sys, "platform", "darwin"), patch.object(r, "load", return_value=self.binding), patch.object(r, "command") as child:
+            with self.assertRaisesRegex(ValueError, "launchd ownership changed"):
+                r.uninstall(self.directory)
+        child.assert_not_called()
+        self.assertEqual(r.read(path), raw)
+        self.assertTrue((self.directory / "launchd.json").exists())
+
     def test_uninstall_preserves_binding_and_evidence(self):
         self.launch_agents()
         label, path, raw = r.job(self.binding, self.directory)
@@ -415,8 +448,10 @@ class RenewalTests(unittest.TestCase):
         r.write_once(self.directory / "launchd.json", r.encoded({"label": label, "path": str(path), "sha256": r.sha(raw)}))
         r.write_once(self.directory / "pending.json", b'{"attempt":"preserve"}')
         with patch.object(r.sys, "platform", "darwin"), patch.object(r, "load", return_value=self.binding), \
-                patch.object(r, "command", return_value=(0, b"")), contextlib.redirect_stdout(io.StringIO()):
+                patch.object(r, "command", return_value=(0, b"")) as child, contextlib.redirect_stdout(io.StringIO()):
             r.uninstall(self.directory)
+        child.assert_called_once_with(["/bin/launchctl", "bootout", "gui/" + str(os.getuid()), str(path)],
+                                      self.binding["home"], self.binding["environment"], 90, r.MAX_JSON)
         self.assertFalse(path.exists())
         self.assertFalse((self.directory / "launchd.json").exists())
         self.assertEqual(r.read(self.directory / "pending.json"), b'{"attempt":"preserve"}')
