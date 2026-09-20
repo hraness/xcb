@@ -4,7 +4,7 @@
   "metadata_only": true,
   "live_provider_qualification": false,
   "scope": "Python DNS/TCP/TLS under exact native metadata-session policy templates",
-  "observed_at": "2026-09-20T03:15:42.752408+00:00",
+  "observed_at": "2026-09-20T16:55:23.006268+00:00",
   "platform": "darwin",
   "architecture": "arm64",
   "macos_version": "26.5.2",
@@ -12,7 +12,7 @@
   "probe_python_versions": [
     "3.9.6"
   ],
-  "harness_sha256": "e7803ca19a1806a1521c29cd1a66b6de1aa57f089da9713ecde0713a1c195788",
+  "harness_sha256": "7d4f838700dea44f04f60b0682ebb95fb8aabf49fc4e0d218dffdddc79abeb27",
   "sandbox_source_sha256": "82acbec3bfd837678a5644dc2f3dc7a7d7a12d32403ab8c01c6e8881d80b9091",
   "source_unchanged": true,
   "cases": [
@@ -28,13 +28,13 @@
         "http_status": null,
         "python_version": "3.9.6",
         "failure": "DNS",
-        "elapsed_seconds": 0.009
+        "elapsed_seconds": 0.011
       },
       "provider": "codex",
       "variant": "without_var_metadata",
       "function_sha256": "fe1608672f31969b87ec3b7b81dac33a0302d8ba5826fb665efa5e46e58ae126",
       "template_sha256": "805bbc26e8820a4dd53d45795b5713fd2f3e00ab3742b4f24a64193419808dee",
-      "policy_sha256": "85dac4ab43822694ffae80446c68206bd00b162e836a1102cdfd372d4f891617",
+      "policy_sha256": "539c9b6386c077654168737747ed77f1c2d036a494131b5eb24d757b75f1122a",
       "passed": true
     },
     {
@@ -48,13 +48,13 @@
         "tls": true,
         "http_status": 401,
         "python_version": "3.9.6",
-        "elapsed_seconds": 0.393
+        "elapsed_seconds": 0.43
       },
       "provider": "codex",
       "variant": "production",
       "function_sha256": "fe1608672f31969b87ec3b7b81dac33a0302d8ba5826fb665efa5e46e58ae126",
       "template_sha256": "805bbc26e8820a4dd53d45795b5713fd2f3e00ab3742b4f24a64193419808dee",
-      "policy_sha256": "17a9d36ecd61065b85a63d19460cf42a1d3c7d8d10e7557323bcb4b6d342240c",
+      "policy_sha256": "1e737405a9de127fb7d68663b4d10dacc3c6a0e2572e5b47062b779fee53708a",
       "passed": true
     },
     {
@@ -69,13 +69,13 @@
         "http_status": null,
         "python_version": "3.9.6",
         "failure": "DNS",
-        "elapsed_seconds": 0.007
+        "elapsed_seconds": 0.012
       },
       "provider": "devin",
       "variant": "without_var_metadata",
       "function_sha256": "a87126b6ca3b97f8f2eaec7ed08239e101dd6a958e889e5b997af591577dbb5d",
       "template_sha256": "61d102420bcb5bcb21edc326d505ce551b448807b881f9a4f53c3ab23753c7a3",
-      "policy_sha256": "e5f3c9cf93e8cb3503861fdc0ec7e552a8e6921e3cf64dc382bf885dfd469029",
+      "policy_sha256": "f1c1358f31274c732143663d40237a46b08eca3f6552864ba3879a186082790b",
       "passed": true
     },
     {
@@ -89,13 +89,13 @@
         "tls": true,
         "http_status": 404,
         "python_version": "3.9.6",
-        "elapsed_seconds": 0.815
+        "elapsed_seconds": 0.83
       },
       "provider": "devin",
       "variant": "production",
       "function_sha256": "a87126b6ca3b97f8f2eaec7ed08239e101dd6a958e889e5b997af591577dbb5d",
       "template_sha256": "61d102420bcb5bcb21edc326d505ce551b448807b881f9a4f53c3ab23753c7a3",
-      "policy_sha256": "1a46519f995bee5e3891f0d00048932a6eb46ae3fa2136864b96789ad3f75e41",
+      "policy_sha256": "c2c43f3bb1af2ce7062cebb9c245ca5b5b80e9fc7c40933646419272c2510569",
       "passed": true
     }
   ],

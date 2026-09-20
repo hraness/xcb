@@ -64,6 +64,36 @@ impl QuotaPoint {
     }
 }
 
+/// The latest observation in each known Claude account-wide window is authoritative
+/// until its reported reset, even after percentage telemetry becomes stale. Callers
+/// must bind `pool` to the current account credential generation; model-specific and
+/// other-provider windows are deliberately not inferred to have account scope.
+pub fn quota_blocked_until(points: &[QuotaPoint], pool: &Id, now: u64) -> Option<u64> {
+    ["five_hour", "seven_day"]
+        .into_iter()
+        .filter_map(|window| {
+            points
+                .iter()
+                .filter(|point| {
+                    &point.pool == pool
+                        && point.window.as_str() == window
+                        && point.validate().is_ok()
+                        && point.observed_at_ms <= now
+                })
+                // Equal-time conflicting observations cannot enter the Store. Be
+                // conservative if this pure helper receives such a slice anyway.
+                .max_by(|a, b| {
+                    a.observed_at_ms
+                        .cmp(&b.observed_at_ms)
+                        .then_with(|| a.used_percent.total_cmp(&b.used_percent))
+                        .then(a.resets_at_ms.cmp(&b.resets_at_ms))
+                })
+                .filter(|point| point.used_percent == 100.0 && now < point.resets_at_ms)
+                .map(|point| point.resets_at_ms)
+        })
+        .max()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Estimate {
@@ -188,4 +218,81 @@ pub fn throughput_share(own: Option<f64>, total: Option<f64>) -> (Option<f64>, H
             Heat::Cool
         },
     )
+}
+
+#[cfg(test)]
+mod quota_availability_tests {
+    use super::*;
+
+    fn point(window: &str, used: f64, observed: u64, reset: u64) -> QuotaPoint {
+        QuotaPoint {
+            pool: Id::new("bound").unwrap(),
+            window: Id::new(window).unwrap(),
+            used_percent: used,
+            observed_at_ms: observed,
+            resets_at_ms: reset,
+        }
+    }
+
+    #[test]
+    fn quota_availability_outlives_telemetry_and_uses_latest_per_window_max_reset() {
+        let pool = Id::new("bound").unwrap();
+        let mut points = vec![
+            point("seven_day", 100.0, 1, 9_000_000),
+            point("five_hour", 100.0, 2, 2_000_000),
+        ];
+        assert!(!points[0].fresh(500_000));
+        assert_eq!(
+            quota_blocked_until(&points, &pool, 500_000),
+            Some(9_000_000)
+        );
+        points.push(point("five_hour", 20.0, 499_999, 2_000_000));
+        assert_eq!(
+            quota_blocked_until(&points, &pool, 500_000),
+            Some(9_000_000)
+        );
+        points.push(point("seven_day", 10.0, 500_000, 10_000_000));
+        points.reverse();
+        assert_eq!(quota_blocked_until(&points, &pool, 500_000), None);
+    }
+
+    #[test]
+    fn quota_availability_has_exact_observed_and_reset_boundaries() {
+        let p = point("five_hour", 100.0, 10, 20);
+        assert_eq!(
+            quota_blocked_until(std::slice::from_ref(&p), &p.pool, 9),
+            None
+        );
+        assert_eq!(
+            quota_blocked_until(std::slice::from_ref(&p), &p.pool, 10),
+            Some(20)
+        );
+        assert_eq!(
+            quota_blocked_until(std::slice::from_ref(&p), &p.pool, 19),
+            Some(20)
+        );
+        assert_eq!(
+            quota_blocked_until(std::slice::from_ref(&p), &p.pool, 20),
+            None
+        );
+    }
+
+    #[test]
+    fn quota_availability_never_infers_pool_model_or_provider_scope() {
+        let pool = Id::new("bound").unwrap();
+        let mut foreign = point("five_hour", 100.0, 1, 1000);
+        foreign.pool = Id::new("foreign").unwrap();
+        let points = [
+            foreign,
+            point("seven_day_opus", 100.0, 1, 1000),
+            point("seven_day_sonnet", 100.0, 1, 1000),
+            point("primary", 100.0, 1, 1000),
+            point("five_hour", 99.99, 1, 1000),
+        ];
+        assert_eq!(quota_blocked_until(&points, &pool, 2), None);
+        assert_eq!(
+            quota_blocked_until(&[point("seven_day", f64::NAN, 1, 1000)], &pool, 2),
+            None
+        );
+    }
 }

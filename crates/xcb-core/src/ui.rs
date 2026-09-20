@@ -14,9 +14,25 @@ pub struct AccountRow {
     pub subscription: String,
     pub remaining_percent: Option<f64>,
     pub resets_at_ms: Option<u64>,
+    /// Known account-wide exhaustion, independent of telemetry freshness.
+    pub quota_blocked_until_ms: Option<u64>,
     pub runway: Estimate,
     pub busy: bool,
     pub enabled: bool,
+}
+
+impl AccountRow {
+    /// A reported retry time is not a promise that the provider will accept a turn.
+    pub fn quota_block_label(&self, now: u64) -> Option<String> {
+        let until = self.quota_blocked_until_ms.filter(|until| *until > now)?;
+        let minutes = (until - now).div_ceil(60_000);
+        let wait = if minutes >= 60 {
+            format!("{}h {}m", minutes / 60, minutes % 60)
+        } else {
+            format!("{minutes}m")
+        };
+        Some(format!("quota limited · retry in ~{wait}"))
+    }
 }
 
 #[derive(Debug, Clone)]

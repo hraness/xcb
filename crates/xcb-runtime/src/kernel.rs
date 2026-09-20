@@ -92,6 +92,7 @@ pub async fn auto_route(
             if view_account.provider != model.provider
                 || view_account.busy
                 || !view_account.enabled
+                || view_account.quota_blocked_until_ms.is_some()
                 || account.is_some_and(|id| id != &view_account.id)
                 || candidates.len() >= 16
             {
@@ -131,7 +132,7 @@ async fn pick_route(
     }
     if candidates.is_empty() || candidates.len() > 64 {
         return Err(Error::Unavailable(
-            "no admitted routes; add an account and sign in",
+            "no eligible admitted routes; connect an enabled account, finish active turns, or wait for reported quota resets",
         ));
     }
     let mut criteria = std::collections::BTreeMap::new();
@@ -277,8 +278,19 @@ pub fn new_session(
         None
     };
     let accounts = store.accounts()?;
+    let now = now_ms();
+    let mut quota_blocked = BTreeSet::new();
+    for candidate in &accounts {
+        if candidate.enabled
+            && requested_provider.is_none_or(|provider| candidate.provider == provider)
+            && store.quota_blocked_until(&candidate.id, now)?.is_some()
+        {
+            quota_blocked.insert(candidate.id.clone());
+        }
+    }
     let compatible = |candidate: &&crate::store::Account| {
         candidate.enabled
+            && !quota_blocked.contains(&candidate.id)
             && requested_provider.is_none_or(|provider| candidate.provider == provider)
     };
     let id = match account {
@@ -287,6 +299,7 @@ pub fn new_session(
             if !selected.enabled {
                 return Err(Error::Unavailable("selected account is disabled"));
             }
+            store.require_quota_available(id, now)?;
             id.clone()
         }
         None => usable_account(store, requested_provider, None, config)?
@@ -301,7 +314,7 @@ pub fn new_session(
                     .map(|candidate| candidate.id.clone())
             })
             .ok_or(Error::Unavailable(
-                "add an enabled account for the selected provider, then sign in",
+                "no eligible account for this provider; connect an enabled account or wait for its reported quota reset",
             ))?,
     };
     let account = store.account(&id)?;
@@ -352,6 +365,7 @@ fn usable_account(
         if provider.is_none_or(|provider| account.provider == provider)
             && account.enabled
             && !held.contains(&account.id)
+            && store.quota_blocked_until(&account.id, now_ms())?.is_none()
             && auth::has_credentials(store, &account.id)?
         {
             return Ok(Some(account.id));
@@ -367,7 +381,7 @@ fn model_account(
     config: &Config,
 ) -> Result<Id> {
     usable_account(store, Some(provider), current, config)?.ok_or(Error::Unavailable(
-        "no connected idle account for this provider; connect or select an enabled account, and let any active turn finish",
+        "no connected idle account for this provider; connect an enabled account, finish active turns, or wait for reported quota resets",
     ))
 }
 
@@ -375,6 +389,7 @@ fn ready(store: &Store, session: &Session) -> Result<()> {
     if !store.account(&session.account)?.enabled {
         return Err(Error::Unavailable("selected account is disabled"));
     }
+    store.require_quota_available(&session.account, now_ms())?;
     let pin = Pin::load(store.root(), session.model.provider)?;
     if !runner::provider_admitted(&pin) {
         return Err(Error::Unavailable(
@@ -649,6 +664,7 @@ async fn execute_inner(
                     if account.provider != model.provider
                         || account.busy
                         || !account.enabled
+                        || account.quota_blocked_until_ms.is_some()
                         || candidates.len() >= 256
                     {
                         continue;
@@ -1033,6 +1049,7 @@ pub async fn serve(
                             Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None)?.id),
                             Intent::Account(account) => {
                                 if current.as_ref().is_some_and(|id| active.contains_key(id)) { return Err(Error::Conflict("stop or finish the turn before changing accounts")); }
+                                store.require_quota_available(&account, now_ms())?;
                                 let provider = store.account(&account)?.provider;
                                 let model = choose_model(&store, provider, None, &config)?;
                                 if let Some(id) = &current { let session = store.session(id)?.ok_or(Error::Unavailable("session not found"))?; store.rebind(id, session.revision, &account, model)?; }
@@ -1162,6 +1179,105 @@ fn pane_prompt(request: &str) -> Result<String> {
 mod tests {
     use super::*;
     use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn quota_availability_preserves_affinity_and_never_reselects_blocked_onboarding_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let workspace = crate::private::directory(&base.join("work")).unwrap();
+        let blocked = store
+            .add_account(Provider::Claude, "Default", "Test", 1)
+            .unwrap();
+        let fallback = store
+            .add_account(Provider::Claude, "Fallback", "Test", 2)
+            .unwrap();
+        for account in [&blocked, &fallback] {
+            auth::store_token(
+                &store,
+                &account.id,
+                b"sk-ant-oat01-syntheticToken000000000000",
+            )
+            .unwrap();
+        }
+        let config = Config {
+            default_account: Some(blocked.id.clone()),
+            ..Config::default()
+        };
+        let model = route_candidate(0).1;
+        store
+            .set_models(Provider::Claude, std::slice::from_ref(&model))
+            .unwrap();
+        assert_eq!(
+            model_account(&store, Provider::Claude, Some(&fallback.id), &config).unwrap(),
+            fallback.id
+        );
+        let original = new_session(
+            &store,
+            &workspace,
+            &config,
+            Some(&blocked.id),
+            Some(&model.key()),
+        )
+        .unwrap();
+        let now = now_ms();
+        let run = store
+            .prepare_probe(&blocked.id, None, now - 400_000)
+            .unwrap();
+        store
+            .record_account_quota(
+                &run,
+                &xcb_core::usage::QuotaPoint {
+                    pool: blocked.quota_pool.clone(),
+                    window: Id::new("seven_day").unwrap(),
+                    used_percent: 100.0,
+                    observed_at_ms: now - 400_000,
+                    resets_at_ms: now + 9_000_000,
+                },
+            )
+            .unwrap();
+        store.settle(&run, State::Idle, now).unwrap();
+        assert_eq!(
+            model_account(&store, Provider::Claude, Some(&blocked.id), &config).unwrap(),
+            fallback.id
+        );
+        assert_eq!(
+            new_session(&store, &workspace, &config, None, Some(&model.key()))
+                .unwrap()
+                .account,
+            fallback.id
+        );
+        assert!(
+            new_session(
+                &store,
+                &workspace,
+                &config,
+                Some(&blocked.id),
+                Some(&model.key())
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("quota exhausted")
+        );
+        assert!(
+            ready(&store, &original)
+                .unwrap_err()
+                .to_string()
+                .contains("quota exhausted")
+        );
+        assert_eq!(
+            store.session(&original.id).unwrap().unwrap().account,
+            blocked.id
+        );
+        store.set_account_enabled(&fallback.id, false).unwrap();
+        assert!(
+            new_session(&store, &workspace, &config, None, Some(&model.key()))
+                .unwrap_err()
+                .to_string()
+                .contains("reported quota reset")
+        );
+        assert!(store.unsettled_runs().unwrap().is_empty());
+    }
 
     #[test]
     fn credential_hints_follow_each_providers_connection_method() {

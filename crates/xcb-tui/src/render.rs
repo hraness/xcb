@@ -437,9 +437,13 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
             )));
             for account in &app.view.accounts {
                 let remaining = account
-                    .remaining_percent
-                    .map(|remaining| format!("{remaining:.0}% left"))
-                    .unwrap_or_else(|| "quota unknown".into());
+                    .quota_block_label(crate::display_now_ms())
+                    .unwrap_or_else(|| {
+                        account
+                            .remaining_percent
+                            .map(|remaining| format!("{remaining:.0}% left"))
+                            .unwrap_or_else(|| "quota unknown".into())
+                    });
                 let time = account
                     .runway
                     .seconds()

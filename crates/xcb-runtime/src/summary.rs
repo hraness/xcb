@@ -68,6 +68,7 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
             subscription: account.subscription,
             remaining_percent,
             resets_at_ms,
+            quota_blocked_until_ms: store.quota_blocked_until(&account.id, now)?,
             runway: estimate,
             busy: busy.contains(&account.id),
             enabled: account.enabled,

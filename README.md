@@ -86,8 +86,12 @@ xcb --cwd /absolute/path/to/your/project
 
 `--plan` is a display label; it does not verify your subscription. Complete the
 browser sign-in when prompted. `accounts refresh` probes supported model and
-usage metadata. Unknown or stale quota remains unknown. To select a model, copy
-its full observed key from `xcb models` and run `xcb models default <key>`.
+usage metadata. Unknown or stale usage percentages remain unknown. A proven
+Claude account-wide quota exhaustion stays blocked until its reported reset,
+even when its percentage has gone stale. The account list shows a retry estimate;
+see [quota routing](docs/quota-routing.md) for the scope and credential binding.
+To select a model, copy its full observed key from `xcb models` and run
+`xcb models default <key>`.
 
 If discovery finds the wrong binary, use
 `xcb doctor --provider claude --executable /absolute/path/to/claude`.
