@@ -64,7 +64,40 @@ SAFE_REFUSALS = frozenset((
     'archive length', 'archive byte limit', 'download deadline',
     'lockfile archive checksum mismatch', 'public Git commit identity mismatch',
     'Git submodules are unsupported', 'fresh fetch output required',
+    'archive entry count', 'archive prefix', 'archive root', 'relative path',
+    'archive link/special/duplicate refused', 'unpacked file size', 'unpacked aggregate size',
+    'truncated tar member', 'verified crate drift', 'Cargo vendor configuration',
+    'vendor source keys', 'vendor directory binding', 'vendor Git binding',
+    'frozen Bun lock drift', 'local package server did not join',
+    'fetch plan differs from exact manifests/tools', 'fresh materialization output required',
+    'materializer requires isolated loopback-only namespace', 'materializer loopback must be up',
+    'fresh scratch and output must share the bounded filesystem',
+    'cache directory', 'cache entry count', 'cache symlink refused', 'cache link escape',
+    'cache file kind/size', 'cache aggregate size', 'cache changed',
+    'Bun cache alias root', 'Bun cache alias count', 'Bun cache alias target',
+    'Bun cache alias changed',
 ))
+
+
+SAFE_DIAGNOSTIC_FUNCTIONS = frozenset((
+    'main', 'materialize', 'cargo_materialize', 'bun_materialize', 'verify_loopback',
+    'unpack', 'inventory', 'normalize_bun_links', 'run', 'verify_tools', 'verify_tool', 'confined_tool_owner',
+    'kernel_text', 'plan', 'inputs', 'validate_plan', 'fetch', 'download',
+))
+
+
+def refusal_site(error):
+    # Only names from this pinned trusted module and a numeric source position.
+    # Never serialize a traceback, filename, source line, local or foreign frame.
+    trace, site = error.__traceback__, ''
+    for _ in range(64):
+        if trace is None:
+            break
+        code = trace.tb_frame.f_code
+        if code.co_filename == __file__ and code.co_name in SAFE_DIAGNOSTIC_FUNCTIONS:
+            site = ' [' + code.co_name + ':' + str(trace.tb_lineno) + ']'
+        trace = trace.tb_next
+    return site
 
 
 def refusal_message(error):
@@ -80,7 +113,7 @@ def refusal_message(error):
         detail = 'filesystem or network operation failed'
     else:
         detail = 'input or preload operation rejected'
-    return 'xcb public locked dependency preload refused: ' + detail
+    return 'xcb public locked dependency preload refused: ' + detail + refusal_site(error)
 
 
 def require(value, message):
@@ -566,6 +599,54 @@ def cargo_materialize(value, files, fetched, output, scratch, deadline):
     (cargo / 'config.toml').write_text(text)
 
 
+def normalize_bun_links(cache):
+    # Bun has joined and the local archive server has stopped. Its lookup index
+    # uses absolute in-cache aliases; convert only verified existing targets so
+    # the final read-only cache can move from /output to /opt/xcb-cache.
+    cache = Path(cache)
+    require(cache.is_dir() and not cache.is_symlink(), 'Bun cache alias root')
+    cache = cache.resolve(strict=True)
+    root = cache.stat()
+    pending, links, count = [cache], [], 0
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                count += 1
+                require(count <= MAX_FILES, 'Bun cache alias count')
+                path, before = Path(entry.path), entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(before.st_mode):
+                    pending.append(path)
+                elif stat.S_ISLNK(before.st_mode):
+                    links.append((path, before, os.readlink(path)))
+    for path, before, original in links:
+        require(len(original.encode()) <= 4096, 'Bun cache alias target')
+        try:
+            target = path.resolve(strict=True)
+        except (OSError, RuntimeError):
+            raise Refused('Bun cache alias target') from None
+        require(target.is_relative_to(cache) and target not in path.parents
+                and (target.is_file() or target.is_dir()), 'Bun cache alias target')
+        target_before = target.stat()
+        require(tool_stamp(path.lstat()) == tool_stamp(before) and os.readlink(path) == original,
+                'Bun cache alias changed')
+        if not Path(original).is_absolute():
+            continue
+        relative = os.path.relpath(target, path.parent)
+        temporary = path.with_name('.xcb-cache-link-' + os.urandom(16).hex())
+        os.symlink(relative, temporary)
+        replacement = temporary.lstat()
+        require(tool_stamp(path.lstat()) == tool_stamp(before) and os.readlink(path) == original
+                and tool_stamp(target.stat()) == tool_stamp(target_before)
+                and (cache.stat().st_dev, cache.stat().st_ino) == (root.st_dev, root.st_ino),
+                'Bun cache alias changed')
+        os.replace(temporary, path)
+        # rename updates ctime on supported kernels; inode/mode/owner/size and
+        # mtime must still match our exact freshly created replacement.
+        require(tool_stamp(path.lstat())[:-1] == tool_stamp(replacement)[:-1] and os.readlink(path) == relative
+                and path.resolve(strict=True) == target, 'Bun cache alias changed')
+
+
 def bun_materialize(value, files, fetched, output, scratch, deadline):
     routes = {}
     for row in value['archives']:
@@ -612,6 +693,7 @@ def bun_materialize(value, files, fetched, output, scratch, deadline):
         server.server_close()
         server_thread.join(timeout=3)
         require(not server_thread.is_alive(), 'local package server did not join')
+    normalize_bun_links(cache)
 
 
 def materialize(spec, fetched, output):

@@ -1,9 +1,11 @@
 # Isolated workspace commands
 
-**Installed end-to-end coding acceptance is still pending.** Filtered Git
-projection and public dependency preparation must finish integration and
-qualification before the complete command workflow can be claimed as a daily
-driver. A booted VM or a successful setup check is not real-model acceptance.
+**Installed end-to-end coding acceptance is still pending.** The current backend
+passed all 12 mandatory VM boundary cases, including filtered read-only Git
+inspection, actual public dependency fetching, offline Cargo/Bun use from
+immutable caches, and rejection of a cache after its manifest changed. These
+synthetic boundary results do not establish an installed provider-driven coding
+workflow or daily-driver readiness.
 
 The native `workspace_exec` tool runs bounded Linux commands in an XCB-owned
 Lima VM on macOS ARM64. The VM has no host workspace mounts, SSH agent forwarding,
@@ -79,9 +81,11 @@ files fail closed.
 
 Cold dependency installation is unavailable inside an ordinary command. The
 separate `scripts/prepare-command-dependencies.py` frontend is now available in
-source. **Its guest operations and worker attachment still await installation
-and qualification.** The frontend refuses a backend without admitted public-cache
-support; a successful plan alone does not activate dependency use.
+source. Its guest preparation and worker cache attachment passed the current
+12-case VM boundary suite, including actual fetch and offline package use.
+Installed provider-driven coding acceptance remains pending. The frontend
+refuses a backend without admitted public-cache support; a successful plan alone
+does not activate dependency use.
 
 This frontend supports Python 3.9 and newer on macOS; it has been checked with
 Apple Python 3.9.6 and Homebrew Python 3.14.6. It observes process exit without
@@ -101,8 +105,8 @@ cleanup; it does not publish a cache or change the workspace:
   --workspace /absolute/path/to/project --dry-run
 ```
 
-Once the guest support is qualified, explicitly prepare the reviewed public
-inputs with the same workspace:
+After setup admits the matching backend, explicitly prepare the reviewed
+public inputs with the same workspace:
 
 ```sh
 "$HOME/.bun/bin/hra-host-run" --mode=shared --lane=mac-native \

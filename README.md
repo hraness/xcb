@@ -17,9 +17,9 @@ with restricted workspace tools and explicit runtime admission.
 The native broker lists, reads, searches, and writes workspace files, creates
 directories, and removes or renames regular files with revision checks. The
 source also includes an isolated Linux command runner for tests and builds on
-macOS ARM64. Filtered Git inspection and public dependency preparation are still
-being integrated and qualified. Final installed coding-workflow acceptance is
-pending. See the [command runner contract](docs/command-runner.md) for the exact
+macOS ARM64. The current backend passed its 12-case VM boundary suite, including
+filtered Git inspection, public dependency fetching, and offline Cargo/Bun use
+from immutable caches. Installed coding-workflow acceptance remains pending. See the [command runner contract](docs/command-runner.md) for the exact
 setup command, supported boundaries, and current limits.
 
 | Provider | Native Rust CLI | TypeScript compatibility CLI |
@@ -159,7 +159,8 @@ from the same source checkout as the installed native CLI. Commands run offline
 against a staged workspace; host dependencies, credentials, and build products
 are excluded. Native macOS and Xcode builds are unavailable. The explicit
 [public dependency preparation frontend](docs/command-runner.md#dependencies-and-git)
-is available in source; its guest workflow still awaits installed qualification.
+passed the current VM boundary suite, including rejection of a cache after its
+manifest changed. Installed provider-driven coding acceptance remains pending.
 
 The Git projection is limited to filtered, read-only HEAD and index data for
 status and diffs. Original history, remotes, and hooks are omitted; commit and

@@ -285,5 +285,91 @@ class PublicCacheTests(unittest.TestCase):
             self.assertTrue(p.refusal_message(p.Refused(guard)).endswith(': ' + guard))
 
 
+    def test_diagnostic_site_contains_only_trusted_function_and_numeric_line(self):
+        with tempfile.TemporaryDirectory(prefix='private-caller-path-') as tmp:
+            try:
+                p.unpack(tar([('secret-caller-prefix/file', 'file', b'private body')]), Path(tmp) / 'out', 'allowed', [0])
+            except p.Refused as error:
+                message = p.refusal_message(error)
+                self.assertRegex(message, r'^xcb public locked dependency preload refused: archive prefix \[unpack:[0-9]+\]$')
+                self.assertNotIn(tmp, message)
+                self.assertNotIn('secret', message)
+                self.assertNotIn('private body', message)
+            else:
+                self.fail('unsafe archive should be refused')
+        try:
+            raise ValueError('secret foreign exception')
+        except ValueError as error:
+            message = p.refusal_message(error)
+            self.assertNotIn('[', message)
+            self.assertNotIn('secret', message)
+
+
+    def test_bun_absolute_cache_alias_becomes_relative_and_survives_relocation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp).resolve() / 'cache'
+            package = cache / 'bytes@3.1.2@@@1'
+            package.mkdir(parents=True)
+            (package / 'index.js').write_bytes(b'public package')
+            alias = cache / 'bytes' / '3.1.2@@@1'
+            alias.parent.mkdir()
+            alias.symlink_to(package)
+            with self.assertRaisesRegex(p.Refused, '^cache link escape$'):
+                p.inventory(cache, allow_links=True)
+            p.normalize_bun_links(cache)
+            self.assertEqual(os.readlink(alias), '../bytes@3.1.2@@@1')
+            expected = p.inventory(cache, allow_links=True)
+            moved = cache.with_name('relocated')
+            cache.rename(moved)
+            self.assertEqual((moved / 'bytes/3.1.2@@@1/index.js').read_bytes(), b'public package')
+            self.assertEqual(p.inventory(moved, allow_links=True), expected)
+            p.normalize_bun_links(moved)
+            self.assertEqual(p.inventory(moved, allow_links=True), expected)
+
+    def test_bun_alias_normalization_rejects_external_dangling_and_cyclic_targets(self):
+        for kind in ('external', 'relative-external', 'dangling', 'cycle', 'ancestor'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                cache = root / 'cache'
+                cache.mkdir()
+                outside = root / 'outside'
+                outside.write_bytes(b'untouched')
+                alias = cache / 'alias'
+                if kind == 'external':
+                    alias.symlink_to(outside)
+                elif kind == 'relative-external':
+                    alias.symlink_to('../outside')
+                elif kind == 'dangling':
+                    alias.symlink_to(cache / 'absent')
+                elif kind == 'ancestor':
+                    alias.symlink_to(cache)
+                else:
+                    alias.symlink_to('other')
+                    (cache / 'other').symlink_to('alias')
+                original = os.readlink(alias)
+                with self.assertRaises(p.Refused):
+                    p.normalize_bun_links(cache)
+                self.assertEqual(os.readlink(alias), original)
+                self.assertEqual(outside.read_bytes(), b'untouched')
+
+    def test_changed_bun_alias_is_not_overwritten_by_normalization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp).resolve() / 'cache'
+            package = cache / 'package'
+            package.mkdir(parents=True)
+            alias = cache / 'alias'
+            alias.symlink_to(package)
+            original_symlink = os.symlink
+            def changing_symlink(target, destination, *args, **kwargs):
+                result = original_symlink(target, destination, *args, **kwargs)
+                if Path(destination).name.startswith('.xcb-cache-link-'):
+                    alias.unlink()
+                    original_symlink('/outside-substitution', alias)
+                return result
+            with patch.object(p.os, 'symlink', side_effect=changing_symlink), self.assertRaisesRegex(p.Refused, '^Bun cache alias changed$'):
+                p.normalize_bun_links(cache)
+            self.assertEqual(os.readlink(alias), '/outside-substitution')
+
+
 if __name__ == '__main__':
     unittest.main()
