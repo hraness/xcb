@@ -1,0 +1,59 @@
+{
+  "schema": "xcb.devin-read-only-metadata.v1",
+  "observed_at_ms": 1789880434237,
+  "provider_sha256": "4cd4d2e242ed78443fe26d6f55382fd888ece0ac4e80b205106f8f1bf2b0cfa4",
+  "provider_version": "3000.10.31",
+  "metadata_only": true,
+  "inference_attempts": 0,
+  "commands": [
+    {
+      "command": [
+        "auth",
+        "status"
+      ],
+      "joined": true,
+      "succeeded": true,
+      "exit_status_checked": true,
+      "policy_sha256": "9a691236ba1afdd26062b3dfb8c7a673b860a388caaf9fdfe4a7e8a2171c0249",
+      "output": {
+        "json": false,
+        "bytes": 203,
+        "lines": 3,
+        "fixed_phrase_present": {
+          "logged in": true,
+          "authenticated": false,
+          "quota": false,
+          "usage": false,
+          "daily": false,
+          "weekly": false,
+          "reset": false,
+          "resource_exhausted": false,
+          "quota exhausted": false,
+          "plan": false,
+          "credits": false
+        },
+        "numeric_and_known_model_rows": []
+      }
+    },
+    {
+      "command": [
+        "models",
+        "list",
+        "--format",
+        "json"
+      ],
+      "joined": true,
+      "succeeded": false,
+      "policy_sha256": "2beeedf0c94f93e18f23d8c33dc8d94dfcc40675b72b8d8dedf8089079f0955f",
+      "failure_category": "host capture rejected output"
+    }
+  ],
+  "test_binary_sha256": "73ab6116ef6dc7bf1980b36b7b1dd1a736fbefcfd689a468a1dd77eafccd16bc",
+  "fixture_source_sha256": "d6390e25af744db45c5045e4f387b67e55d83197773fe896d5bb7b453fc8a46e",
+  "scope": "Read-only auth and model-list diagnostics under exclusive xcb probe custody and production confinement. No inference or original session access. Empty quota fields mean unobserved, not zero. Complete JSON capture does not attest a native process success exit.",
+  "quota_scope_observed": false,
+  "quota_reset_observed": false,
+  "alternate_model_entitlement_observed": false,
+  "all_command_custody_joined": true,
+  "fixture_elapsed_seconds": 7.87
+}

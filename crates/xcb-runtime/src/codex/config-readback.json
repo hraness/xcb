@@ -1,0 +1,97 @@
+{
+  "config": {
+    "model_provider": "openai",
+    "forced_login_method": "chatgpt",
+    "cli_auth_credentials_store": "file",
+    "mcp_oauth_credentials_store": "file",
+    "approval_policy": "never",
+    "sandbox_mode": "read-only",
+    "web_search": "disabled",
+    "project_doc_max_bytes": 0,
+    "check_for_update_on_startup": false,
+    "allow_login_shell": false,
+    "notify": [],
+    "mcp_servers": {},
+    "plugins": {},
+    "model_providers": {},
+    "model_catalog_json": "/synthetic/catalog.json",
+    "instructions": null,
+    "developer_instructions": null,
+    "compact_prompt": null,
+    "model_instructions_file": null,
+    "experimental_compact_prompt_file": null,
+    "openai_base_url": null,
+    "chatgpt_base_url": "https://chatgpt.com/backend-api/",
+    "shell_environment_policy": {
+      "inherit": "none",
+      "ignore_default_excludes": null,
+      "exclude": null,
+      "set": null,
+      "include_only": null,
+      "filters": null,
+      "experimental_use_profile": null
+    },
+    "analytics": {
+      "enabled": false
+    },
+    "feedback": {
+      "enabled": false
+    },
+    "history": {
+      "persistence": "none",
+      "max_bytes": null
+    },
+    "skills": {
+      "bundled": {
+        "enabled": false
+      },
+      "include_instructions": false
+    },
+    "orchestrator": {
+      "skills": {
+        "enabled": false
+      },
+      "mcp": null
+    },
+    "apps": {
+      "_default": {
+        "enabled": false,
+        "approvals_reviewer": null,
+        "destructive_enabled": false,
+        "open_world_enabled": false,
+        "default_tools_approval_mode": null
+      }
+    },
+    "features": {
+      "code_mode": false,
+      "multi_agent_v2": false,
+      "network_proxy": null,
+      "apps": false,
+      "auth_elicitation": false,
+      "browser_use": false,
+      "computer_use": false,
+      "hooks": false,
+      "image_generation": false,
+      "in_app_browser": false,
+      "memories": false,
+      "multi_agent": false,
+      "plugin_sharing": false,
+      "plugins": false,
+      "remote_control": false,
+      "remote_plugin": false,
+      "shell_snapshot": false,
+      "shell_tool": false,
+      "skill_mcp_dependency_install": false,
+      "skill_search": false,
+      "unified_exec": false,
+      "workspace_dependencies": false,
+      "api_key_model_discovery": false,
+      "background_paginated_rollout_migration": false,
+      "codex_apps_mcp_2026_07_28": false,
+      "mcp_2026_07_28": false,
+      "mentions_v2": true,
+      "tool_suggest": true,
+      "windows_sandbox_service": false
+    }
+  }
+}

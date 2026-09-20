@@ -1,0 +1,53 @@
+# XCB command backend. No host paths or ambient Lima defaults are imported.
+minimumLimaVersion: 2.2.0
+vmType: vz
+arch: aarch64
+images:
+- location: https://cloud-images.ubuntu.com/minimal/releases/noble/release-20260716/ubuntu-24.04-minimal-cloudimg-arm64.img
+  arch: aarch64
+  digest: sha256:7e938df669e3b1923595eeda97aa28569350c5283e05a835cc912a2486a54934
+cpus: 2
+memory: 3GiB
+disk: 8GiB
+plain: true
+mounts: []
+portForwards: []
+copyToHost: []
+containerd:
+  system: false
+  user: false
+ssh:
+  forwardAgent: false
+  loadDotSSHPubKeys: false
+propagateProxyEnv: false
+hostResolver:
+  enabled: false
+dns: [1.1.1.1, 8.8.8.8]
+user:
+  name: xcbhost
+  uid: 1000
+  home: /home/xcbhost
+provision:
+- mode: system
+  script: |
+    #!/bin/sh
+    set -eu
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y --no-install-recommends python3 bubblewrap git nodejs rustc cargo build-essential pkg-config curl unzip ca-certificates
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+    if ! getent passwd 61001 >/dev/null; then useradd --uid 61001 --no-create-home --shell /usr/sbin/nologin xcbworker; fi
+    install -d -m 0700 /var/lib/xcb-command /var/lib/xcb-command/jobs /var/lib/xcb-command/cancel
+    install -d -m 0755 /usr/local/lib/xcb-command /opt/xcb-tools /opt/xcb-tools/bin
+    # Ubuntu's AppArmor unprivileged-userns restriction conflicts with bwrap.
+    # Grant the packaged helper its own exact executable profile, without
+    # changing the global sysctl or disabling AppArmor.
+    cat >/etc/apparmor.d/xcb-bwrap <<'PROFILE'
+    abi <abi/4.0>,
+    include <tunables/global>
+    /usr/bin/bwrap flags=(unconfined) {
+      userns,
+    }
+    PROFILE
+    apparmor_parser -r /etc/apparmor.d/xcb-bwrap

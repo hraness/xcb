@@ -72,6 +72,8 @@ pub struct Config {
     pub pane: Id,
     pub reduced_motion: bool,
     pub auto_failover: bool,
+    /// Independent deadline for one provider turn, including initialization.
+    pub turn_timeout_ms: u64,
     pub extensions: Extensions,
 }
 impl Default for Config {
@@ -83,6 +85,7 @@ impl Default for Config {
             pane: Id::new("focus").expect("static pane"),
             reduced_motion: false,
             auto_failover: true,
+            turn_timeout_ms: 1_800_000,
             extensions: Extensions::default(),
         }
     }
@@ -92,6 +95,7 @@ impl Config {
         let context = &self.extensions.gobstopper;
         let continuation = &self.extensions.auto_continue;
         if self.version != 1
+            || !(1_000..=3_600_000).contains(&self.turn_timeout_ms)
             || self.favorites.len() > 128
             || context.floor_tokens < 1024
             || context.floor_tokens >= context.trigger_tokens

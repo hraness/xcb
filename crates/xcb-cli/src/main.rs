@@ -1,3 +1,5 @@
+mod application;
+
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::json;
 use std::{
@@ -5,10 +7,10 @@ use std::{
     path::PathBuf,
     sync::{Arc, mpsc::sync_channel},
 };
-use tokio::{process::Command, sync::watch};
+use tokio::sync::watch;
 use xcb_core::{
     Id, Provider,
-    models::{Preference, parse_devin_catalog, sort_choices},
+    models::{Preference, sort_choices},
     panes::Pane,
     policy::Terminal,
 };
@@ -42,6 +44,25 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Chat,
+    /// Bounded, ephemeral application inference with no tools or hooks.
+    Generate {
+        #[arg(long)]
+        capabilities: bool,
+    },
+    /// Run a fixed application qualification challenge using private gate evidence.
+    QualifyApplication {
+        #[arg(long)]
+        account: Id,
+        #[arg(long)]
+        model: String,
+        #[arg(long, required_unless_present = "inspect", conflicts_with = "inspect")]
+        evidence: Option<PathBuf>,
+        /// Renew only if this existing credential generation still matches.
+        #[arg(long, conflicts_with = "inspect", value_parser = parse_expected_generation)]
+        expected_generation: Option<String>,
+        #[arg(long)]
+        inspect: bool,
+    },
     Run {
         #[arg(short = 'p', long)]
         prompt: Option<String>,
@@ -95,6 +116,8 @@ enum Commands {
         #[arg(long)]
         yes: bool,
     },
+    #[command(name = "broker-stdio", hide = true)]
+    BrokerStdio,
     #[command(name = "egress-forward", hide = true)]
     EgressForward {
         socket: PathBuf,
@@ -143,6 +166,19 @@ enum AccountCommand {
         #[arg(long, default_value = "AgentMixer account")]
         label: String,
     },
+    ImportCodex {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long, default_value = "Codex account")]
+        label: String,
+    },
+    /// Copy one existing Devin sign-in into a private xcb account.
+    ImportDevin {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long, default_value = "Devin account")]
+        label: String,
+    },
 }
 #[derive(Subcommand)]
 enum ModelCommand {
@@ -150,6 +186,7 @@ enum ModelCommand {
         provider: Provider,
         #[arg(long)]
         account: Option<String>,
+        /// Legacy discovery flag; use an explicit credential import and --account.
         #[arg(long)]
         from_native: bool,
     },
@@ -234,6 +271,41 @@ fn print_json(value: impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
+fn run_output(session: &Id, result: &runner::Outcome) -> serde_json::Value {
+    json!({"version":1,"session":session,"state":result.state,"outcome":result.facts,"text":result.text})
+}
+
+fn run_exit_code(result: &runner::Outcome) -> i32 {
+    if result.facts.terminal == Terminal::Completed
+        && result.facts.joined
+        && result.facts.effects != xcb_core::policy::EffectState::Uncertain
+        && !result.facts.pending_attention
+        && result.facts.failure.is_none()
+        && result.state == xcb_core::session::State::Idle
+    {
+        0
+    } else {
+        1
+    }
+}
+
+fn import_acknowledgement(id: &Id) -> serde_json::Value {
+    json!({"version":1,"account":id,"sourcePreserved":true,"sessionsMigrated":false})
+}
+
+async fn broker_stdio() -> Result<i32> {
+    let socket = std::env::var_os("XCB_BROKER_SOCKET")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or(Error::Unavailable("broker socket is unavailable"))?;
+    let token = zeroize::Zeroizing::new(
+        std::env::var("XCB_BROKER_TOKEN")
+            .map_err(|_| Error::Unavailable("broker authority is unavailable"))?,
+    );
+    xcb_runtime::devin::broker_stdio(&socket, &token).await?;
+    Ok(0)
+}
+
 /// The CLI account contract deliberately excludes storage/custody fields.
 /// Never serialize the runtime record itself: adding an internal field must
 /// not silently extend public command output.
@@ -265,15 +337,67 @@ impl PublicAccount<'_> {
             self.provider,
             self.id
         );
-        if self.provider == Provider::Claude {
+        if matches!(self.provider, Provider::Claude | Provider::Codex) {
             format!("{added}\nNext: xcb accounts login {}", self.id)
         } else {
             format!(
-                "{added}\nNative {} execution and sign-in are not yet available; this account is metadata only.",
-                self.provider
+                "{added}\nNext: pipe a Devin token into xcb accounts token {}.\nTo copy an existing CLI sign-in into a new account: xcb accounts import-devin --source /absolute/path/credentials.toml",
+                self.id
             )
         }
     }
+}
+
+fn require_account_credentials(store: &Store, account: &xcb_runtime::store::Account) -> Result<()> {
+    if auth::has_credentials(store, &account.id)? {
+        return Ok(());
+    }
+    Err(Error::Unavailable(match account.provider {
+        Provider::Claude => "connect this Claude account with xcb accounts login <account>",
+        Provider::Codex => {
+            "connect this Codex account with xcb accounts login <account> or explicitly import auth.json with xcb accounts import-codex --source <path>"
+        }
+        Provider::Devin => {
+            "connect Devin by explicitly importing credentials.toml with xcb accounts import-devin --source <path>, or pipe a token into xcb accounts token <account>"
+        }
+    }))
+}
+
+fn catalog_account(
+    store: &Store,
+    provider: Provider,
+    name: Option<&str>,
+    from_native: bool,
+) -> Result<Option<Id>> {
+    // Process admission must never reinterpret this flag as an unauthenticated
+    // ACP probe, nor grant ambient access to the native CLI's credential home.
+    if from_native {
+        return Err(Error::Unavailable(match provider {
+            Provider::Devin => {
+                "--from-native no longer reads ambient credentials; use xcb accounts import-devin --source <absolute credentials.toml path>, then models refresh devin --account <account>"
+            }
+            Provider::Codex => {
+                "--from-native no longer reads ambient credentials; use xcb accounts import-codex --source <absolute auth.json path>, then models refresh codex --account <account>"
+            }
+            Provider::Claude => {
+                "--from-native is unsupported for Claude; connect an account and use models refresh claude --account <account>"
+            }
+        }));
+    }
+    let Some(name) = name else {
+        if provider == Provider::Devin {
+            return Err(Error::Unavailable(
+                "Devin catalog refresh requires --account after an explicit credential import or token connection",
+            ));
+        }
+        return Ok(None);
+    };
+    let account = store.resolve_account(name)?;
+    if account.provider != provider {
+        return Err(Error::Conflict("catalog account provider mismatch"));
+    }
+    require_account_credentials(store, &account)?;
+    Ok(Some(account.id))
 }
 
 fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
@@ -350,7 +474,19 @@ async fn egress_forward(
     .await
 }
 
+fn parse_expected_generation(value: &str) -> std::result::Result<String, &'static str> {
+    xcb_runtime::application::validate_expected_generation(value)
+        .map(|()| value.to_owned())
+        .map_err(|_| "expected generation must be 64 lowercase hexadecimal characters")
+}
+
 async fn dispatch(cli: Cli) -> Result<i32> {
+    process::initialize_host()?;
+    // The provider's MCP helper must not open application state or emit any
+    // ordinary CLI output on its protocol-only standard streams.
+    if matches!(&cli.command, Some(Commands::BrokerStdio)) {
+        return broker_stdio().await;
+    }
     // The hidden in-namespace forwarder must not touch CLI state: inside the
     // bwrap plan the environment is --clearenv (no HOME/XCB_STATE) and the
     // host state root is unbound, so Store/Config init would fail before the
@@ -367,9 +503,39 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         return egress_forward(socket, *port, lo_up, env_file, *target_port, child).await;
     }
     let root = cli.state.unwrap_or(private::default_root()?);
+    if let Some(Commands::Generate { capabilities }) = &cli.command {
+        return application::dispatch(&root, *capabilities, cli.json).await;
+    }
+    if let Some(Commands::QualifyApplication {
+        account,
+        model,
+        evidence,
+        expected_generation,
+        inspect,
+    }) = &cli.command
+    {
+        if *inspect {
+            return application::inspect_dispatch(&root, account, model, cli.json);
+        }
+        let Some(evidence) = evidence else {
+            unreachable!("clap requires evidence or inspection");
+        };
+        return application::qualify_dispatch(
+            &root,
+            account.clone(),
+            model.clone(),
+            evidence,
+            expected_generation.as_deref(),
+            cli.json,
+        )
+        .await;
+    }
     let store = Arc::new(Store::open(&root)?);
     let (mut config, _) = Config::load(store.root())?;
     match cli.command {
+        Some(Commands::Generate { .. } | Commands::QualifyApplication { .. }) => {
+            unreachable!("application dispatch returns above")
+        }
         None | Some(Commands::Chat) => chat(store, cli.cwd.canonicalize()?, None, cli.json).await,
         Some(Commands::Resume { id }) => {
             let id = id
@@ -431,8 +597,17 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 model.as_deref(),
             )?;
             let (cancel, cancelled) = watch::channel(false);
+            // Install both handlers before starting any provider. SIGTERM must
+            // use the same independent join/custody path as interactive Ctrl-C.
+            let mut interrupts =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+            let mut terminates =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
             let interrupt = tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                tokio::select! {
+                    _ = interrupts.recv() => {},
+                    _ = terminates.recv() => {},
+                }
                 let _ = cancel.send(true);
             });
             let observer: Observer = Arc::new(|event| {
@@ -442,7 +617,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             });
             let result = kernel::execute(
                 store,
-                session.id,
+                session.id.clone(),
                 prompt,
                 attachments,
                 false,
@@ -453,17 +628,11 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             interrupt.abort();
             let result = result?;
             if cli.json {
-                print_json(
-                    json!({"version":1,"state":result.state,"outcome":result.facts,"text":result.text}),
-                )?;
+                print_json(run_output(&session.id, &result))?;
             } else {
                 println!("{}", result.text);
             }
-            Ok(if result.facts.terminal == Terminal::Completed {
-                0
-            } else {
-                1
-            })
+            Ok(run_exit_code(&result))
         }
         Some(Commands::Accounts { command }) => {
             match command {
@@ -488,21 +657,41 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 }
                 Some(AccountCommand::Login { account }) => {
                     let account = store.resolve_account(&account)?;
-                    if account.provider != Provider::Claude {
+                    if account.provider == Provider::Devin {
                         return Err(Error::Unavailable(
-                            "native sign-in and task execution are not yet available for this provider; use its official CLI",
+                            "sign in with devin auth login, then use xcb accounts import-devin --source <absolute credentials.toml path>; to connect this account directly, pipe a token into xcb accounts token <account>",
                         ));
                     }
                     let pin = Pin::load(store.root(), account.provider)?;
-                    eprintln!(
-                        "Complete the provider's browser sign-in. Credential output is captured, not printed."
-                    );
-                    auth::login(&store, &account.id, &pin).await?;
+                    match account.provider {
+                        Provider::Claude => {
+                            eprintln!(
+                                "Complete the provider's browser sign-in. Credential output is captured, not printed."
+                            );
+                            let (cancel, receiver) = tokio::sync::watch::channel(false);
+                            let mut interrupt = tokio::signal::unix::signal(
+                                tokio::signal::unix::SignalKind::interrupt(),
+                            )?;
+                            let mut terminate = tokio::signal::unix::signal(
+                                tokio::signal::unix::SignalKind::terminate(),
+                            )?;
+                            let login =
+                                auth::login_with_cancel(&store, &account.id, &pin, receiver);
+                            tokio::pin!(login);
+                            tokio::select! {
+                                result = &mut login => result?,
+                                _ = interrupt.recv() => { let _ = cancel.send(true); login.await?; },
+                                _ = terminate.recv() => { let _ = cancel.send(true); login.await?; },
+                            }
+                        }
+                        Provider::Codex => runner::login_codex(&store, &account.id, &pin).await?,
+                        Provider::Devin => unreachable!("Devin sign-in is gated above"),
+                    }
                     if cli.json {
                         print_json(json!({"version":1,"account":account.id,"stored":true}))?;
                     } else {
                         println!(
-                            "Sign-in completed for {}. Run xcb accounts refresh {} to read supported quota windows.",
+                            "Sign-in completed for {}. Run xcb accounts refresh {} to refresh available account metadata.",
                             account.label, account.id
                         );
                     }
@@ -514,9 +703,31 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         ));
                     }
                     let account = store.resolve_account(&account)?;
-                    let bytes = stdin(2048)?;
-                    auth::store_token(&store, &account.id, &bytes)?;
-                    println!("Credential stored for {}", account.label);
+                    let limit = match account.provider {
+                        Provider::Claude => 2048,
+                        Provider::Devin => 8194,
+                        Provider::Codex => {
+                            return Err(Error::Unavailable(
+                                "Codex uses ChatGPT sign-in; use xcb accounts login <account> or xcb accounts import-codex --source <absolute auth.json path>",
+                            ));
+                        }
+                    };
+                    let bytes = zeroize::Zeroizing::new(stdin(limit)?);
+                    match account.provider {
+                        Provider::Claude => auth::store_token(&store, &account.id, &bytes)?,
+                        Provider::Devin => {
+                            xcb_runtime::devin::auth::store_token(&store, &account.id, &bytes)?
+                        }
+                        Provider::Codex => unreachable!("Codex token input is rejected above"),
+                    }
+                    if cli.json {
+                        print_json(json!({"version":1,"account":account.id,"stored":true}))?;
+                    } else {
+                        println!(
+                            "Credential stored for {}",
+                            xcb_core::display_text(&account.label, 80)
+                        );
+                    }
                 }
                 Some(AccountCommand::Default { account }) => {
                     let account = store.resolve_account(&account)?;
@@ -532,12 +743,13 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 }
                 Some(AccountCommand::Refresh { account }) => {
                     let account = store.resolve_account(&account)?;
-                    if account.provider != Provider::Claude {
+                    require_account_credentials(&store, &account)?;
+                    let pin = Pin::load(store.root(), account.provider)?;
+                    if !runner::provider_admitted(&pin) {
                         return Err(Error::Unavailable(
-                            "native account-quota querying for this provider is not yet qualified",
+                            "native account metadata querying for this runtime is not yet qualified",
                         ));
                     }
-                    let pin = Pin::load(store.root(), account.provider)?;
                     let models = runner::probe(&store, &pin, Some(&account.id)).await?;
                     store.set_models(account.provider, &models)?;
                     accounts(&store, &config, cli.json)?;
@@ -547,12 +759,30 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     // or an internal account record.
                     let id: Id = auth::import_agentmixer_token(&store, &source, &label)?;
                     if cli.json {
-                        print_json(
-                            json!({"version":1,"account":id,"sourcePreserved":true,"sessionsMigrated":false}),
-                        )?;
+                        print_json(import_acknowledgement(&id))?;
                     } else {
                         println!(
                             "Imported one Claude account as {id}. Original state and sessions are unchanged."
+                        );
+                    }
+                }
+                Some(AccountCommand::ImportCodex { source, label }) => {
+                    let id = auth::import_codex_account(&store, &source, &label)?;
+                    if cli.json {
+                        print_json(import_acknowledgement(&id))?;
+                    } else {
+                        println!(
+                            "Imported one Codex account as {id}. Original state and sessions are unchanged."
+                        );
+                    }
+                }
+                Some(AccountCommand::ImportDevin { source, label }) => {
+                    let id = xcb_runtime::devin::auth::import_account(&store, &source, &label)?;
+                    if cli.json {
+                        print_json(import_acknowledgement(&id))?;
+                    } else {
+                        println!(
+                            "Imported one Devin account as {id}. Next: xcb accounts refresh {id}"
                         );
                     }
                 }
@@ -576,10 +806,10 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 match process::inspect(provider, executable.as_deref(), &home).await {
                     Ok(pin) => {
                         pin.save(&root)?;
-                        let native = provider == Provider::Claude
-                            && xcb_runtime::claude::version_admitted(&pin.version)
-                            && xcb_runtime::sandbox::available();
-                        let detail = if native {
+                        let native = runner::provider_admitted(&pin);
+                        let detail = if native && provider == Provider::Devin {
+                            "pinned · accounts refresh <account> loads the catalog after credential import"
+                        } else if native {
                             "pinned · per-run boundary verification required"
                         } else {
                             "metadata pin only · native execution unavailable"
@@ -589,7 +819,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             println!("{provider}: {} · {detail}", pin.version);
                         }
                         found += 1;
-                        if native {
+                        // Devin catalog discovery requires explicit account-owned
+                        // credentials; doctor only pins its executable.
+                        if native && provider != Provider::Devin {
                             match runner::probe(&store, &pin, None).await {
                                 Ok(models) => store.set_models(provider, &models)?,
                                 Err(error) => eprintln!("xcb: metadata probe: {error}"),
@@ -674,49 +906,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     account,
                     from_native,
                 }) => {
+                    let account =
+                        catalog_account(&store, provider, account.as_deref(), from_native)?;
                     let pin = Pin::load(store.root(), provider)?;
-                    let models = match provider {
-                        Provider::Claude => {
-                            let account = account
-                                .map(|name| store.resolve_account(&name).map(|account| account.id))
-                                .transpose()?;
-                            runner::probe(&store, &pin, account.as_ref()).await?
-                        }
-                        Provider::Devin => {
-                            let home = if from_native {
-                                PathBuf::from(std::env::var_os("HOME").ok_or(Error::PrivateState)?)
-                                    .canonicalize()?
-                            } else {
-                                let account = store.resolve_account(account.as_deref().ok_or(Error::Unavailable("select --account or explicitly use --from-native for read-only catalog discovery"))?)?;
-                                if account.provider != provider {
-                                    return Err(Error::Conflict(
-                                        "catalog account provider mismatch",
-                                    ));
-                                }
-                                store.account_root(&account.id)?.join("home")
-                            };
-                            let mut command = Command::new(pin.executable);
-                            command
-                                .args(["models", "list", "--format", "json"])
-                                .env_clear()
-                                .envs(process::environment(&home))
-                                .current_dir(&home);
-                            parse_devin_catalog(
-                                &process::capture(
-                                    command,
-                                    xcb_core::MAX_JSON_BYTES,
-                                    std::time::Duration::from_secs(30),
-                                )
-                                .await?,
-                                now_ms(),
-                            )?
-                        }
-                        Provider::Codex => {
-                            return Err(Error::Unavailable(
-                                "native Codex catalog adapter is not yet qualified",
-                            ));
-                        }
-                    };
+                    if !runner::provider_admitted(&pin) {
+                        return Err(Error::Unavailable(
+                            "native catalog discovery for this runtime is not yet qualified",
+                        ));
+                    }
+                    let models = runner::probe(&store, &pin, account.as_ref()).await?;
                     store.set_models(provider, &models)?;
                 }
                 Some(ModelCommand::Default { key }) => {
@@ -1044,7 +1242,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         }
         Some(Commands::Recover { run, yes }) => {
             if let Some(run_id) = run {
-                let (run, run_digest) = store
+                let (run, mut run_digest) = store
                     .recovery_candidate(&run_id)?
                     .ok_or(Error::Unavailable("run not found"))?;
                 let pid = run.pid.ok_or(Error::Conflict(
@@ -1055,20 +1253,28 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         "run is not in running phase; recovery requires a recorded process group",
                     ));
                 }
+                run.verify_recovery_stop()?;
                 if !yes {
                     if cli.json {
                         print_json(
-                            json!({"version":1,"dryRun":true,"run":run.id,"phase":run.phase,"pid":pid}),
+                            json!({"version":1,"dryRun":true,"run":run.id,"phase":run.phase,"pid":pid,"guestCommandProofRequired":run.command_custody.is_some()}),
                         )?;
                     } else {
                         println!(
-                            "Would recover run {} · phase {} · process group {}.\nRepeat with --yes after verifying the process group is absent.",
+                            "Would recover run {} · phase {} · process group {}.\nRepeat with --yes to independently verify any guest command, reconcile retained credentials and release custody. Staged command edits are never published by recovery.",
                             run.id, run.phase, pid
                         );
                     }
                     return Ok(0);
                 }
                 process::prove_process_group_absent(pid)?;
+                if run.command_custody.is_some() {
+                    xcb_runtime::command_tool::recover(&store, &run, &run_digest).await?;
+                    run_digest = store
+                        .recovery_candidate(&run_id)?
+                        .ok_or(Error::Unavailable("run not found"))?
+                        .1;
+                }
                 let settled = store.recover_run(&run_id, &run_digest, now_ms())?;
                 if cli.json {
                     print_json(
@@ -1094,7 +1300,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         println!("  {} · phase {} · pid {:?}", run.id, run.phase, run.pid);
                     }
                     println!(
-                        "Use `xcb recover <run-id> --yes` after verifying the process group is absent."
+                        "Use `xcb recover <run-id> --yes` after the original host and process group have stopped; unresolved credentials must reconcile safely."
                     );
                 }
             }
@@ -1108,6 +1314,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             target_port,
             child,
         }) => egress_forward(&socket, port, &lo_up, &env_file, target_port, &child).await,
+        Some(Commands::BrokerStdio) => broker_stdio().await,
         Some(Commands::Completions { shell }) => {
             clap_complete::generate(shell, &mut Cli::command(), "xcb", &mut io::stdout());
             Ok(0)
@@ -1154,6 +1361,269 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualification_generation_flag_is_optional_canonical_and_conflicts_with_inspection() {
+        let base = [
+            "xcb",
+            "qualify-application",
+            "--account",
+            "a_fixture",
+            "--model",
+            "claude/fixture",
+        ];
+        let parse =
+            |tail: &[&str]| Cli::try_parse_from(base.into_iter().chain(tail.iter().copied()));
+        assert!(matches!(
+            parse(&["--evidence", "/private/fixture"]).unwrap().command,
+            Some(Commands::QualifyApplication {
+                expected_generation: None,
+                ..
+            })
+        ));
+        let expected = "0123456789abcdef".repeat(4);
+        assert!(matches!(
+            parse(&["--evidence", "/private/fixture", "--expected-generation", &expected]).unwrap().command,
+            Some(Commands::QualifyApplication { expected_generation: Some(value), .. }) if value == expected
+        ));
+        for invalid in [
+            "".into(),
+            "a".repeat(63),
+            "0".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+            "é".repeat(32),
+        ] {
+            assert!(
+                parse(&[
+                    "--evidence",
+                    "/private/fixture",
+                    "--expected-generation",
+                    &invalid
+                ])
+                .is_err()
+            );
+        }
+        assert!(parse(&["--inspect"]).is_ok());
+        assert!(parse(&["--inspect", "--expected-generation", &expected]).is_err());
+    }
+
+    #[test]
+    fn devin_import_requires_an_explicit_source_and_preserves_the_label() {
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "accounts",
+            "import-devin",
+            "--source",
+            "/private/source/credentials.toml",
+            "--label",
+            "Work account",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Some(Commands::Accounts {
+            command: Some(AccountCommand::ImportDevin { source, label }),
+        }) if source == std::path::Path::new("/private/source/credentials.toml") && label == "Work account"));
+        assert!(Cli::try_parse_from(["xcb", "accounts", "import-devin"]).is_err());
+        assert!(
+            Cli::try_parse_from(["xcb", "accounts", "import-devin", "--token", "synthetic"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn devin_added_account_explains_token_and_explicit_import_paths() {
+        let id = Id::new("a_devin").unwrap();
+        let account = PublicAccount {
+            id: &id,
+            provider: Provider::Devin,
+            label: "Work",
+            subscription: "Subscription",
+            enabled: true,
+        };
+        let message = account.added_message();
+        assert!(message.contains("xcb accounts token a_devin"));
+        assert!(message.contains("xcb accounts import-devin --source"));
+        assert!(!message.contains("metadata only"));
+        assert!(!message.contains("accounts login"));
+    }
+
+    #[test]
+    fn catalog_selection_requires_explicit_devin_credentials_and_rejects_ambient_discovery() {
+        let directory = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(xcb_runtime::new_id("xcb_cli").as_str());
+        let store = Store::open(&directory).unwrap();
+        let devin = store
+            .add_account(Provider::Devin, "Work", "Subscription", now_ms())
+            .unwrap();
+        let claude = store
+            .add_account(Provider::Claude, "Other", "Subscription", now_ms())
+            .unwrap();
+        assert!(catalog_account(&store, Provider::Devin, None, false).is_err());
+        assert!(catalog_account(&store, Provider::Devin, Some(devin.id.as_str()), false).is_err());
+        xcb_runtime::devin::auth::store_token(&store, &devin.id, b"synthetic-token").unwrap();
+        assert_eq!(
+            catalog_account(&store, Provider::Devin, Some(devin.id.as_str()), false).unwrap(),
+            Some(devin.id.clone())
+        );
+        assert!(catalog_account(&store, Provider::Devin, Some(claude.id.as_str()), false).is_err());
+        for provider in Provider::ALL {
+            let error = catalog_account(&store, provider, None, true).unwrap_err();
+            assert!(error.to_string().contains("--from-native"));
+        }
+        assert!(catalog_account(&store, Provider::Devin, Some(devin.id.as_str()), true).is_err());
+        assert!(
+            catalog_account(&store, Provider::Claude, None, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            catalog_account(&store, Provider::Codex, None, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn codex_import_requires_an_explicit_source_and_preserves_the_label() {
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "accounts",
+            "import-codex",
+            "--source",
+            "/private/source/auth.json",
+            "--label",
+            "Work account",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Accounts {
+                command: Some(AccountCommand::ImportCodex { source, label }),
+            }) if source == std::path::Path::new("/private/source/auth.json") && label == "Work account"
+        ));
+        assert!(Cli::try_parse_from(["xcb", "accounts", "import-codex"]).is_err());
+    }
+
+    #[test]
+    fn broker_helper_accepts_no_credentials_as_arguments_and_stays_hidden() {
+        assert!(matches!(
+            Cli::try_parse_from(["xcb", "broker-stdio"])
+                .unwrap()
+                .command,
+            Some(Commands::BrokerStdio)
+        ));
+        assert!(Cli::try_parse_from(["xcb", "broker-stdio", "--token", "synthetic"]).is_err());
+        assert!(
+            !Cli::command()
+                .render_long_help()
+                .to_string()
+                .contains("broker-stdio")
+        );
+    }
+
+    #[test]
+    fn import_acknowledgements_only_expose_the_generated_routing_id() {
+        let id = Id::new("a_public_routing_id").unwrap();
+        assert_eq!(
+            import_acknowledgement(&id),
+            json!({"version":1,"account":"a_public_routing_id","sourcePreserved":true,"sessionsMigrated":false}),
+        );
+    }
+
+    #[test]
+    fn json_run_output_includes_its_resumable_session_id() {
+        let result = runner::Outcome {
+            text: "Completed response".into(),
+            facts: xcb_core::policy::TurnFacts {
+                terminal: Terminal::Completed,
+                joined: true,
+                effects: xcb_core::policy::EffectState::None,
+                pending_attention: false,
+                failure: None,
+            },
+            state: xcb_core::session::State::Idle,
+        };
+        let session = Id::new("s_resumable").unwrap();
+        let output = run_output(&session, &result);
+        assert_eq!(output["session"], "s_resumable");
+        assert_eq!(output["text"], result.text);
+        assert_eq!(output.as_object().unwrap().len(), 5);
+        assert_eq!(
+            output["outcome"],
+            serde_json::to_value(&result.facts).unwrap()
+        );
+    }
+
+    #[test]
+    fn headless_success_requires_completed_joined_settled_idle_outcome() {
+        use xcb_core::{
+            policy::{EffectState, Failure, TurnFacts},
+            session::State,
+        };
+        let mut result = runner::Outcome {
+            text: "Provider said done".into(),
+            facts: TurnFacts {
+                terminal: Terminal::Completed,
+                joined: true,
+                effects: EffectState::None,
+                pending_attention: false,
+                failure: None,
+            },
+            state: State::Idle,
+        };
+        for effects in [EffectState::None, EffectState::Settled] {
+            result.facts.effects = effects;
+            assert_eq!(run_exit_code(&result), 0);
+        }
+        result.facts.effects = EffectState::Uncertain;
+        assert_eq!(run_exit_code(&result), 1);
+        result.facts.effects = EffectState::None;
+        result.facts.joined = false;
+        assert_eq!(run_exit_code(&result), 1);
+        let output = run_output(&Id::new("s_unjoined").unwrap(), &result);
+        assert_eq!(output["outcome"]["joined"], false);
+        assert_eq!(output["outcome"]["terminal"], "completed");
+        result.facts.joined = true;
+        result.facts.pending_attention = true;
+        assert_eq!(run_exit_code(&result), 1);
+        result.facts.pending_attention = false;
+        result.facts.failure = Some(Failure::Unknown);
+        assert_eq!(run_exit_code(&result), 1);
+        result.facts.failure = None;
+        result.state = State::Uncertain;
+        assert_eq!(run_exit_code(&result), 1);
+        result.state = State::Idle;
+        for terminal in [
+            Terminal::Failed,
+            Terminal::Cancelled,
+            Terminal::TokenLimit,
+            Terminal::TurnLimit,
+        ] {
+            result.facts.terminal = terminal;
+            assert_eq!(run_exit_code(&result), 1);
+        }
+    }
+
+    #[test]
+    fn codex_added_account_has_a_copyable_login_command() {
+        let account = PublicAccount {
+            id: &Id::new("a_codex").unwrap(),
+            provider: Provider::Codex,
+            label: "Work",
+            subscription: "Pro",
+            enabled: true,
+        };
+        assert!(
+            account
+                .added_message()
+                .ends_with("xcb accounts login a_codex")
+        );
+    }
 
     #[test]
     fn public_account_output_has_only_the_documented_metadata_fields() {

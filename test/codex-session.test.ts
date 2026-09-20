@@ -26,6 +26,7 @@ type PeerOptions = {
   mutateItem?(item: Record<string, any>, index: number): void;
   unknownRequest?: boolean; duplicateRpcId?: boolean; groupAbsent?: boolean; truncated?: boolean;
   invoke?(name: unknown, input: unknown): Promise<unknown>;
+  onRevoke?(): void;
   maxRequests?: number; deadlineMs?: number;
   ioMs?: number; runtimeError?: boolean; finalizationError?: boolean; response?: () => Promise<Response>;
   mutateEnvelope?(envelope: Record<string, any>): void; malformedThreadReply?: boolean;
@@ -129,7 +130,7 @@ function peer(options: PeerOptions = {}) {
     const item = name ? { type: "function_call", call_id: `call-${index}`, name: CODEX_TOOL_NAMES[name], arguments: JSON.stringify(defaultArgs[name]) } : structuredClone(final);
     options.mutateItem?.(item, index); return options.response ? options.response() : sse(index, item);
   } };
-  const broker: ToolBroker = { workspaceId: "contact-1", runId: "run-1", tools: names, revoke() { revoked = true; },
+  const broker: ToolBroker = { workspaceId: "contact-1", runId: "run-1", tools: names, revoke() { revoked = true; options.onRevoke?.(); },
     async invoke(name, value) { invocations.push({ name, value }); return options.invoke ? options.invoke(name, value) : { revision: "revision-1", text: "synthetic" }; } };
   async function run() {
     return runCodexSession({ launcher, upstream, broker, request: { runId: "run-1", workspaceId: "contact-1", accountId: "account-1", provider: "codex",
@@ -365,13 +366,27 @@ describe("Codex closed driver", () => {
     const receipt = await failure(peer({ groupAbsent: false }).run); expect(receipt.turnCompleted).toBe(true); expect(receipt.processStopped).toBe(false);
   });
   test("pending broker work that ignores cancellation prevents stopped proof", async () => {
-    const fixture = peer({ invoke: () => new Promise(() => {}), deadlineMs: 40 });
-    const receipt = await failure(fixture.run); expect(fixture.stopped()).toBe(true); expect(receipt.handlersJoined).toBe(false); expect(receipt.processStopped).toBe(false);
+    // Invocation, rather than a startup deadline, establishes the pending handler.
+    const fixture = peer({ invoke: () => { fixture.abort(); return new Promise(() => {}); } });
+    const receipt = await failure(fixture.run);
+    expect(fixture.invocations).toHaveLength(1); expect(fixture.submitted).toHaveLength(0); expect(fixture.revoked()).toBe(true);
+    expect(receipt.failures).toContain("CODEX_CANCELLED"); expect(receipt.failures).not.toContain("CODEX_SESSION_DEADLINE");
+    expect(receipt.failures).toContain("CODEX_HANDLER_JOIN_DEADLINE"); expect(receipt.failures).toContain("CODEX_CUSTODY_UNPROVEN");
+    expect(fixture.stopped()).toBe(true); expect(receipt.handlersJoined).toBe(false); expect(receipt.processStopped).toBe(false);
   });
   test("cancelled broker work that joins permits stopped proof", async () => {
-    const fixture = peer({ invoke: async () => { await Bun.sleep(50); throw new Error("cancelled"); }, deadlineMs: 30 });
-    const receipt = await failure(fixture.run); expect(receipt.handlersJoined).toBe(true); expect(receipt.processStopped).toBe(true);
-    expect(receipt.turnCompleted).toBe(false);
+    let release!: () => void;
+    const revoked = new Promise<void>(resolve => { release = resolve; });
+    const fixture = peer({
+      invoke: async () => { fixture.abort(); await revoked; throw new Error("cancelled"); },
+      // Keep the handler pending until cancellation has entered actual cleanup.
+      onRevoke: release,
+    });
+    const receipt = await failure(fixture.run);
+    expect(fixture.invocations).toHaveLength(1); expect(fixture.submitted).toHaveLength(0); expect(fixture.revoked()).toBe(true);
+    expect(receipt.failures).toContain("CODEX_CANCELLED"); expect(receipt.failures).not.toContain("CODEX_SESSION_DEADLINE");
+    expect(receipt.failures).not.toContain("CODEX_HANDLER_JOIN_DEADLINE"); expect(receipt.failures).not.toContain("CODEX_CUSTODY_UNPROVEN");
+    expect(receipt.handlersJoined).toBe(true); expect(receipt.processStopped).toBe(true); expect(receipt.turnCompleted).toBe(false);
   });
   test("native runtime failure remains a failure after proved cleanup", async () => {
     const receipt = await failure(peer({ runtimeError: true }).run);

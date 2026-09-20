@@ -29,7 +29,7 @@ const repository = "https://github.com/hraness/xcb";
 const archiveUrl = publishedRelease?.archiveUrl ?? null;
 
 const heading = "Your agents. Your terminal. Your edge.";
-const footnote = "Excalibur, for short. Local-first and MIT licensed. Source preview: Claude execution candidate; Codex and Devin execution unavailable.";
+const footnote = "Excalibur, for short. Local-first and MIT licensed. Source preview: native Claude, Codex, and Devin adapters with scoped workspace tools. Installed Claude and Codex coding workflows passed on macOS ARM64 with the tested accounts, alongside the command backend’s 12-case VM boundary suite. The tested Devin account reached its quota.";
 
 const primitives = [
   {
@@ -40,7 +40,7 @@ const primitives = [
   {
     icon: "model-selection",
     label: "Choose your models",
-    summary: "Favorites first, the rest below. Pick a model across harnesses, or a provider-managed mode such as Devin Adaptive or Fusion. No task-shape router making the choice for you.",
+    summary: "Favorites first, the rest below. Choose a model from an admitted provider's catalog, with explicit account and model selection. Native Devin currently supports fixed ACP choices.",
   },
   {
     icon: "capability-profiles",
@@ -90,7 +90,7 @@ const questions = [
   },
   {
     question: "Can I use Adaptive and Fusion?",
-    answer: "The model catalog distinguishes fixed models, Adaptive routing, and Fusion lead/sidekick pairings. Choices must come from the provider's observed catalog; availability in a catalog is not itself proof that a native execution adapter is qualified.",
+    answer: "Native Devin currently supports fixed ACP model choices. The TypeScript compatibility catalog represents Adaptive and Fusion, but its Devin task adapter remains unqualified. A catalog entry alone does not establish native execution support.",
   },
   {
     question: "Does usage go to aiCharts automatically?",
@@ -212,10 +212,11 @@ Claude · selected observed model  [ working ]`}</code></pre>
             summary="xcb is not yet a daily-driver replacement for Codex, Claude Code, and Devin."
           >
             <ul>
-              <li><strong>Claude:</strong> native execution candidate on macOS and Linux after sign-in, binary admission, and per-run confinement checks.</li>
-              <li><strong>Codex:</strong> binary metadata only; native execution unavailable.</li>
-              <li><strong>Devin:</strong> read-only model catalog discovery; native execution unavailable. The compatibility ACP adapter remains disabled pending qualification.</li>
-              <li><strong>Workspace tools:</strong> list, read, search, and write files. Shell commands, tests, builds, and Git still run in your own terminal.</li>
+              <li><strong>Claude:</strong> installed coding workflow verified on macOS ARM64 with the tested account. Linux remains an execution candidate after sign-in, binary admission, and per-run confinement checks.</li>
+              <li><strong>Codex:</strong> native app-server candidate on macOS for exact build 0.155.0-alpha.2.6, with supervised ChatGPT sign-in or explicit credential import. Authenticated read/write/read acceptance passed, followed by the installed coding workflow on macOS ARM64 with the tested account.</li>
+              <li><strong>Devin:</strong> native ACP candidate on macOS for exact build 3000.10.31, with explicit credential import. Authenticated discovery passed; the tested account reached provider quota before a coding turn.</li>
+              <li><strong>Compatibility CLI:</strong> Codex and Devin task execution remains disabled pending qualification.</li>
+              <li><strong>Workspace tools:</strong> list, read, search, write, create directories, and remove or rename regular files with revision checks. The isolated Linux runner for offline tests and builds passed its 12-case VM boundary suite, including filtered read-only Git inspection, public dependency fetching, and offline Cargo/Bun use from immutable caches. Installed Claude and Codex coding workflows passed: expected test failure, exact repair, passing test, and filtered Git status, with joined processes and settled effects.</li>
             </ul>
             <p>A model in the catalog or a successful metadata probe does not qualify a provider. <a href="/docs#readiness">Read the current limits and source quick start</a>.</p>
           </MarketingSection>
@@ -253,14 +254,15 @@ Claude · selected observed model  [ working ]`}</code></pre>
               },
               {
                 label: "Models",
-                summary: "Choose a fixed favorite or a provider-managed mode. Fusion pairings stay pairings, not invented capability scores.",
+                summary: "Choose an observed model and its matching account. Catalog discovery and authenticated task acceptance remain separate checks.",
                 example: (
                   <>
                     <TopicIcon slug="model-selection" />
                     <pre tabIndex={0}><code>{`Claude      observed models · execution candidate
-Devin       observed catalog · metadata only
-Modes       Adaptive · Fusion · catalog entries
-Codex       binary metadata · execution unavailable`}</code></pre>
+Codex       0.155.0-alpha.2.6 · macOS candidate
+Devin       3000.10.31 · macOS candidate
+Live proof  Claude and Codex coding passed · Devin quota blocked
+Commands    Offline Linux · filtered Git · prepared public deps`}</code></pre>
                   </>
                 ),
               },
@@ -313,6 +315,7 @@ cd xcb
 export PATH="$HOME/.local/bin:$PATH"
 xcb --help`}</code></pre>
             <p><a href={repository}>Follow the native work</a> · <a href="/docs#native-xcb">Read the native interface guide</a></p>
+            <p><a href={`${repository}/blob/main/docs/application-api.md`}>Application API guide</a> · <a href="https://github.com/hraness/textbutler">TextButler reference application</a></p>
             <h3>xcb compatibility package</h3>
             <p className="install-note">{releaseVersion === undefined ? "First xcb package release in preparation" : `Current verified compatibility release · v${releaseVersion}`}</p>
             {publishedRelease !== null && archiveUrl !== null ? (

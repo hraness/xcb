@@ -73,9 +73,17 @@ test("scopes the editorial preset to the homepage header and real contract examp
 test("makes provider and tool limitations visible before installation", () => {
   const html = renderToStaticMarkup(<Home />);
   expect(html).toContain("not yet a daily-driver replacement");
-  expect(html).toContain("native execution unavailable");
-  expect(html).toContain("compatibility ACP adapter remains disabled pending qualification");
-  expect(html).toContain("Shell commands, tests, builds, and Git");
+  expect(html).toContain("0.155.0-alpha.2.6");
+  expect(html).toContain("3000.10.31");
+  expect(html).toContain("Authenticated read/write/read acceptance passed");
+  expect(html).toContain("tested account reached provider quota");
+  expect(html).toContain("Codex and Devin task execution remains disabled pending qualification");
+  expect(html).toContain("isolated Linux runner for offline tests and builds");
+  expect(html).toContain("passed its 12-case VM boundary suite");
+  expect(html).toContain("offline Cargo/Bun use from immutable caches");
+  expect(html).toContain("Installed Claude and Codex coding workflows passed");
+  expect(html).toContain("expected test failure, exact repair, passing test, and filtered Git status");
+  expect(html).not.toContain("installed command-workflow acceptance remains pending");
   expect(html.indexOf('id="readiness"')).toBeLessThan(html.indexOf('id="install"'));
   expect(html).toContain("./scripts/install-native.sh");
 });

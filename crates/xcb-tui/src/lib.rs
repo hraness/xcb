@@ -383,7 +383,7 @@ impl App {
             "/default" => self.send(output, Intent::SetDefault),
             "/model" | "/models" if arguments.is_empty() => self.picker("Models · fixed, Adaptive, and Fusion", self.view.models.iter().map(|choice| PickItem { label: format!("{} · {}{} · {:?}", choice.provider, choice.label, choice.resolved.as_ref().map(|resolved| format!(" → {resolved}")).unwrap_or_default(), choice.mode), action: PickAction::Model(choice.key()) }).collect()),
             "/model" => self.send(output, Intent::Model(arguments.into())),
-            "/accounts" => self.picker("Accounts · select an account", self.view.accounts.iter().map(|account| PickItem { label: format!("{} · {} · {} · {}{}", account.label, account.provider, account.subscription, account.remaining_percent.map(|percent| format!("{percent:.0}% left")).unwrap_or_else(|| "quota unknown".into()), if account.busy { " · busy" } else { "" }), action: PickAction::Account(account.id.clone()) }).collect()),
+            "/accounts" => self.picker("Accounts · select an account", self.view.accounts.iter().map(|account| PickItem { label: format!("{} · {} · {} · {}{}{}", account.label, account.provider, account.subscription, account.remaining_percent.map(|percent| format!("{percent:.0}% left")).unwrap_or_else(|| "quota unknown".into()), if account.busy { " · busy" } else { "" }, if account.enabled { "" } else { " · disabled" }), action: PickAction::Account(account.id.clone()) }).collect()),
             "/sessions" => self.picker("Sessions", self.view.sessions.iter().map(|session| PickItem { label: format!("{} · {} · {}", session.title, session.model.label, session.state.label()), action: PickAction::Session(session.id.clone()) }).collect()),
             "/pane" if arguments.is_empty() => {
                 let mut items: Vec<_> = self.view.panes.iter().map(|pane| PickItem { label: format!("{} · {}", pane.id, pane.title), action: PickAction::Pane(pane.id.clone()) }).collect();
@@ -538,7 +538,12 @@ impl App {
             }
             ComposerAction::Cancel => {
                 self.send(output, Intent::Cancel);
-                self.notice = "Stopping the current turn and queued follow-ups.".into();
+                self.notice = if self.view.remote_active {
+                    "This turn is running in another terminal; cancel it there."
+                } else {
+                    "Stopping the current turn and queued follow-ups."
+                }
+                .into();
             }
             ComposerAction::Quit => {
                 self.send(output, Intent::Quit);
@@ -609,7 +614,12 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
             self.send(output, Intent::Cancel);
-            self.notice = "Stopping the current turn and queued follow-ups.".into();
+            self.notice = if self.view.remote_active {
+                "This turn is running in another terminal; cancel it there."
+            } else {
+                "Stopping the current turn and queued follow-ups."
+            }
+            .into();
             return;
         }
         if matches!(
@@ -719,6 +729,22 @@ impl App {
         if let Some((pane, expected)) = save {
             self.modal = None;
             self.send(output, Intent::SavePane { pane, expected });
+        }
+        if let Some(PickAction::Account(id)) = &chosen {
+            // Account state can change in another terminal while this picker
+            // is open. Check the latest view before dispatching the selection.
+            match self.view.accounts.iter().find(|account| &account.id == id) {
+                Some(account) if !account.enabled => {
+                    self.notice = "This account is disabled. Enable it before selecting it.".into();
+                    return;
+                }
+                None => {
+                    self.notice =
+                        "This account is no longer available. Reopen the account picker.".into();
+                    return;
+                }
+                _ => (),
+            }
         }
         if let Some(action) = chosen {
             self.modal = None;

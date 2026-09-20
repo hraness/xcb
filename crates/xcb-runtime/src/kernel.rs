@@ -80,7 +80,12 @@ pub async fn auto_route(
         Error::Unavailable("--model auto needs the judge: xcb judge token && xcb judge enable"),
     )?;
     let view = summary::snapshot(store, None, config, now_ms())?;
-    let claude_admitted = Pin::load(store.root(), Provider::Claude).is_ok();
+    let admitted_providers: BTreeSet<_> = Provider::ALL
+        .into_iter()
+        .filter(|provider| {
+            Pin::load(store.root(), *provider).is_ok_and(|pin| runner::provider_admitted(&pin))
+        })
+        .collect();
     let mut candidates: Vec<(Id, ModelChoice, Option<f64>)> = Vec::new();
     for model in &view.models {
         for view_account in &view.accounts {
@@ -92,8 +97,8 @@ pub async fn auto_route(
             {
                 continue;
             }
-            let admitted = model.provider == Provider::Claude && claude_admitted;
-            if !admitted || !auth::has_token(store, &view_account.id)? {
+            let admitted = admitted_providers.contains(&model.provider);
+            if !admitted || !auth::has_credentials(store, &view_account.id)? {
                 continue;
             }
             candidates.push((
@@ -236,20 +241,69 @@ pub fn new_session(
     account: Option<&Id>,
     model: Option<&str>,
 ) -> Result<Session> {
-    let id = account
-        .or(config.default_account.as_ref())
-        .cloned()
-        .or_else(|| {
-            store
-                .accounts()
-                .ok()?
-                .into_iter()
-                .find(|account| account.enabled)
-                .map(|account| account.id)
-        })
-        .ok_or(Error::Unavailable(
-            "add an account with xcb accounts add, then sign in",
-        ))?;
+    // An explicit model chooses its provider when no account was supplied.
+    // The saved default is a preference, not a cross-provider override.
+    let requested_provider = if account.is_none() {
+        model
+            .map(|requested| {
+                let matches: Vec<_> = store
+                    .models()?
+                    .into_iter()
+                    .filter(|choice| {
+                        choice.key() == requested
+                            || choice.id.as_str() == requested
+                            || choice.label == requested
+                    })
+                    .collect();
+                match matches.as_slice() {
+                    [] => Err(Error::Unavailable(
+                        "model not observed; refresh the catalog",
+                    )),
+                    [choice] => Ok(choice.provider),
+                    choices
+                        if choices
+                            .iter()
+                            .all(|choice| choice.provider == choices[0].provider) =>
+                    {
+                        Ok(choices[0].provider)
+                    }
+                    _ => Err(Error::Unavailable(
+                        "model is ambiguous; use its full provider/model/effort key",
+                    )),
+                }
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let accounts = store.accounts()?;
+    let compatible = |candidate: &&crate::store::Account| {
+        candidate.enabled
+            && requested_provider.is_none_or(|provider| candidate.provider == provider)
+    };
+    let id = match account {
+        Some(id) => {
+            let selected = store.account(id)?;
+            if !selected.enabled {
+                return Err(Error::Unavailable("selected account is disabled"));
+            }
+            id.clone()
+        }
+        None => usable_account(store, requested_provider, None, config)?
+            // Keep account setup possible before sign-in, while never choosing
+            // an unsigned/busy account over a connected idle matching route.
+            .or_else(|| {
+                accounts
+                    .iter()
+                    .filter(compatible)
+                    .find(|candidate| config.default_account.as_ref() == Some(&candidate.id))
+                    .or_else(|| accounts.iter().find(compatible))
+                    .map(|candidate| candidate.id.clone())
+            })
+            .ok_or(Error::Unavailable(
+                "add an enabled account for the selected provider, then sign in",
+            ))?,
+    };
     let account = store.account(&id)?;
     let model = choose_model(store, account.provider, model, config)?;
     let session = store.create_session(&id, model, workspace, now_ms())?;
@@ -259,17 +313,78 @@ pub fn new_session(
         .ok_or(Error::Unavailable("session not found"))
 }
 
+fn credential_guidance(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Claude => "connect this Claude account with xcb accounts login <account>",
+        Provider::Codex => {
+            "connect this Codex account with xcb accounts login <account>, or explicitly import auth.json with xcb accounts import-codex --source <path>"
+        }
+        Provider::Devin => {
+            "connect this Devin account by piping a token into xcb accounts token <account>, or copy a CLI sign-in into a new account with xcb accounts import-devin --source <absolute credentials.toml path>"
+        }
+    }
+}
+
+/// Select among this provider's usable accounts without mutating any custody.
+/// Rebinding and launch still validate session revisions and exclusive leases.
+fn usable_account(
+    store: &Store,
+    provider: Option<Provider>,
+    current: Option<&Id>,
+    config: &Config,
+) -> Result<Option<Id>> {
+    let held: BTreeSet<_> = store
+        .unsettled_runs()?
+        .into_iter()
+        .map(|run| run.account)
+        .collect();
+    let mut accounts = store.accounts()?;
+    accounts.sort_by_key(|account| {
+        if current == Some(&account.id) {
+            0
+        } else if config.default_account.as_ref() == Some(&account.id) {
+            1
+        } else {
+            2
+        }
+    });
+    for account in accounts {
+        if provider.is_none_or(|provider| account.provider == provider)
+            && account.enabled
+            && !held.contains(&account.id)
+            && auth::has_credentials(store, &account.id)?
+        {
+            return Ok(Some(account.id));
+        }
+    }
+    Ok(None)
+}
+
+fn model_account(
+    store: &Store,
+    provider: Provider,
+    current: Option<&Id>,
+    config: &Config,
+) -> Result<Id> {
+    usable_account(store, Some(provider), current, config)?.ok_or(Error::Unavailable(
+        "no connected idle account for this provider; connect or select an enabled account, and let any active turn finish",
+    ))
+}
+
 fn ready(store: &Store, session: &Session) -> Result<()> {
-    if session.model.provider != Provider::Claude {
+    if !store.account(&session.account)?.enabled {
+        return Err(Error::Unavailable("selected account is disabled"));
+    }
+    let pin = Pin::load(store.root(), session.model.provider)?;
+    if !runner::provider_admitted(&pin) {
         return Err(Error::Unavailable(
-            "native execution for this provider is still unqualified; catalog entries are not activation",
+            "native execution for this provider/runtime is not qualified; run xcb doctor",
         ));
     }
-    Pin::load(store.root(), session.model.provider)?;
-    if !auth::has_token(store, &session.account)? {
-        return Err(Error::Unavailable(
-            "sign in with xcb accounts login before running a task",
-        ));
+    if !auth::has_credentials(store, &session.account)? {
+        return Err(Error::Unavailable(credential_guidance(
+            session.model.provider,
+        )));
     }
     if store
         .unsettled_runs()?
@@ -521,7 +636,13 @@ async fn execute_inner(
                 quota_fresh: true,
                 available: false,
             };
-            let claude_admitted = Pin::load(store.root(), Provider::Claude).is_ok();
+            let admitted_providers: BTreeSet<_> = Provider::ALL
+                .into_iter()
+                .filter(|provider| {
+                    Pin::load(store.root(), *provider)
+                        .is_ok_and(|pin| runner::provider_admitted(&pin))
+                })
+                .collect();
             let mut candidates = Vec::new();
             for model in &view.models {
                 for account in &view.accounts {
@@ -535,7 +656,8 @@ async fn execute_inner(
                     candidates.push(RouteCandidate {
                         account: account.id.clone(),
                         model: model.clone(),
-                        admitted: model.provider == Provider::Claude && claude_admitted,
+                        admitted: admitted_providers.contains(&model.provider)
+                            && auth::has_credentials(&store, &account.id)?,
                         quota_fresh: account.remaining_percent.is_some(),
                         available: account
                             .remaining_percent
@@ -869,8 +991,10 @@ pub async fn serve(
                     Err(error) => queue(&outbox, Update::Notice(error.to_string())),
                     _ => (),
                 }
-                if let Some((queued_id, request)) = pending_pane.take()
-                    && !quit { let session = store.session(&queued_id)?.ok_or(Error::Unavailable("session not found"))?; let generated = generation_session(&store, &session, &config)?; let task = start(store.clone(), generated.id.clone(), pane_prompt(&request)?, vec![], true, outbox.clone(), completed.clone()); active.insert(generated.id, task); }
+                if !quit && let Some((generated, prompt)) = pending_pane_at_boundary(&store, &id, &mut pending_pane, &config, &outbox) {
+                    let task = start(store.clone(), generated.clone(), prompt, vec![], true, outbox.clone(), completed.clone());
+                    active.insert(generated, task);
+                }
                 publish(&store, current.as_ref(), &config, &active, &outbox)?;
             },
             _ = ticker.tick() => {
@@ -897,7 +1021,14 @@ pub async fn serve(
                                     }
                                 }
                             }
-                            Intent::Cancel => { pending_pane = None; if let Some(task) = current.as_ref().and_then(|id| active.get(id)) { let _ = task.cancel.send(true); } }
+                            Intent::Cancel => {
+                                pending_pane = None;
+                                if let Some(task) = current.as_ref().and_then(|id| active.get(id)) {
+                                    let _ = task.cancel.send(true);
+                                } else if let Some(id) = &current && store.remote_active(id)? {
+                                    queue(&outbox, Update::Notice("This turn is running in another terminal; cancel it there.".into()));
+                                }
+                            }
                             Intent::Resume(id) => { if store.session(&id)?.is_none() { return Err(Error::Unavailable("session not found")); } current = Some(id); }
                             Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None)?.id),
                             Intent::Account(account) => {
@@ -912,8 +1043,8 @@ pub async fn serve(
                                 if matches.len() != 1 { return Err(Error::Unavailable("choose one exact observed model and effort")); }
                                 let model = matches[0].clone();
                                 if current.as_ref().is_some_and(|id| active.contains_key(id)) { return Err(Error::Conflict("finish the turn before changing models")); }
-                                let account = current.as_ref().and_then(|id| store.session(id).ok().flatten()).filter(|session| session.model.provider == model.provider).map(|session| session.account)
-                                    .or_else(|| store.accounts().ok()?.into_iter().find(|account| account.enabled && account.provider == model.provider).map(|account| account.id)).ok_or(Error::Unavailable("add an account for this provider"))?;
+                                let previous = current.as_ref().map(|id| store.session(id)).transpose()?.flatten();
+                                let account = model_account(&store, model.provider, previous.as_ref().map(|session| &session.account), &config)?;
                                 if let Some(id) = &current { let session = store.session(id)?.ok_or(Error::Unavailable("session not found"))?; store.rebind(id, session.revision, &account, model)?; }
                                 else { current = Some(new_session(&store, &workspace, &config, Some(&account), Some(&model.key()))?.id); }
                             }
@@ -948,10 +1079,12 @@ pub async fn serve(
                     publish(&store, current.as_ref(), &config, &active, &outbox)?;
                     activity_published = tokio::time::Instant::now();
                 }
-                // Streaming activity and usage change without user intents.
-                // Refresh at the meter's 250ms cadence, not on every 20ms
-                // input tick or text delta.
-                if !active.is_empty() && activity_published.elapsed() >= Duration::from_millis(250) {
+                // Durable state can change in another terminal even while this
+                // one is idle. Full View updates retain the current session and
+                // let the UI fingerprint suppress unchanged redraws; they do not
+                // reset drafts, scroll positions, notices or open pickers.
+                let refresh_after = if active.is_empty() { Duration::from_secs(1) } else { Duration::from_millis(250) };
+                if activity_published.elapsed() >= refresh_after {
                     publish(&store, current.as_ref(), &config, &active, &outbox)?;
                     activity_published = tokio::time::Instant::now();
                 }
@@ -968,6 +1101,43 @@ pub async fn serve(
     queue(&outbox, Update::Stopped);
     flush(&outbox, &output);
     Ok(())
+}
+
+/// An unrelated session finishing does not establish the queued account's idle
+/// boundary. Preparation failures are notices, never errors that stop serve and
+/// detach other active turns.
+fn pending_pane_at_boundary(
+    store: &Store,
+    finished: &Id,
+    pending: &mut Option<(Id, String)>,
+    config: &Config,
+    outbox: &Mutex<Outbox>,
+) -> Option<(Id, String)> {
+    if !pending
+        .as_ref()
+        .is_some_and(|(session, _)| session == finished)
+    {
+        return None;
+    }
+    let (id, request) = pending.take().expect("matching queued pane");
+    let prepared: Result<(Id, String)> = (|| {
+        let prompt = pane_prompt(&request)?;
+        let source = store
+            .session(&id)?
+            .ok_or(Error::Unavailable("session not found"))?;
+        let generated = generation_session(store, &source, config)?;
+        Ok((generated.id, prompt))
+    })();
+    match prepared {
+        Ok(prepared) => Some(prepared),
+        Err(error) => {
+            queue(
+                outbox,
+                Update::Notice(format!("Queued pane generation could not start: {error}")),
+            );
+            None
+        }
+    }
 }
 
 fn generation_session(store: &Store, source: &Session, config: &Config) -> Result<Session> {
@@ -992,6 +1162,378 @@ fn pane_prompt(request: &str) -> Result<String> {
 mod tests {
     use super::*;
     use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn credential_hints_follow_each_providers_connection_method() {
+        assert!(credential_guidance(Provider::Claude).contains("accounts login"));
+        assert!(credential_guidance(Provider::Codex).contains("accounts import-codex"));
+        let devin = credential_guidance(Provider::Devin);
+        assert!(devin.contains("accounts token"));
+        assert!(devin.contains("accounts import-devin"));
+        assert!(!devin.contains("accounts login"));
+    }
+
+    #[test]
+    fn queued_pane_waits_for_its_session_and_reports_start_failure_without_stopping_views() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let workspace = crate::private::directory(&base.join("workspace")).unwrap();
+        let model = ModelChoice {
+            provider: Provider::Devin,
+            id: Id::new("swe-test").unwrap(),
+            label: "Synthetic".into(),
+            mode: xcb_core::models::Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        let first = store.add_account(Provider::Devin, "A", "Test", 1).unwrap();
+        let second = store.add_account(Provider::Devin, "B", "Test", 1).unwrap();
+        let a = store
+            .create_session(&first.id, model.clone(), &workspace, 2)
+            .unwrap();
+        let b = store
+            .create_session(&second.id, model, &workspace, 2)
+            .unwrap();
+        let a_run = store.prepare_run(&a.id, a.revision, 3).unwrap();
+        let b_run = store.prepare_run(&b.id, b.revision, 3).unwrap();
+        let config = Config::default();
+        let outbox = Mutex::new(Outbox::default());
+        let mut pending = Some((a.id.clone(), "compact view".into()));
+
+        store.settle(&b_run, State::Idle, 4).unwrap();
+        assert!(pending_pane_at_boundary(&store, &b.id, &mut pending, &config, &outbox).is_none());
+        assert_eq!(pending.as_ref().map(|(id, _)| id), Some(&a.id));
+        assert!(outbox.lock().unwrap().updates.is_empty());
+        assert_eq!(store.sessions(64).unwrap().len(), 2);
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+
+        store.settle(&a_run, State::Idle, 5).unwrap();
+        store.set_account_enabled(&first.id, false).unwrap();
+        assert!(pending_pane_at_boundary(&store, &a.id, &mut pending, &config, &outbox).is_none());
+        assert!(pending.is_none());
+        assert!(outbox.lock().unwrap().updates.iter().any(|update| matches!(update, Update::Notice(text) if text.contains("Queued pane generation could not start") && text.contains("disabled"))));
+        assert_eq!(store.sessions(64).unwrap().len(), 2);
+        publish(&store, Some(&a.id), &config, &BTreeMap::new(), &outbox).unwrap();
+        assert!(matches!(
+            outbox.lock().unwrap().updates.back(),
+            Some(Update::View(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn disabled_resumed_accounts_restore_drafts_before_any_turn_for_every_provider() {
+        for provider in Provider::ALL {
+            let directory = tempfile::tempdir().unwrap();
+            let base = directory.path().canonicalize().unwrap();
+            let store = Arc::new(Store::open(&base.join("state")).unwrap());
+            let workspace = crate::private::directory(&base.join("workspace")).unwrap();
+            let account = store
+                .add_account(provider, "Disabled later", "Test", 1)
+                .unwrap();
+            let session = store
+                .create_session(
+                    &account.id,
+                    ModelChoice {
+                        provider,
+                        id: Id::new("synthetic-model").unwrap(),
+                        label: "Synthetic".into(),
+                        mode: xcb_core::models::Mode::Fixed,
+                        resolved: None,
+                        effort: None,
+                        observed_at_ms: 1,
+                    },
+                    &workspace,
+                    2,
+                )
+                .unwrap();
+            let (commands, input) = sync_channel(8);
+            let (output, updates) = sync_channel(32);
+            let task = tokio::spawn(serve(
+                store.clone(),
+                workspace,
+                Some(session.id.clone()),
+                input,
+                output,
+            ));
+            view_matching(&updates, |view| {
+                view.session
+                    .as_ref()
+                    .is_some_and(|current| current.id == session.id)
+            })
+            .await;
+            let other = Store::open(store.root()).unwrap();
+            other.set_account_enabled(&account.id, false).unwrap();
+            let image = xcb_core::session::Attachment {
+                digest: "a".repeat(64),
+                media_type: "image/png".into(),
+                bytes: 512,
+                width: 16,
+                height: 16,
+            };
+            commands
+                .send(Intent::Submit {
+                    text: "retained task".into(),
+                    attachments: vec![image.clone()],
+                })
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(4), async {
+                let mut draft = false;
+                let mut notice = false;
+                loop {
+                    while let Ok(update) = updates.try_recv() {
+                        match update {
+                            Update::Draft { text, attachments } => {
+                                assert_eq!(text, "retained task");
+                                assert_eq!(attachments, vec![image.clone()]);
+                                draft = true;
+                            }
+                            Update::Notice(text)
+                                if text.contains("selected account is disabled") =>
+                            {
+                                notice = true
+                            }
+                            Update::Stopped => panic!("disabled account stopped the terminal"),
+                            _ => (),
+                        }
+                    }
+                    if draft && notice {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("disabled account must return its draft and diagnosis");
+            assert!(!task.is_finished());
+            assert!(store.messages(&session.id, 128).unwrap().is_empty());
+            assert!(store.unsettled_runs().unwrap().is_empty());
+            commands.send(Intent::Quit).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn model_account_prefers_usable_current_then_default_and_preserves_busy_custody() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().canonicalize().unwrap().join("state");
+        let store = Store::open(&state).unwrap();
+        let current = store
+            .add_account(Provider::Devin, "Current", "Subscription", 1)
+            .unwrap();
+        let default = store
+            .add_account(Provider::Devin, "Default", "Subscription", 2)
+            .unwrap();
+        let fallback = store
+            .add_account(Provider::Devin, "Fallback", "Subscription", 3)
+            .unwrap();
+        let unsigned = store
+            .add_account(Provider::Devin, "Unsigned", "Subscription", 4)
+            .unwrap();
+        let disabled = store
+            .add_account(Provider::Devin, "Disabled", "Subscription", 5)
+            .unwrap();
+        let other = store
+            .add_account(Provider::Claude, "Other provider", "Subscription", 6)
+            .unwrap();
+        for account in [&current, &default, &fallback, &disabled] {
+            crate::devin::auth::store_token(&store, &account.id, b"synthetic-token").unwrap();
+        }
+        store.set_account_enabled(&disabled.id, false).unwrap();
+        let mut config = Config {
+            default_account: Some(default.id.clone()),
+            ..Config::default()
+        };
+        assert_eq!(
+            model_account(&store, Provider::Devin, Some(&current.id), &config).unwrap(),
+            current.id
+        );
+        assert_eq!(
+            model_account(&store, Provider::Devin, Some(&other.id), &config).unwrap(),
+            default.id
+        );
+        assert_eq!(
+            model_account(&store, Provider::Devin, Some(&unsigned.id), &config).unwrap(),
+            default.id
+        );
+        let current_run = store.prepare_probe(&current.id, None, 7).unwrap();
+        assert_eq!(
+            model_account(&store, Provider::Devin, Some(&current.id), &config).unwrap(),
+            default.id
+        );
+        let default_run = store.prepare_probe(&default.id, None, 8).unwrap();
+        assert_eq!(
+            model_account(&store, Provider::Devin, Some(&current.id), &config).unwrap(),
+            fallback.id
+        );
+        config.default_account = Some(unsigned.id);
+        assert_eq!(
+            model_account(&store, Provider::Devin, None, &config).unwrap(),
+            fallback.id
+        );
+        store.set_account_enabled(&fallback.id, false).unwrap();
+        assert!(model_account(&store, Provider::Devin, Some(&current.id), &config).is_err());
+        assert_eq!(store.unsettled_runs().unwrap().len(), 2);
+        store.settle(&current_run, State::Idle, 9).unwrap();
+        store.settle(&default_run, State::Idle, 10).unwrap();
+    }
+
+    #[test]
+    fn new_session_prefers_usable_matching_accounts_before_onboarding_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let workspace = crate::private::directory(&base.join("workspace")).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let unsigned = store
+            .add_account(Provider::Devin, "Unsigned default", "Subscription", 1)
+            .unwrap();
+        let connected = store
+            .add_account(Provider::Devin, "Connected", "Subscription", 2)
+            .unwrap();
+        let claude = store
+            .add_account(Provider::Claude, "Other provider", "Subscription", 3)
+            .unwrap();
+        let config = Config {
+            default_account: Some(unsigned.id.clone()),
+            ..Config::default()
+        };
+        let model = ModelChoice {
+            provider: Provider::Devin,
+            id: Id::new("swe-test").unwrap(),
+            label: "Synthetic".into(),
+            mode: xcb_core::models::Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        store
+            .set_models(Provider::Devin, std::slice::from_ref(&model))
+            .unwrap();
+        crate::devin::auth::store_token(&store, &connected.id, b"synthetic-token").unwrap();
+        let chosen = new_session(&store, &workspace, &config, None, Some(&model.key())).unwrap();
+        assert_eq!(chosen.account, connected.id);
+        let other_default = Config {
+            default_account: Some(claude.id),
+            ..config.clone()
+        };
+        assert_eq!(
+            new_session(&store, &workspace, &other_default, None, Some(&model.key()))
+                .unwrap()
+                .account,
+            connected.id
+        );
+        let run = store.prepare_probe(&connected.id, None, 4).unwrap();
+        assert_eq!(
+            new_session(&store, &workspace, &config, None, Some(&model.key()))
+                .unwrap()
+                .account,
+            unsigned.id
+        );
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        store.settle(&run, State::Idle, 5).unwrap();
+        crate::devin::auth::store_token(&store, &unsigned.id, b"synthetic-token").unwrap();
+        assert_eq!(
+            new_session(&store, &workspace, &config, None, Some(&model.key()))
+                .unwrap()
+                .account,
+            unsigned.id
+        );
+    }
+
+    async fn view_matching(
+        updates: &Receiver<Update>,
+        expected: impl Fn(&xcb_core::ui::View) -> bool,
+    ) -> xcb_core::ui::View {
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                while let Ok(update) = updates.try_recv() {
+                    match update {
+                        Update::View(view) if expected(&view) => return *view,
+                        Update::View(_) => (),
+                        _ => panic!("idle polling must publish only full views"),
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("idle terminal did not observe durable state")
+    }
+
+    #[tokio::test]
+    async fn idle_terminal_observes_other_terminal_state_without_changing_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().canonicalize().unwrap().join("state");
+        let store = Arc::new(Store::open(&state).unwrap());
+        let other = Store::open(&state).unwrap();
+        let account = store
+            .add_account(Provider::Devin, "Shared", "Subscription", 1)
+            .unwrap();
+        let model = ModelChoice {
+            provider: Provider::Devin,
+            id: Id::new("swe-test").unwrap(),
+            label: "Synthetic".into(),
+            mode: xcb_core::models::Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        let workspace =
+            crate::private::directory(&directory.path().canonicalize().unwrap().join("workspace"))
+                .unwrap();
+        let session = store
+            .create_session(&account.id, model.clone(), &workspace, 2)
+            .unwrap();
+        let (commands, input) = sync_channel(8);
+        let (output, updates) = sync_channel(32);
+        let task = tokio::spawn(serve(
+            store.clone(),
+            workspace,
+            Some(session.id.clone()),
+            input,
+            output,
+        ));
+        let first = view_matching(&updates, |view| {
+            view.session.as_ref().is_some_and(|s| s.id == session.id)
+        })
+        .await;
+        assert_eq!(first.state, State::Idle);
+        let run = other.prepare_run(&session.id, session.revision, 3).unwrap();
+        let busy = view_matching(&updates, |view| view.remote_active).await;
+        assert_eq!(busy.session.unwrap().id, session.id);
+        assert!(
+            busy.accounts
+                .iter()
+                .any(|row| row.id == account.id && row.busy)
+        );
+        other.settle(&run, State::Idle, 4).unwrap();
+        let imported = other
+            .add_account(Provider::Codex, "New account", "Subscription", 5)
+            .unwrap();
+        other
+            .set_models(Provider::Devin, std::slice::from_ref(&model))
+            .unwrap();
+        let settled = view_matching(&updates, |view| {
+            !view.remote_active
+                && view.state == State::Idle
+                && view.accounts.iter().any(|row| row.id == imported.id)
+                && view.models.iter().any(|choice| choice.key() == model.key())
+        })
+        .await;
+        assert_eq!(settled.session.unwrap().id, session.id);
+        assert!(!settled.accounts.iter().any(|row| row.busy));
+        commands.send(Intent::Quit).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
 
     /// Saturating the bounded UI channel must never lose data: guaranteed
     /// updates arrive in order and coalesced stream text reassembles whole.

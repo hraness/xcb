@@ -62,7 +62,6 @@ pub fn seatbelt(executable: &Path, scratch: &Path) -> Result<String> {
     }
     let exe = quoted(executable)?;
     let work = quoted(scratch)?;
-    let temp = format!("/private/tmp/claude-{}", rustix::process::getuid().as_raw());
     Ok(format!(
         r#"(version 1)
 (deny default)
@@ -77,9 +76,117 @@ pub fn seatbelt(executable: &Path, scratch: &Path) -> Result<String> {
 (allow file-read* (literal "/") (literal "/tmp") (literal "/etc") (literal "/var") (literal "/Library") (literal "/private/etc") (literal "/private/tmp") (literal "/private/var")
   (literal {exe}) (subpath "/System") (subpath "/usr") (subpath "/Library/Preferences") (subpath "/Library/Apple") (subpath "/etc") (subpath "/private/etc") (subpath "/var/db/timezone") (subpath "/private/var/db/timezone"))
 (allow file-map-executable (literal {exe}) (subpath "/System") (subpath "/usr"))
-(allow file-read* file-write* (subpath {work}) (subpath "{temp}"))
-(allow file-read-metadata (path-ancestors {exe}) (path-ancestors {work}) (path-ancestors "{temp}"))
+(allow file-read* file-write* (subpath {work}))
+(allow file-read-metadata (path-ancestors {exe}) (path-ancestors {work}))
 (allow network-outbound (literal "/private/var/run/mDNSResponder") (literal "/private/var/run/syslog") (remote tcp "*:443"))
+"#
+    ))
+}
+
+/// Codex has no executable native tools in this profile. Fork/exec of helpers,
+/// other account homes, consumer workspaces and ambient config remain denied.
+/// Credentials are writable only in a disposable profile; the host persists a
+/// validated refresh after joining the exact process.
+pub fn codex_seatbelt(
+    executable: &Path,
+    scratch: &Path,
+    profile: &Path,
+    config: &Path,
+    catalog: &Path,
+    ca_bundle: &Path,
+) -> Result<String> {
+    if executable.starts_with(scratch)
+        || !profile.starts_with(scratch)
+        || config.parent() != Some(profile)
+        || catalog.starts_with(scratch)
+        || ca_bundle.starts_with(scratch)
+    {
+        return Err(Error::PrivateState);
+    }
+    let exe = quoted(executable)?;
+    let work = quoted(scratch)?;
+    let profile = quoted(profile)?;
+    let config = quoted(config)?;
+    let catalog = quoted(catalog)?;
+    let ca_bundle = quoted(ca_bundle)?;
+    Ok(format!(
+        r#"(version 1)
+(deny default)
+(allow process-exec (literal {exe}))
+(allow process-info* (target self))
+(allow signal (target self))
+(allow sysctl-read)
+(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
+; The resolver stats the /var symlink before using the mDNSResponder socket.
+; Its canonical /private/var ancestors do not grant this symlink metadata.
+(allow file-read-metadata (literal "/var"))
+(allow file-read* (literal {exe}) (literal {catalog}) (literal {ca_bundle}) (subpath "/System/Library") (subpath "/usr/lib") (subpath "/Library/Apple/System/Library") (subpath "/System/Cryptexes/OS") (subpath "/System/Volumes/Preboot/Cryptexes/OS") (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random"))
+(allow file-write* (literal "/dev/null"))
+(allow file-read-data file-write-data (literal "/dev/fd/0") (literal "/dev/fd/1") (literal "/dev/fd/2"))
+(allow file-map-executable (literal {exe}) (subpath "/System/Library") (subpath "/usr/lib") (subpath "/System/Cryptexes/OS") (subpath "/System/Volumes/Preboot/Cryptexes/OS"))
+(allow file-read* (literal "/") (path-ancestors "/System/Cryptexes/OS") (path-ancestors "/System/Volumes/Preboot/Cryptexes/OS"))
+(allow file-read-metadata (path-ancestors {exe}) (path-ancestors {work}) (path-ancestors {catalog}) (path-ancestors {ca_bundle}))
+(allow file-read* file-write* (subpath {work}))
+(deny file-write* (literal {config}) (literal {catalog}) (literal {ca_bundle}))
+(deny file-write-unlink (literal {profile}))
+(allow file-read-data file-read-metadata (literal "/etc/codex/requirements.toml") (literal "/private/etc/codex/requirements.toml") (literal "/etc/resolv.conf") (literal "/private/etc/resolv.conf") (literal "/private/var/run/resolv.conf") (subpath "/Library/Preferences/SystemConfiguration"))
+(allow file-read-metadata (path-ancestors "/etc/codex/requirements.toml") (path-ancestors "/private/etc/codex/requirements.toml") (path-ancestors "/private/var/run/resolv.conf"))
+(allow network-outbound (literal "/private/var/run/mDNSResponder") (literal "/private/var/run/syslog") (remote tcp "*:443"))
+"#
+    ))
+}
+
+/// Devin's model-facing native tools have no consumer-workspace access. Only
+/// the host broker can publish effects; credentials arrive through the process
+/// environment and are never materialized in the disposable provider home.
+pub fn devin_seatbelt(
+    executable: &Path,
+    helper: &Path,
+    scratch: &Path,
+    home: &Path,
+    config_directory: &Path,
+    socket: Option<&Path>,
+) -> Result<String> {
+    if executable.starts_with(scratch)
+        || helper.starts_with(scratch)
+        || home.parent() != Some(scratch)
+        || config_directory != home.join(".config/devin")
+    {
+        return Err(Error::PrivateState);
+    }
+    let exe = quoted(executable)?;
+    let helper = quoted(helper)?;
+    let work = quoted(scratch)?;
+    let home = quoted(home)?;
+    let config = quoted(config_directory)?;
+    let config_parent = quoted(config_directory.parent().ok_or(Error::PrivateState)?)?;
+    let socket = socket
+        .map(|path| canonical_child(path).and_then(|path| Ok(serde_json::to_string(&path)?)))
+        .transpose()?;
+    let network = socket.map(|path| format!("(allow network-outbound (literal {path}))\n(allow file-read-metadata (path-ancestors {path}))")).unwrap_or_default();
+    Ok(format!(
+        r#"(version 1)
+(deny default)
+(allow process-exec (literal {exe}) (literal {helper}))
+(allow process-fork)
+(allow process-info* (target self))
+(allow signal (target self))
+(allow sysctl-read)
+(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo") (global-name "com.apple.trustd.agent") (global-name "com.apple.SystemConfiguration.configd"))
+(allow file-ioctl (literal "/dev/null"))
+(allow file-read* (literal {exe}) (literal {helper}) (subpath "/System") (subpath "/usr/lib") (subpath "/Library/Apple") (subpath "/Library/Preferences/SystemConfiguration") (subpath "/private/etc/ssl") (subpath "/var/db/timezone") (subpath "/private/var/db/timezone") (literal "/etc/resolv.conf") (literal "/private/etc/resolv.conf") (literal "/private/var/run/resolv.conf") (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/random"))
+(allow file-write* (literal "/dev/null"))
+(allow file-map-executable (literal {exe}) (literal {helper}) (subpath "/System") (subpath "/usr/lib"))
+(allow file-read-data (literal "/"))
+; DNS resolution also stats this symlink, independently of /private/var.
+(allow file-read-metadata (literal "/var"))
+(allow file-read-metadata (literal "/") (path-ancestors {exe}) (path-ancestors {helper}) (path-ancestors {work}) (path-ancestors "/private/var/run/resolv.conf") (path-ancestors "/private/etc/ssl"))
+(allow file-read* file-write* (subpath {work}))
+(deny file-write* (subpath {config}))
+(deny file-write-unlink (literal {home}) (literal {config_parent}))
+(deny file-read* file-write* (subpath "/dev/fd") (subpath "/proc"))
+(allow network-outbound (literal "/private/var/run/mDNSResponder") (literal "/private/var/run/syslog") (remote tcp "*:443"))
+{network}
 "#
     ))
 }
@@ -562,6 +669,25 @@ mod tests {
         let work = layout.spec.scratch.join("work");
         fs::create_dir_all(&work).unwrap();
         work
+    }
+
+    #[test]
+    fn claude_profile_confines_regular_file_writes_to_private_scratch() {
+        let layout = make_layout(Egress::Denied, false, false);
+        let policy = seatbelt(&layout.spec.executable, &layout.spec.scratch).unwrap();
+        let scratch = quoted(&layout.spec.scratch).unwrap();
+        assert!(!policy.contains("/private/tmp/claude-"));
+        assert!(!policy.contains("/tmp/claude-"));
+        let regular_writes = policy
+            .lines()
+            .filter(|line| line.starts_with("(allow file-read* file-write* (subpath "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            regular_writes,
+            [format!(
+                "(allow file-read* file-write* (subpath {scratch}))"
+            )]
+        );
     }
 
     #[test]

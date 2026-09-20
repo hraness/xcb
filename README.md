@@ -4,29 +4,41 @@
 Excalibur (`xcb`) is a metaharness and SDK for working with AI subscriptions.
 Its local, terminal-first workspace brings named accounts, local sessions,
 token observability, and composable extensions into one Rust and Ratatui
-interface. It is in development: Claude is the only native execution candidate;
-Codex and Devin execution remain unavailable.
+interface. Native adapters for Claude, Codex, and Devin are in development,
+with restricted workspace tools and explicit runtime admission.
 <!-- hraness:xcb-landing:end -->
 
 [Project site](https://xcb.dev) · [Source](https://github.com/hraness/xcb) ·
-[Compatibility reference](docs/compatibility.md) · [Contributing](CONTRIBUTING.md)
+[Application API](docs/application-api.md) · [Compatibility reference](docs/compatibility.md) · [Contributing](CONTRIBUTING.md)
 
 ## Readiness
 
 **xcb is not yet a daily-driver replacement for Codex, Claude Code, and Devin.**
-The native broker can list, read, search, and write workspace files. It cannot
-run shell commands, tests, builds, Git, or arbitrary provider tools. Run those
-operations yourself in a separate terminal and check changes before using them.
+The native broker lists, reads, searches, and writes workspace files, creates
+directories, and removes or renames regular files with revision checks. The
+source also includes an isolated Linux command runner for tests and builds on
+macOS ARM64. The current backend passed its 12-case VM boundary suite, including
+filtered Git inspection, public dependency fetching, and offline Cargo/Bun use
+from immutable caches. Installed Claude and Codex coding workflows passed on
+macOS ARM64: an expected test failure, exact repair, passing test, and filtered
+Git status, with joined processes and settled effects. This evidence covers the
+tested accounts and admitted builds; Devin quota still blocks acceptance across
+all three providers. See the [command runner contract](docs/command-runner.md)
+for setup, supported boundaries, and current limits.
 
 | Provider | Native Rust CLI | TypeScript compatibility CLI |
 | --- | --- | --- |
-| Claude | Execution candidate on macOS/Linux, after sign-in, an admitted binary, and per-run confinement checks | Execution candidate, subject to its own admission and confinement checks |
-| Codex | Binary metadata discovery only; execution and catalog adapter unavailable | Discovery only; managed task execution gated on host qualification |
-| Devin | Binary metadata and read-only model catalog discovery; execution unavailable | ACP implementation exists; task execution disabled pending exact-runtime qualification |
+| Claude | Installed coding workflow verified on macOS ARM64 with the tested account; Linux remains an execution candidate after sign-in, binary admission, and confinement checks | Execution candidate, subject to its own admission and confinement checks |
+| Codex | Native app-server on macOS for exact build **0.155.0-alpha.2.6**; authenticated broker and installed coding workflow acceptance passed on macOS ARM64 with the tested account | Discovery only; managed task execution gated on host qualification |
+| Devin | Native ACP candidate on macOS for exact build **3000.10.31**; authenticated model discovery passed; tested account hit provider quota before a coding turn | ACP implementation exists; task execution disabled pending exact-runtime qualification |
 
 A successful `doctor` or a visible model does not prove a working coding session.
-Native `doctor` reports `metadata pin only` for unqualified providers. Automated
-fixtures check boundaries; they do not establish live provider readiness.
+Native `doctor` reports `metadata pin only` for unqualified providers. Codex and
+Devin candidates require the checked executable digest as well as the version;
+other builds and their Linux execution paths remain unavailable. Automated
+fixtures check boundaries; they do not establish authentication, service
+reliability, or real-model task quality. The TypeScript compatibility CLI's
+Codex and Devin task routes remain unqualified and disabled.
 
 ## Native xcb
 
@@ -39,8 +51,9 @@ Source version 0.4.0 is not a published release. Check the
 ### Install from source
 
 Requires Git, the pinned Rust **1.97.1** toolchain, and platform build tools.
-The supported execution boundary is macOS Seatbelt or Linux with a working,
-admitted `bwrap` configuration; unsupported confinement fails closed.
+Claude's supported execution boundary is macOS Seatbelt or Linux with a working,
+admitted `bwrap` configuration. The native Codex and Devin candidates currently
+require macOS Seatbelt; unsupported confinement fails closed.
 
 ```sh
 git clone https://github.com/hraness/xcb.git
@@ -78,8 +91,99 @@ its full observed key from `xcb models` and run `xcb models default <key>`.
 
 If discovery finds the wrong binary, use
 `xcb doctor --provider claude --executable /absolute/path/to/claude`.
-The pin binds executable bytes and version; rerun `doctor` after an upgrade.
+The pin binds executable bytes and version. After upgrading xcb, restart open
+xcb terminals and rerun `doctor`. A process started from the old binary cannot
+adopt the replacement binary's pin, and older clients refuse new run records
+whose credential-custody format they do not understand.
 An account, metadata pin, or model listing cannot activate an unqualified adapter.
+
+### Connect Codex on macOS
+
+Use the exact admitted **0.155.0-alpha.2.6** build. Authenticated broker
+read/write/read and installed coding-workflow acceptance passed on macOS ARM64
+with the tested account; this does not qualify arbitrary provider versions or
+the separate application API. xcb supervises the official
+CLI's ChatGPT device sign-in in a private profile:
+
+```sh
+xcb doctor --provider codex
+xcb accounts add codex codex-personal --plan ChatGPT
+xcb accounts login codex-personal
+xcb accounts refresh codex-personal
+xcb models
+```
+
+Follow the device sign-in instructions shown in the terminal. Alternatively,
+copy one existing ChatGPT credential into a new xcb account by selecting its
+private `auth.json` explicitly:
+
+```sh
+xcb accounts import-codex --source /absolute/path/to/auth.json --label codex-imported
+xcb accounts refresh codex-imported
+```
+
+The source file is preserved. Import does not copy provider configuration,
+plugins, sessions, or transcripts. API-key credentials are not accepted by this
+route. Refreshed ChatGPT credentials are persisted only after the owned provider
+process has joined.
+
+### Connect Devin on macOS
+
+Use the exact admitted **3000.10.31** build. Authenticated ACP model discovery
+passed; the tested account returned quota/resource exhaustion on a real turn,
+so successful coding acceptance remains pending. xcb preserves an unknown quota
+reset as unknown. Sign in through the provider CLI, then explicitly select its
+`credentials.toml` to create a private xcb account:
+
+```sh
+devin auth login
+xcb doctor --provider devin
+xcb accounts import-devin --source /absolute/path/to/credentials.toml --label devin-personal
+xcb accounts refresh devin-personal
+xcb models
+```
+
+The source file and provider sessions are preserved. xcb copies only the
+credential for the supported provider endpoints. To update just the catalog,
+use `xcb models refresh devin --account devin-personal`; Devin discovery requires
+an explicitly connected account. Native Devin currently uses fixed ACP model
+choices. Adaptive and Fusion catalog representations in the compatibility
+package do not establish native support.
+
+For either provider, copy a full matching model key from `xcb models` and set it
+with `xcb models default <key>`. Select the account with
+`xcb accounts default <account>` for new interactive sessions, or pass
+`--account <account> --model <key>` to `xcb run`. Rerun `doctor` after a provider
+upgrade; a new version is not automatically admitted.
+
+### Isolated tests, builds, and Git
+
+Project commands use an explicitly provisioned Linux VM through `workspace_exec`.
+Follow the [command runner setup](docs/command-runner.md#setup-and-admission)
+from the same source checkout as the installed native CLI. Commands run offline
+against a staged workspace; host dependencies, credentials, and build products
+are excluded. Native macOS and Xcode builds are unavailable. The explicit
+[public dependency preparation frontend](docs/command-runner.md#dependencies-and-git)
+passed the current VM boundary suite, including rejection of a cache after its
+manifest changed. Installed Claude and Codex coding workflows passed on macOS
+ARM64 with the tested accounts; other repositories and toolchains still need
+their own checks.
+
+The Git projection is limited to filtered, read-only HEAD and index data for
+status and diffs. Original history, remotes, and hooks are omitted; commit and
+push workflows are unavailable. Publication checks file revisions and replaces
+each file atomically; it is not a transaction across every changed file. Failed,
+cancelled, or uncertain command state is retained. Successfully published and
+durably settled commands remove their verified input snapshot.
+
+### Application integration
+
+The [application API](docs/application-api.md) provides bounded, ephemeral
+inference with no tools or hooks. It requires evidence for the exact XCB binary,
+provider, account and model before accepting application traffic.
+[TextButler](https://github.com/hraness/textbutler), an MIT-licensed reference
+application, keeps its contact access and messaging approval in its own host.
+Sign-in and a successful `doctor` alone do not qualify the application route.
 
 ### Everyday commands
 
@@ -96,11 +200,27 @@ xcb doctor
 xcb completions zsh > /path/to/completions/_xcb
 ```
 
-Resume opens the saved session and its workspace. `/help` lists terminal
+Resume opens the saved native session and its workspace in the interactive
+terminal; it is not a headless continuation command. `/help` lists terminal
 commands. Sessions and credentials live in the private native state root
 `~/.local/share/xcb`; `--state /absolute/path` or `XCB_STATE` overrides it.
 The compatibility CLI uses `~/.xcb` instead. Do not point both implementations
-at the same state directory.
+at the same state directory. `xcb --json run` includes the native session ID
+in its result so it can be reopened with `xcb resume <session-id>`.
+
+One provider turn has a 30-minute default deadline, including initialization.
+The `turn_timeout_ms` setting in the private state root's `config.json` accepts
+1,000–3,600,000 milliseconds (one second to 60 minutes); `xcb config` displays the
+effective configuration. Older configurations that omit it use the default.
+Cancellation remains available before the deadline, and automatic continuation
+has its own separate limits.
+
+Each account owns at most one active provider turn. Other terminals may view
+that session, but cancellation must be requested in the terminal that owns it.
+Different accounts can run concurrently; the isolated command backend admits
+one command at a time across those accounts. Ctrl-C and SIGTERM request bounded
+cleanup for a headless run. `xcb run` reports success only for a completed,
+joined, settled idle result.
 
 Cancellation joins the owned process before releasing custody. If `doctor`
 reports an unsettled run, inspect `xcb recover` and the process state; an expired
@@ -137,21 +257,6 @@ Keys are vaulted mode-0600 outside the workspace. `XCB_JEV_API_KEY` or
 `TYPESAFE_API_KEY` may supply a key via the environment. Custom endpoints require
 an explicit environment key; the vaulted key remains bound to System One.
 
-### Devin model discovery
-
-For an already authenticated Devin CLI, the following explicitly uses its
-existing home for read-only catalog discovery:
-
-```sh
-xcb doctor --provider devin
-xcb models refresh devin --from-native
-xcb models
-```
-
-Fixed models, Adaptive, and Fusion pairings retain provider-issued identifiers.
-A catalog choice does not enable Devin execution inside xcb. Continue using the
-provider's own CLI for Devin and Codex tasks until their adapters are qualified.
-
 ## Migrating from AgentMixer
 
 The native command imports **one Claude credential**, preserving the source:
@@ -178,5 +283,7 @@ it is not evidence of a published package.
 ## Development
 
 See [Contributing](CONTRIBUTING.md) for setup and the native, compatibility, and
-site checks. Report vulnerabilities through [Security](SECURITY.md).
-Licensed under [MIT](LICENSE).
+site checks. The credential-free [native Codex boundary fixtures](qualification/codex-native.md)
+and [native Devin boundary fixture](qualification/devin-native.md) document
+repeatable checks separately from authenticated live acceptance.
+Report vulnerabilities through [Security](SECURITY.md). Licensed under [MIT](LICENSE).

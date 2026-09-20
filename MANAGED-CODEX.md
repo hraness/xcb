@@ -1,5 +1,10 @@
 # Managed Codex accounts
 
+This document describes the retained TypeScript host-integration API. Native
+Rust xcb uses a separate supervised device sign-in and explicit `auth.json`
+import; follow the [native Codex setup](README.md#connect-codex-on-macos).
+The compatibility CLI's Codex task route remains unqualified and disabled.
+
 The managed account controller connects owner account controls to Codex's
 ChatGPT sign-in flow. It keeps account authentication separate from permission
 to run an agent. A signed-in account never qualifies an execution adapter.

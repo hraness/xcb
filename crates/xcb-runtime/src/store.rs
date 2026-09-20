@@ -67,6 +67,10 @@ impl RunOwner {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunRecord {
+    /// Always emitted, including for legacy records, so older strict decoders
+    /// cannot release custody using recovery rules that predate auth receipts.
+    #[serde(default)]
+    pub custody_version: u32,
     pub id: Id,
     pub session: Option<Id>,
     pub account: Id,
@@ -78,10 +82,49 @@ pub struct RunRecord {
     pub model: Option<ModelChoice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<RunOwner>,
+    /// A guest worker has independent custody from its host provider process.
+    /// Present fields make older strict readers fail closed until reconciliation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_custody: Option<crate::command::CommandCustody>,
 }
 
 impl RunRecord {
+    /// Recovery is unavailable while the owning host could still be joining
+    /// processes or persisting credentials. Unknown identities fail closed.
+    pub fn verify_recovery_stop(&self) -> Result<()> {
+        if self.phase != "running" {
+            return Err(Error::Conflict("run is not in running phase"));
+        }
+        let owner = self.owner.as_ref().ok_or(Error::Conflict(
+            "run has no recorded owner; recovery custody cannot be proven",
+        ))?;
+        let owner_pid = i32::try_from(owner.pid)
+            .ok()
+            .filter(|pid| *pid > 1)
+            .and_then(rustix::process::Pid::from_raw)
+            .ok_or(Error::Conflict("run owner identity is invalid"))?;
+        if rustix::process::test_kill_process(owner_pid) != Err(rustix::io::Errno::SRCH) {
+            return Err(Error::Conflict(
+                "run owner is still present or its stop is unproven",
+            ));
+        }
+        let pid = self
+            .pid
+            .filter(|pid| *pid > 1)
+            .ok_or(Error::Conflict("run has no valid recorded process group"))?;
+        crate::process::prove_process_group_absent(pid)
+    }
+
     pub fn validate(&self) -> Result<()> {
+        if !matches!(self.custody_version, 0 | 1) {
+            return Err(xcb_core::Error::Invalid("run custody version").into());
+        }
+        if let Some(custody) = &self.command_custody {
+            if self.custody_version != 1 || !matches!(self.phase.as_str(), "prepared" | "running") {
+                return Err(xcb_core::Error::Invalid("command run custody").into());
+            }
+            validate_command_custody(&self.id, custody)?;
+        }
         if let Some(model) = &self.model {
             model.validate()?;
         }
@@ -94,6 +137,32 @@ impl RunRecord {
         }
         Ok(())
     }
+}
+
+fn validate_command_custody(run_id: &Id, custody: &crate::command::CommandCustody) -> Result<()> {
+    let hash = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    let id = custody.command_id.as_str();
+    if custody.version != 1
+        || custody.run_id != *run_id
+        || id.len() > 80
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+        || !hash(&custody.workspace_id)
+        || !hash(&custody.snapshot_sha256)
+        || !hash(&custody.request_sha256)
+        || !hash(&custody.backend_sha256)
+        || custody.boot_id.len() != 36
+        || custody.boot_id.chars().any(char::is_control)
+    {
+        return Err(xcb_core::Error::Invalid("command custody").into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,7 +229,39 @@ fn update_session(transaction: &Transaction<'_>, session: &Session, expected: u6
 }
 
 impl Store {
+    /// Read existing state without initialization, migration, recovery, or a
+    /// writable database connection. SQLite may maintain its normal reader
+    /// coordination sidecars; no application records are changed.
+    pub fn open_read_only(root: &Path) -> Result<Self> {
+        crate::process::initialize_host()?;
+        let root = private::check_directory(root)?;
+        let path = root.join("xcb.sqlite");
+        let database = private::open_file(&path, 8 * 1024 * 1024 * 1024)?;
+        for suffix in ["xcb.sqlite-wal", "xcb.sqlite-shm", "xcb.sqlite-journal"] {
+            private::open_file_maybe_vanished(&root.join(suffix), 1024 * 1024 * 1024)?;
+        }
+        let connection = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        private::same_file(&path, &database)?;
+        connection.busy_timeout(Duration::from_secs(2))?;
+        connection.pragma_update(None, "query_only", true)?;
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version != 1 {
+            return Err(Error::Unavailable(
+                "existing xcb database schema is unavailable",
+            ));
+        }
+        Ok(Self {
+            root,
+            instance: new_id("i").to_string(),
+            connection: Mutex::new(connection),
+        })
+    }
+
     pub fn open(root: &Path) -> Result<Self> {
+        crate::process::initialize_host()?;
         let root = private::directory(root)?;
         let lock_path = root.join(".initialize.lock");
         let initialization = fs::OpenOptions::new()
@@ -566,6 +667,7 @@ impl Store {
         session.state = State::Working;
         session.last_active_at_ms = session.last_active_at_ms.max(now);
         let run = RunRecord {
+            custody_version: 1,
             id: new_id("r"),
             session: Some(session_id.clone()),
             account: session.account.clone(),
@@ -575,6 +677,7 @@ impl Store {
             created_at_ms: now,
             model: Some(session.model.clone()),
             owner: Some(self.owner()),
+            command_custody: None,
         };
         tx.execute(
             "INSERT INTO runs VALUES(?1,?2,?3,?4,?5)",
@@ -621,6 +724,7 @@ impl Store {
             return Err(Error::Conflict("account has an unsettled run"));
         }
         let run = RunRecord {
+            custody_version: 1,
             id: new_id("probe"),
             session: None,
             account: account.clone(),
@@ -630,6 +734,7 @@ impl Store {
             created_at_ms: now,
             model,
             owner: Some(self.owner()),
+            command_custody: None,
         };
         tx.execute(
             "INSERT INTO runs VALUES(?1,NULL,?2,'prepared',?3)",
@@ -647,26 +752,163 @@ impl Store {
         Ok(run)
     }
     pub(crate) fn mark_spawned(&self, run: &RunRecord, pid: u32) -> Result<RunRecord> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (current, payload) = self.owned_run_from(&tx, run)?;
+        if current.phase != "prepared" {
+            return Err(Error::Conflict("run authority changed"));
+        }
+        // A stale prepared handle must not erase guest custody persisted before
+        // spawning. Preserve the authoritative row rather than cloning input.
         let next = RunRecord {
             phase: "running".into(),
             pid: Some(pid),
-            ..run.clone()
+            ..current
         };
-        if self.db()?.execute("UPDATE runs SET phase='running',payload=?1 WHERE id=?2 AND phase='prepared' AND EXISTS(SELECT 1 FROM leases WHERE account=?3 AND run=?2)", params![serde_json::to_string(&next)?, run.id.as_str(), run.account.as_str()])? != 1 { return Err(Error::Conflict("run authority changed")); }
+        if tx.execute("UPDATE runs SET phase='running',payload=?1 WHERE id=?2 AND phase='prepared' AND payload=?3", params![serde_json::to_string(&next)?, run.id.as_str(), payload])? != 1 {
+            return Err(Error::Conflict("run authority changed"));
+        }
+        tx.commit()?;
         Ok(next)
     }
+
+    /// Prepared handles remain valid after mark_spawned and custody updates.
+    /// Only mutable phase/process/custody fields may differ from the handle.
+    fn owned_run_from(&self, db: &Connection, run: &RunRecord) -> Result<(RunRecord, String)> {
+        let row: Option<(String, String)> = db.query_row(
+            "SELECT r.payload,r.phase FROM runs r JOIN leases l ON l.run=r.id AND l.account=r.account WHERE r.id=?1 AND r.account=?2 AND r.phase IN ('prepared','running')",
+            params![run.id.as_str(), run.account.as_str()], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let (payload, phase) = row.ok_or(Error::Conflict("run authority changed"))?;
+        let current: RunRecord = decode(&payload)?;
+        current.validate()?;
+        let owner = current
+            .owner
+            .as_ref()
+            .ok_or(Error::Conflict("run owner missing"))?;
+        let supplied = run
+            .owner
+            .as_ref()
+            .ok_or(Error::Conflict("run owner missing"))?;
+        if current.custody_version != 1
+            || run.custody_version != 1
+            || current.id != run.id
+            || current.account != run.account
+            || current.session != run.session
+            || current.revision != run.revision
+            || current.created_at_ms != run.created_at_ms
+            || current.model != run.model
+            || current.phase != phase
+            || owner.instance != self.instance
+            || owner.pid != std::process::id()
+            || supplied.instance != owner.instance
+            || supplied.pid != owner.pid
+        {
+            return Err(Error::Conflict("run authority changed"));
+        }
+        Ok((current, payload))
+    }
+
+    pub(crate) fn verify_owned_run(&self, run: &RunRecord) -> Result<()> {
+        let db = self.db()?;
+        self.owned_run_from(&db, run).map(|_| ())
+    }
+
+    /// Persist before launching any guest command. A second pending command,
+    /// even with the same ID, is not another grant to launch.
+    pub(crate) fn record_command_custody(
+        &self,
+        run: &RunRecord,
+        custody: &crate::command::CommandCustody,
+    ) -> Result<()> {
+        validate_command_custody(&run.id, custody)?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (mut current, payload) = self.owned_run_from(&tx, run)?;
+        if current.command_custody.is_some() {
+            return Err(Error::Conflict("run has pending command custody"));
+        }
+        current.command_custody = Some(custody.clone());
+        if tx.execute(
+            "UPDATE runs SET payload=?1 WHERE id=?2 AND payload=?3",
+            params![serde_json::to_string(&current)?, run.id.as_str(), payload],
+        )? != 1
+        {
+            return Err(Error::Conflict("run authority changed"));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The trusted command owner calls this only after independently proving
+    /// the exact guest receipt joined. It never settles effects or the run.
+    pub(crate) fn clear_command_custody(
+        &self,
+        run: &RunRecord,
+        custody: &crate::command::CommandCustody,
+    ) -> Result<()> {
+        validate_command_custody(&run.id, custody)?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (mut current, payload) = self.owned_run_from(&tx, run)?;
+        if current.command_custody.as_ref() != Some(custody) {
+            return Err(Error::Conflict("command custody changed"));
+        }
+        current.command_custody = None;
+        if tx.execute(
+            "UPDATE runs SET payload=?1 WHERE id=?2 AND payload=?3",
+            params![serde_json::to_string(&current)?, run.id.as_str(), payload],
+        )? != 1
+        {
+            return Err(Error::Conflict("run authority changed"));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Called only by trusted backend recovery after its exact guest/stream
+    /// join proof. Repeat host stop and complete run/custody identity under the
+    /// writer lock. The account remains leased until ordinary run recovery.
+    pub(crate) fn reconcile_command_custody(
+        &self,
+        run_id: &Id,
+        expected_digest: &str,
+        custody: &crate::command::CommandCustody,
+    ) -> Result<RunRecord> {
+        validate_command_custody(run_id, custody)?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let payload: String = tx.query_row(
+            "SELECT r.payload FROM runs r JOIN leases l ON l.run=r.id AND l.account=r.account WHERE r.id=?1 AND r.phase='running'",
+            [run_id.as_str()], |row| row.get(0),
+        ).optional()?.ok_or(Error::Conflict("run lease is absent or not running"))?;
+        if digest(payload.as_bytes()) != expected_digest {
+            return Err(Error::Conflict("run changed since command recovery proof"));
+        }
+        let mut current: RunRecord = decode(&payload)?;
+        current.validate()?;
+        if current.id != *run_id || current.command_custody.as_ref() != Some(custody) {
+            return Err(Error::Conflict("command custody changed"));
+        }
+        current.verify_recovery_stop()?;
+        current.command_custody = None;
+        if tx.execute("UPDATE runs SET payload=?1 WHERE id=?2 AND account=?3 AND phase='running' AND payload=?4", params![serde_json::to_string(&current)?, run_id.as_str(), current.account.as_str(), payload])? != 1 {
+            return Err(Error::Conflict("run changed since command recovery proof"));
+        }
+        tx.commit()?;
+        Ok(current)
+    }
+
     pub(crate) fn settle(&self, run: &RunRecord, state: State, now: u64) -> Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let held: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM leases WHERE account=?1 AND run=?2)",
-            params![run.account.as_str(), run.id.as_str()],
-            |row| row.get(0),
-        )?;
-        if !held {
-            return Err(Error::Conflict("run authority changed"));
+        let (current, payload) = self.owned_run_from(&tx, run)?;
+        if current.command_custody.is_some() {
+            return Err(Error::Conflict(
+                "command guest stop is unproven; reconcile command custody before settling",
+            ));
         }
-        if let Some(id) = &run.session {
+        if let Some(id) = &current.session {
             let mut session =
                 session_from(&tx, id)?.ok_or(Error::Unavailable("session not found"))?;
             let expected = session.revision;
@@ -679,16 +921,22 @@ impl Store {
         }
         let record = RunRecord {
             phase: "settled".into(),
-            ..run.clone()
+            ..current
         };
-        tx.execute(
-            "UPDATE runs SET phase='settled',payload=?1 WHERE id=?2",
-            params![serde_json::to_string(&record)?, run.id.as_str()],
-        )?;
-        tx.execute(
+        if tx.execute(
+            "UPDATE runs SET phase='settled',payload=?1 WHERE id=?2 AND payload=?3",
+            params![serde_json::to_string(&record)?, run.id.as_str(), payload],
+        )? != 1
+        {
+            return Err(Error::Conflict("run authority changed"));
+        }
+        if tx.execute(
             "DELETE FROM leases WHERE account=?1 AND run=?2",
             params![run.account.as_str(), run.id.as_str()],
-        )?;
+        )? != 1
+        {
+            return Err(Error::Conflict("run authority changed"));
+        }
         tx.commit()?;
         Ok(())
     }
@@ -759,6 +1007,48 @@ impl Store {
         }
         if digest(payload.as_bytes()) != expected_digest {
             return Err(Error::Conflict("run changed since process-group proof"));
+        }
+        if run.command_custody.is_some() {
+            return Err(Error::Conflict(
+                "command guest stop is unproven; reconcile command custody before recovery",
+            ));
+        }
+        run.verify_recovery_stop()?;
+        let pending_auth: Vec<(String, String, String)> = {
+            let mut query = tx.prepare("SELECT call,operation,input_digest FROM tool_effects WHERE run=?1 AND settled=0 AND (operation LIKE 'host_auth_%' OR call LIKE 'xcb_auth_%' OR call LIKE 'xcb_devin_auth_%')")?;
+            query
+                .query_map([run_id.as_str()], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        if !pending_auth.is_empty() {
+            let [(call, operation, metadata_digest)] = pending_auth.as_slice() else {
+                return Err(Error::Conflict(
+                    "unsettled credential receipts require reconciliation",
+                ));
+            };
+            if call != "xcb_auth_snapshot" || operation != "host_auth_refresh" {
+                return Err(Error::Conflict(
+                    "unsettled credential receipt has no safe recovery",
+                ));
+            }
+            let account_json: String = tx.query_row(
+                "SELECT payload FROM accounts WHERE id=?1",
+                [run.account.as_str()],
+                |row| row.get(0),
+            )?;
+            let account: Account = decode(&account_json)?;
+            if account.provider != Provider::Codex {
+                return Err(Error::Conflict("credential recovery provider mismatch"));
+            }
+            // Hold the same immediate transaction through filesystem CAS and
+            // receipt/run settlement. Concurrent recoverers cannot release the
+            // account while another still owns credential reconciliation.
+            crate::auth::recover_codex_auth(&self.root, &run, metadata_digest)?;
+            if tx.execute("UPDATE tool_effects SET settled=1 WHERE run=?1 AND call=?2 AND operation=?3 AND input_digest=?4 AND settled=0", params![run.id.as_str(), call, operation, metadata_digest])? != 1 {
+                return Err(Error::Conflict("credential recovery receipt changed"));
+            }
         }
         if let Some(session_id) = &run.session {
             let mut session =
@@ -1014,6 +1304,35 @@ impl Store {
         )?;
         Ok(())
     }
+    /// Idempotent receipt cleanup for an independently proven unstarted run.
+    /// Keep authority and prepared/no-pid checks in the same transaction as the
+    /// update; missing receipts are expected when launch preparation failed early.
+    pub(crate) fn discard_unstarted_tool(&self, run: &RunRecord, call: &str) -> Result<()> {
+        label(call, 160)?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let payload: Option<String> = tx.query_row(
+            "SELECT payload FROM runs WHERE id=?1 AND account=?2 AND phase='prepared' AND EXISTS(SELECT 1 FROM leases WHERE run=?1 AND account=?2)",
+            params![run.id.as_str(), run.account.as_str()], |row| row.get(0),
+        ).optional()?;
+        let current: RunRecord =
+            decode(&payload.ok_or(Error::Conflict("unstarted run authority changed"))?)?;
+        if current.pid.is_some()
+            || current.phase != "prepared"
+            || current.account != run.account
+            || !current.owner.as_ref().is_some_and(|owner| {
+                owner.instance == self.instance && owner.pid == std::process::id()
+            })
+        {
+            return Err(Error::Conflict("unstarted run proof changed"));
+        }
+        tx.execute(
+            "UPDATE tool_effects SET settled=1 WHERE run=?1 AND call=?2",
+            params![run.id.as_str(), call],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
     pub(crate) fn settle_tool(&self, run: &RunRecord, call: &str) -> Result<()> {
         if self.db()?.execute(
             "UPDATE tool_effects SET settled=1 WHERE run=?1 AND call=?2 AND settled=0",
@@ -1110,6 +1429,121 @@ mod tests {
         }
     }
 
+    fn orphaned(store: &Store, run: &RunRecord) -> RunRecord {
+        let mut run = run.clone();
+        run.owner.as_mut().unwrap().pid = i32::MAX as u32;
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE runs SET payload=?1 WHERE id=?2",
+                params![serde_json::to_string(&run).unwrap(), run.id.as_str()],
+            )
+            .unwrap();
+        run
+    }
+
+    #[test]
+    fn read_only_discovery_reads_live_wal_without_initializing_or_writing() {
+        let dir = root();
+        let path = dir.path().canonicalize().unwrap().join("state");
+        let writer = Store::open(&path).unwrap();
+        let account = writer
+            .add_account(Provider::Claude, "Personal", "Max", 1)
+            .unwrap();
+        fs::remove_file(path.join(".initialize.lock")).unwrap();
+        let reader = Store::open_read_only(&path).unwrap();
+        assert_eq!(reader.accounts().unwrap()[0].id, account.id);
+        assert!(!path.join(".initialize.lock").exists());
+        assert!(
+            reader
+                .db()
+                .unwrap()
+                .execute("DELETE FROM accounts", [])
+                .is_err()
+        );
+        assert_eq!(writer.accounts().unwrap().len(), 1);
+        let second = writer
+            .add_account(Provider::Codex, "Second", "Pro", 2)
+            .unwrap();
+        assert!(
+            reader
+                .accounts()
+                .unwrap()
+                .iter()
+                .any(|row| row.id == second.id)
+        );
+    }
+
+    #[test]
+    fn read_only_discovery_does_not_create_or_migrate_state() {
+        let dir = root();
+        let missing = dir.path().canonicalize().unwrap().join("missing");
+        assert!(Store::open_read_only(&missing).is_err());
+        assert!(!missing.exists());
+        let path = dir.path().canonicalize().unwrap().join("state");
+        let writer = Store::open(&path).unwrap();
+        writer
+            .db()
+            .unwrap()
+            .pragma_update(None, "user_version", 0)
+            .unwrap();
+        assert!(Store::open_read_only(&path).is_err());
+        let version: u32 = writer
+            .db()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 0);
+    }
+
+    #[test]
+    fn recovery_rejects_live_original_owner_and_preserves_receipts() {
+        let dir = root();
+        let base = dir.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Personal", "Max", 1)
+            .unwrap();
+        let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
+        let running = store.mark_spawned(&prepared, i32::MAX as u32).unwrap();
+        let digest = crate::digest(serde_json::to_string(&running).unwrap());
+        assert!(store.recover_run(&running.id, &digest, 3).is_err());
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        store
+            .begin_tool(
+                &running,
+                "xcb_auth_settled",
+                "host_auth_refresh",
+                "synthetic",
+            )
+            .unwrap();
+        store.settle_tool(&running, "xcb_auth_settled").unwrap();
+        assert!(
+            store.recover_run(&running.id, &digest, 3).is_err(),
+            "even settled auth cannot override a living host"
+        );
+        store
+            .begin_tool(&running, "xcb_auth_legacy", "host_auth_import", "synthetic")
+            .unwrap();
+        let running = orphaned(&store, &running);
+        let digest = crate::digest(serde_json::to_string(&running).unwrap());
+        assert!(store.recover_run(&running.id, &digest, 4).is_err());
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        assert_eq!(
+            store
+                .db()
+                .unwrap()
+                .query_row(
+                    "SELECT settled FROM tool_effects WHERE run=?1 AND call='xcb_auth_legacy'",
+                    [running.id.as_str()],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+
     #[test]
     fn recovery_settles_running_run_and_marks_session_uncertain() {
         let dir = root();
@@ -1122,13 +1556,16 @@ mod tests {
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
         let prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
-        let running = store.mark_spawned(&prepared, 12345).unwrap();
+        let running = orphaned(
+            &store,
+            &store.mark_spawned(&prepared, i32::MAX as u32).unwrap(),
+        );
         let digest = digest(serde_json::to_string(&running).unwrap());
 
         let settled = store.recover_run(&running.id, &digest, 4).unwrap();
 
         assert_eq!(settled.phase, "settled");
-        assert_eq!(settled.pid, Some(12345));
+        assert_eq!(settled.pid, Some(i32::MAX as u32));
         assert!(store.run(&running.id).unwrap().unwrap().phase == "settled");
         assert!(store.unsettled_runs().unwrap().is_empty());
         let session = store.session(&session.id).unwrap().unwrap();
@@ -1150,7 +1587,10 @@ mod tests {
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
         let prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
-        let running = store.mark_spawned(&prepared, 12345).unwrap();
+        let running = orphaned(
+            &store,
+            &store.mark_spawned(&prepared, i32::MAX as u32).unwrap(),
+        );
         let payload = format!(" {} ", serde_json::to_string(&running).unwrap());
         store
             .db()
@@ -1307,7 +1747,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_run_record_deserializes_without_model_field() {
+    fn custody_version_defaults_legacy_records_and_is_always_serialized() {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
@@ -1339,6 +1779,112 @@ mod tests {
         assert_eq!(run.model, None);
         assert_eq!(run.phase, "running");
         assert_eq!(run.pid, Some(12345));
+        assert_eq!(run.custody_version, 0);
+        run.validate().unwrap();
+        assert_eq!(serde_json::to_value(&run).unwrap()["custody_version"], 0);
+    }
+
+    #[test]
+    fn custody_version_stamps_new_runs_and_rejects_older_readers() {
+        // This is the complete pre-custody-version decoder. An already-open
+        // older Store must reject the payload without reopening the database.
+        #[derive(Debug, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct OldRunRecord {
+            id: Id,
+            session: Option<Id>,
+            account: Id,
+            revision: u64,
+            phase: String,
+            pid: Option<u32>,
+            created_at_ms: u64,
+            #[serde(default)]
+            model: Option<ModelChoice>,
+            #[serde(default)]
+            owner: Option<RunOwner>,
+        }
+
+        let dir = root();
+        let base = dir.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Personal", "Max", 1)
+            .unwrap();
+        let session = store
+            .create_session(&account.id, choice(), &base.join("work"), 2)
+            .unwrap();
+        let run = store.prepare_run(&session.id, session.revision, 3).unwrap();
+        store.settle(&run, State::Idle, 4).unwrap();
+        let probe = store.prepare_probe(&account.id, None, 5).unwrap();
+        for record in [run, probe] {
+            assert_eq!(record.custody_version, 1);
+            let stored = store.run(&record.id).unwrap().unwrap();
+            assert_eq!(stored.custody_version, 1);
+            let mut payload = serde_json::to_value(&stored).unwrap();
+            let error = serde_json::from_value::<OldRunRecord>(payload.clone()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("unknown field `custody_version`")
+            );
+            assert_eq!(
+                payload.as_object_mut().unwrap().remove("custody_version"),
+                Some(1.into())
+            );
+            serde_json::from_value::<OldRunRecord>(payload.clone()).unwrap();
+            let legacy: RunRecord = serde_json::from_value(payload).unwrap();
+            legacy.validate().unwrap();
+            assert_eq!(legacy.custody_version, 0);
+            let reserialized = serde_json::to_value(&legacy).unwrap();
+            assert_eq!(reserialized["custody_version"], 0);
+            assert!(serde_json::from_value::<OldRunRecord>(reserialized).is_err());
+        }
+    }
+
+    #[test]
+    fn custody_version_unknown_rejects_reads_and_recovery_without_releasing_lease() {
+        let dir = root();
+        let base = dir.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Personal", "Max", 1)
+            .unwrap();
+        let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
+        let mut running = orphaned(
+            &store,
+            &store.mark_spawned(&prepared, i32::MAX as u32).unwrap(),
+        );
+        running.verify_recovery_stop().unwrap();
+        running.custody_version = 2;
+        assert!(running.validate().is_err());
+        let payload = serde_json::to_string(&running).unwrap();
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE runs SET payload=?1 WHERE id=?2",
+                params![payload, running.id.as_str()],
+            )
+            .unwrap();
+        assert!(store.run(&running.id).is_err());
+        assert!(store.unsettled_runs().is_err());
+        assert!(store.recovery_candidate(&running.id).is_err());
+        assert!(
+            store
+                .recover_run(&running.id, &digest(payload.as_bytes()), 3)
+                .is_err()
+        );
+        let held: bool = store
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM leases WHERE account=?1 AND run=?2)",
+                params![account.id.as_str(), running.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(held);
     }
 
     #[test]
@@ -1384,7 +1930,10 @@ mod tests {
             .unwrap();
         let expected = session.model.clone();
         let prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
-        let running = store.mark_spawned(&prepared, 12345).unwrap();
+        let running = orphaned(
+            &store,
+            &store.mark_spawned(&prepared, i32::MAX as u32).unwrap(),
+        );
         let expected_digest = digest(serde_json::to_string(&running).unwrap());
         let (candidate, stored_digest) = store.recovery_candidate(&running.id).unwrap().unwrap();
         assert_eq!(candidate.model, Some(expected.clone()));
@@ -1434,10 +1983,8 @@ mod tests {
         let (candidate, stored_digest) = store.recovery_candidate(&run_id).unwrap().unwrap();
         assert_eq!(candidate.model, None);
         assert_eq!(stored_digest, expected_digest);
-        let settled = store.recover_run(&run_id, &stored_digest, 4).unwrap();
-        assert_eq!(settled.model, None);
-        assert_eq!(settled.phase, "settled");
-        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert!(store.recover_run(&run_id, &stored_digest, 4).is_err());
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
     }
 
     #[test]
@@ -1498,5 +2045,250 @@ mod tests {
             )
             .unwrap();
         assert!(!viewer.remote_active(&session.id).unwrap());
+    }
+    fn command_custody(run: &RunRecord) -> crate::command::CommandCustody {
+        crate::command::CommandCustody {
+            version: 1,
+            command_id: Id::new("cmd_synthetic").unwrap(),
+            run_id: run.id.clone(),
+            workspace_id: "a".repeat(64),
+            snapshot_sha256: "b".repeat(64),
+            request_sha256: "c".repeat(64),
+            backend_sha256: "d".repeat(64),
+            boot_id: "00000000-0000-0000-0000-000000000001".into(),
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct CommandlessRunRecord {
+        #[serde(default)]
+        custody_version: u32,
+        id: Id,
+        session: Option<Id>,
+        account: Id,
+        revision: u64,
+        phase: String,
+        pid: Option<u32>,
+        created_at_ms: u64,
+        #[serde(default)]
+        model: Option<ModelChoice>,
+        #[serde(default)]
+        owner: Option<RunOwner>,
+    }
+
+    #[test]
+    fn command_marker_survives_stale_spawn_and_blocks_older_readers_and_settle() {
+        let dir = root();
+        let store = Store::open(&dir.path().canonicalize().unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Synthetic", "Test", 1)
+            .unwrap();
+        let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
+        let unmarked = serde_json::to_value(&prepared).unwrap();
+        assert!(unmarked.get("command_custody").is_none());
+        serde_json::from_value::<CommandlessRunRecord>(unmarked).unwrap();
+        let custody = command_custody(&prepared);
+        store.record_command_custody(&prepared, &custody).unwrap();
+        let marked = store.run(&prepared.id).unwrap().unwrap();
+        assert_eq!(marked.command_custody.as_ref(), Some(&custody));
+        assert_eq!(marked.phase, "prepared");
+        let payload = serde_json::to_value(&marked).unwrap();
+        assert_eq!(payload["custody_version"], 1);
+        let error = serde_json::from_value::<CommandlessRunRecord>(payload).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `command_custody`")
+        );
+        assert!(store.settle(&prepared, State::Idle, 3).is_err());
+        // Provider start still accepts the original prepared handle, preserving
+        // the later durable guest marker instead of overwriting with None.
+        let spawned = store.mark_spawned(&prepared, i32::MAX as u32).unwrap();
+        assert_eq!(spawned.command_custody.as_ref(), Some(&custody));
+        assert!(store.settle(&prepared, State::Idle, 4).is_err());
+        assert!(store.prepare_probe(&account.id, None, 4).is_err());
+        store.clear_command_custody(&prepared, &custody).unwrap();
+        assert!(store.prepare_probe(&account.id, None, 4).is_err());
+        store.settle(&prepared, State::Idle, 4).unwrap();
+        let settled = store.run(&prepared.id).unwrap().unwrap();
+        assert_eq!(settled.pid, Some(i32::MAX as u32));
+        assert!(settled.command_custody.is_none());
+        serde_json::from_value::<CommandlessRunRecord>(serde_json::to_value(&settled).unwrap())
+            .unwrap();
+        assert!(store.prepare_probe(&account.id, None, 5).is_ok());
+    }
+
+    #[test]
+    fn command_custody_requires_exact_lease_owner_and_all_bound_fields() {
+        let dir = root();
+        let path = dir.path().canonicalize().unwrap().join("state");
+        let store = Store::open(&path).unwrap();
+        let sibling = Store::open(&path).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Synthetic", "Test", 1)
+            .unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        let custody = command_custody(&run);
+        assert!(sibling.record_command_custody(&run, &custody).is_err());
+        let mut forged = run.clone();
+        forged.revision += 1;
+        assert!(store.record_command_custody(&forged, &custody).is_err());
+        store.record_command_custody(&run, &custody).unwrap();
+        assert!(store.record_command_custody(&run, &custody).is_err());
+        assert!(sibling.clear_command_custody(&run, &custody).is_err());
+        assert!(sibling.settle(&run, State::Idle, 3).is_err());
+        for field in 0..8 {
+            let mut other = custody.clone();
+            match field {
+                0 => other.command_id = Id::new("cmd_other").unwrap(),
+                1 => other.run_id = Id::new("r_other").unwrap(),
+                2 => other.workspace_id = "0".repeat(64),
+                3 => other.snapshot_sha256 = "0".repeat(64),
+                4 => other.request_sha256 = "0".repeat(64),
+                5 => other.backend_sha256 = "0".repeat(64),
+                6 => other.boot_id = "00000000-0000-0000-0000-000000000002".into(),
+                7 => other.version = 2,
+                _ => unreachable!(),
+            }
+            assert!(store.clear_command_custody(&run, &other).is_err());
+            assert_eq!(
+                store
+                    .run(&run.id)
+                    .unwrap()
+                    .unwrap()
+                    .command_custody
+                    .as_ref(),
+                Some(&custody)
+            );
+        }
+        store.clear_command_custody(&run, &custody).unwrap();
+        assert!(store.clear_command_custody(&run, &custody).is_err());
+        store.settle(&run, State::Idle, 3).unwrap();
+        assert!(store.record_command_custody(&run, &custody).is_err());
+        assert!(store.clear_command_custody(&run, &custody).is_err());
+    }
+
+    #[test]
+    fn command_reconciliation_rechecks_stop_digest_and_custody_without_releasing_account() {
+        let dir = root();
+        let base = dir.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Synthetic", "Test", 1)
+            .unwrap();
+        let session = store
+            .create_session(&account.id, choice(), &base.join("work"), 2)
+            .unwrap();
+        let prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
+        let run = store.mark_spawned(&prepared, i32::MAX as u32).unwrap();
+        let custody = command_custody(&run);
+        store.record_command_custody(&run, &custody).unwrap();
+        let (live, live_digest) = store.recovery_candidate(&run.id).unwrap().unwrap();
+        assert!(
+            store
+                .reconcile_command_custody(&run.id, &live_digest, &custody)
+                .is_err()
+        );
+        let dead = orphaned(&store, &live);
+        let (_, expected) = store.recovery_candidate(&run.id).unwrap().unwrap();
+        dead.verify_recovery_stop().unwrap();
+        assert!(store.recover_run(&run.id, &expected, 4).is_err());
+        assert!(
+            store
+                .reconcile_command_custody(&run.id, &live_digest, &custody)
+                .is_err()
+        );
+        let mut wrong = custody.clone();
+        wrong.request_sha256 = "0".repeat(64);
+        assert!(
+            store
+                .reconcile_command_custody(&run.id, &expected, &wrong)
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .run(&run.id)
+                .unwrap()
+                .unwrap()
+                .command_custody
+                .as_ref(),
+            Some(&custody)
+        );
+        let cleared = store
+            .reconcile_command_custody(&run.id, &expected, &custody)
+            .unwrap();
+        assert!(cleared.command_custody.is_none());
+        assert_eq!(cleared.phase, "running");
+        assert!(store.prepare_probe(&account.id, None, 4).is_err());
+        assert_eq!(
+            store.session(&session.id).unwrap().unwrap().state,
+            State::Working
+        );
+        assert!(
+            store
+                .reconcile_command_custody(&run.id, &expected, &custody)
+                .is_err()
+        );
+        assert!(store.recover_run(&run.id, &expected, 4).is_err());
+        let (_, fresh_digest) = store.recovery_candidate(&run.id).unwrap().unwrap();
+        store.recover_run(&run.id, &fresh_digest, 4).unwrap();
+        assert_eq!(
+            store.session(&session.id).unwrap().unwrap().state,
+            State::Uncertain
+        );
+        assert!(store.prepare_probe(&account.id, None, 5).is_ok());
+    }
+
+    #[test]
+    fn command_custody_rejects_malformed_records_and_absent_lease() {
+        let dir = root();
+        let store = Store::open(&dir.path().canonicalize().unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Synthetic", "Test", 1)
+            .unwrap();
+        let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
+        let run = store.mark_spawned(&prepared, i32::MAX as u32).unwrap();
+        let custody = command_custody(&run);
+        for field in 0..4 {
+            let mut invalid = custody.clone();
+            match field {
+                0 => invalid.workspace_id = "not-a-hash".into(),
+                1 => invalid.run_id = Id::new("r_other").unwrap(),
+                2 => invalid.boot_id = "invalid".into(),
+                3 => invalid.version = 2,
+                _ => unreachable!(),
+            }
+            assert!(store.record_command_custody(&run, &invalid).is_err());
+            let mut malformed = run.clone();
+            malformed.command_custody = Some(invalid);
+            assert!(malformed.validate().is_err());
+        }
+        store.record_command_custody(&run, &custody).unwrap();
+        let current = store.run(&run.id).unwrap().unwrap();
+        let dead = orphaned(&store, &current);
+        let (_, expected) = store.recovery_candidate(&run.id).unwrap().unwrap();
+        store
+            .db()
+            .unwrap()
+            .execute("DELETE FROM leases WHERE run=?1", [run.id.as_str()])
+            .unwrap();
+        assert!(
+            store
+                .reconcile_command_custody(&run.id, &expected, &custody)
+                .is_err()
+        );
+        assert!(store.clear_command_custody(&dead, &custody).is_err());
+        assert!(store.settle(&dead, State::Idle, 4).is_err());
+        assert_eq!(
+            store
+                .run(&run.id)
+                .unwrap()
+                .unwrap()
+                .command_custody
+                .as_ref(),
+            Some(&custody)
+        );
     }
 }
