@@ -1,11 +1,6 @@
 import { MarketingSiteHeader } from "@hraness/design-kit/react/server";
 import { ThemeMenuButton } from "@hraness/design-kit/react";
 
-function BrandMark() {
-  // eslint-disable-next-line @next/next/no-img-element -- fixed-size authored SVG; no raster optimization needed
-  return <img src="/marks/xcb.svg" alt="" aria-hidden="true" width="22" height="22" />;
-}
-
 export function SiteHeader({ active }: Readonly<{ active?: "home" | "docs" | "compare" }>) {
   return (
     <div data-hraness-marketing-preset="editorial" className="xcb-header-wrap">
@@ -13,7 +8,8 @@ export function SiteHeader({ active }: Readonly<{ active?: "home" | "docs" | "co
       <MarketingSiteHeader
         ariaLabel="Primary"
         className="hraness-material-chrome"
-        brand={<><BrandMark />xcb</>}
+        brand="xcb"
+        brandMark="/marks/xcb.svg"
         brandLabel="xcb home"
         links={[
           { href: "/#workspace", label: "Why xcb" },
