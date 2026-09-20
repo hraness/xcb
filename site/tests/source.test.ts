@@ -133,9 +133,9 @@ test("registers the footer layer after UI layers in one stylesheet", async () =>
 });
 
 test("adopts the shared palette contract with Paper as the default appearance", async () => {
-  const [layout, home, bootstrap, css, packageJson] = await Promise.all([
+  const [layout, header, bootstrap, css, packageJson] = await Promise.all([
     read("app/layout.tsx"),
-    read("app/page.tsx"),
+    read("app/site-header.tsx"),
     read("browser/theme-bootstrap.ts"),
     read("app/globals.css"),
     read("package.json"),
@@ -146,7 +146,7 @@ test("adopts the shared palette contract with Paper as the default appearance", 
   expect(layout).toContain("DesignPaletteProvider");
   expect(layout).toContain("suppressHydrationWarning");
   // The single appearance control sits at the rightmost header action.
-  expect(home).toContain('trailing={<ThemeMenuButton aria-label="Appearance" />}');
+  expect(header).toContain('trailing={<ThemeMenuButton aria-label="Appearance" />}');
   // The blocking bootstrap installs appearance before the React menu hydrates.
   expect(bootstrap).toContain("initDesignPalette");
   // Palette themes and the semantic bridge load before the vendored theme.

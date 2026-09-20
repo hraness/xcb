@@ -1,0 +1,132 @@
+/* Documentation uses the same Paper palette as the marketing pages. */
+.xcb-docs-shell {
+  display: grid;
+  grid-template-columns: 14rem minmax(0, 1fr);
+  gap: clamp(2rem, 5vw, 5rem);
+  max-inline-size: 78rem;
+  margin-inline: auto;
+  padding: 3.5rem clamp(1.25rem, 4vw, 3rem) 5rem;
+}
+
+.xcb-docs-sidebar {
+  align-self: start;
+  position: sticky;
+  inset-block-start: 7rem;
+  max-block-size: calc(100dvh - 9rem);
+  overflow-y: auto;
+  font-size: 0.9rem;
+}
+
+.xcb-docs-nav-title,
+.xcb-docs-eyebrow {
+  margin: 0 0 1.1rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.xcb-docs-sidebar ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.xcb-docs-sidebar nav a {
+  display: block;
+  padding: 0.5rem 0.7rem;
+  border-inline-start: 2px solid transparent;
+  color: var(--muted);
+  text-decoration: none;
+  line-height: 1.45;
+}
+
+.xcb-docs-sidebar nav a:hover,
+.xcb-docs-sidebar nav a[aria-current="page"] {
+  color: var(--foreground);
+  background: var(--hraness-material-warm-plane, var(--surface));
+}
+
+.xcb-docs-sidebar nav a[aria-current="page"] {
+  border-inline-start-color: var(--foreground);
+  font-weight: 600;
+}
+
+.xcb-docs-nav-group { margin-block-start: 1.5rem; }
+.xcb-docs-nav-group > p { margin: 0 0 0.45rem 0.7rem; color: var(--foreground); font-size: 0.78rem; font-weight: 600; }
+.xcb-docs-source { display: inline-block; margin: 1.75rem 0 0 0.7rem; color: var(--muted); font-size: 0.8rem; }
+.xcb-docs-main { min-inline-size: 0; max-inline-size: 52rem; }
+.xcb-docs-heading { margin-block-end: 2rem; }
+.xcb-docs-heading h1,
+.xcb-docs-body h1 { margin: 0 0 1.3rem; font-family: var(--font-heading, var(--font-text)); font-size: clamp(2.2rem, 4.5vw, 3.6rem); font-weight: 500; letter-spacing: -0.045em; line-height: 1.08; text-wrap: balance; }
+.xcb-docs-lead { max-inline-size: 57ch; margin: 0; font-size: 1.15rem; line-height: 1.65; color: var(--muted); }
+.xcb-docs-note { padding: 1rem 1.2rem; margin-block: 1.5rem; border-inline-start: 2px solid var(--foreground); background: var(--hraness-material-warm-plane, var(--surface)); font-size: 0.94rem; line-height: 1.65; }
+.xcb-docs-note a,
+.xcb-docs-body a { color: var(--foreground); text-decoration: underline; text-decoration-color: color-mix(in oklch, var(--foreground) 35%, transparent); text-underline-offset: 0.2em; }
+.xcb-docs-note a:hover,
+.xcb-docs-body a:hover { text-decoration-color: currentColor; }
+.xcb-docs-body { font-size: 1rem; line-height: 1.75; overflow-wrap: anywhere; }
+.xcb-docs-body h2 { margin: 2.8rem 0 1rem; padding-block-start: 1.5rem; border-block-start: 1px solid var(--line); font-size: 1.55rem; font-weight: 600; line-height: 1.25; letter-spacing: -0.025em; text-wrap: balance; }
+.xcb-docs-body h3 { margin: 1.8rem 0 0.6rem; font-size: 1.2rem; font-weight: 600; line-height: 1.35; }
+.xcb-docs-body :is(h1, h2, h3),
+.xcb-docs-body section { scroll-margin-block-start: 7rem; }
+.xcb-docs-body p { margin-block: 1rem; }
+.xcb-docs-body ul,
+.xcb-docs-body ol { padding-inline-start: 1.5rem; margin-block: 1rem; }
+.xcb-docs-body ul { list-style: disc; }
+.xcb-docs-body ol { list-style: decimal; }
+.xcb-docs-body li + li { margin-block-start: 0.6rem; }
+.xcb-docs code { font-size: 0.87em; font-family: var(--font-mono); }
+.xcb-docs-body pre { overflow-x: auto; padding: 1.2rem 1.35rem; margin-block: 1.4rem; border: 1px solid var(--hraness-material-seam, var(--line)); background: var(--hraness-material-plane, var(--surface)); color: var(--hraness-material-ink, var(--foreground)); line-height: 1.7; white-space: pre; tab-size: 2; }
+.xcb-docs-body pre code { font-size: 0.81rem; }
+.xcb-docs-body table { inline-size: 100%; border-collapse: collapse; font-size: 0.88rem; line-height: 1.6; }
+.xcb-docs-body th,
+.xcb-docs-body td { border-block-end: 1px solid var(--line); padding: 0.85rem; text-align: start; vertical-align: top; }
+.xcb-docs-body th { font-weight: 600; }
+.xcb-docs-body thead { background: var(--hraness-material-warm-plane, var(--surface)); }
+.xcb-docs-body caption { text-align: start; padding-block-end: 0.8rem; font-size: 0.83rem; color: var(--muted); }
+.xcb-docs-table-wrap { overflow-x: auto; }
+.xcb-docs-body pre:focus-visible,
+.xcb-docs-table-wrap:focus-visible {
+  outline: 2px solid var(--foreground);
+  outline-offset: 3px;
+}
+.xcb-docs-table-wrap table { min-inline-size: 32rem; }
+.xcb-docs-body > div > table { display: block; overflow-x: auto; }
+.xcb-docs-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-block: 2.25rem 3.5rem; }
+.xcb-docs-card { display: block; padding: 1.5rem; border: 1px solid var(--line); color: var(--foreground); text-decoration: none; background: var(--hraness-material-plane, var(--surface)); }
+.xcb-docs-card:hover { border-color: var(--foreground); }
+.xcb-docs-card-index { display: block; margin-block-end: 1.2rem; font: 0.72rem var(--font-mono); color: var(--muted); }
+.xcb-docs-card h2 { display: flex; justify-content: space-between; gap: 0.5rem; margin: 0 0 0.65rem; font-size: 1.1rem; font-weight: 600; line-height: 1.35; }
+.xcb-docs-card h2 span { color: var(--muted); }
+.xcb-docs-card p { margin: 0; color: var(--muted); font-size: 0.92rem; line-height: 1.6; }
+.xcb-docs-pagination { display: flex; justify-content: space-between; gap: 1rem; margin-block-start: 3rem; padding-block-start: 1.5rem; border-block-start: 1px solid var(--line); font-size: 0.95rem; }
+.xcb-docs-pagination a { color: var(--foreground); text-decoration: none; }
+.xcb-docs-pagination a:hover { text-decoration: underline; }
+.xcb-docs-pagination a:last-child:not(:first-child) { text-align: end; }
+.xcb-docs-pagination span { display: block; margin-block-end: 0.4rem; font: 0.72rem var(--font-mono); text-transform: uppercase; color: var(--muted); letter-spacing: 0.05em; }
+
+@media (max-width: 64rem) {
+  .xcb-docs-shell { grid-template-columns: 12rem minmax(0, 1fr); gap: 2rem; }
+  .xcb-docs-cards { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 48rem) {
+  .xcb-docs-shell { display: block; padding-block-start: 1.5rem; }
+  .xcb-docs-sidebar { position: static; max-block-size: none; overflow: visible; margin-block-end: 2.5rem; padding-block-end: 1.4rem; border-block-end: 1px solid var(--line); }
+  .xcb-docs-sidebar nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.3rem 1rem; }
+  .xcb-docs-nav-title { grid-column: 1 / -1; margin-block-end: 0.3rem; }
+  .xcb-docs-sidebar nav > a { align-self: start; }
+  .xcb-docs-nav-group { margin-block-start: 0.5rem; }
+  .xcb-docs-source { margin-block-start: 1rem; }
+  .xcb-docs-body :is(h1, h2, h3), .xcb-docs-body section { scroll-margin-block-start: 1rem; }
+  .xcb-docs-heading h1, .xcb-docs-body h1 { font-size: 2.45rem; }
+  .xcb-docs-card { padding: 1.25rem; }
+}
+
+@media (pointer: coarse) {
+  .xcb-docs-sidebar nav a { min-block-size: 2.75rem; display: flex; align-items: center; }
+  .xcb-docs-pagination a { min-block-size: 2.75rem; }
+}
