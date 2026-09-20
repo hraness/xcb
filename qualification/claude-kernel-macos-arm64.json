@@ -1,0 +1,611 @@
+{
+  "schema_version": 1,
+  "credential_free": true,
+  "live_provider_qualification": false,
+  "kind": "kernel-syscall-policy-probe-not-provider-runtime",
+  "observed_at": "2026-09-20T03:15:40.481553+00:00",
+  "platform": "darwin",
+  "architecture": "arm64",
+  "macos_version": "26.5.2",
+  "runtime_reference": {
+    "version": "2.1.274",
+    "version_source": "installed package metadata; runtime not executed",
+    "executable_sha256": "3509913f9d1576316c8845b88837f8fd3bbbcf26625833ac82cfb6b8985da94a",
+    "package_sha256": "f8485e97137d29f01b480aa4ae2ba8ec417ed0d39afa6a8bb0658a6259a3f0ff",
+    "unchanged": true
+  },
+  "harness_sha256": "3d87ce7a3167faeb3f023f7e9257343c9878fbc32e430d9bfb22278e091f34f6",
+  "sandbox_source_sha256": "82acbec3bfd837678a5644dc2f3dc7a7d7a12d32403ab8c01c6e8881d80b9091",
+  "sandbox_function_sha256": "5abcd53115d6a87323af811d7d9e8d5ad194ace44207cc28fba895473f093e23",
+  "sandbox_policy_sha256": "82e1baaf7c16e25c552ec2c82011cffc98e441e18aeb04d24d8e06c6a1a9fd03",
+  "source_unchanged": true,
+  "shared_temp_ancestors_unchanged": true,
+  "result": {
+    "exit_code": 0,
+    "process_group_joined": true,
+    "stdio_joined": true,
+    "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "python_version": "3.9.6",
+    "checks": [
+      {
+        "label": "scratch_write_read",
+        "expected_allowed": true,
+        "allowed": true,
+        "matched": true
+      },
+      {
+        "label": "scratch_rename",
+        "expected_allowed": true,
+        "allowed": true,
+        "matched": true
+      },
+      {
+        "label": "scratch_unlink",
+        "expected_allowed": true,
+        "allowed": true,
+        "matched": true
+      },
+      {
+        "label": "consumer:read",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "consumer:write",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "consumer:symlink_read",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "consumer:symlink_write",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "consumer:hardlink_create",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "consumer:rename",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "consumer:overwrite_rename",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "consumer:unlink",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "consumer:chmod",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "consumer:new_file",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "consumer:directory_list",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "peer-account:read",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "peer-account:write",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "peer-account:symlink_read",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "peer-account:symlink_write",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "peer-account:hardlink_create",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "peer-account:rename",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "peer-account:overwrite_rename",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "peer-account:unlink",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "peer-account:chmod",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "peer-account:new_file",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "peer-account:directory_list",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "ambient-config:read",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "ambient-config:write",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "ambient-config:symlink_read",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "ambient-config:symlink_write",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "ambient-config:hardlink_create",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "ambient-config:rename",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "ambient-config:overwrite_rename",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "ambient-config:unlink",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "ambient-config:chmod",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "ambient-config:new_file",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "ambient-config:directory_list",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:read",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:write",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:symlink_read",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:symlink_write",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:hardlink_create",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:rename",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:overwrite_rename",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:unlink",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:chmod",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:new_file",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:directory_list",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:tmp_alias_read",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "shared-global-temp:tmp_alias_write",
+        "expected_allowed": false,
+        "allowed": false,
+        "errno": 1,
+        "matched": true
+      },
+      {
+        "label": "fork_allowed",
+        "matched": true
+      },
+      {
+        "label": "shell_exec_denied",
+        "matched": true
+      }
+    ]
+  },
+  "protected": {
+    "consumer:file": {
+      "identity_before": [
+        16777233,
+        1067575472,
+        33152,
+        501,
+        20,
+        1,
+        1789874139726827051,
+        1789874139726859801,
+        26,
+        0
+      ],
+      "identity_after": [
+        16777233,
+        1067575472,
+        33152,
+        501,
+        20,
+        1,
+        1789874139726827051,
+        1789874139726859801,
+        26,
+        0
+      ],
+      "identity_unchanged": true,
+      "sha256_before": "d07d392d9b736e9b7d1ca08c3720830f64713876d62d79aef31b1df3cc9fd99e",
+      "sha256_after": "d07d392d9b736e9b7d1ca08c3720830f64713876d62d79aef31b1df3cc9fd99e",
+      "bytes_unchanged": true
+    },
+    "consumer:directory": {
+      "identity_before": [
+        16777233,
+        1067575471,
+        16832,
+        501,
+        20,
+        3,
+        1789874139726764218,
+        1789874139726764218,
+        96,
+        0
+      ],
+      "identity_after": [
+        16777233,
+        1067575471,
+        16832,
+        501,
+        20,
+        3,
+        1789874139726764218,
+        1789874139726764218,
+        96,
+        0
+      ],
+      "identity_unchanged": true
+    },
+    "peer-account:file": {
+      "identity_before": [
+        16777233,
+        1067575476,
+        33152,
+        501,
+        20,
+        1,
+        1789874139727193881,
+        1789874139727218090,
+        30,
+        0
+      ],
+      "identity_after": [
+        16777233,
+        1067575476,
+        33152,
+        501,
+        20,
+        1,
+        1789874139727193881,
+        1789874139727218090,
+        30,
+        0
+      ],
+      "identity_unchanged": true,
+      "sha256_before": "62354d2971e9ebcfa1c783adb74fe36780cbed546abb9f1de6ac1151eff01cf6",
+      "sha256_after": "62354d2971e9ebcfa1c783adb74fe36780cbed546abb9f1de6ac1151eff01cf6",
+      "bytes_unchanged": true
+    },
+    "peer-account:directory": {
+      "identity_before": [
+        16777233,
+        1067575475,
+        16832,
+        501,
+        20,
+        3,
+        1789874139727154382,
+        1789874139727154382,
+        96,
+        0
+      ],
+      "identity_after": [
+        16777233,
+        1067575475,
+        16832,
+        501,
+        20,
+        3,
+        1789874139727154382,
+        1789874139727154382,
+        96,
+        0
+      ],
+      "identity_unchanged": true
+    },
+    "ambient-config:file": {
+      "identity_before": [
+        16777233,
+        1067575480,
+        33152,
+        501,
+        20,
+        1,
+        1789874139727534587,
+        1789874139727557212,
+        32,
+        0
+      ],
+      "identity_after": [
+        16777233,
+        1067575480,
+        33152,
+        501,
+        20,
+        1,
+        1789874139727534587,
+        1789874139727557212,
+        32,
+        0
+      ],
+      "identity_unchanged": true,
+      "sha256_before": "09c3252fa49bc786366ac32a418d3292bb6502b019a0e09744339a9c849bf15b",
+      "sha256_after": "09c3252fa49bc786366ac32a418d3292bb6502b019a0e09744339a9c849bf15b",
+      "bytes_unchanged": true
+    },
+    "ambient-config:directory": {
+      "identity_before": [
+        16777233,
+        1067575479,
+        16832,
+        501,
+        20,
+        3,
+        1789874139727496671,
+        1789874139727496671,
+        96,
+        0
+      ],
+      "identity_after": [
+        16777233,
+        1067575479,
+        16832,
+        501,
+        20,
+        3,
+        1789874139727496671,
+        1789874139727496671,
+        96,
+        0
+      ],
+      "identity_unchanged": true
+    },
+    "shared-global-temp:file": {
+      "identity_before": [
+        16777233,
+        1067575483,
+        33152,
+        501,
+        0,
+        1,
+        1789874139727805043,
+        1789874139727805043,
+        36,
+        0
+      ],
+      "identity_after": [
+        16777233,
+        1067575483,
+        33152,
+        501,
+        0,
+        1,
+        1789874139727805043,
+        1789874139727805043,
+        36,
+        0
+      ],
+      "identity_unchanged": true,
+      "sha256_before": "c2fc09586b57f55b43f0079013a05f68a2b922ccd25b97c6aee7e3f08446bc2e",
+      "sha256_after": "c2fc09586b57f55b43f0079013a05f68a2b922ccd25b97c6aee7e3f08446bc2e",
+      "bytes_unchanged": true
+    },
+    "shared-global-temp:directory": {
+      "identity_before": [
+        16777233,
+        1067575470,
+        16832,
+        501,
+        0,
+        3,
+        1789874139727767835,
+        1789874139727767835,
+        96,
+        0
+      ],
+      "identity_after": [
+        16777233,
+        1067575470,
+        16832,
+        501,
+        0,
+        3,
+        1789874139727767835,
+        1789874139727767835,
+        96,
+        0
+      ],
+      "identity_unchanged": true
+    }
+  },
+  "passed": true
+}

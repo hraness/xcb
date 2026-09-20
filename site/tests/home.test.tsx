@@ -73,8 +73,10 @@ test("scopes the editorial preset to the homepage header and real contract examp
 test("makes provider and tool limitations visible before installation", () => {
   const html = renderToStaticMarkup(<Home />);
   expect(html).toContain("not yet a daily-driver replacement");
-  expect(html).toContain("native execution unavailable");
-  expect(html).toContain("compatibility ACP adapter remains disabled pending qualification");
+  expect(html).toContain("0.155.0-alpha.2.6");
+  expect(html).toContain("3000.10.31");
+  expect(html).toContain("Authenticated live acceptance is pending");
+  expect(html).toContain("Codex and Devin task execution remains disabled pending qualification");
   expect(html).toContain("Shell commands, tests, builds, and Git");
   expect(html.indexOf('id="readiness"')).toBeLessThan(html.indexOf('id="install"'));
   expect(html).toContain("./scripts/install-native.sh");

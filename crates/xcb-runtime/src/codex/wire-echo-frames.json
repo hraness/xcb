@@ -1,0 +1,265 @@
+[
+  {
+    "id": 7,
+    "result": {
+      "turn": {
+        "id": "turn1",
+        "items": [],
+        "itemsView": "notLoaded",
+        "status": "inProgress",
+        "error": null,
+        "startedAt": null,
+        "completedAt": null,
+        "durationMs": null
+      }
+    }
+  },
+  {
+    "method": "thread/status/changed",
+    "params": {
+      "threadId": "thread1",
+      "status": {
+        "type": "active",
+        "activeFlags": []
+      }
+    }
+  },
+  {
+    "method": "turn/started",
+    "params": {
+      "threadId": "thread1",
+      "turn": {
+        "id": "turn1",
+        "items": [],
+        "itemsView": "notLoaded",
+        "status": "inProgress",
+        "error": null,
+        "startedAt": 1789833370,
+        "completedAt": null,
+        "durationMs": null
+      }
+    }
+  },
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "userMessage",
+        "id": "01a0ba61-da33-7633-809e-0d3fa09e01b7",
+        "clientId": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Synthetic no-auth protocol test.",
+            "text_elements": []
+          }
+        ]
+      },
+      "threadId": "thread1",
+      "turnId": "turn1",
+      "startedAtMs": 1789833370163
+    }
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "userMessage",
+        "id": "01a0ba61-da33-7633-809e-0d3fa09e01b7",
+        "clientId": null,
+        "content": [
+          {
+            "type": "text",
+            "text": "Synthetic no-auth protocol test.",
+            "text_elements": []
+          }
+        ]
+      },
+      "threadId": "thread1",
+      "turnId": "turn1",
+      "completedAtMs": 1789833370163
+    }
+  },
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "dynamicToolCall",
+        "id": "call1",
+        "namespace": null,
+        "tool": "workspace_read",
+        "arguments": {
+          "path": "note.txt"
+        },
+        "status": "inProgress",
+        "contentItems": null,
+        "success": null,
+        "durationMs": null
+      },
+      "threadId": "thread1",
+      "turnId": "turn1",
+      "startedAtMs": 1789833370164
+    }
+  },
+  {
+    "method": "item/tool/call",
+    "id": 0,
+    "params": {
+      "threadId": "thread1",
+      "turnId": "turn1",
+      "callId": "call1",
+      "namespace": null,
+      "tool": "workspace_read",
+      "arguments": {
+        "path": "note.txt"
+      }
+    }
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "dynamicToolCall",
+        "id": "call1",
+        "namespace": null,
+        "tool": "workspace_read",
+        "arguments": {
+          "path": "note.txt"
+        },
+        "status": "completed",
+        "contentItems": [
+          {
+            "type": "inputText",
+            "text": "{\"text\":\"broker-echo-ok\"}"
+          }
+        ],
+        "success": true,
+        "durationMs": 0
+      },
+      "threadId": "thread1",
+      "turnId": "turn1",
+      "completedAtMs": 1789833370164
+    }
+  },
+  {
+    "method": "thread/tokenUsage/updated",
+    "params": {
+      "threadId": "thread1",
+      "turnId": "turn1",
+      "tokenUsage": {
+        "total": {
+          "totalTokens": 13,
+          "inputTokens": 10,
+          "cachedInputTokens": 0,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 3,
+          "reasoningOutputTokens": 0
+        },
+        "last": {
+          "totalTokens": 13,
+          "inputTokens": 10,
+          "cachedInputTokens": 0,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 3,
+          "reasoningOutputTokens": 0
+        },
+        "modelContextWindow": 258400
+      }
+    }
+  },
+  {
+    "method": "item/started",
+    "params": {
+      "item": {
+        "type": "agentMessage",
+        "id": "msg_3",
+        "text": "synthetic-complete",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": null,
+        "questions": null
+      },
+      "threadId": "thread1",
+      "turnId": "turn1",
+      "startedAtMs": 1789833370166
+    }
+  },
+  {
+    "method": "item/completed",
+    "params": {
+      "item": {
+        "type": "agentMessage",
+        "id": "msg_3",
+        "text": "synthetic-complete",
+        "phase": "final_answer",
+        "memoryCitation": null,
+        "delivery": null,
+        "questions": null
+      },
+      "threadId": "thread1",
+      "turnId": "turn1",
+      "completedAtMs": 1789833370166
+    }
+  },
+  {
+    "method": "thread/tokenUsage/updated",
+    "params": {
+      "threadId": "thread1",
+      "turnId": "turn1",
+      "tokenUsage": {
+        "total": {
+          "totalTokens": 26,
+          "inputTokens": 20,
+          "cachedInputTokens": 0,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 6,
+          "reasoningOutputTokens": 0
+        },
+        "last": {
+          "totalTokens": 13,
+          "inputTokens": 10,
+          "cachedInputTokens": 0,
+          "cacheWriteInputTokens": 0,
+          "outputTokens": 3,
+          "reasoningOutputTokens": 0
+        },
+        "modelContextWindow": 258400
+      }
+    }
+  },
+  {
+    "method": "thread/status/changed",
+    "params": {
+      "threadId": "thread1",
+      "status": {
+        "type": "idle"
+      }
+    }
+  },
+  {
+    "method": "turn/completed",
+    "params": {
+      "threadId": "thread1",
+      "turn": {
+        "id": "turn1",
+        "items": [
+          {
+            "type": "agentMessage",
+            "id": "msg_3",
+            "text": "synthetic-complete",
+            "phase": "final_answer",
+            "memoryCitation": null,
+            "delivery": null,
+            "questions": null
+          }
+        ],
+        "itemsView": "summary",
+        "status": "completed",
+        "error": null,
+        "startedAt": 1789833370,
+        "completedAt": 1789833370,
+        "durationMs": 3
+      }
+    }
+  }
+]

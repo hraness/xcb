@@ -4,7 +4,10 @@ This is the retained library and compatibility CLI reference. For the native
 Rust application, start with the [README](../README.md). Code snippets using
 application-owned ports illustrate host integration; they do not qualify a
 provider or establish a live production boundary. Devin and Codex task execution
-remain disabled in the standalone CLI.
+remain disabled in the TypeScript standalone CLI. The native Rust Codex and Devin
+candidates, credential imports, and supervised Codex sign-in are separate paths;
+see the [native setup](../README.md#connect-codex-on-macos). Native admission does
+not qualify these compatibility adapters.
 
 ## TypeScript compatibility
 

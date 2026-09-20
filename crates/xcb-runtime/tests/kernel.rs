@@ -144,3 +144,58 @@ async fn a_run_owned_by_a_sibling_terminal_is_remote_not_recovery() {
     assert!(remote_active, "a live foreign-owned run is remote work");
     assert_eq!(state, State::Working, "remote work is not a recovery case");
 }
+
+#[test]
+fn explicit_model_selects_its_provider_instead_of_an_unrelated_default_account() {
+    let dir = root();
+    let base = dir.path().canonicalize().unwrap();
+    let store = Store::open(&base.join("state")).unwrap();
+    let claude = store
+        .add_account(Provider::Claude, "Claude", "Test", 1)
+        .unwrap();
+    let codex = store
+        .add_account(Provider::Codex, "Codex", "Test", 1)
+        .unwrap();
+    let claude_model = choice();
+    let codex_model = xcb_core::models::ModelChoice {
+        provider: Provider::Codex,
+        id: Id::new("codex-fixture").unwrap(),
+        ..choice()
+    };
+    store
+        .set_models(Provider::Claude, std::slice::from_ref(&claude_model))
+        .unwrap();
+    store
+        .set_models(Provider::Codex, std::slice::from_ref(&codex_model))
+        .unwrap();
+    let config = xcb_runtime::config::Config {
+        default_account: Some(claude.id.clone()),
+        ..Default::default()
+    };
+    let session = kernel::new_session(
+        &store,
+        &base.join("work"),
+        &config,
+        None,
+        Some(&codex_model.key()),
+    )
+    .unwrap();
+    assert_eq!(session.account, codex.id);
+    assert_eq!(session.model, codex_model);
+    assert!(
+        kernel::new_session(
+            &store,
+            &base.join("work"),
+            &config,
+            Some(&claude.id),
+            Some(&codex_model.key())
+        )
+        .is_err()
+    );
+    store.set_account_enabled(&claude.id, false).unwrap();
+    let session = kernel::new_session(&store, &base.join("work"), &config, None, None).unwrap();
+    assert_eq!(session.account, codex.id);
+    assert!(
+        kernel::new_session(&store, &base.join("work"), &config, Some(&claude.id), None).is_err()
+    );
+}

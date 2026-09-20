@@ -2,7 +2,7 @@
 
 > xcb (Excalibur) is a local, terminal-first workspace for coding agents. Bring accounts, choose models, and shape the interface with composable panes and extensions.
 
-The native Rust interface is a source preview. Claude is the only execution candidate; Codex and Devin native execution are unavailable. The file broker cannot run shell commands, tests, builds, or Git. No native xcb binary or @hraness/xcb npm package is published; v0.3.0 is the legacy AgentMixer release. No cloud synchronization or required daemon is part of the native design.
+The native Rust interface is a source preview, not yet a daily-driver replacement. Claude is an execution candidate on macOS and Linux. Native Codex 0.155.0-alpha.2.6 and Devin 3000.10.31 are macOS candidates; authenticated live acceptance is pending. The TypeScript compatibility CLI's Codex and Devin task routes remain unqualified and disabled. Native setup uses supervised Codex sign-in or explicit credential imports. The file broker supports reads, writes, directory creation, and revision-checked removal and renaming of regular files; it cannot run shell commands, tests, builds, or Git. No native xcb binary or @hraness/xcb npm package is published; v0.3.0 is the legacy AgentMixer release. No cloud synchronization or required daemon is part of the native design.
 
 ## Pages
 

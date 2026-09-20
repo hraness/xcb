@@ -4,9 +4,11 @@ use crate::{
     Error, Result, attachments, auth,
     broker::{self, Workspace},
     claude::{self, Event},
+    claude_protocol::ClaudeProtocol,
     config::Config,
     context, digest, egress, judge, new_id, now_ms, private,
     process::{Pin, StreamProcess},
+    protocol::{Event as TurnEvent, ImageInput, Prompt, Protocol},
     sandbox,
     store::{RunRecord, Store, UsageObservation},
 };
@@ -49,11 +51,13 @@ pub fn should_idle_export(pane_generation: bool, facts: &TurnFacts, state: State
         && facts.terminal == Terminal::Completed
 }
 
-struct Launch {
-    command: Command,
-    cwd: PathBuf,
-    bridge: Option<egress::EgressBridge>,
-    artifacts: LaunchArtifacts,
+pub(crate) struct Launch {
+    pub(crate) command: Command,
+    pub(crate) cwd: PathBuf,
+    pub(crate) bridge: Option<egress::EgressBridge>,
+    pub(crate) artifacts: LaunchArtifacts,
+    pub(crate) prepared_run: Option<RunRecord>,
+    pub(crate) codex_credentials: Option<auth::CodexAuthSnapshot>,
 }
 
 impl Launch {
@@ -63,7 +67,7 @@ impl Launch {
     }
 }
 
-async fn close_bridge(bridge: Option<egress::EgressBridge>) -> bool {
+pub(crate) async fn close_bridge(bridge: Option<egress::EgressBridge>) -> bool {
     if let Some(bridge) = bridge {
         let receipt = bridge.close().await;
         receipt.listener_closed && receipt.sockets_joined && receipt.socket_removed
@@ -72,12 +76,38 @@ async fn close_bridge(bridge: Option<egress::EgressBridge>) -> bool {
     }
 }
 
+#[cfg(any(test, target_os = "linux"))]
+async fn discard_failed_preparation(
+    artifacts: &mut LaunchArtifacts,
+    bridge: egress::EgressBridge,
+    error: Error,
+) -> Error {
+    let joined = close_bridge(Some(bridge)).await;
+    artifacts.release_after_join(joined, EffectState::None);
+    if joined {
+        error
+    } else {
+        Error::CleanupUnproven
+    }
+}
+
+fn settle_failed_preparation(store: &Store, run: Option<&RunRecord>, error: Error) -> Error {
+    if !matches!(error, Error::CleanupUnproven)
+        && let Some(run) = run
+        && let Err(settlement) = store.settle(run, State::Failed, now_ms())
+    {
+        return settlement;
+    }
+    error
+}
+
 async fn spawn_process(
     store: &Store,
     run: Option<&RunRecord>,
     command: Command,
     artifacts: &mut LaunchArtifacts,
     bridge: Option<egress::EgressBridge>,
+    codex_credentials: bool,
 ) -> Result<(StreamProcess, Option<egress::EgressBridge>)> {
     artifacts.retain_before_launch();
     match StreamProcess::spawn(command) {
@@ -87,6 +117,9 @@ async fn spawn_process(
             // existed. Postspawn errors carry no such proof and stay held.
             if close_bridge(bridge).await {
                 if let Some(run) = run {
+                    if codex_credentials {
+                        auth::discard_unstarted_codex_auth(store, run, true)?;
+                    }
                     store.settle(run, State::Failed, now_ms())?;
                 }
                 artifacts.release_after_join(true, EffectState::None);
@@ -100,13 +133,13 @@ async fn spawn_process(
 /// Launch snapshots are disposable only before spawn or after independent
 /// process-join evidence and settled effects. Cancellation/drop alone never
 /// grants cleanup permission.
-struct LaunchArtifacts {
+pub(crate) struct LaunchArtifacts {
     directory: PathBuf,
     identity: (u64, u64),
     retained: bool,
 }
 impl LaunchArtifacts {
-    fn create(root: &Path) -> Result<Self> {
+    pub(crate) fn create(root: &Path) -> Result<Self> {
         let directory = private::directory(&root.join("runs").join(new_id("launch").as_str()))?;
         let metadata = std::fs::symlink_metadata(&directory)?;
         Ok(Self {
@@ -115,10 +148,13 @@ impl LaunchArtifacts {
             retained: false,
         })
     }
-    fn retain_before_launch(&mut self) {
+    pub(crate) fn path(&self) -> &Path {
+        &self.directory
+    }
+    pub(crate) fn retain_before_launch(&mut self) {
         self.retained = true;
     }
-    fn release_after_join(&mut self, joined: bool, effects: EffectState) {
+    pub(crate) fn release_after_join(&mut self, joined: bool, effects: EffectState) {
         if joined && effects != EffectState::Uncertain {
             self.retained = false;
         }
@@ -150,9 +186,13 @@ impl Answer {
         self.partial.push_str(text);
         Ok(())
     }
-    fn completed(&mut self, text: String) {
+    fn completed(&mut self, text: String) -> Result<()> {
+        if text.len() > MAX_TEXT_BYTES {
+            return Err(Error::Protocol("answer limit"));
+        }
         self.complete = text;
         self.partial.clear();
+        Ok(())
     }
     fn into_text(self) -> String {
         if self.partial.is_empty() {
@@ -270,6 +310,10 @@ fn child_env(
     env.insert("HOME".into(), home.to_string_lossy().into_owned());
     env.insert("TMPDIR".into(), tmp.to_string_lossy().into_owned());
     env.insert(
+        "CLAUDE_CODE_TMPDIR".into(),
+        tmp.to_string_lossy().into_owned(),
+    );
+    env.insert(
         "CLAUDE_CONFIG_DIR".into(),
         config.to_string_lossy().into_owned(),
     );
@@ -285,7 +329,7 @@ fn child_env(
 }
 
 #[cfg(target_os = "macos")]
-async fn prepare(
+pub(crate) async fn prepare(
     pin: &Pin,
     root: &Path,
     model: &ModelChoice,
@@ -320,6 +364,10 @@ async fn prepare(
     );
     env.insert("TMPDIR".into(), tmp.to_string_lossy().into_owned());
     env.insert(
+        "CLAUDE_CODE_TMPDIR".into(),
+        tmp.to_string_lossy().into_owned(),
+    );
+    env.insert(
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".into(),
         "1".into(),
     );
@@ -336,11 +384,13 @@ async fn prepare(
         cwd,
         bridge: None,
         artifacts,
+        prepared_run: None,
+        codex_credentials: None,
     })
 }
 
 #[cfg(target_os = "linux")]
-async fn prepare(
+pub(crate) async fn prepare(
     pin: &Pin,
     root: &Path,
     model: &ModelChoice,
@@ -383,7 +433,14 @@ async fn prepare(
     let policy_path = directory.join("sandbox.json");
     artifacts.retain_before_launch();
     let bridge =
-        egress::EgressBridge::start(egress::EgressBridgeOptions::new(socket.clone())).await?;
+        match egress::EgressBridge::start(egress::EgressBridgeOptions::new(socket.clone())).await {
+            Ok(bridge) => bridge,
+            Err(error) => {
+                // start cannot fail after installing its accept task.
+                artifacts.release_after_join(true, EffectState::None);
+                return Err(error);
+            }
+        };
     let spec = linux_spec(
         executable,
         xcb,
@@ -414,9 +471,7 @@ async fn prepare(
     let command = match planned {
         Ok(command) => command,
         Err(error) => {
-            let joined = close_bridge(Some(bridge)).await;
-            artifacts.release_after_join(joined, EffectState::None);
-            return Err(error);
+            return Err(discard_failed_preparation(&mut artifacts, bridge, error).await);
         }
     };
     Ok(Launch {
@@ -424,11 +479,13 @@ async fn prepare(
         cwd,
         bridge: Some(bridge),
         artifacts,
+        prepared_run: None,
+        codex_credentials: None,
     })
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-async fn prepare(
+pub(crate) async fn prepare(
     _pin: &Pin,
     _root: &Path,
     _model: &ModelChoice,
@@ -440,11 +497,531 @@ async fn prepare(
     ))
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn prepare_codex(
+    store: &Store,
+    pin: &Pin,
+    model: &ModelChoice,
+    tools: bool,
+    metadata_only: bool,
+    run: Option<&RunRecord>,
+) -> Result<(Launch, crate::codex::CodexProtocol)> {
+    use crate::codex::{self, CodexOptions, CodexProtocol};
+    codex::runtime_admitted(pin)?;
+    if !sandbox::available() {
+        return Err(Error::Unavailable(
+            "Codex requires qualified native OS confinement",
+        ));
+    }
+    let artifacts = LaunchArtifacts::create(store.root())?;
+    let directory = &artifacts.directory;
+    let executable = pin.snapshot(directory)?;
+    let scratch = private::directory(&directory.join("scratch"))?;
+    let cwd = private::directory(&scratch.join("work"))?;
+    let home = private::directory(&scratch.join("home"))?;
+    let profile = private::directory(&scratch.join("profile"))?;
+    let tmp = private::directory(&home.join("tmp"))?;
+    let catalog = codex::static_catalog(pin, (!metadata_only).then_some(model.id.as_str()))?;
+    let catalog_path = directory.join("models.json");
+    private::create(&catalog_path, &catalog.bytes)?;
+    let config_path = profile.join("config.toml");
+    private::create(
+        &config_path,
+        codex::configuration(&catalog_path)?.as_bytes(),
+    )?;
+    let ca_bundle = crate::public_ca::snapshot(directory)?;
+    let policy = sandbox::codex_seatbelt(
+        &executable,
+        &scratch,
+        &profile,
+        &config_path,
+        &catalog_path,
+        &ca_bundle,
+    )?;
+    let policy_path = directory.join("sandbox.sb");
+    private::create(&policy_path, policy.as_bytes())?;
+    let protocol = CodexProtocol::new(CodexOptions {
+        cwd: cwd.clone(),
+        account_home: profile.clone(),
+        catalog_path,
+        model: model.clone(),
+        tools,
+        metadata_only,
+        admission: catalog.admission,
+    })?;
+    let mut env = environment(&home);
+    env.insert("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into());
+    env.insert("CODEX_HOME".into(), profile.to_string_lossy().into_owned());
+    // This exact public snapshot selects the file-based Rustls root loader; no
+    // ambient CA override, user keychain, or trust-service access is inherited.
+    env.insert(
+        "SSL_CERT_FILE".into(),
+        ca_bundle.to_string_lossy().into_owned(),
+    );
+    env.insert("TMPDIR".into(), tmp.to_string_lossy().into_owned());
+    env.insert(
+        "CODEX_INTERNAL_APP_SERVER_REMOTE_CONTROL_DISABLED".into(),
+        "1".into(),
+    );
+    let mut command = Command::new("/usr/bin/sandbox-exec");
+    command
+        .arg("-f")
+        .arg(policy_path)
+        .arg(executable)
+        .args(codex::ARGS)
+        .env_clear()
+        .envs(env)
+        .current_dir(&cwd);
+    // Everything before this point is a credential-free launch plan. The
+    // caller has already acquired the exact account's run before snapshotting.
+    let codex_credentials = run
+        .map(|run| auth::snapshot_codex_auth(store, run, &profile))
+        .transpose()?;
+    Ok((
+        Launch {
+            command,
+            cwd,
+            bridge: None,
+            artifacts,
+            prepared_run: run.cloned(),
+            codex_credentials,
+        },
+        protocol,
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn prepare_codex(
+    _store: &Store,
+    _pin: &Pin,
+    _model: &ModelChoice,
+    _tools: bool,
+    _metadata_only: bool,
+    _run: Option<&RunRecord>,
+) -> Result<(Launch, crate::codex::CodexProtocol)> {
+    Err(Error::Unavailable(
+        "native Codex OS confinement is not qualified on this platform",
+    ))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) async fn prepare_devin(
+    store: &Store,
+    pin: &Pin,
+    model: &ModelChoice,
+    tools: bool,
+    metadata_only: bool,
+    run: Option<&RunRecord>,
+) -> Result<(Launch, crate::devin::DevinProtocol)> {
+    use crate::devin::{self, DevinBridge, DevinOptions, DevinProtocol};
+    devin::runtime_admitted(pin)?;
+    if !sandbox::available() {
+        return Err(Error::Unavailable(
+            "Devin requires qualified native OS confinement",
+        ));
+    }
+    model.validate()?;
+    if model.provider != Provider::Devin || model.mode != Mode::Fixed || model.effort.is_some() {
+        return Err(Error::Unavailable("unsupported Devin model mode"));
+    }
+    let artifacts = LaunchArtifacts::create(store.root())?;
+    let directory = &artifacts.directory;
+    let executable = pin.snapshot(directory)?;
+    let helper = pin.host_snapshot(directory)?;
+    let scratch = private::directory(&directory.join("scratch"))?;
+    let cwd = private::directory(&scratch.join("work"))?;
+    let home = private::directory(&scratch.join("home"))?;
+    private::directory(&home.join("tmp"))?;
+    let config_directory = private::directory(&home.join(".config/devin"))?;
+    let config_path = config_directory.join("config.json");
+    let mcp_path = config_directory.join("mcp_config.json");
+    private::create(&config_path, &serde_json::to_vec(&devin::configuration())?)?;
+    let socket = directory.join("mcp.sock");
+    let mut bridge = if tools {
+        Some(DevinBridge::bind(&socket)?)
+    } else {
+        None
+    };
+    let plan = (|| {
+        let mcp = match &bridge {
+            Some(bridge) => bridge.configuration(&helper)?,
+            None => json!({"mcpServers":{}}),
+        };
+        private::create(&mcp_path, &serde_json::to_vec(&mcp)?)?;
+        let policy = sandbox::devin_seatbelt(
+            &executable,
+            &helper,
+            &scratch,
+            &home,
+            &config_directory,
+            tools.then_some(socket.as_path()),
+        )?;
+        let policy_path = directory.join("sandbox.sb");
+        private::create(&policy_path, policy.as_bytes())?;
+        let mut env = environment(&home);
+        env.insert("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into());
+        let mut command = Command::new("/usr/bin/sandbox-exec");
+        command
+            .arg("-f")
+            .arg(policy_path)
+            .arg(executable)
+            .arg("--config")
+            .arg(config_path)
+            .args(["--permission-mode", "auto", "acp"])
+            .env_clear()
+            .envs(env)
+            .current_dir(&cwd);
+        if let Some(run) = run {
+            let credential = devin::auth::token(store, &run.account)?;
+            command.env("WINDSURF_API_KEY", credential.as_str());
+        }
+        Ok::<_, Error>(command)
+    })();
+    let command = match plan {
+        Ok(command) => command,
+        Err(error) => {
+            if let Some(bridge) = &mut bridge {
+                bridge.shutdown().await;
+            }
+            return Err(error);
+        }
+    };
+    let protocol = DevinProtocol::new(
+        DevinOptions {
+            cwd: cwd.clone(),
+            model: model.clone(),
+            tools,
+            metadata_only,
+        },
+        bridge,
+    )?;
+    Ok((
+        Launch {
+            command,
+            cwd,
+            bridge: None,
+            artifacts,
+            prepared_run: run.cloned(),
+            codex_credentials: None,
+        },
+        protocol,
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) async fn prepare_devin(
+    _store: &Store,
+    _pin: &Pin,
+    _model: &ModelChoice,
+    _tools: bool,
+    _metadata_only: bool,
+    _run: Option<&RunRecord>,
+) -> Result<(Launch, crate::devin::DevinProtocol)> {
+    Err(Error::Unavailable(
+        "native Devin OS confinement is not qualified on this platform",
+    ))
+}
+
+async fn probe_devin(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec<ModelChoice>> {
+    if account.is_none() {
+        return Err(Error::Unavailable(
+            "Devin catalog requires a connected xcb account",
+        ));
+    }
+    let model = ModelChoice {
+        provider: Provider::Devin,
+        id: Id::new("swe-2-high")?,
+        label: "Devin catalog".into(),
+        mode: Mode::Fixed,
+        resolved: None,
+        effort: None,
+        observed_at_ms: now_ms(),
+    };
+    let run = account
+        .map(|id| store.prepare_probe(id, Some(model.clone()), now_ms()))
+        .transpose()?;
+    let (mut launch, mut protocol) =
+        match prepare_devin(store, pin, &model, false, true, run.as_ref()).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(run) = &run {
+                    store.settle(run, State::Failed, now_ms())?;
+                }
+                return Err(error);
+            }
+        };
+    let spawned = spawn_process(
+        store,
+        run.as_ref(),
+        launch.command,
+        &mut launch.artifacts,
+        launch.bridge.take(),
+        false,
+    )
+    .await;
+    let (mut process, bridge) = match spawned {
+        Ok(process) => process,
+        Err(error) => {
+            protocol.shutdown().await;
+            return Err(error);
+        }
+    };
+    let result = tokio::time::timeout(Duration::from_secs(45), async {
+        if let Some(run) = &run {
+            store.mark_spawned(run, process.pid())?;
+        }
+        let models = protocol
+            .initialize(&mut process, "Metadata only; do not create or run a task.")
+            .await?;
+        if models.is_empty() {
+            return Err(Error::Unavailable(
+                "Devin returned no models; refresh the account credentials",
+            ));
+        }
+        Ok(models)
+    })
+    .await
+    .unwrap_or(Err(Error::Unavailable("Devin metadata timed out")));
+    let process_joined = process.join().await;
+    let protocol_joined = protocol.shutdown().await;
+    let bridge_joined = close_bridge(bridge).await;
+    let joined = process_joined && protocol_joined && bridge_joined;
+    if !joined {
+        return Err(Error::Unavailable(
+            "metadata process stop is unproven; account custody retained",
+        ));
+    }
+    if let Some(run) = &run {
+        store.settle(run, State::Idle, now_ms())?;
+    }
+    launch
+        .artifacts
+        .release_after_join(joined, EffectState::None);
+    result
+}
+
+/// Artifact/runtime admission only; each launch still checks configuration,
+/// model/tool authority, fresh authentication, and OS confinement.
+pub fn provider_admitted(pin: &Pin) -> bool {
+    match pin.provider {
+        Provider::Claude => claude::version_admitted(&pin.version) && sandbox::available(),
+        Provider::Codex => {
+            cfg!(target_os = "macos")
+                && sandbox::available()
+                && crate::codex::runtime_admitted(pin).is_ok()
+        }
+        Provider::Devin => {
+            cfg!(target_os = "macos")
+                && sandbox::available()
+                && crate::devin::runtime_admitted(pin).is_ok()
+        }
+    }
+}
+
+async fn probe_codex(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec<ModelChoice>> {
+    let model = ModelChoice {
+        provider: Provider::Codex,
+        id: Id::new(crate::codex::QUALIFIED_MODELS[0])?,
+        label: "Codex catalog".into(),
+        mode: Mode::Fixed,
+        resolved: None,
+        effort: None,
+        observed_at_ms: now_ms(),
+    };
+    let run = account
+        .map(|account| store.prepare_probe(account, Some(model.clone()), now_ms()))
+        .transpose()?;
+    let (mut launch, mut protocol) =
+        match prepare_codex(store, pin, &model, false, true, run.as_ref()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(run) = &run {
+                    auth::discard_unstarted_codex_auth(store, run, true)?;
+                    store.settle(run, State::Failed, now_ms())?;
+                }
+                return Err(error);
+            }
+        };
+    let (mut process, bridge) = spawn_process(
+        store,
+        run.as_ref(),
+        launch.command,
+        &mut launch.artifacts,
+        launch.bridge.take(),
+        launch.codex_credentials.is_some(),
+    )
+    .await?;
+    let result = async {
+        if let Some(run) = &run {
+            store.mark_spawned(run, process.pid())?;
+        }
+        let models = protocol
+            .initialize(&mut process, "Metadata only; do not create or run a task.")
+            .await?;
+        if let Some(account) = account {
+            for point in protocol
+                .read_quotas(&mut process, &store.account(account)?.quota_pool)
+                .await?
+            {
+                store.record_quota(&point)?;
+            }
+        }
+        Ok(models)
+    }
+    .await;
+    let process_joined = process.join().await;
+    let bridge_joined = close_bridge(bridge).await;
+    let joined = process_joined && bridge_joined;
+    if !joined {
+        return Err(Error::Unavailable(
+            "metadata process stop is unproven; account custody retained",
+        ));
+    }
+    if let Some(run) = &run {
+        if let Some(credentials) = &launch.codex_credentials {
+            auth::persist_codex_auth(store, run, credentials, joined)?;
+        }
+        store.settle(run, State::Idle, now_ms())?;
+    }
+    launch
+        .artifacts
+        .release_after_join(joined, EffectState::None);
+    result
+}
+
+/// Interactive provider sign-in is a host action, separate from a model turn.
+/// Device codes are shown by the official CLI; credentials stay in the private
+/// launch profile until the process has independently joined.
+pub async fn login_codex(store: &Store, account: &Id, pin: &Pin) -> Result<()> {
+    use rustix::process::{Pid, Signal, kill_process_group};
+    use std::{os::fd::AsFd, process::Stdio};
+    crate::codex::runtime_admitted(pin)?;
+    let status_output = std::io::stderr().as_fd().try_clone_to_owned()?;
+    let mut artifacts = LaunchArtifacts::create(store.root())?;
+    let snapshot_pin = Pin {
+        executable: pin.snapshot(&artifacts.directory)?,
+        ..pin.clone()
+    };
+    let profile = private::directory(&artifacts.directory.join("profile"))?;
+    let run = store.prepare_probe(account, None, now_ms())?;
+    let mut plan = match auth::prepare_codex_login(store, &run, &snapshot_pin, &profile) {
+        Ok(plan) => plan,
+        Err(error @ Error::CleanupUnproven) => {
+            artifacts.retain_before_launch();
+            return Err(error);
+        }
+        Err(error) => {
+            auth::discard_unstarted_codex_auth(store, &run, true)?;
+            store.settle(&run, State::Failed, now_ms())?;
+            return Err(error);
+        }
+    };
+    // Keep stdout available for the CLI's final JSON acknowledgement.
+    plan.command.stdout(Stdio::from(status_output));
+    artifacts.retain_before_launch();
+    let mut child = match plan.command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            auth::discard_unstarted_codex_auth(store, &run, true)?;
+            store.settle(&run, State::Failed, now_ms())?;
+            artifacts.release_after_join(true, EffectState::None);
+            return Err(Error::LaunchNotStarted(error));
+        }
+    };
+    let pid = child
+        .id()
+        .filter(|pid| *pid > 1)
+        .ok_or(Error::Protocol("login process identity"))?;
+    struct LoginGroup(Option<Pid>);
+    impl Drop for LoginGroup {
+        fn drop(&mut self) {
+            if let Some(group) = self.0 {
+                let _ = kill_process_group(group, Signal::KILL);
+            }
+        }
+    }
+    let group = i32::try_from(pid)
+        .ok()
+        .and_then(Pid::from_raw)
+        .ok_or(Error::Protocol("login process group"))?;
+    let mut custody = LoginGroup(Some(group));
+    let marked = store.mark_spawned(&run, pid);
+    let result = if marked.is_ok() {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => Err(Error::Unavailable("Codex sign-in cancelled")),
+            result = tokio::time::timeout(Duration::from_secs(600), child.wait()) => match result {
+                Ok(Ok(status)) if status.success() => Ok(()),
+                Ok(Ok(_)) => Err(Error::Unavailable("Codex sign-in did not complete")),
+                Ok(Err(error)) => Err(error.into()),
+                Err(_) => Err(Error::Unavailable("Codex sign-in timed out")),
+            },
+        }
+    } else {
+        marked.map(|_| ())
+    };
+    // A completed wait has reaped the leader, so its numeric group may be
+    // reused. Signal only while Child still owns that unreaped identity, then
+    // disarm before any further wait can reap it. Natural exits need absence
+    // evidence; lingering descendants keep custody rather than risking a
+    // signal to an unrelated recycled process group.
+    if child.id() == Some(pid) {
+        let _ = kill_process_group(group, Signal::KILL);
+    }
+    custody.0 = None;
+    let joined = tokio::time::timeout(Duration::from_secs(5), async {
+        if child.wait().await.is_err() {
+            return false;
+        }
+        loop {
+            if crate::process::prove_process_group_absent(pid).is_ok() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+    if !joined {
+        return Err(Error::Unavailable(
+            "sign-in process stop unproven; account custody retained",
+        ));
+    }
+    custody.0 = None;
+    let credential_path = plan.credentials.profile().join("auth.json");
+    let has_credential = match std::fs::symlink_metadata(&credential_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if has_credential {
+        auth::persist_codex_auth(store, &run, &plan.credentials, joined)?;
+    } else {
+        // No persistent account credential was handed to the login process.
+        // A stopped, unsuccessful device flow may be retried normally.
+        store.settle_tool(&run, "xcb_auth_snapshot")?;
+    }
+    store.settle(
+        &run,
+        if result.is_ok() && has_credential {
+            State::Idle
+        } else {
+            State::Failed
+        },
+        now_ms(),
+    )?;
+    artifacts.release_after_join(joined, EffectState::None);
+    result?;
+    if !has_credential {
+        return Err(Error::Unavailable("Codex sign-in returned no credential"));
+    }
+    Ok(())
+}
+
 fn initialize(tools: bool, system: &str) -> Value {
     json!({"type":"control_request","request_id":"xcb_initialize","request":{"subtype":"initialize","sdkMcpServers":if tools { vec!["xcb"] } else { vec![] },"hooks":{},"agents":{},"skills":[],"plugins":[],"systemPrompt":[system],"supportedDialogKinds":[]}})
 }
 
-fn mcp_reply(request: &Value, tools: bool, call_result: Option<Value>) -> Result<Value> {
+pub(crate) fn mcp_reply(request: &Value, tools: bool, call_result: Option<Value>) -> Result<Value> {
     if request.get("server_name").and_then(Value::as_str) != Some("xcb") || !tools {
         return Err(Error::Protocol("unexpected MCP server"));
     }
@@ -470,7 +1047,11 @@ fn mcp_reply(request: &Value, tools: bool, call_result: Option<Value>) -> Result
     Ok(json!({"mcp_response":{"jsonrpc":"2.0","id":id,"result":result}}))
 }
 
-async fn control(process: &mut StreamProcess, envelope: &Value, response: Value) -> Result<()> {
+pub(crate) async fn control(
+    process: &mut StreamProcess,
+    envelope: &Value,
+    response: Value,
+) -> Result<()> {
     let id = envelope
         .get("request_id")
         .and_then(Value::as_str)
@@ -655,7 +1236,7 @@ pub fn parse_quotas(value: &Value, pool: &Id, now: u64) -> Result<Vec<QuotaPoint
     Ok(points)
 }
 
-async fn handshake(
+pub(crate) async fn handshake(
     process: &mut StreamProcess,
     tools: bool,
     system: &str,
@@ -706,6 +1287,12 @@ async fn handshake(
 }
 
 pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec<ModelChoice>> {
+    if pin.provider == Provider::Codex {
+        return probe_codex(store, pin, account).await;
+    }
+    if pin.provider == Provider::Devin {
+        return probe_devin(store, pin, account).await;
+    }
     let now = now_ms();
     let model = ModelChoice {
         provider: Provider::Claude,
@@ -716,24 +1303,24 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
         effort: None,
         observed_at_ms: now,
     };
-    let token = account.map(|id| auth::token(store, id)).transpose()?;
-    let mut launch = prepare(
-        pin,
-        store.root(),
-        &model,
-        token.as_deref().map(|token| token.as_str()),
-        false,
-    )
-    .await?;
-    let run = match account
+    let run = account
         .map(|id| store.prepare_probe(id, Some(model.clone()), now))
-        .transpose()
-    {
-        Ok(run) => run,
-        Err(error) => {
-            launch.discard_unstarted().await;
-            return Err(error);
-        }
+        .transpose()?;
+    let prepared = async {
+        let token = account.map(|id| auth::token(store, id)).transpose()?;
+        prepare(
+            pin,
+            store.root(),
+            &model,
+            token.as_deref().map(|token| token.as_str()),
+            false,
+        )
+        .await
+    }
+    .await;
+    let mut launch = match prepared {
+        Ok(launch) => launch,
+        Err(error) => return Err(settle_failed_preparation(store, run.as_ref(), error)),
     };
     let (mut process, bridge) = spawn_process(
         store,
@@ -741,6 +1328,7 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
         launch.command,
         &mut launch.artifacts,
         launch.bridge.take(),
+        launch.codex_credentials.is_some(),
     )
     .await?;
     let result = async {
@@ -814,51 +1402,140 @@ pub struct RunInput {
 pub async fn run(
     store: Arc<Store>,
     input: RunInput,
-    mut cancel: watch::Receiver<bool>,
+    cancel: watch::Receiver<bool>,
     observer: Observer,
 ) -> Result<Outcome> {
     let session = &input.session;
-    if session.model.provider != Provider::Claude {
-        return Err(Error::Unavailable(
-            "native Codex and Devin execution are not yet qualified; catalog support does not activate them",
-        ));
-    }
     if *cancel.borrow() {
         return Err(Error::Unavailable("cancelled before launch"));
     }
-    let pin = Pin::load(store.root(), Provider::Claude)?;
-    let credential = auth::token(&store, &session.account)?;
-    let tools = !input.pane_generation;
     let workspace = Workspace::open(Path::new(&session.workspace))?;
-    let mut launch = prepare(&pin, store.root(), &session.model, Some(&credential), tools).await?;
-    let run = match store.prepare_run(&session.id, session.revision, now_ms()) {
+    if session.model.provider == Provider::Codex {
+        let pin = Pin::load(store.root(), Provider::Codex)?;
+        crate::codex::runtime_admitted(&pin)?;
+        let run = store.prepare_run(&session.id, session.revision, now_ms())?;
+        let (launch, protocol) = match prepare_codex(
+            &store,
+            &pin,
+            &session.model,
+            !input.pane_generation,
+            false,
+            Some(&run),
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                auth::discard_unstarted_codex_auth(&store, &run, true)?;
+                store.settle(&run, State::Failed, now_ms())?;
+                return Err(error);
+            }
+        };
+        return run_prepared(store, input, cancel, observer, launch, protocol, workspace).await;
+    }
+    if session.model.provider == Provider::Devin {
+        let pin = Pin::load(store.root(), Provider::Devin)?;
+        crate::devin::runtime_admitted(&pin)?;
+        let run = store.prepare_run(&session.id, session.revision, now_ms())?;
+        let (launch, protocol) = match prepare_devin(
+            &store,
+            &pin,
+            &session.model,
+            !input.pane_generation,
+            false,
+            Some(&run),
+        )
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                store.settle(&run, State::Failed, now_ms())?;
+                return Err(error);
+            }
+        };
+        return run_prepared(store, input, cancel, observer, launch, protocol, workspace).await;
+    }
+    if session.model.provider != Provider::Claude {
+        return Err(Error::Unavailable(
+            "native execution for this provider is not yet qualified",
+        ));
+    }
+    let pin = Pin::load(store.root(), Provider::Claude)?;
+    let run = store.prepare_run(&session.id, session.revision, now_ms())?;
+    let tools = !input.pane_generation;
+    let prepared = async {
+        let credential = auth::token(&store, &session.account)?;
+        prepare(&pin, store.root(), &session.model, Some(&credential), tools).await
+    }
+    .await;
+    let mut launch = match prepared {
+        Ok(launch) => launch,
+        Err(error) => return Err(settle_failed_preparation(&store, Some(&run), error)),
+    };
+    launch.prepared_run = Some(run);
+    let protocol = ClaudeProtocol::new(tools, launch.cwd.clone(), session.model.clone());
+    run_prepared(store, input, cancel, observer, launch, protocol, workspace).await
+}
+
+async fn run_prepared<P: Protocol>(
+    store: Arc<Store>,
+    input: RunInput,
+    mut cancel: watch::Receiver<bool>,
+    observer: Observer,
+    mut launch: Launch,
+    mut protocol: P,
+    workspace: Workspace,
+) -> Result<Outcome> {
+    let session = &input.session;
+    let tools = !input.pane_generation;
+    let prepared = match launch.prepared_run.take() {
+        Some(run) => Ok(run),
+        None => store.prepare_run(&session.id, session.revision, now_ms()),
+    };
+    let run = match prepared {
         Ok(run) => run,
         Err(error) => {
-            launch.discard_unstarted().await;
+            if protocol.shutdown().await {
+                launch.discard_unstarted().await;
+            } else {
+                launch.artifacts.retain_before_launch();
+            }
             return Err(error);
         }
     };
-    let (mut process, bridge) = spawn_process(
-        &store,
-        Some(&run),
-        launch.command,
-        &mut launch.artifacts,
-        launch.bridge.take(),
-    )
-    .await?;
+    launch.artifacts.retain_before_launch();
+    let bridge = launch.bridge.take();
+    let mut process = match StreamProcess::spawn(launch.command) {
+        Ok(process) => process,
+        Err(error) => {
+            // A protocol may own an active broker listener before its child
+            // starts. Independently join every listener before no-child
+            // evidence can release the account or disposable launch files.
+            let protocol_joined = protocol.shutdown().await;
+            let bridge_joined = close_bridge(bridge).await;
+            if matches!(error, Error::LaunchNotStarted(_)) && protocol_joined && bridge_joined {
+                if launch.codex_credentials.is_some() {
+                    auth::discard_unstarted_codex_auth(&store, &run, true)?;
+                }
+                store.settle(&run, State::Failed, now_ms())?;
+                launch.artifacts.release_after_join(true, EffectState::None);
+            }
+            return Err(error);
+        }
+    };
+    let spawned = store.mark_spawned(&run, process.pid());
+    let mut cancel_execution = cancel.clone();
     let mut effects = EffectState::None;
     let mut pending_attention = false;
     let mut quota_failure = None;
     let mut answer = Answer::default();
     let mut thinking = String::new();
     let execution = async {
-        store.mark_spawned(&run, process.pid())?;
+        spawned?;
         let baseline = store
             .velocities(&session.id, 0)?
             .last()
             .map(|point| point.output_tokens)
             .unwrap_or(0);
-        let models = handshake(&mut process, tools, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. There is no shell or arbitrary path access. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
+        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. There is no shell or arbitrary path access. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
         if !models.iter().any(|choice| {
             choice.id == session.model.id
                 && (session.model.effort.is_none() || choice.effort == session.model.effort)
@@ -867,7 +1544,9 @@ pub async fn run(
                 "selected model or effort is not in the fresh provider catalog",
             ));
         }
-        store.set_models(Provider::Claude, &models)?;
+        if protocol.refreshes_catalog() {
+            store.set_models(session.model.provider, &models)?;
+        }
         let history = store
             .messages(&session.id, 512)?
             .into_iter()
@@ -922,12 +1601,17 @@ pub async fn run(
         } else {
             context::prompt(&projection.messages, &input.message.text)?
         };
-        let mut content = vec![json!({"type":"text","text":text})];
+        let mut images = Vec::new();
         for image in &input.message.attachments {
             let bytes = attachments::read(store.root(), image)?;
-            content.push(json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":base64::engine::general_purpose::STANDARD.encode(bytes)}}));
+            images.push(ImageInput {
+                media_type: image.media_type.clone(),
+                base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            });
         }
-        process.send(&json!({"type":"user","session_id":"","parent_tool_use_id":null,"message":{"role":"user","content":content}})).await?;
+        protocol
+            .start(&mut process, Prompt { text, images })
+            .await?;
         let started = now_ms();
         if input.config.extensions.usage {
             store.record_velocity(
@@ -941,8 +1625,7 @@ pub async fn run(
         let mut admitted = false;
         let mut seen_calls = BTreeSet::new();
         let mut byte_count = 0usize;
-        let mut completed_output = 0u64;
-        let mut current_output = 0u64;
+        let mut output_tokens = 0u64;
         // Velocity is a display meter; the authoritative usage lands via
         // record_usage at settle. Per-delta fsync'd transactions would
         // serialize every parallel terminal on one writer, so stream samples
@@ -952,149 +1635,109 @@ pub async fn run(
             if *cancel.borrow() {
                 return Ok((Terminal::Cancelled, vec![]));
             }
-            let frame = tokio::select! {
+            let batch = tokio::select! {
                 _ = cancel.changed() => return Ok((Terminal::Cancelled, vec![])),
-                frame = process.frame() => frame?,
-            }
-            .ok_or(Error::Protocol("provider ended without a terminal result"))?;
-            byte_count += frame.len();
-            if byte_count > 16 * 1024 * 1024 {
+                batch = protocol.next(&mut process) => batch?,
+            };
+            byte_count = byte_count
+                .checked_add(batch.bytes)
+                .ok_or(Error::Protocol("total provider output limit"))?;
+            if byte_count > 64 * 1024 * 1024 {
                 return Err(Error::Protocol("total provider output limit"));
             }
-            let raw: Value = serde_json::from_slice(&frame)?;
-            if input.config.extensions.usage && admitted {
-                match raw.pointer("/event/type").and_then(Value::as_str) {
-                    Some("message_start") => {
-                        completed_output = completed_output.saturating_add(current_output);
-                        current_output = 0;
+            for event in batch.events {
+                match event {
+                    TurnEvent::Ready { resolved_model } => {
+                        if admitted {
+                            return Err(Error::Protocol("duplicate initialization"));
+                        }
+                        admitted = true;
+                        if let Some(reported) = resolved_model
+                            && reported != session.model.id.as_str()
+                            && Id::new(reported.clone()).is_ok()
+                        {
+                            observer(Progress::Notice(format!(
+                                "provider resolved the model to {reported}"
+                            )));
+                        }
                     }
-                    Some("message_delta") => {
-                        if let Some(total) = raw.pointer("/event/usage/output_tokens") {
-                            let total = total
-                                .as_u64()
-                                .filter(|total| {
-                                    *total >= current_output
-                                        && *total <= xcb_core::usage::COUNTER_LIMIT
-                                })
-                                .ok_or(Error::Protocol("stream token counter"))?;
-                            current_output = total;
-                            let now = now_ms();
-                            if now.saturating_sub(last_velocity_ms) >= 250 {
-                                last_velocity_ms = now;
-                                store.record_velocity(
-                                    &session.id,
-                                    VelocitySample {
-                                        at_ms: now,
-                                        output_tokens: baseline
-                                            .saturating_add(completed_output)
-                                            .saturating_add(current_output),
-                                    },
-                                )?;
+                    TurnEvent::OutputTokens(total) if admitted => {
+                        if total < output_tokens || total > xcb_core::usage::COUNTER_LIMIT {
+                            return Err(Error::Protocol("stream token counter"));
+                        }
+                        output_tokens = total;
+                        let now = now_ms();
+                        if input.config.extensions.usage
+                            && now.saturating_sub(last_velocity_ms) >= 250
+                        {
+                            last_velocity_ms = now;
+                            store.record_velocity(
+                                &session.id,
+                                VelocitySample {
+                                    at_ms: now,
+                                    output_tokens: baseline.saturating_add(output_tokens),
+                                },
+                            )?;
+                        }
+                    }
+                    TurnEvent::Delta {
+                        thinking: is_thinking,
+                        text,
+                    } if admitted => {
+                        if is_thinking {
+                            if thinking.len() + text.len() > MAX_TEXT_BYTES {
+                                return Err(Error::Protocol("thinking limit"));
+                            }
+                            thinking.push_str(&text);
+                        } else {
+                            answer.delta(&text)?;
+                        }
+                        observer(Progress::Text {
+                            thinking: is_thinking,
+                            text,
+                        });
+                    }
+                    TurnEvent::Assistant(text) if admitted => answer.completed(text)?,
+                    TurnEvent::Attention => pending_attention = true,
+                    TurnEvent::Quota {
+                        window,
+                        used_percent,
+                        resets_at_ms,
+                        failure,
+                    } if admitted => {
+                        quota_failure = failure;
+                        if let (Some(window), Some(used_percent), Some(resets_at_ms)) =
+                            (window, used_percent, resets_at_ms)
+                        {
+                            let point = QuotaPoint {
+                                pool: store.account(&session.account)?.quota_pool,
+                                window: Id::new(window)?,
+                                used_percent,
+                                observed_at_ms: now_ms(),
+                                resets_at_ms,
+                            };
+                            if point.validate().is_ok() {
+                                store.record_quota(&point)?;
                             }
                         }
                     }
-                    _ => (),
-                }
-            }
-            match claude::parse_event(&frame)? {
-                Event::Initialize(value) => {
-                    if admitted {
-                        return Err(Error::Protocol("duplicate initialization"));
-                    }
-                    validate_init(&value, &launch.cwd, &session.model, tools)?;
-                    admitted = true;
-                    if let Some(reported) = value.get("model").and_then(Value::as_str)
-                        && reported != session.model.id.as_str()
-                        && Id::new(reported).is_ok()
-                    {
-                        observer(Progress::Notice(format!(
-                            "provider resolved the model to {reported}"
-                        )));
-                    }
-                }
-                Event::Delta {
-                    thinking: is_thinking,
-                    text,
-                } if admitted => {
-                    if is_thinking {
-                        if thinking.len() + text.len() > MAX_TEXT_BYTES {
-                            return Err(Error::Protocol("thinking limit"));
+                    TurnEvent::Tool {
+                        id: call_id,
+                        name,
+                        arguments,
+                    } if admitted && tools => {
+                        if seen_calls.len() >= 128 || !seen_calls.insert(call_id.clone()) {
+                            return Err(Error::Protocol("duplicate or excessive tool call"));
                         }
-                        thinking.push_str(&text);
-                    } else {
-                        answer.delta(&text)?;
-                    }
-                    observer(Progress::Text {
-                        thinking: is_thinking,
-                        text,
-                    });
-                }
-                Event::Assistant { text, .. } if admitted => {
-                    answer.completed(text);
-                }
-                Event::Quota {
-                    window,
-                    utilization,
-                    resets_at_ms,
-                    failure,
-                } if admitted => {
-                    quota_failure = failure;
-                    if let (Some(window), Some(used), Some(reset)) =
-                        (window, utilization, resets_at_ms)
-                    {
-                        let point = QuotaPoint {
-                            pool: store.account(&session.account)?.quota_pool,
-                            window: Id::new(window)?,
-                            used_percent: used * 100.0,
-                            observed_at_ms: now_ms(),
-                            resets_at_ms: reset,
-                        };
-                        if point.validate().is_ok() {
-                            store.record_quota(&point)?;
-                        }
-                    }
-                }
-                Event::Control(envelope) => {
-                    let request = envelope
-                        .get("request")
-                        .ok_or(Error::Protocol("control request"))?;
-                    if request.get("subtype").and_then(Value::as_str) == Some("can_use_tool") {
-                        pending_attention = true;
-                        control(&mut process, &envelope, json!({"behavior":"deny","message":"xcb will not manufacture permission; human attention is required"})).await?;
-                        continue;
-                    }
-                    if request.get("subtype").and_then(Value::as_str) != Some("mcp_message") {
-                        return Err(Error::Protocol("unhandled provider control request"));
-                    }
-                    let call = request.pointer("/message/method").and_then(Value::as_str)
-                        == Some("tools/call");
-                    let result = if call {
-                        if !admitted || !tools || seen_calls.len() >= 128 {
-                            return Err(Error::Protocol("tool call outside admitted turn"));
-                        }
-                        let call_id = envelope
-                            .get("request_id")
-                            .and_then(Value::as_str)
-                            .ok_or(Error::Protocol("tool call identity"))?;
-                        if !seen_calls.insert(call_id.to_owned()) {
-                            return Err(Error::Protocol("duplicate tool call"));
-                        }
-                        let name = request
-                            .pointer("/message/params/name")
-                            .and_then(Value::as_str)
-                            .ok_or(Error::Protocol("tool name"))?;
-                        let arguments = request
-                            .pointer("/message/params/arguments")
-                            .ok_or(Error::Protocol("tool arguments"))?;
                         store.begin_tool(
                             &run,
-                            call_id,
-                            name,
-                            &digest(serde_json::to_vec(arguments)?),
+                            &call_id,
+                            &name,
+                            &digest(serde_json::to_vec(&arguments)?),
                         )?;
-                        observer(Progress::Tool(name.to_owned()));
-                        let (output, call_effects) = workspace.call_observed(name, arguments);
-                        settle_tool_effects(&store, &run, call_id, call_effects, &mut effects)?;
+                        observer(Progress::Tool(name.clone()));
+                        let (output, call_effects) = workspace.call_observed(&name, &arguments);
+                        settle_tool_effects(&store, &run, &call_id, call_effects, &mut effects)?;
                         let (text, failed) = match output {
                             Ok(output) => (serde_json::to_string(&output)?, false),
                             Err(error) => (error.to_string(), true),
@@ -1121,75 +1764,71 @@ pub async fn run(
                                 }),
                             },
                         )?;
-                        Some(json!({"content":[{"type":"text","text":text}],"isError":failed}))
-                    } else {
-                        None
-                    };
-                    let response = mcp_reply(request, tools, result)?;
-                    control(&mut process, &envelope, response).await?;
-                }
-                Event::Result {
-                    terminal,
-                    text,
-                    models,
-                } if admitted => {
-                    if !text.is_empty() {
-                        answer.completed(text);
+                        protocol
+                            .reply(
+                                &mut process,
+                                &call_id,
+                                json!({"content":[{"type":"text","text":text}],"isError":failed}),
+                            )
+                            .await?;
                     }
-                    if input.config.extensions.usage {
-                        store.record_velocity(
-                            &session.id,
-                            VelocitySample {
-                                at_ms: now_ms(),
-                                output_tokens: baseline
-                                    .saturating_add(completed_output)
-                                    .saturating_add(current_output),
-                            },
-                        )?;
+                    TurnEvent::Result {
+                        terminal,
+                        text,
+                        models,
+                    } if admitted => {
+                        if !text.is_empty() {
+                            answer.completed(text)?;
+                        }
+                        if input.config.extensions.usage {
+                            store.record_velocity(
+                                &session.id,
+                                VelocitySample {
+                                    at_ms: now_ms(),
+                                    output_tokens: baseline.saturating_add(output_tokens),
+                                },
+                            )?;
+                        }
+                        return Ok((terminal, models));
                     }
-                    return Ok((terminal, models));
-                }
-                Event::Subagent {
-                    id,
-                    status,
-                    label,
-                    model,
-                } if admitted => observer(Progress::Subagent(Subagent {
-                    id: Id::new(id)?,
-                    label,
-                    state: match status.as_str() {
-                        "working" | "running" => State::Working,
-                        "completed" => State::Idle,
-                        "failed" => State::Failed,
-                        _ => State::Uncertain,
-                    },
-                    model,
-                })),
-                Event::Notice | Event::ControlResponse(_) => (),
-                _ => {
-                    return Err(Error::Protocol(
-                        "provider work before effective-boundary admission",
-                    ));
+                    TurnEvent::Subagent {
+                        id,
+                        status,
+                        label,
+                        model,
+                    } if admitted => observer(Progress::Subagent(Subagent {
+                        id: Id::new(id)?,
+                        label,
+                        state: match status.as_str() {
+                            "working" | "running" => State::Working,
+                            "completed" => State::Idle,
+                            "failed" => State::Failed,
+                            _ => State::Uncertain,
+                        },
+                        model,
+                    })),
+                    _ => {
+                        return Err(Error::Protocol(
+                            "provider work before effective-boundary admission",
+                        ));
+                    }
                 }
             }
         }
         Err(Error::Protocol("provider frame count limit"))
     };
-    let result = tokio::time::timeout(
-        Duration::from_millis(
-            input
-                .config
-                .extensions
-                .auto_continue
-                .max_elapsed_ms
-                .min(300_000),
-        ),
-        execution,
-    )
-    .await;
+    let deadline = Duration::from_millis(input.config.turn_timeout_ms);
+    let result = tokio::select! {
+        biased;
+        _ = async { if !*cancel_execution.borrow() { let _ = cancel_execution.changed().await; } } => Ok(Ok((Terminal::Cancelled, vec![]))),
+        result = tokio::time::timeout(deadline, execution) => result,
+    };
+    // Cancellation drops only the execution future. Never cancel independent
+    // process/listener joins or credential persistence and custody settlement.
     let process_joined = process.join().await;
+    let protocol_joined = protocol.shutdown().await;
     let bridge_joined = close_bridge(bridge).await;
-    let joined = process_joined && bridge_joined;
+    let joined = process_joined && protocol_joined && bridge_joined;
     let (terminal, models, failure) = match result {
         Ok(Ok((terminal, models))) => (
             terminal,
@@ -1279,6 +1918,9 @@ pub async fn run(
                 })?;
             }
         }
+        if let Some(credentials) = &launch.codex_credentials {
+            auth::persist_codex_auth(&store, &run, credentials, joined)?;
+        }
         if effects != EffectState::Uncertain {
             store.settle(&run, state, now_ms())?;
             launch.artifacts.release_after_join(joined, effects);
@@ -1332,6 +1974,7 @@ mod tests {
                 Command::new(base.join("missing-executable")),
                 &mut artifacts,
                 Some(bridge),
+                false,
             )
             .await;
             assert!(matches!(result, Err(Error::LaunchNotStarted(_))));
@@ -1344,6 +1987,52 @@ mod tests {
             assert_eq!(
                 store.run(&run.id).unwrap().unwrap().phase == "settled",
                 !interfere_with_socket
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn preparation_failure_requires_bridge_stop_before_releasing_account() {
+        for interfere_with_socket in [false, true] {
+            let root = tempfile::tempdir_in("/tmp").unwrap();
+            let base = root.path().canonicalize().unwrap();
+            let store = Store::open(&base.join("state")).unwrap();
+            let account = store
+                .add_account(Provider::Claude, "Test", "Test", 1)
+                .unwrap();
+            let run = store.prepare_probe(&account.id, None, 2).unwrap();
+            let mut artifacts = LaunchArtifacts::create(&base).unwrap();
+            let directory = artifacts.directory.clone();
+            let socket = directory.join("egress.sock");
+            artifacts.retain_before_launch();
+            let bridge =
+                egress::EgressBridge::start(egress::EgressBridgeOptions::new(socket.clone()))
+                    .await
+                    .unwrap();
+            if interfere_with_socket {
+                std::fs::remove_file(&socket).unwrap();
+                std::fs::create_dir(&socket).unwrap();
+            }
+            let error = discard_failed_preparation(
+                &mut artifacts,
+                bridge,
+                Error::Unavailable("synthetic planning failure"),
+            )
+            .await;
+            let error = settle_failed_preparation(&store, Some(&run), error);
+            assert_eq!(
+                matches!(error, Error::CleanupUnproven),
+                interfere_with_socket
+            );
+            drop(artifacts);
+            assert_eq!(directory.exists(), interfere_with_socket);
+            assert_eq!(
+                store.unsettled_runs().unwrap().len(),
+                usize::from(interfere_with_socket)
+            );
+            assert_eq!(
+                store.prepare_probe(&account.id, None, 3).is_err(),
+                interfere_with_socket
             );
         }
     }
@@ -1365,6 +2054,8 @@ mod tests {
             cwd: base,
             bridge: Some(bridge),
             artifacts,
+            prepared_run: None,
+            codex_credentials: None,
         };
         launch.discard_unstarted().await;
         drop(launch);
@@ -1416,11 +2107,11 @@ mod tests {
 
         let mut answer = Answer::default();
         answer.delta("draft").unwrap();
-        answer.completed("authoritative result".into());
+        answer.completed("authoritative result".into()).unwrap();
         assert_eq!(answer.into_text(), "authoritative result");
 
         let mut answer = Answer::default();
-        answer.completed("prior tool explanation".into());
+        answer.completed("prior tool explanation".into()).unwrap();
         answer.delta("new partial answer").unwrap();
         assert_eq!(answer.into_text(), "new partial answer");
     }
@@ -1615,5 +2306,318 @@ mod tests {
         let concrete = choice("claude-fable-5-1", None);
         validate_init(&init("claude-fable-5-1"), cwd, &concrete, false).unwrap();
         assert!(validate_init(&init("claude-sonnet-5"), cwd, &concrete, false).is_err());
+    }
+    struct FixtureProtocol {
+        model: ModelChoice,
+        before_ready: bool,
+        step: u8,
+        block_initialize: Option<tokio::sync::oneshot::Sender<()>>,
+    }
+    impl Protocol for FixtureProtocol {
+        async fn initialize(&mut self, _: &mut StreamProcess, _: &str) -> Result<Vec<ModelChoice>> {
+            if let Some(started) = self.block_initialize.take() {
+                let _ = started.send(());
+                std::future::pending::<()>().await;
+            }
+            Ok(vec![self.model.clone()])
+        }
+        async fn start(&mut self, process: &mut StreamProcess, _: Prompt) -> Result<()> {
+            process.send(&json!({"step":0})).await
+        }
+        async fn receive(&mut self, _: &mut StreamProcess, _: &[u8]) -> Result<Vec<TurnEvent>> {
+            self.step += 1;
+            if self.step == 1 {
+                let mut events = vec![];
+                if !self.before_ready {
+                    events.push(TurnEvent::Ready {
+                        resolved_model: None,
+                    });
+                }
+                events.push(TurnEvent::Tool {
+                    id: "fixture-call".into(), name: "workspace_write".into(),
+                    arguments: json!({"path":"created.txt","text":"confirmed write","expectedRevision":null}),
+                });
+                Ok(events)
+            } else {
+                Ok(vec![
+                    TurnEvent::Delta {
+                        thinking: false,
+                        text: "Done".into(),
+                    },
+                    TurnEvent::Result {
+                        terminal: Terminal::Completed,
+                        text: "Done".into(),
+                        models: vec![],
+                    },
+                ])
+            }
+        }
+        async fn reply(
+            &mut self,
+            process: &mut StreamProcess,
+            id: &str,
+            result: Value,
+        ) -> Result<()> {
+            assert_eq!(id, "fixture-call");
+            assert_eq!(result["isError"], false);
+            process.send(&json!({"step":1})).await
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_lifecycle_settles_tools_and_account_for_each_provider_protocol() {
+        for provider in [Provider::Claude, Provider::Codex, Provider::Devin] {
+            for before_ready in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let base = root.path().canonicalize().unwrap();
+                let workspace = base.join("work");
+                std::fs::create_dir(&workspace).unwrap();
+                let store = Arc::new(Store::open(&base.join("state")).unwrap());
+                let account = store
+                    .add_account(provider, "Fixture", "Fixture", now_ms())
+                    .unwrap();
+                let model = ModelChoice {
+                    provider,
+                    id: Id::new("fixture-model").unwrap(),
+                    label: "Fixture".into(),
+                    mode: Mode::Fixed,
+                    resolved: None,
+                    effort: None,
+                    observed_at_ms: now_ms(),
+                };
+                let session = store
+                    .create_session(&account.id, model.clone(), &workspace, now_ms())
+                    .unwrap();
+                let message = Message {
+                    id: new_id("message"),
+                    role: Role::User,
+                    text: "Create a file".into(),
+                    at_ms: now_ms(),
+                    attachments: vec![],
+                    provenance: None,
+                };
+                let artifacts = LaunchArtifacts::create(store.root()).unwrap();
+                let launch_path = artifacts.directory.clone();
+                let launch = Launch {
+                    command: Command::new("/bin/cat"),
+                    cwd: base.clone(),
+                    bridge: None,
+                    artifacts,
+                    prepared_run: None,
+                    codex_credentials: None,
+                };
+                let (_cancel, cancellation) = watch::channel(false);
+                let outcome = run_prepared(
+                    store.clone(),
+                    RunInput {
+                        session,
+                        message,
+                        config: Config::default(),
+                        pane_generation: false,
+                    },
+                    cancellation,
+                    Arc::new(|_| ()),
+                    launch,
+                    FixtureProtocol {
+                        model,
+                        before_ready,
+                        step: 0,
+                        block_initialize: None,
+                    },
+                    Workspace::open_with_coordination(&workspace, &base.join("coordination"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+                assert!(outcome.facts.joined);
+                assert!(store.unsettled_runs().unwrap().is_empty());
+                assert!(!launch_path.exists());
+                assert_eq!(workspace.join("created.txt").exists(), !before_ready);
+                if before_ready {
+                    assert_eq!(outcome.facts.terminal, Terminal::Failed);
+                    assert_eq!(outcome.facts.effects, EffectState::None);
+                } else {
+                    assert_eq!(outcome.text, "Done");
+                    assert_eq!(outcome.facts.terminal, Terminal::Completed);
+                    assert_eq!(outcome.facts.effects, EffectState::Settled);
+                }
+                let run = store.prepare_probe(&account.id, None, now_ms()).unwrap();
+                store.settle(&run, State::Idle, now_ms()).unwrap();
+            }
+        }
+    }
+    #[tokio::test]
+    async fn cancellation_during_initialization_joins_and_releases_without_submitting_a_turn() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let workspace = base.join("work");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Arc::new(Store::open(&base.join("state")).unwrap());
+        let account = store
+            .add_account(Provider::Claude, "Fixture", "Fixture", now_ms())
+            .unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("fixture-model").unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: now_ms(),
+        };
+        let session = store
+            .create_session(&account.id, model.clone(), &workspace, now_ms())
+            .unwrap();
+        let message = Message {
+            id: new_id("message"),
+            role: Role::User,
+            text: "Create a file".into(),
+            at_ms: now_ms(),
+            attachments: vec![],
+            provenance: None,
+        };
+        let artifacts = LaunchArtifacts::create(store.root()).unwrap();
+        let launch_path = artifacts.directory.clone();
+        let launch = Launch {
+            command: Command::new("/bin/cat"),
+            cwd: base.clone(),
+            bridge: None,
+            artifacts,
+            prepared_run: None,
+            codex_credentials: None,
+        };
+        let (cancel, cancellation) = watch::channel(false);
+        let (started, initialized) = tokio::sync::oneshot::channel();
+        let trigger = tokio::spawn(async move {
+            initialized.await.unwrap();
+            cancel.send(true).unwrap();
+        });
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(3),
+            run_prepared(
+                store.clone(),
+                RunInput {
+                    session,
+                    message,
+                    config: Config::default(),
+                    pane_generation: false,
+                },
+                cancellation,
+                Arc::new(|_| ()),
+                launch,
+                FixtureProtocol {
+                    model,
+                    before_ready: false,
+                    step: 0,
+                    block_initialize: Some(started),
+                },
+                Workspace::open_with_coordination(&workspace, &base.join("coordination")).unwrap(),
+            ),
+        )
+        .await
+        .expect("cancellation must not wait for the initialization deadline")
+        .unwrap();
+        trigger.await.unwrap();
+        assert_eq!(outcome.facts.terminal, Terminal::Cancelled);
+        assert!(outcome.facts.joined);
+        assert_eq!(outcome.facts.effects, EffectState::None);
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert!(!workspace.join("created.txt").exists());
+        assert!(!launch_path.exists());
+    }
+    #[tokio::test]
+    async fn failed_launch_releases_only_after_protocol_listener_join() {
+        struct ListenerProtocol {
+            store: Arc<Store>,
+            joined: bool,
+        }
+        impl Protocol for ListenerProtocol {
+            async fn initialize(
+                &mut self,
+                _: &mut StreamProcess,
+                _: &str,
+            ) -> Result<Vec<ModelChoice>> {
+                unreachable!()
+            }
+            async fn start(&mut self, _: &mut StreamProcess, _: Prompt) -> Result<()> {
+                unreachable!()
+            }
+            async fn receive(&mut self, _: &mut StreamProcess, _: &[u8]) -> Result<Vec<TurnEvent>> {
+                unreachable!()
+            }
+            async fn reply(&mut self, _: &mut StreamProcess, _: &str, _: Value) -> Result<()> {
+                unreachable!()
+            }
+            async fn shutdown(&mut self) -> bool {
+                assert_eq!(
+                    self.store.unsettled_runs().unwrap().len(),
+                    1,
+                    "custody must remain while the listener joins"
+                );
+                self.joined
+            }
+        }
+        for joined in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let base = root.path().canonicalize().unwrap();
+            let workspace = base.join("work");
+            std::fs::create_dir(&workspace).unwrap();
+            let store = Arc::new(Store::open(&base.join("state")).unwrap());
+            let account = store
+                .add_account(Provider::Devin, "Fixture", "Fixture", now_ms())
+                .unwrap();
+            let model = ModelChoice {
+                provider: Provider::Devin,
+                id: Id::new("fixture-model").unwrap(),
+                label: "Fixture".into(),
+                mode: Mode::Fixed,
+                resolved: None,
+                effort: None,
+                observed_at_ms: now_ms(),
+            };
+            let session = store
+                .create_session(&account.id, model, &workspace, now_ms())
+                .unwrap();
+            let artifacts = LaunchArtifacts::create(store.root()).unwrap();
+            let launch_path = artifacts.directory.clone();
+            let launch = Launch {
+                command: Command::new(base.join("missing-provider")),
+                cwd: base.clone(),
+                bridge: None,
+                artifacts,
+                prepared_run: None,
+                codex_credentials: None,
+            };
+            let (_cancel, cancellation) = watch::channel(false);
+            let input = RunInput {
+                session,
+                message: Message {
+                    id: new_id("message"),
+                    role: Role::User,
+                    text: "unused".into(),
+                    at_ms: now_ms(),
+                    attachments: vec![],
+                    provenance: None,
+                },
+                config: Config::default(),
+                pane_generation: false,
+            };
+            let result = run_prepared(
+                store.clone(),
+                input,
+                cancellation,
+                Arc::new(|_| ()),
+                launch,
+                ListenerProtocol {
+                    store: store.clone(),
+                    joined,
+                },
+                Workspace::open_with_coordination(&workspace, &base.join("coordination")).unwrap(),
+            )
+            .await;
+            assert!(matches!(result, Err(Error::LaunchNotStarted(_))));
+            assert_eq!(store.unsettled_runs().unwrap().is_empty(), joined);
+            assert_eq!(launch_path.exists(), !joined);
+        }
     }
 }

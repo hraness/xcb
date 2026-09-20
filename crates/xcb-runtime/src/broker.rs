@@ -1,5 +1,5 @@
 use crate::{Error, Result, coordination, digest};
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, RenameFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -62,6 +62,31 @@ fn file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
     regular(&file)?;
     Ok(file)
 }
+fn revision_file_at(parent: &File, name: &std::ffi::OsStr, expected: &str) -> Result<File> {
+    if expected.len() != 64
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(xcb_core::Error::Invalid("workspace revision").into());
+    }
+    let mut file = file_at(parent, name)?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(MAX_TEXT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    regular(&file)?;
+    if bytes.len() > MAX_TEXT_BYTES {
+        return Err(xcb_core::Error::Limit("workspace file").into());
+    }
+    if digest(&bytes) != expected {
+        return Err(Error::Conflict(
+            "workspace revision changed; read the current file first",
+        ));
+    }
+    Ok(file)
+}
+
 fn read_at(parent: &File, name: &std::ffi::OsStr) -> Result<ReadResult> {
     let file = file_at(parent, name)?;
     let mut bytes = Vec::new();
@@ -216,6 +241,135 @@ impl Workspace {
         }
         result
     }
+    pub fn mkdir(&self, path: &str, parents: bool) -> Result<usize> {
+        self.mkdir_observed(path, parents, &mut EffectState::None)
+    }
+    fn mkdir_observed(
+        &self,
+        path: &str,
+        parents: bool,
+        effects: &mut EffectState,
+    ) -> Result<usize> {
+        let parts = components(path)?;
+        if parts.is_empty() || parts.len() > 64 {
+            return Err(xcb_core::Error::Limit("workspace directory depth").into());
+        }
+        self.check_root()?;
+        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
+        self.check_root()?;
+        let mut directory = self.directory.try_clone()?;
+        let mut created = 0;
+        for (index, part) in parts.iter().enumerate() {
+            let final_component = index + 1 == parts.len();
+            if parents || final_component {
+                self.check_root()?;
+                match rustix::fs::mkdirat(&directory, *part, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+                    Ok(()) => {
+                        // A created directory must be reconciled if either sync fails.
+                        *effects = EffectState::Uncertain;
+                        directory.sync_all()?;
+                        let child = File::from(
+                            rustix::fs::openat(
+                                &directory,
+                                *part,
+                                OFlags::RDONLY
+                                    | OFlags::DIRECTORY
+                                    | OFlags::NOFOLLOW
+                                    | OFlags::CLOEXEC,
+                                Mode::empty(),
+                            )
+                            .map_err(io)?,
+                        );
+                        child.sync_all()?;
+                        directory = child;
+                        created += 1;
+                        *effects = EffectState::Settled;
+                        continue;
+                    }
+                    Err(rustix::io::Errno::EXIST) if parents => (),
+                    Err(error) => return Err(io(error)),
+                }
+            }
+            // Existing components, including the final one with parents=true,
+            // must be real directories; a symlink is never followed.
+            directory = File::from(
+                rustix::fs::openat(
+                    &directory,
+                    *part,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(io)?,
+            );
+        }
+        Ok(created)
+    }
+    pub fn remove(&self, path: &str, expected: &str) -> Result<()> {
+        self.remove_observed(path, expected, &mut EffectState::None)
+    }
+    fn remove_observed(&self, path: &str, expected: &str, effects: &mut EffectState) -> Result<()> {
+        // Resolve parents while holding the same coordination transaction used
+        // by writes and renames, so cooperating mutations cannot move them.
+        components(path)?;
+        self.check_root()?;
+        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
+        self.check_root()?;
+        let (parent, name) = self.parent(path)?;
+        let _file = revision_file_at(&parent, name, expected)?;
+        self.check_root()?;
+        rustix::fs::unlinkat(&parent, name, AtFlags::empty()).map_err(io)?;
+        *effects = EffectState::Uncertain;
+        parent.sync_all()?;
+        *effects = EffectState::Settled;
+        Ok(())
+    }
+    pub fn rename(&self, from: &str, to: &str, expected: &str) -> Result<String> {
+        self.rename_observed(from, to, expected, &mut EffectState::None)
+    }
+    fn rename_observed(
+        &self,
+        from: &str,
+        to: &str,
+        expected: &str,
+        effects: &mut EffectState,
+    ) -> Result<String> {
+        components(from)?;
+        components(to)?;
+        self.check_root()?;
+        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
+        self.check_root()?;
+        let (source, source_name) = self.parent(from)?;
+        let (destination, destination_name) = self.parent(to)?;
+        let file = revision_file_at(&source, source_name, expected)?;
+        // Some kernels accept renaming a path to itself even with NOREPLACE.
+        // Reject every existing destination, including the source and symlinks.
+        match rustix::fs::statat(&destination, destination_name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(_) => {
+                return Err(Error::Conflict(
+                    "workspace rename destination already exists",
+                ));
+            }
+            Err(rustix::io::Errno::NOENT) => (),
+            Err(error) => return Err(io(error)),
+        }
+        // NOREPLACE provides the no-clobber guarantee even when an unrelated
+        // editor creates the destination after the revision check.
+        file.sync_all()?;
+        self.check_root()?;
+        rustix::fs::renameat_with(
+            &source,
+            source_name,
+            &destination,
+            destination_name,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(io)?;
+        *effects = EffectState::Uncertain;
+        destination.sync_all()?;
+        source.sync_all()?;
+        *effects = EffectState::Settled;
+        Ok(expected.to_owned())
+    }
     pub fn list(&self, path: &str) -> Result<Vec<Entry>> {
         let fd = if path == "." || path.is_empty() {
             self.directory.try_clone()?
@@ -333,7 +487,41 @@ impl Workspace {
             path: String,
             query: String,
         }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct MkdirArgs {
+            path: String,
+            parents: bool,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RemoveArgs {
+            path: String,
+            expected_revision: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RenameArgs {
+            from: String,
+            to: String,
+            expected_revision: String,
+        }
         match name {
+            "workspace_mkdir" => {
+                let args: MkdirArgs = serde_json::from_value(input.clone())?;
+                Ok(json!({"created": self.mkdir_observed(&args.path, args.parents, effects)?}))
+            }
+            "workspace_remove" => {
+                let args: RemoveArgs = serde_json::from_value(input.clone())?;
+                self.remove_observed(&args.path, &args.expected_revision, effects)?;
+                Ok(json!({"removed": true}))
+            }
+            "workspace_rename" => {
+                let args: RenameArgs = serde_json::from_value(input.clone())?;
+                Ok(
+                    json!({"revision": self.rename_observed(&args.from, &args.to, &args.expected_revision, effects)?}),
+                )
+            }
             "workspace_read" => {
                 let args: PathArgs = serde_json::from_value(input.clone())?;
                 Ok(serde_json::to_value(self.read(&args.path)?)?)
@@ -363,6 +551,9 @@ pub fn descriptors() -> Vec<Value> {
         ("workspace_list", "List the bound workspace directory. Use . for its root.", json!({"path":path}), vec!["path"]),
         ("workspace_read", "Read one UTF-8 file and its revision inside the workspace.", json!({"path":path}), vec!["path"]),
         ("workspace_search", "Bounded literal text search inside the workspace.", json!({"path":path,"query":{"type":"string","minLength":1,"maxLength":256}}), vec!["path","query"]),
+        ("workspace_mkdir", "Create a workspace directory; parents=true also creates missing ancestors and accepts existing directories. Returns the number created.", json!({"path":path,"parents":{"type":"boolean"}}), vec!["path","parents"]),
+        ("workspace_remove", "Remove one regular file only when its current revision matches expectedRevision. Directories are never removed.", json!({"path":path,"expectedRevision":{"type":"string","pattern":"^[0-9a-f]{64}$"}}), vec!["path","expectedRevision"]),
+        ("workspace_rename", "Move one regular file with its current expectedRevision to a new path. The destination must not exist; parent directories must already exist.", json!({"from":path,"to":path,"expectedRevision":{"type":"string","pattern":"^[0-9a-f]{64}$"}}), vec!["from","to","expectedRevision"]),
         ("workspace_write", "Atomically write a file with its current expectedRevision; null creates a new file.", json!({"path":path,"text":{"type":"string","maxLength":MAX_TEXT_BYTES},"expectedRevision":{"anyOf":[{"type":"string","maxLength":64},{"type":"null"}]}}), vec!["path","text","expectedRevision"]),
     ].into_iter().map(|(name, description, properties, required)| json!({"name":name,"description":description,"inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false}})).collect()
 }

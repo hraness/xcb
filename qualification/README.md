@@ -96,3 +96,116 @@ hosts, activate a production deployment, or turn the local seven-day CLI
 admission into a general production qualification. The synthetic confined fixture
 above remains the independent evidence for effective tool inventory and escape
 denials; the live smoke does not replace it.
+
+## Native DNS and TLS regression
+
+Run `qualification/native-network.py --output /tmp/xcb-native-network.json` with
+`/usr/bin/python3` through the host scheduler's `mac-native` lane. This
+credential-free macOS check extracts the current Codex and Devin metadata-session
+Seatbelt templates, preloads Python's codecs and public CA context, and tests DNS,
+TCP and TLS against fixed public HTTPS endpoints. Each production policy must
+succeed, while removing only the `/var` symlink metadata grant must reproduce the
+DNS failure. The receipt binds source and policy hashes and proves every child
+process group joined; it contains no credentials, response bodies or local paths.
+This checks the resolver regression, not provider authentication, model behavior,
+or complete confinement. The native provider fixtures and live acceptance remain
+separate requirements. The checked-in [network receipt](native-network-macos-arm64.json)
+records the tested host and policy source; rerun it after relevant policy changes.
+
+## Current native Claude kernel boundary
+
+Run `/usr/bin/python3 qualification/claude-kernel.py --output /tmp/xcb-claude-kernel.json`
+through the host scheduler's `mac-native` lane. This synthetic check extracts the
+current Rust `sandbox::seatbelt` policy, allows scratch operations, and requires
+foreign consumer, peer-account, ambient-config and shared global temp (including
+its `/tmp` alias) reads, writes, symlink access, hard-link creation and renames to
+fail. It separately verifies permitted fork and
+denied `/bin/sh` execution, checks complete protected-file and directory identity
+plus canary bytes, and joins every child process group. The
+[checked-in receipt](claude-kernel-macos-arm64.json) binds the current policy and
+installed Claude executable hash and package version. Python is initialized before
+confinement, and Claude is not executed: this is kernel policy evidence, separate
+from native tool inventory, authentication and live-provider qualification.
+
+## Application qualification prerequisites
+
+`application-prerequisites.py` collects actual native validation output and
+prepares the private input for `xcb --json qualify-application`. It does not
+perform authenticated inference or activate application access. Python 3.9 or
+newer, Git, Cargo, the final release XCB executable, and that executable's current
+doctor pins and account/model catalog are required. The `--state` directory is
+existing private XCB state; the script inspects it through the read-only CLI and
+never reads credential files itself.
+
+Freeze the source and build `cargo build --release --locked -p xcb-cli`. Use the
+same final bytes for doctor, collection, qualification, and the calling
+application. Run the following through the installed host scheduler, with one
+integration owner. Replace every example path and the account/model selection:
+
+```sh
+/absolute/path/to/hra-host-run --mode=exclusive --lane=mac-native --label=xcb-application-prerequisites -- \
+  /usr/bin/python3 /absolute/xcb/qualification/application-prerequisites.py collect \
+  --xcb /absolute/xcb/target/release/xcb --state /absolute/private/xcb-state \
+  --source /absolute/xcb --provider claude --account a_selected --model claude/sonnet/low \
+  --provider-executable /absolute/path/to/native/claude \
+  --output /absolute/private/new-application-evidence
+```
+
+Collection runs the required Cargo formatting check, workspace tests and Clippy,
+then builds the release CLI and requires its digest to equal `--xcb`. Cargo's
+compiler-artifact message identifies the actual executable, including configured
+output directories and targets. The actual
+workspace test log supplies the mandatory application unit and contract cases,
+so those tests are not run twice. Native source files, embedded fixtures, Cargo
+manifests/lockfile, local Cargo configuration, toolchain and compiler environment
+are checked before and after collection. XCB's inspection command supplies the
+exact compiled policy/configuration, executable and provider identities.
+
+For Claude, collection runs the current credential-free kernel probe and checks
+its exact policy/harness binding, required syscall cases, protected canaries and
+process joins. It does not execute Claude. Codex and Devin instead require an
+explicit `--provider-boundary /absolute/current-native-boundary.json` from their
+separate reviewed fixtures; the script checks the supported receipt schema,
+current binary/source bindings and successful observations. Devin's helper must
+match the final XCB binary. Run those fixtures again when their bindings change.
+Keep their original observation times; a boundary receipt is never refreshed by
+copying it into a new bundle.
+
+Only a complete successful collection publishes `prerequisites.json` and its
+content-addressed artifacts. Directories are mode0700 and files mode0600. Failed
+collections remain for diagnosis and cannot be used as qualification evidence.
+The script has no option for supplying a success flag, exit status, custom
+command, prompt, or replacement collection timestamp. Its `capture.json` and
+per-command execution records bind actual commands, exit codes and raw bytes.
+These are trusted local execution records, not signatures against an actor who
+already controls the host account.
+
+After collection, use the same final executable for the separate fixed live
+challenge, also through the scheduler:
+
+```sh
+/absolute/path/to/hra-host-run --mode=shared --lane=mac-native --label=xcb-application-live-qualification -- \
+  /absolute/xcb/target/release/xcb --json --state /absolute/private/xcb-state \
+  qualify-application --account a_selected --model claude/sonnet/low \
+  --evidence /absolute/private/new-application-evidence
+```
+
+Qualification is limited to that exact account/model and replaces its previous
+coverage. The runtime publishes a receipt only after the common application
+executor completes the exact synthetic challenge, joins its work and settles
+account/auth custody. Application requests repeat admission under the account
+lease. Sign-in replacement, executable changes and policy/configuration changes
+invalidate qualification immediately.
+
+The receipt expires at the earliest prerequisite observation plus24hours.
+Capabilities reads do not renew it. To renew, rerun the same collection and live
+qualification with a new output directory and fresh boundary observations.
+`bundle --capture /absolute/private/existing-capture` accepts the same selection,
+source/runtime arguments and a new `--output`; it rechecks and recopies an existing
+successful capture while preserving its original deadline. It cannot renew old
+evidence or turn a failed command into a success.
+
+Run `python3 qualification/application-prerequisites.py --self-test` through the
+host scheduler for the hermetic parser, custody and bundle regressions. These
+checks use only synthetic files and a bounded Python signal-mask child; they do
+not run Cargo, XCB or providers.

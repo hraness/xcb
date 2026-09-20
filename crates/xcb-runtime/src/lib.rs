@@ -1,10 +1,15 @@
+pub mod application;
+mod application_qualification;
 pub mod attachments;
 pub mod auth;
 pub mod broker;
 pub mod claude;
+mod claude_protocol;
+pub mod codex;
 pub mod config;
 pub mod context;
 mod coordination;
+pub mod devin;
 pub mod egress;
 pub mod exports;
 pub mod hooks;
@@ -14,6 +19,9 @@ pub mod kernel;
 pub mod panes;
 pub mod private;
 pub mod process;
+mod protocol;
+#[cfg(any(test, target_os = "macos"))]
+mod public_ca;
 pub mod qualification;
 pub mod runner;
 pub mod sandbox;
@@ -33,6 +41,9 @@ pub enum Error {
     /// never use this variant: callers use it as explicit no-child evidence.
     #[error("provider could not start: {0}")]
     LaunchNotStarted(std::io::Error),
+    /// A preparation helper failed to prove shutdown; retain account custody.
+    #[error("provider preparation cleanup is unproven; account custody retained")]
+    CleanupUnproven,
     #[error("local database operation failed: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("invalid local record")]
@@ -45,6 +56,23 @@ pub enum Error {
     Unavailable(&'static str),
     #[error("provider protocol error: {0}")]
     Protocol(&'static str),
+    #[error("Codex {method} failed (RPC {code}): {category}")]
+    CodexRpc {
+        method: &'static str,
+        code: i64,
+        category: &'static str,
+    },
+    #[error("Devin model choices have unsupported shape {shape} (count {count:?})")]
+    DevinModelChoices {
+        shape: &'static str,
+        count: Option<usize>,
+    },
+    #[error("Devin {method} failed (RPC {code}): {category}")]
+    DevinRpc {
+        method: &'static str,
+        code: i64,
+        category: &'static str,
+    },
 }
 pub type Result<T> = std::result::Result<T, Error>;
 

@@ -66,3 +66,19 @@ fn concurrent_config_writers_cannot_both_replace_the_same_revision() {
         assert_eq!(succeeded, 1, "multiple commits to revision {round}");
     }
 }
+
+#[test]
+fn old_configuration_gets_a_bounded_turn_deadline_independent_of_continuation() {
+    let mut config: xcb_runtime::config::Config = serde_json::from_str(
+        r#"{"version":1,"extensions":{"auto_continue":{"max_elapsed_ms":1000}}}"#,
+    )
+    .unwrap();
+    assert_eq!(config.turn_timeout_ms, 1_800_000);
+    config.validate().unwrap();
+    for timeout in [0, 999, 3_600_001, u64::MAX] {
+        config.turn_timeout_ms = timeout;
+        assert!(config.validate().is_err());
+    }
+    config.turn_timeout_ms = 3_600_000;
+    config.validate().unwrap();
+}

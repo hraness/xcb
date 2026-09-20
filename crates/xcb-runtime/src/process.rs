@@ -150,6 +150,55 @@ pub fn executable_digest(path: &Path) -> Result<String> {
     digest_file(executable_file(path)?, 512 * 1024 * 1024)
 }
 
+/// Captured before a long-lived terminal can observe an in-place xcb update.
+/// Pins identify this process's starting implementation, never replacement bytes
+/// installed later at the same executable pathname.
+struct HostExecutable {
+    path: PathBuf,
+    sha256: String,
+}
+impl HostExecutable {
+    fn capture(path: PathBuf) -> Result<Self> {
+        let path = path.canonicalize()?;
+        let sha256 = executable_digest(&path)?;
+        Ok(Self { path, sha256 })
+    }
+    fn verify(&self) -> Result<()> {
+        if executable_digest(&self.path).ok().as_deref() != Some(self.sha256.as_str()) {
+            return Err(Error::Unavailable(
+                "xcb was replaced while this process was running; restart xcb and run xcb doctor",
+            ));
+        }
+        Ok(())
+    }
+    fn verify_pin(&self, expected: &str) -> Result<()> {
+        self.verify()?;
+        if expected != self.sha256 {
+            return Err(Error::Unavailable("runtime changed; run xcb doctor again"));
+        }
+        Ok(())
+    }
+}
+
+fn host_executable() -> Result<&'static HostExecutable> {
+    static HOST: std::sync::OnceLock<std::result::Result<HostExecutable, ()>> =
+        std::sync::OnceLock::new();
+    HOST.get_or_init(|| {
+        std::env::current_exe()
+            .map_err(Error::from)
+            .and_then(HostExecutable::capture)
+            .map_err(|_| ())
+    })
+    .as_ref()
+    .map_err(|_| Error::Unavailable("could not bind the running xcb executable"))
+}
+
+/// Call at host startup, before accepting commands or waiting for input.
+/// Store::open also captures this identity for embedded runtime consumers.
+pub fn initialize_host() -> Result<()> {
+    host_executable().map(|_| ())
+}
+
 pub fn wrapper_digest(path: &Path) -> Result<String> {
     digest_file(wrapper_file(path)?, 8 * 1024 * 1024)
 }
@@ -200,9 +249,9 @@ pub struct Pin {
 }
 impl Pin {
     pub fn verify(&self) -> Result<()> {
+        host_executable()?.verify_pin(&self.host_sha256)?;
         if self.executable.canonicalize()? != self.executable
             || executable_digest(&self.executable)? != self.sha256
-            || executable_digest(&std::env::current_exe()?.canonicalize()?)? != self.host_sha256
         {
             return Err(Error::Unavailable("runtime changed; run xcb doctor again"));
         }
@@ -230,6 +279,29 @@ impl Pin {
             }
             Err(error) => Err(error),
         }
+    }
+    /// Pin the current host relay to immutable launch-owned bytes, just as we
+    /// pin the provider. An in-place xcb upgrade cannot change an active relay.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn host_snapshot(&self, directory: &Path) -> Result<PathBuf> {
+        self.verify()?;
+        let source_path = std::env::current_exe()?.canonicalize()?;
+        let path = directory.join("xcb-helper");
+        let source = executable_file(&source_path)?;
+        let mut target = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o500)
+            .custom_flags((rustix::fs::OFlags::CLOEXEC).bits() as i32)
+            .open(&path)?;
+        std::io::copy(&mut source.take(512 * 1024 * 1024 + 1), &mut target)?;
+        target.flush()?;
+        target.sync_all()?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+        if executable_digest(&path)? != self.host_sha256 {
+            return Err(Error::Unavailable("host relay snapshot changed"));
+        }
+        Ok(path)
     }
     pub fn snapshot(&self, directory: &Path) -> Result<PathBuf> {
         self.verify()?;
@@ -283,6 +355,8 @@ fn parse_version(provider: Provider, output: &str) -> Result<&str> {
 }
 
 pub async fn inspect(provider: Provider, explicit: Option<&Path>, home: &Path) -> Result<Pin> {
+    let host = host_executable()?;
+    host.verify()?;
     let executable = discover(provider, explicit)?;
     let sha256 = executable_digest(&executable)?;
     let mut command = Command::new(&executable);
@@ -299,12 +373,13 @@ pub async fn inspect(provider: Provider, explicit: Option<&Path>, home: &Path) -
     if executable_digest(&executable)? != sha256 {
         return Err(Error::Unavailable("runtime changed during inspection"));
     }
+    host.verify()?;
     Ok(Pin {
         provider,
         executable,
         sha256,
         version: version.to_owned(),
-        host_sha256: executable_digest(&std::env::current_exe()?.canonicalize()?)?,
+        host_sha256: host.sha256.clone(),
         observed_at_ms: crate::now_ms(),
     })
 }
@@ -315,6 +390,7 @@ pub struct StreamProcess {
     child: Child,
     group: Option<Pid>,
     stderr: JoinHandle<bool>,
+    frame_buffer: Vec<u8>,
 }
 impl StreamProcess {
     pub fn spawn(mut command: Command) -> Result<Self> {
@@ -341,6 +417,7 @@ impl StreamProcess {
             child,
             group: Some(pid),
             stderr,
+            frame_buffer: Vec::new(),
         })
     }
     pub fn pid(&self) -> u32 {
@@ -360,11 +437,21 @@ impl StreamProcess {
         Ok(())
     }
     pub async fn frame(&mut self) -> Result<Option<Vec<u8>>> {
-        let mut bytes = Vec::new();
+        self.frame_bounded(MAX_JSON_BYTES).await
+    }
+    /// Some providers echo accepted image inputs in notifications. Permit a
+    /// separately bounded wire envelope without widening tool/text limits.
+    pub async fn frame_bounded(&mut self, max: usize) -> Result<Option<Vec<u8>>> {
+        if max == 0 || max > 16 * 1024 * 1024 {
+            return Err(Error::Protocol("invalid frame bound"));
+        }
+        if self.frame_buffer.len() > max {
+            return Err(Error::Protocol("output frame limit"));
+        }
         loop {
             let available = self.stdout.fill_buf().await?;
             if available.is_empty() {
-                return if bytes.is_empty() {
+                return if self.frame_buffer.is_empty() {
                     Ok(None)
                 } else {
                     Err(Error::Protocol("incomplete final frame"))
@@ -372,13 +459,15 @@ impl StreamProcess {
             }
             let end = available.iter().position(|byte| *byte == b'\n');
             let count = end.map_or(available.len(), |end| end + 1);
-            if bytes.len() + count > MAX_JSON_BYTES {
+            if self.frame_buffer.len() + count > max {
                 return Err(Error::Protocol("output frame limit"));
             }
-            bytes.extend_from_slice(&available[..count]);
+            // Retain consumed bytes across cancellation. An adapter may select
+            // ACP stdout against an independent MCP callback channel.
+            self.frame_buffer.extend_from_slice(&available[..count]);
             self.stdout.consume(count);
             if end.is_some() {
-                return Ok(Some(bytes));
+                return Ok(Some(std::mem::take(&mut self.frame_buffer)));
             }
         }
     }
@@ -518,6 +607,130 @@ pub async fn capture_with_input(
     result.expect("timeout handled")
 }
 
+/// No Debug or Serialize: successful capture may contain a reusable credential.
+/// A Joined error carries independent process/pipe cleanup proof; arbitrary
+/// capture errors must never be treated as that proof.
+pub(crate) enum CaptureOutcome {
+    NeverStarted(Error),
+    Joined(Result<zeroize::Zeroizing<Vec<u8>>>),
+    Unproven,
+}
+
+struct CaptureGroup(Option<Pid>);
+impl Drop for CaptureGroup {
+    fn drop(&mut self) {
+        if let Some(group) = self.0 {
+            let _ = kill_process_group(group, Signal::KILL);
+        }
+    }
+}
+
+/// Capture one credential-bearing host login under caller-owned durable custody.
+/// `started` runs immediately after spawn, before the first await. Cancellation
+/// is signalled, never implemented by dropping the cleanup future. Drop only
+/// attempts a stop; the caller must retain its durable lease in that case.
+pub(crate) async fn capture_supervised(
+    mut command: Command,
+    max: usize,
+    deadline: Duration,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+    started: impl FnOnce(u32) -> Result<()>,
+) -> CaptureOutcome {
+    if max == 0 || max > 64 * 1024 || deadline.is_zero() || deadline > Duration::from_secs(600) {
+        return CaptureOutcome::NeverStarted(Error::Unavailable(
+            "invalid supervised capture bounds",
+        ));
+    }
+    if *cancel.borrow() {
+        return CaptureOutcome::NeverStarted(Error::Unavailable("sign-in cancelled before launch"));
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    command.as_std_mut().process_group(0);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return CaptureOutcome::NeverStarted(Error::LaunchNotStarted(error)),
+    };
+    let Some(pid) = child.id().filter(|pid| *pid > 1) else {
+        return CaptureOutcome::Unproven;
+    };
+    let Some(group) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
+        return CaptureOutcome::Unproven;
+    };
+    let mut custody = CaptureGroup(Some(group));
+    let recorded = started(pid);
+    let Some(mut stdout) = child.stdout.take() else {
+        return CaptureOutcome::Unproven;
+    };
+    let Some(mut stderr) = child.stderr.take() else {
+        return CaptureOutcome::Unproven;
+    };
+    let result = match recorded {
+        Err(error) => Err(error),
+        Ok(()) => {
+            let execution = async {
+                let output = async {
+                    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+                    (&mut stdout)
+                        .take(max as u64 + 1)
+                        .read_to_end(&mut bytes)
+                        .await?;
+                    if bytes.len() > max {
+                        return Err(Error::Protocol("login output limit"));
+                    }
+                    Ok(bytes)
+                };
+                let (bytes, _) = tokio::try_join!(output, drain(&mut stderr, 1024 * 1024))?;
+                Ok(bytes)
+            };
+            tokio::select! {
+                biased;
+                _ = async { if !*cancel.borrow() { let _ = cancel.changed().await; } } =>
+                    Err(Error::Unavailable("sign-in cancelled")),
+                result = tokio::time::timeout(deadline, execution) =>
+                    result.unwrap_or(Err(Error::Unavailable("sign-in timed out"))),
+            }
+        }
+    };
+    // Error/timeout/cancellation stops the still-unreaped owned group. With
+    // complete streams, allow the leader to exit naturally so closing stdout
+    // immediately before exit cannot turn a successful login into SIGKILL.
+    if result.is_err() {
+        if child.id() == Some(pid) {
+            let _ = kill_process_group(group, Signal::KILL);
+        }
+        custody.0 = None;
+    }
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), async {
+        let exit = async {
+            let status = child.wait().await;
+            // No await between reaping and disarming: never signal a recycled
+            // process-group number from the future's Drop or later cleanup.
+            custody.0 = None;
+            status
+        };
+        tokio::join!(
+            exit,
+            drain(&mut stdout, 16 * 1024 * 1024),
+            drain(&mut stderr, 16 * 1024 * 1024)
+        )
+    })
+    .await;
+    let Ok((Ok(status), Ok(()), Ok(()))) = cleanup else {
+        return CaptureOutcome::Unproven;
+    };
+    if !group_absent(group).await {
+        return CaptureOutcome::Unproven;
+    }
+    if !status.success() && result.is_ok() {
+        return CaptureOutcome::Joined(Err(Error::Unavailable("sign-in did not complete")));
+    }
+    CaptureOutcome::Joined(result)
+}
+
 pub async fn capture(mut command: Command, max: usize, deadline: Duration) -> Result<Vec<u8>> {
     command
         .stdin(Stdio::null())
@@ -577,6 +790,108 @@ mod tests {
         path
     }
 
+    #[tokio::test]
+    async fn supervised_capture_distinguishes_no_start_and_joined_output() {
+        let root = tempfile::tempdir().unwrap();
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        let missing = capture_supervised(
+            Command::new(root.path().join("missing")),
+            1024,
+            Duration::from_secs(1),
+            cancel.clone(),
+            |_| panic!("missing executable started"),
+        )
+        .await;
+        assert!(matches!(
+            missing,
+            CaptureOutcome::NeverStarted(Error::LaunchNotStarted(_))
+        ));
+        for (script, success) in [
+            ("printf synthetic-login-output", true),
+            ("printf secret-not-success; exit 7", false),
+            ("printf output-too-long", false),
+        ] {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]);
+            let mut pid = 0;
+            let outcome = capture_supervised(
+                command,
+                if script == "printf output-too-long" {
+                    1
+                } else {
+                    1024
+                },
+                Duration::from_secs(1),
+                cancel.clone(),
+                |started| {
+                    pid = started;
+                    Ok(())
+                },
+            )
+            .await;
+            match outcome {
+                CaptureOutcome::Joined(Ok(bytes)) if success => {
+                    assert_eq!(&**bytes, b"synthetic-login-output")
+                }
+                CaptureOutcome::Joined(Err(_)) if !success => (),
+                _ => panic!("capture did not preserve join and result distinction"),
+            }
+            assert!(prove_process_group_absent(pid).is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn supervised_capture_cancel_deadline_and_drop_stop_owned_groups() {
+        for mode in ["cancel", "deadline", "drop"] {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "sleep 30"]);
+            let (sender, cancel) = tokio::sync::watch::channel(false);
+            let (ready, pid) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(capture_supervised(
+                command,
+                1024,
+                if mode == "deadline" {
+                    Duration::from_millis(25)
+                } else {
+                    Duration::from_secs(30)
+                },
+                cancel,
+                |pid| {
+                    let _ = ready.send(pid);
+                    Ok(())
+                },
+            ));
+            let pid = tokio::time::timeout(Duration::from_secs(5), pid)
+                .await
+                .unwrap()
+                .unwrap();
+            if mode == "drop" {
+                task.abort();
+                match task.await {
+                    Err(error) => assert!(error.is_cancelled()),
+                    Ok(_) => panic!("capture was not dropped"),
+                }
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while prove_process_group_absent(pid).is_err() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+            } else {
+                if mode == "cancel" {
+                    sender.send(true).unwrap();
+                }
+                let outcome = tokio::time::timeout(Duration::from_secs(15), task)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(outcome, CaptureOutcome::Joined(Err(_))));
+                assert!(prove_process_group_absent(pid).is_ok());
+            }
+        }
+    }
+
     #[test]
     fn provider_version_metadata_accepts_official_codex_prereleases() {
         assert_eq!(
@@ -600,6 +915,31 @@ mod tests {
             assert!(parse_version(Provider::Codex, text).is_err());
         }
         assert!(parse_version(Provider::Claude, "2.1.274-beta").is_err());
+    }
+
+    #[test]
+    fn host_identity_rejects_a_replacement_even_when_its_new_pin_matches_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_executable(directory.path(), 0o755);
+        let running = HostExecutable::capture(path.clone()).unwrap();
+        running.verify_pin(&running.sha256).unwrap();
+        let replacement = directory.path().join("replacement");
+        fs::write(&replacement, b"new implementation").unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        let new_digest = executable_digest(&path).unwrap();
+        assert_ne!(new_digest, running.sha256);
+        assert!(running.verify_pin(&new_digest).is_err());
+        assert!(running.verify_pin(&running.sha256).is_err());
+        let restarted = HostExecutable::capture(path.clone()).unwrap();
+        restarted.verify_pin(&new_digest).unwrap();
+        // An installer that overwrites instead of renaming is rejected too.
+        fs::write(&path, b"third implementation").unwrap();
+        assert!(
+            restarted
+                .verify_pin(&executable_digest(&path).unwrap())
+                .is_err()
+        );
     }
 
     #[test]
@@ -686,5 +1026,40 @@ mod tests {
     #[test]
     fn zero_process_group_id_is_rejected_as_absence_proof() {
         assert!(prove_process_group_absent(0).is_err());
+    }
+    #[tokio::test]
+    async fn interrupted_frame_read_preserves_the_partial_json_prefix() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "printf '{\"ok\":'; read -r next; printf 'true}\\n'"]);
+        let mut process = StreamProcess::spawn(command).unwrap();
+        let started = tokio::time::Instant::now();
+        loop {
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), process.frame())
+                    .await
+                    .is_err()
+            );
+            if !process.frame_buffer.is_empty() {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "fixture never wrote its prefix"
+            );
+        }
+        process
+            .send(&serde_json::json!({"continue":true}))
+            .await
+            .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), process.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&frame).unwrap(),
+            serde_json::json!({"ok":true})
+        );
+        assert!(process.join().await);
     }
 }

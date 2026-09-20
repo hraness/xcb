@@ -1,10 +1,12 @@
 # Security
 
-xcb is in development. Native Claude execution remains subject to exact-binary
-admission and per-run boundary verification. Native Codex and Devin execution
-are unavailable; compatibility Devin remains disabled pending qualification.
-A model catalog, successful metadata probe, or synthetic fixture is not a
-production security attestation.
+xcb is in development. Native Claude, Codex, and Devin adapters remain subject
+to exact-binary admission and per-run boundary verification. The native Codex
+0.155.0-alpha.2.6 and Devin 3000.10.31 candidates currently require macOS;
+authenticated live acceptance is pending. The TypeScript compatibility CLI's
+Codex and Devin task routes remain unqualified and disabled. A model catalog,
+successful metadata probe, or synthetic fixture is not a production security
+attestation.
 
 The execution boundary keeps model-facing tools closed and bounded, credentials
 outside workspaces, and provider accounts under exclusive host custody. Report

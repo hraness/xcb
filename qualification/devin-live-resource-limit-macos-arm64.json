@@ -1,0 +1,43 @@
+{
+  "schema": "xcb.devin-live-resource-limit.v1",
+  "recorded_at": "2026-09-20T03:30:34.376105+00:00",
+  "provider": "devin",
+  "provider_version": "3000.10.31",
+  "provider_sha256": "4cd4d2e242ed78443fe26d6f55382fd888ece0ac4e80b205106f8f1bf2b0cfa4",
+  "xcb_sha256": "a4d03745b4fd769ed7c893fb7a09195f5f47168342d25d117f81141bfcaf2917",
+  "model": "devin/swe-1-6-fast",
+  "metadata": {
+    "doctor_passed": true,
+    "refresh_passed": true,
+    "observed_models": 385
+  },
+  "live_prompt": {
+    "rpc_method": "session/prompt",
+    "rpc_code": -32011,
+    "fixed_category": "provider rejected the operation",
+    "elapsed_seconds": 9.25,
+    "terminal": "failed",
+    "effects": "none",
+    "provider_joined": true,
+    "cli_group_joined": true,
+    "stdio_joined": true,
+    "synthetic_fixture_unchanged": true
+  },
+  "primary_binary_evidence": {
+    "schema": "xcb.devin-static-error-code.v1",
+    "binary_sha256": "4cd4d2e242ed78443fe26d6f55382fd888ece0ac4e80b205106f8f1bf2b0cfa4",
+    "reference_version": "3000.10.31",
+    "code": -32011,
+    "embedded_acp_example_matches_resource_exhausted": true,
+    "embedded_acp_example_retryable": true,
+    "known_static_usage_categories": {
+      "monthly_limit": true,
+      "organization_monthly_limit": true,
+      "admin_paused": true
+    },
+    "scope": "Static exact-binary protocol example, not an observed live errorKind or account quota balance."
+  },
+  "assessment": "The observed live code matches the exact installed binary ACP example for quota exhaustion/resource_exhausted. The live errorKind, quota balance, reset time, and whether the limit is per-model/account/organization were not observed.",
+  "live_acceptance_passed": false,
+  "application_activation_admitted": false
+}
