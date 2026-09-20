@@ -323,3 +323,99 @@ fn unchanged_views_and_foreign_deltas_do_not_mark_a_repaint() {
     assert!(app.apply(xcb_core::ui::Update::View(Box::new(changed))));
     assert!(app.take_dirty());
 }
+
+fn picker_account(
+    id: &str,
+    provider: xcb_core::Provider,
+    enabled: bool,
+) -> xcb_core::ui::AccountRow {
+    xcb_core::ui::AccountRow {
+        id: xcb_core::Id::new(id).unwrap(),
+        provider,
+        label: id.into(),
+        subscription: "subscription".into(),
+        remaining_percent: None,
+        resets_at_ms: None,
+        runway: xcb_core::usage::Estimate::Unknown {
+            reason: "unknown".into(),
+        },
+        busy: false,
+        enabled,
+    }
+}
+
+fn picker_key(
+    app: &mut App,
+    tx: &std::sync::mpsc::SyncSender<xcb_core::ui::Intent>,
+    code: KeyCode,
+) {
+    assert!(app.handle(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)), tx));
+}
+
+#[test]
+fn account_picker_labels_disabled_rows_and_only_submits_enabled_accounts() {
+    for provider in [
+        xcb_core::Provider::Claude,
+        xcb_core::Provider::Codex,
+        xcb_core::Provider::Devin,
+    ] {
+        let (tx, rx) = sync_channel(2);
+        let mut app = App::default();
+        app.view.accounts = vec![
+            picker_account("disabled", provider, false),
+            picker_account("enabled", provider, true),
+        ];
+        app.composer.set_text("/accounts");
+        picker_key(&mut app, &tx, KeyCode::Enter);
+        let Some(Modal::Picker { items, .. }) = &app.modal else {
+            panic!("account picker")
+        };
+        assert!(items[0].label.ends_with(" · disabled"));
+        assert!(!items[1].label.contains(" · disabled"));
+        app.composer.set_text("keep my draft");
+        picker_key(&mut app, &tx, KeyCode::Enter);
+        assert!(
+            rx.try_recv().is_err(),
+            "disabled account must not reach the kernel"
+        );
+        assert!(matches!(app.modal, Some(Modal::Picker { .. })));
+        assert!(app.notice.contains("disabled"));
+        assert_eq!(app.composer.text(), "keep my draft");
+        picker_key(&mut app, &tx, KeyCode::Down);
+        picker_key(&mut app, &tx, KeyCode::Enter);
+        assert!(
+            matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Account(id)) if id.as_str() == "enabled")
+        );
+        assert!(app.modal.is_none());
+        assert_eq!(app.composer.text(), "keep my draft");
+    }
+}
+
+#[test]
+fn account_picker_rechecks_disabled_or_removed_accounts_after_refresh() {
+    for removed in [false, true] {
+        let (tx, rx) = sync_channel(2);
+        let mut app = App::default();
+        app.view.accounts = vec![picker_account("selected", xcb_core::Provider::Claude, true)];
+        app.composer.set_text("/accounts");
+        picker_key(&mut app, &tx, KeyCode::Enter);
+        let mut refreshed = app.view.clone();
+        if removed {
+            refreshed.accounts.clear();
+        } else {
+            refreshed.accounts[0].enabled = false;
+        }
+        assert!(app.apply(xcb_core::ui::Update::View(Box::new(refreshed))));
+        picker_key(&mut app, &tx, KeyCode::Enter);
+        assert!(
+            rx.try_recv().is_err(),
+            "stale account action must not reach the kernel"
+        );
+        assert!(matches!(app.modal, Some(Modal::Picker { .. })));
+        assert!(app.notice.contains(if removed {
+            "no longer available"
+        } else {
+            "disabled"
+        }));
+    }
+}

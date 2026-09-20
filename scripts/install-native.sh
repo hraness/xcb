@@ -89,8 +89,11 @@ install_from_source() {
   ' "$root/Cargo.toml")
   version_valid "$expected_version" || fail "invalid Cargo workspace version"
   cd "$root"
-  "$CARGO" build --release --locked -p xcb-cli
-  source="$root/target/release/xcb"
+  # Cargo owns artifact selection, including configured target directories and
+  # triples. Install into our empty private stage so a stale default target
+  # binary can never be selected. `cargo install` builds release by default.
+  "$CARGO" install --path "$root/crates/xcb-cli" --locked --bin xcb --root "$stage/cargo-install" --no-track
+  source="$stage/cargo-install/bin/xcb"
   regular_file "$source" || fail "source candidate must be a regular non-symlink file"
   source_digest=$(sha256 "$source")
   cp "$source" "$stage/candidate"

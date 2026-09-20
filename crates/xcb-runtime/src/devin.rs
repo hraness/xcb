@@ -11,5 +11,7 @@ pub use bridge::broker_stdio;
 pub use config::{
     BINARY_SHA256, NATIVE_TOOLS, VERSION, configuration, runtime_admitted, version_admitted,
 };
+#[cfg(target_os = "macos")]
+pub(crate) use wire::DevinOptions;
+pub(crate) use wire::DevinProtocol;
 pub use wire::parse_models;
-pub(crate) use wire::{DevinOptions, DevinProtocol};
