@@ -40,6 +40,7 @@ def child(provider, policy_path):
     for encoding in ("idna", "ascii", "utf-8", "latin-1"):
         codecs.lookup(encoding)
     context = ssl.create_default_context(cafile="/private/etc/ssl/cert.pem")
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     policy = Path(policy_path).read_bytes()
     if len(policy) > LIMIT:
         raise ValueError("policy bound")
