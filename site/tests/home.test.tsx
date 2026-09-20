@@ -81,7 +81,9 @@ test("makes provider and tool limitations visible before installation", () => {
   expect(html).toContain("isolated Linux runner for offline tests and builds");
   expect(html).toContain("passed its 12-case VM boundary suite");
   expect(html).toContain("offline Cargo/Bun use from immutable caches");
-  expect(html).toContain("Installed coding-workflow acceptance is pending");
+  expect(html).toContain("Installed Claude and Codex coding workflows passed");
+  expect(html).toContain("expected test failure, exact repair, passing test, and filtered Git status");
+  expect(html).not.toContain("installed command-workflow acceptance remains pending");
   expect(html.indexOf('id="readiness"')).toBeLessThan(html.indexOf('id="install"'));
   expect(html).toContain("./scripts/install-native.sh");
 });

@@ -29,7 +29,7 @@ const repository = "https://github.com/hraness/xcb";
 const archiveUrl = publishedRelease?.archiveUrl ?? null;
 
 const heading = "Your agents. Your terminal. Your edge.";
-const footnote = "Excalibur, for short. Local-first and MIT licensed. Source preview: native Claude, Codex, and Devin adapters with scoped workspace tools. Codex broker acceptance and the command backend’s 12-case VM boundary suite passed. Installed coding-workflow acceptance remains pending, and the tested Devin account reached its quota.";
+const footnote = "Excalibur, for short. Local-first and MIT licensed. Source preview: native Claude, Codex, and Devin adapters with scoped workspace tools. Installed Claude and Codex coding workflows passed on macOS ARM64 with the tested accounts, alongside the command backend’s 12-case VM boundary suite. The tested Devin account reached its quota.";
 
 const primitives = [
   {
@@ -212,11 +212,11 @@ Claude · selected observed model  [ working ]`}</code></pre>
             summary="xcb is not yet a daily-driver replacement for Codex, Claude Code, and Devin."
           >
             <ul>
-              <li><strong>Claude:</strong> native execution candidate on macOS and Linux after sign-in, binary admission, and per-run confinement checks.</li>
-              <li><strong>Codex:</strong> native app-server candidate on macOS for exact build 0.155.0-alpha.2.6, with supervised ChatGPT sign-in or explicit credential import. Authenticated read/write/read acceptance passed; installed command-workflow acceptance remains pending.</li>
+              <li><strong>Claude:</strong> installed coding workflow verified on macOS ARM64 with the tested account. Linux remains an execution candidate after sign-in, binary admission, and per-run confinement checks.</li>
+              <li><strong>Codex:</strong> native app-server candidate on macOS for exact build 0.155.0-alpha.2.6, with supervised ChatGPT sign-in or explicit credential import. Authenticated read/write/read acceptance passed, followed by the installed coding workflow on macOS ARM64 with the tested account.</li>
               <li><strong>Devin:</strong> native ACP candidate on macOS for exact build 3000.10.31, with explicit credential import. Authenticated discovery passed; the tested account reached provider quota before a coding turn.</li>
               <li><strong>Compatibility CLI:</strong> Codex and Devin task execution remains disabled pending qualification.</li>
-              <li><strong>Workspace tools:</strong> list, read, search, write, create directories, and remove or rename regular files with revision checks. The isolated Linux runner for offline tests and builds passed its 12-case VM boundary suite, including filtered read-only Git inspection, public dependency fetching, and offline Cargo/Bun use from immutable caches. Installed coding-workflow acceptance is pending.</li>
+              <li><strong>Workspace tools:</strong> list, read, search, write, create directories, and remove or rename regular files with revision checks. The isolated Linux runner for offline tests and builds passed its 12-case VM boundary suite, including filtered read-only Git inspection, public dependency fetching, and offline Cargo/Bun use from immutable caches. Installed Claude and Codex coding workflows passed: expected test failure, exact repair, passing test, and filtered Git status, with joined processes and settled effects.</li>
             </ul>
             <p>A model in the catalog or a successful metadata probe does not qualify a provider. <a href="/docs#readiness">Read the current limits and source quick start</a>.</p>
           </MarketingSection>
@@ -261,8 +261,8 @@ Claude · selected observed model  [ working ]`}</code></pre>
                     <pre tabIndex={0}><code>{`Claude      observed models · execution candidate
 Codex       0.155.0-alpha.2.6 · macOS candidate
 Devin       3000.10.31 · macOS candidate
-Live proof  Codex broker passed · Devin quota blocked
-Commands    VM boundary passed · installed acceptance pending`}</code></pre>
+Live proof  Claude and Codex coding passed · Devin quota blocked
+Commands    Offline Linux · filtered Git · prepared public deps`}</code></pre>
                   </>
                 ),
               },

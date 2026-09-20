@@ -1,11 +1,13 @@
 # Isolated workspace commands
 
-**Installed end-to-end coding acceptance is still pending.** The current backend
-passed all 12 mandatory VM boundary cases, including filtered read-only Git
-inspection, actual public dependency fetching, offline Cargo/Bun use from
-immutable caches, and rejection of a cache after its manifest changed. These
-synthetic boundary results do not establish an installed provider-driven coding
-workflow or daily-driver readiness.
+**Installed Claude and Codex coding workflows passed on macOS ARM64 with the
+tested accounts and admitted builds.** Each ran an expected failing test, made
+the exact repair, passed the test, and inspected filtered Git status, with joined
+processes and settled effects. The backend also passed all 12 mandatory VM
+boundary cases, including public dependency fetching, offline Cargo/Bun use from
+immutable caches, and rejection of a cache after its manifest changed. Devin
+quota still blocks coding acceptance across all three providers; these results
+do not establish an unrestricted replacement for their native CLIs.
 
 The native `workspace_exec` tool runs bounded Linux commands in an XCB-owned
 Lima VM on macOS ARM64. The VM has no host workspace mounts, SSH agent forwarding,
@@ -83,9 +85,9 @@ Cold dependency installation is unavailable inside an ordinary command. The
 separate `scripts/prepare-command-dependencies.py` frontend is now available in
 source. Its guest preparation and worker cache attachment passed the current
 12-case VM boundary suite, including actual fetch and offline package use.
-Installed provider-driven coding acceptance remains pending. The frontend
-refuses a backend without admitted public-cache support; a successful plan alone
-does not activate dependency use.
+Installed Claude and Codex coding workflows also passed on macOS ARM64 with the
+tested accounts. The frontend refuses a backend without admitted public-cache
+support; a successful plan alone does not activate dependency use.
 
 This frontend supports Python 3.9 and newer on macOS; it has been checked with
 Apple Python 3.9.6 and Homebrew Python 3.14.6. It observes process exit without
@@ -155,9 +157,9 @@ The cache key binds manifests, lockfiles, toolchain bytes, and preloader bytes;
 there is no time-based refresh. Changed inputs require explicit preparation
 again, and the worker recomputes the identity before use. A cold or mismatched
 cache never enables network access. Internal `plan`/`fetch`/`materialize` phases
-are not standalone user entrypoints. Until installed acceptance passes, do not
-assume a dependency-bearing repository can build merely because the VM contains
-its compiler.
+are not standalone user entrypoints. The tested cache fixtures do not prove
+every dependency-bearing repository can build; prepare its exact inputs and
+run its checks inside the admitted workspace.
 
 The Git projection supplies a filtered synthetic repository containing only
 selected HEAD and stage-zero index data. The trusted projector runs unprivileged
@@ -172,7 +174,8 @@ require a trusted host association. Unsupported or changing Git metadata omits
 Git with a diagnostic while allowing ordinary offline commands. The tool reports
 `gitInspectionAvailable` and `gitUnavailable`; an unproven projector stop retains
 custody and prevents worker execution. Encoded workspace/Git input is limited to
-96 MiB. Git helper presence alone does not establish installed acceptance.
+96 MiB. Installed acceptance covers filtered status inspection, not Git writes
+or every repository layout.
 
 ## Publication and retained state
 
@@ -199,9 +202,11 @@ not permission to delete those records manually.
 
 ## Cancellation, concurrency and recovery
 
-Ctrl-C and SIGTERM request cancellation of a headless run. The owner waits for
-the command's cgroup, descendants, and output streams to join before releasing
-account custody. Dropping a provider wait cannot drop that cleanup. A durable
+Ctrl-C and SIGTERM request cancellation of a headless run. Installed SIGTERM
+cancellation was verified after a guest worker started: guest stop, run
+settlement, lease release, and an unchanged workspace were confirmed. The owner
+waits for the command's cgroup, descendants, and output streams to join before
+releasing account custody. Dropping a provider wait cannot drop that cleanup. A durable
 command marker prevents older clients and ordinary host-PID recovery from
 releasing an unresolved guest command.
 

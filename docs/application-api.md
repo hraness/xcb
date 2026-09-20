@@ -139,8 +139,12 @@ collection began. Reads never extend it. Exact executable/provider changes and
 explicit account credential replacement invalidate it immediately. Model
 observations also expire after 24 hours; `xcb accounts refresh <account>` obtains
 fresh provider metadata. Expired qualification requires new valid evidence and a
-new fixed challenge. Unattended renewal is not implemented, so this version must
-not be described as ready for unattended use beyond those windows.
+new fixed challenge. For one previously qualified Claude account/model on macOS,
+the [explicit renewal helper](application-renewal.md) collects fresh evidence and
+runs that challenge against a pinned deployment and account generation. It does
+not extend the 24-hour lifetime or activate automatically. Unattended use requires
+explicit binding and LaunchAgent installation, plus a coordinated first live
+renewal whose actual result and final installed bytes have been verified.
 
 Discovery emits models only when covered by that account's valid qualification.
 The complete response is limited to 128 accounts, 64 qualified models per

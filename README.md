@@ -19,13 +19,17 @@ directories, and removes or renames regular files with revision checks. The
 source also includes an isolated Linux command runner for tests and builds on
 macOS ARM64. The current backend passed its 12-case VM boundary suite, including
 filtered Git inspection, public dependency fetching, and offline Cargo/Bun use
-from immutable caches. Installed coding-workflow acceptance remains pending. See the [command runner contract](docs/command-runner.md) for the exact
-setup command, supported boundaries, and current limits.
+from immutable caches. Installed Claude and Codex coding workflows passed on
+macOS ARM64: an expected test failure, exact repair, passing test, and filtered
+Git status, with joined processes and settled effects. This evidence covers the
+tested accounts and admitted builds; Devin quota still blocks acceptance across
+all three providers. See the [command runner contract](docs/command-runner.md)
+for setup, supported boundaries, and current limits.
 
 | Provider | Native Rust CLI | TypeScript compatibility CLI |
 | --- | --- | --- |
-| Claude | Execution candidate on macOS/Linux, after sign-in, an admitted binary, and per-run confinement checks | Execution candidate, subject to its own admission and confinement checks |
-| Codex | Native app-server on macOS for exact build **0.155.0-alpha.2.6**; authenticated broker read/write/read acceptance passed; command workflow pending | Discovery only; managed task execution gated on host qualification |
+| Claude | Installed coding workflow verified on macOS ARM64 with the tested account; Linux remains an execution candidate after sign-in, binary admission, and confinement checks | Execution candidate, subject to its own admission and confinement checks |
+| Codex | Native app-server on macOS for exact build **0.155.0-alpha.2.6**; authenticated broker and installed coding workflow acceptance passed on macOS ARM64 with the tested account | Discovery only; managed task execution gated on host qualification |
 | Devin | Native ACP candidate on macOS for exact build **3000.10.31**; authenticated model discovery passed; tested account hit provider quota before a coding turn | ACP implementation exists; task execution disabled pending exact-runtime qualification |
 
 A successful `doctor` or a visible model does not prove a working coding session.
@@ -96,8 +100,9 @@ An account, metadata pin, or model listing cannot activate an unqualified adapte
 ### Connect Codex on macOS
 
 Use the exact admitted **0.155.0-alpha.2.6** build. Authenticated broker
-read/write/read acceptance passed on macOS; this does not qualify arbitrary
-provider versions or the separate application API. xcb supervises the official
+read/write/read and installed coding-workflow acceptance passed on macOS ARM64
+with the tested account; this does not qualify arbitrary provider versions or
+the separate application API. xcb supervises the official
 CLI's ChatGPT device sign-in in a private profile:
 
 ```sh
@@ -160,7 +165,9 @@ against a staged workspace; host dependencies, credentials, and build products
 are excluded. Native macOS and Xcode builds are unavailable. The explicit
 [public dependency preparation frontend](docs/command-runner.md#dependencies-and-git)
 passed the current VM boundary suite, including rejection of a cache after its
-manifest changed. Installed provider-driven coding acceptance remains pending.
+manifest changed. Installed Claude and Codex coding workflows passed on macOS
+ARM64 with the tested accounts; other repositories and toolchains still need
+their own checks.
 
 The Git projection is limited to filtered, read-only HEAD and index data for
 status and diffs. Original history, remotes, and hooks are omitted; commit and
