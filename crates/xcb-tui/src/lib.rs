@@ -538,7 +538,12 @@ impl App {
             }
             ComposerAction::Cancel => {
                 self.send(output, Intent::Cancel);
-                self.notice = "Stopping the current turn and queued follow-ups.".into();
+                self.notice = if self.view.remote_active {
+                    "This turn is running in another terminal; cancel it there."
+                } else {
+                    "Stopping the current turn and queued follow-ups."
+                }
+                .into();
             }
             ComposerAction::Quit => {
                 self.send(output, Intent::Quit);
@@ -609,7 +614,12 @@ impl App {
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
             self.send(output, Intent::Cancel);
-            self.notice = "Stopping the current turn and queued follow-ups.".into();
+            self.notice = if self.view.remote_active {
+                "This turn is running in another terminal; cancel it there."
+            } else {
+                "Stopping the current turn and queued follow-ups."
+            }
+            .into();
             return;
         }
         if matches!(

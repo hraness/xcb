@@ -75,9 +75,11 @@ test("makes provider and tool limitations visible before installation", () => {
   expect(html).toContain("not yet a daily-driver replacement");
   expect(html).toContain("0.155.0-alpha.2.6");
   expect(html).toContain("3000.10.31");
-  expect(html).toContain("Authenticated live acceptance is pending");
+  expect(html).toContain("Authenticated read/write/read acceptance passed");
+  expect(html).toContain("tested account reached provider quota");
   expect(html).toContain("Codex and Devin task execution remains disabled pending qualification");
-  expect(html).toContain("Shell commands, tests, builds, and Git");
+  expect(html).toContain("isolated Linux runner for offline tests and builds");
+  expect(html).toContain("Installed coding-workflow acceptance is pending");
   expect(html.indexOf('id="readiness"')).toBeLessThan(html.indexOf('id="install"'));
   expect(html).toContain("./scripts/install-native.sh");
 });

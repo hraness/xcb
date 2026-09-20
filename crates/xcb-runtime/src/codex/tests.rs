@@ -476,3 +476,59 @@ fn rpc_failures_identify_operation_without_exposing_provider_secrets() {
         assert!(!error.contains("example.invalid"));
     }
 }
+
+#[test]
+fn broker_guidance_keeps_native_sandbox_read_only_and_zero_tool_launches_empty() {
+    for tools in [false, true] {
+        let mut options = codec().options;
+        options.tools = tools;
+        let protocol = CodexProtocol::new(options).unwrap();
+        let request = protocol.thread_request("Synthetic host instructions");
+        assert_eq!(request["sandbox"], "read-only");
+        assert_eq!(request["approvalPolicy"], "never");
+        assert_eq!(request["cwd"], "/synthetic/work");
+        assert_eq!(request["runtimeWorkspaceRoots"], json!([]));
+        assert_eq!(request["selectedCapabilityRoots"], json!([]));
+        assert_eq!(request["environments"], json!([]));
+        assert_eq!(request["ephemeral"], true);
+        assert_eq!(request["allowProviderModelFallback"], false);
+        assert!(
+            request["config"]["features"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|value| value == false)
+        );
+        assert_eq!(request["config"]["agents"]["enabled"], false);
+        let instructions = request["developerInstructions"].as_str().unwrap();
+        let inventory = request["dynamicTools"].as_array().unwrap();
+        if tools {
+            assert!(instructions.contains("separately bound project"));
+            assert!(instructions.contains("authorized host broker writes"));
+            assert!(instructions.contains("expectedRevision"));
+            assert!(instructions.contains("do not attempt native filesystem or shell access"));
+            let names = inventory
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                names,
+                [
+                    "workspace_exec",
+                    "workspace_list",
+                    "workspace_read",
+                    "workspace_search",
+                    "workspace_mkdir",
+                    "workspace_remove",
+                    "workspace_rename",
+                    "workspace_write"
+                ]
+                .into()
+            );
+        } else {
+            assert!(inventory.is_empty());
+            assert!(!instructions.contains("authorized host broker writes"));
+            assert!(!instructions.contains("workspace_write"));
+        }
+    }
+}

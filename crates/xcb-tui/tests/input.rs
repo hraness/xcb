@@ -419,3 +419,26 @@ fn account_picker_rechecks_disabled_or_removed_accounts_after_refresh() {
         }));
     }
 }
+
+#[test]
+fn remote_turn_cancellation_explains_ownership_in_composer_and_dialogs() {
+    for dialog in [false, true] {
+        let (tx, rx) = sync_channel(4);
+        let mut app = App::default();
+        app.view.remote_active = true;
+        app.view.state = xcb_core::session::State::Working;
+        if dialog {
+            app.modal = Some(Modal::Help);
+        }
+        app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            &tx,
+        );
+        assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
+        assert_eq!(
+            app.notice,
+            "This turn is running in another terminal; cancel it there."
+        );
+        assert_eq!(app.modal.is_some(), dialog);
+    }
+}

@@ -29,7 +29,7 @@ const repository = "https://github.com/hraness/xcb";
 const archiveUrl = publishedRelease?.archiveUrl ?? null;
 
 const heading = "Your agents. Your terminal. Your edge.";
-const footnote = "Excalibur, for short. Local-first and MIT licensed. Source preview: native Claude, Codex, and Devin candidates with restricted workspace tools. Live Codex and Devin acceptance is pending.";
+const footnote = "Excalibur, for short. Local-first and MIT licensed. Source preview: native Claude, Codex, and Devin adapters with scoped workspace tools. Codex broker acceptance passed; full command workflows remain under qualification, and the tested Devin account reached its quota.";
 
 const primitives = [
   {
@@ -213,10 +213,10 @@ Claude · selected observed model  [ working ]`}</code></pre>
           >
             <ul>
               <li><strong>Claude:</strong> native execution candidate on macOS and Linux after sign-in, binary admission, and per-run confinement checks.</li>
-              <li><strong>Codex:</strong> native app-server candidate on macOS for exact build 0.155.0-alpha.2.6, with supervised ChatGPT sign-in or explicit credential import. Authenticated live acceptance is pending.</li>
-              <li><strong>Devin:</strong> native ACP candidate on macOS for exact build 3000.10.31, with explicit credential import. Authenticated live acceptance is pending.</li>
+              <li><strong>Codex:</strong> native app-server candidate on macOS for exact build 0.155.0-alpha.2.6, with supervised ChatGPT sign-in or explicit credential import. Authenticated read/write/read acceptance passed; the command workflow is still being qualified.</li>
+              <li><strong>Devin:</strong> native ACP candidate on macOS for exact build 3000.10.31, with explicit credential import. Authenticated discovery passed; the tested account reached provider quota before a coding turn.</li>
               <li><strong>Compatibility CLI:</strong> Codex and Devin task execution remains disabled pending qualification.</li>
-              <li><strong>Workspace tools:</strong> list, read, search, write, create directories, and remove or rename regular files with revision checks. Shell commands, tests, builds, and Git still run in your own terminal.</li>
+              <li><strong>Workspace tools:</strong> list, read, search, write, create directories, and remove or rename regular files with revision checks. An isolated Linux runner for offline tests and builds, filtered Git inspection, and prepared public dependencies is being integrated and qualified. Installed coding-workflow acceptance is pending.</li>
             </ul>
             <p>A model in the catalog or a successful metadata probe does not qualify a provider. <a href="/docs#readiness">Read the current limits and source quick start</a>.</p>
           </MarketingSection>

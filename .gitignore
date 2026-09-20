@@ -22,3 +22,7 @@ site/public/theme-bootstrap.js
 # Generated local algal execution manifests; keep authored configuration visible.
 /.algal/manifests/*.json
 /site/.algal/manifests/*.json
+
+# Reproducible Python helper bytecode.
+__pycache__/
+*.py[cod]

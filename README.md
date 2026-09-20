@@ -14,16 +14,19 @@ with restricted workspace tools and explicit runtime admission.
 ## Readiness
 
 **xcb is not yet a daily-driver replacement for Codex, Claude Code, and Devin.**
-The native broker can list, read, search, and write workspace files, create
-directories, and remove or rename regular files with revision checks. It cannot
-run shell commands, tests, builds, Git, or arbitrary provider tools. Run those
-operations yourself in a separate terminal and check changes before using them.
+The native broker lists, reads, searches, and writes workspace files, creates
+directories, and removes or renames regular files with revision checks. The
+source also includes an isolated Linux command runner for tests and builds on
+macOS ARM64. Filtered Git inspection and public dependency preparation are still
+being integrated and qualified. Final installed coding-workflow acceptance is
+pending. See the [command runner contract](docs/command-runner.md) for the exact
+setup command, supported boundaries, and current limits.
 
 | Provider | Native Rust CLI | TypeScript compatibility CLI |
 | --- | --- | --- |
 | Claude | Execution candidate on macOS/Linux, after sign-in, an admitted binary, and per-run confinement checks | Execution candidate, subject to its own admission and confinement checks |
-| Codex | Native app-server execution candidate on macOS for exact build **0.155.0-alpha.2.6**; authenticated live acceptance pending | Discovery only; managed task execution gated on host qualification |
-| Devin | Native ACP execution candidate on macOS for exact build **3000.10.31**; authenticated live acceptance pending | ACP implementation exists; task execution disabled pending exact-runtime qualification |
+| Codex | Native app-server on macOS for exact build **0.155.0-alpha.2.6**; authenticated broker read/write/read acceptance passed; command workflow pending | Discovery only; managed task execution gated on host qualification |
+| Devin | Native ACP candidate on macOS for exact build **3000.10.31**; authenticated model discovery passed; tested account hit provider quota before a coding turn | ACP implementation exists; task execution disabled pending exact-runtime qualification |
 
 A successful `doctor` or a visible model does not prove a working coding session.
 Native `doctor` reports `metadata pin only` for unqualified providers. Codex and
@@ -92,9 +95,10 @@ An account, metadata pin, or model listing cannot activate an unqualified adapte
 
 ### Connect Codex on macOS
 
-Use the exact admitted **0.155.0-alpha.2.6** build. This is a native adapter
-candidate; authenticated live acceptance is still pending. xcb supervises the
-official CLI's ChatGPT device sign-in in a private profile:
+Use the exact admitted **0.155.0-alpha.2.6** build. Authenticated broker
+read/write/read acceptance passed on macOS; this does not qualify arbitrary
+provider versions or the separate application API. xcb supervises the official
+CLI's ChatGPT device sign-in in a private profile:
 
 ```sh
 xcb doctor --provider codex
@@ -120,10 +124,11 @@ process has joined.
 
 ### Connect Devin on macOS
 
-Use the exact admitted **3000.10.31** build. This is a native ACP adapter
-candidate; authenticated live acceptance is still pending. Sign in through the
-provider CLI, then explicitly select its `credentials.toml` to create a private
-xcb account:
+Use the exact admitted **3000.10.31** build. Authenticated ACP model discovery
+passed; the tested account returned quota/resource exhaustion on a real turn,
+so successful coding acceptance remains pending. xcb preserves an unknown quota
+reset as unknown. Sign in through the provider CLI, then explicitly select its
+`credentials.toml` to create a private xcb account:
 
 ```sh
 devin auth login
@@ -145,6 +150,23 @@ with `xcb models default <key>`. Select the account with
 `xcb accounts default <account>` for new interactive sessions, or pass
 `--account <account> --model <key>` to `xcb run`. Rerun `doctor` after a provider
 upgrade; a new version is not automatically admitted.
+
+### Isolated tests, builds, and Git
+
+Project commands use an explicitly provisioned Linux VM through `workspace_exec`.
+Follow the [command runner setup](docs/command-runner.md#setup-and-admission)
+from the same source checkout as the installed native CLI. Commands run offline
+against a staged workspace; host dependencies, credentials, and build products
+are excluded. Native macOS and Xcode builds are unavailable. The explicit
+[public dependency preparation frontend](docs/command-runner.md#dependencies-and-git)
+is available in source; its guest workflow still awaits installed qualification.
+
+The Git projection is limited to filtered, read-only HEAD and index data for
+status and diffs. Original history, remotes, and hooks are omitted; commit and
+push workflows are unavailable. Publication checks file revisions and replaces
+each file atomically; it is not a transaction across every changed file. Failed,
+cancelled, or uncertain command state is retained. Successfully published and
+durably settled commands remove their verified input snapshot.
 
 ### Application integration
 
@@ -170,7 +192,8 @@ xcb doctor
 xcb completions zsh > /path/to/completions/_xcb
 ```
 
-Resume opens the saved session and its workspace. `/help` lists terminal
+Resume opens the saved native session and its workspace in the interactive
+terminal; it is not a headless continuation command. `/help` lists terminal
 commands. Sessions and credentials live in the private native state root
 `~/.local/share/xcb`; `--state /absolute/path` or `XCB_STATE` overrides it.
 The compatibility CLI uses `~/.xcb` instead. Do not point both implementations
@@ -183,6 +206,13 @@ The `turn_timeout_ms` setting in the private state root's `config.json` accepts
 effective configuration. Older configurations that omit it use the default.
 Cancellation remains available before the deadline, and automatic continuation
 has its own separate limits.
+
+Each account owns at most one active provider turn. Other terminals may view
+that session, but cancellation must be requested in the terminal that owns it.
+Different accounts can run concurrently; the isolated command backend admits
+one command at a time across those accounts. Ctrl-C and SIGTERM request bounded
+cleanup for a headless run. `xcb run` reports success only for a completed,
+joined, settled idle result.
 
 Cancellation joins the owned process before releasing custody. If `doctor`
 reports an unsettled run, inspect `xcb recover` and the process state; an expired

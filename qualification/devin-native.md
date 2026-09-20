@@ -89,3 +89,36 @@ time and limit scope were not observed. Resolve the provider-side availability
 condition before repeating a bounded live acceptance check. The adapter retains
 only a fixed diagnostic category and numeric RPC code, never raw provider error
 messages or data.
+
+## Read-only quota diagnosis
+
+The runtime reports the admitted client's `-32011` code (or exact
+`resource_exhausted` error kind) as **provider quota or resource limit reached**.
+It does not infer a reset time, available balance, or per-model limit. Raw
+provider errors remain private.
+
+[Devin's self-serve billing documentation](https://docs.devin.ai/admin/billing/self-serve)
+says Pro and Teams full seats share daily and weekly quotas across CLI, Desktop
+and cloud sessions; Max has a weekly quota. Allowances refresh on a calendar
+basis. [Enterprise usage policies](https://docs.devin.ai/enterprise/features/usage-policies)
+can impose shared per-user monthly limits, independently of organization limits,
+with resets tied to the contract billing cycle. These are plan rules, not
+observations of this account's quota or reset.
+
+The opt-in `devin::wire::tests::metadata_fixture::read_only_account_metadata_under_production_profile`
+test executes only the documented `auth status` and `models list --format json`
+commands. It requires `XCB_DEVIN_METADATA_SPEC` to name a private, owned JSON
+file with absolute `state`, `executable`, and new `output` paths plus an explicit
+Devin `account` ID. Run the ignored test through the macOS native scheduler.
+It uses exclusive xcb probe custody, a disposable profile, the production
+sandbox and independent process/pipe joins. Only fixed flags, numeric quota
+fields and a small set of known model IDs can enter its receipt. A complete
+model JSON payload is not an entitlement check; empty quota fields mean
+unobserved, not zero.
+
+The [read-only metadata receipt](devin-read-only-metadata-macos-arm64.json)
+records the latest bounded observations. No inference retries, plan changes or
+purchases were made. When these commands do not expose the quota, Devin names
+[Settings > Plans or enterprise usage pages](https://docs.devin.ai/admin/billing/usage)
+as the authoritative account usage source. An available model catalog alone
+is insufficient evidence to retry a different model after a resource limit.

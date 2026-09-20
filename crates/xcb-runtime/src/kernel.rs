@@ -1021,7 +1021,14 @@ pub async fn serve(
                                     }
                                 }
                             }
-                            Intent::Cancel => { pending_pane = None; if let Some(task) = current.as_ref().and_then(|id| active.get(id)) { let _ = task.cancel.send(true); } }
+                            Intent::Cancel => {
+                                pending_pane = None;
+                                if let Some(task) = current.as_ref().and_then(|id| active.get(id)) {
+                                    let _ = task.cancel.send(true);
+                                } else if let Some(id) = &current && store.remote_active(id)? {
+                                    queue(&outbox, Update::Notice("This turn is running in another terminal; cancel it there.".into()));
+                                }
+                            }
                             Intent::Resume(id) => { if store.session(&id)?.is_none() { return Err(Error::Unavailable("session not found")); } current = Some(id); }
                             Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None)?.id),
                             Intent::Account(account) => {

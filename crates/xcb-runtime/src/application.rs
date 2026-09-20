@@ -535,7 +535,32 @@ pub async fn qualify(
     evidence_directory: &std::path::Path,
     cancel: watch::Receiver<bool>,
 ) -> std::result::Result<QualificationResponse, GenerateFailure> {
+    qualify_with_expected_generation(
+        store,
+        account_id,
+        model_key,
+        evidence_directory,
+        None,
+        cancel,
+    )
+    .await
+}
+
+/// Conditionally renew qualification only for an existing credential generation.
+/// The expected value is checked under exclusive account custody, before any
+/// provider preparation or generation/evidence publication.
+pub async fn qualify_with_expected_generation(
+    store: Arc<Store>,
+    account_id: Id,
+    model_key: String,
+    evidence_directory: &std::path::Path,
+    expected_generation: Option<&str>,
+    cancel: watch::Receiver<bool>,
+) -> std::result::Result<QualificationResponse, GenerateFailure> {
     let fail = |code| GenerateFailure::unstarted(code);
+    if let Some(expected) = expected_generation {
+        validate_expected_generation(expected).map_err(fail)?;
+    }
     let account = store
         .account(&account_id)
         .map_err(|_| fail(FailureCode::Unavailable))?;
@@ -575,8 +600,7 @@ pub async fn qualify(
     let run = store
         .prepare_probe(&account_id, Some(model.clone()), now_ms())
         .map_err(|_| fail(FailureCode::Busy))?;
-    let generation = qualification::ensure_generation(&store, &run)
-        .map_err(|_| GenerateFailure::new(FailureCode::CustodyUnproven))?;
+    let generation = qualification_generation(&store, &run, expected_generation)?;
     let binding = qualification::Binding {
         runtime_version: env!("CARGO_PKG_VERSION").into(),
         runtime_sha256: pin.host_sha256.clone(),
@@ -735,6 +759,54 @@ pub async fn qualify(
         model: model_key,
         qualification,
     })
+}
+
+/// Canonical opaque generation accepted by the host qualification command.
+pub fn validate_expected_generation(value: &str) -> std::result::Result<(), FailureCode> {
+    if value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        Ok(())
+    } else {
+        Err(FailureCode::InvalidRequest)
+    }
+}
+
+fn qualification_generation(
+    store: &Store,
+    run: &RunRecord,
+    expected: Option<&str>,
+) -> std::result::Result<qualification::CredentialGeneration, GenerateFailure> {
+    let Some(expected) = expected else {
+        return qualification::ensure_generation(store, run)
+            .map_err(|_| GenerateFailure::new(FailureCode::CustodyUnproven));
+    };
+    // This check is intentionally read-only: ensure_generation would create a
+    // new value for an absent record, which cannot satisfy conditional renewal.
+    store
+        .verify_owned_run(run)
+        .map_err(|_| GenerateFailure::new(FailureCode::CustodyUnproven))?;
+    let existing: Result<qualification::CredentialGeneration> = (|| {
+        let path = store
+            .account_root(&run.account)?
+            .join("application-generation.json");
+        let bytes = crate::private::read(&path, 1024)?;
+        let record: qualification::CredentialGeneration = serde_json::from_slice(&bytes)?;
+        if record.version != 1
+            || record.account != run.account
+            || validate_expected_generation(&record.generation).is_err()
+            || record.generation != expected
+        {
+            return Err(Error::Unavailable("credential generation does not match"));
+        }
+        Ok(record)
+    })();
+    store
+        .verify_owned_run(run)
+        .map_err(|_| GenerateFailure::new(FailureCode::CustodyUnproven))?;
+    existing.map_err(|_| settle_unstarted(store, run, &new_id("application"), false))
 }
 
 fn complete_qualification_publication(
@@ -1258,6 +1330,115 @@ mod tests {
         assert_eq!(failure.joined, Some(true));
         assert_eq!(failure.effects, Some("none"));
         assert!(unsettled.is_empty());
+    }
+
+    #[tokio::test]
+    async fn qualification_generation_rejects_malformed_input_before_account_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap());
+        for expected in [
+            "".into(),
+            "a".repeat(63),
+            "0".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+        ] {
+            let (_cancel, receiver) = watch::channel(false);
+            let outcome = qualify_with_expected_generation(
+                store.clone(),
+                Id::new("a_nonexistent").unwrap(),
+                "claude/nonexistent".into(),
+                &temp.path().join("missing-evidence"),
+                Some(&expected),
+                receiver,
+            )
+            .await;
+            let failure = outcome.err().expect("malformed generation must fail first");
+            assert_eq!(failure.code, FailureCode::InvalidRequest);
+            assert_eq!(failure.joined, Some(true));
+            assert_eq!(failure.effects, Some("none"));
+        }
+        assert!(store.accounts().unwrap().is_empty());
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert!(!store.root().join("qualification").exists());
+    }
+
+    #[test]
+    fn qualification_generation_mismatch_releases_childless_custody_without_publication() {
+        for provider in Provider::ALL {
+            for present in [false, true] {
+                let temp = tempfile::tempdir().unwrap();
+                let store =
+                    Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+                let account = store
+                    .add_account(provider, "Synthetic", "Synthetic", 1)
+                    .unwrap();
+                let path = store
+                    .account_root(&account.id)
+                    .unwrap()
+                    .join("application-generation.json");
+                let original = serde_json::to_vec(&qualification::CredentialGeneration {
+                    version: 1,
+                    account: account.id.clone(),
+                    generation: "a".repeat(64),
+                })
+                .unwrap();
+                if present {
+                    crate::private::create(&path, &original).unwrap();
+                }
+                let run = store.prepare_probe(&account.id, None, now_ms()).unwrap();
+                let failure = qualification_generation(&store, &run, Some(&"b".repeat(64)))
+                    .err()
+                    .expect("missing or changed generation must fail");
+                assert_eq!(failure.code, FailureCode::Unavailable);
+                assert_eq!(failure.joined, Some(true));
+                assert_eq!(failure.effects, Some("none"));
+                let settled = store.run(&run.id).unwrap().unwrap();
+                assert_eq!(settled.phase, "settled");
+                assert!(settled.pid.is_none(), "provider must never start");
+                assert!(store.unsettled_runs().unwrap().is_empty());
+                assert!(!store.root().join("qualification").exists());
+                if present {
+                    assert_eq!(crate::private::read(&path, 1024).unwrap(), original);
+                } else {
+                    assert!(
+                        !path.exists(),
+                        "conditional renewal must not create a generation"
+                    );
+                }
+                let next = store.prepare_probe(&account.id, None, now_ms()).unwrap();
+                store.settle(&next, State::Idle, now_ms()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn qualification_generation_match_preserves_bytes_and_exclusive_custody() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Synthetic", "Synthetic", 1)
+            .unwrap();
+        let run = store.prepare_probe(&account.id, None, now_ms()).unwrap();
+        // Unconditional callers retain legacy generation creation.
+        let initial = qualification_generation(&store, &run, None)
+            .unwrap_or_else(|_| panic!("legacy generation creation"));
+        let path = store
+            .account_root(&account.id)
+            .unwrap()
+            .join("application-generation.json");
+        let bytes = crate::private::read(&path, 1024).unwrap();
+        store.settle(&run, State::Idle, now_ms()).unwrap();
+        let guarded = store.prepare_probe(&account.id, None, now_ms()).unwrap();
+        let current = qualification_generation(&store, &guarded, Some(&initial.generation))
+            .unwrap_or_else(|_| panic!("matching generation"));
+        assert_eq!(current.generation, initial.generation);
+        assert_eq!(crate::private::read(&path, 1024).unwrap(), bytes);
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        assert!(store.prepare_probe(&account.id, None, now_ms()).is_err());
+        assert!(store.run(&guarded.id).unwrap().unwrap().pid.is_none());
+        store.settle(&guarded, State::Idle, now_ms()).unwrap();
     }
 
     #[test]

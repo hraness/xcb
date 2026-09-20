@@ -1,6 +1,8 @@
 use super::*;
 
 #[cfg(target_os = "macos")]
+mod metadata_fixture;
+#[cfg(target_os = "macos")]
 mod native_fixture;
 
 fn protocol() -> DevinProtocol {
@@ -470,4 +472,54 @@ fn prompt_failure_keeps_only_fixed_diagnostics_after_identity_check() {
             .accept(json!({"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}))
             .is_ok()
     );
+}
+
+#[test]
+fn resource_limit_failures_keep_only_fixed_diagnostics_and_exact_identity() {
+    for (code, kind) in [
+        (-32011, json!(null)),
+        (-32011, json!("untrusted-other-kind")),
+        (-32002, json!("resource_exhausted")),
+    ] {
+        let value = json!({"jsonrpc":"2.0","id":7,"error":{
+            "code":code,"message":"TLS request Bearer SYNTHETIC_SECRET /private/account/path",
+            "data":{"cognition.ai/errorKind":kind,"token":"SYNTHETIC_DATA_SECRET"}
+        }});
+        let error = protocol().accept(value.clone()).err().unwrap();
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(rendered.contains("session/prompt"));
+            assert!(rendered.contains(&code.to_string()));
+            assert!(rendered.contains("provider quota or resource limit reached"));
+            assert!(!rendered.contains("SYNTHETIC"));
+            assert!(!rendered.contains("/private/"));
+            assert!(!rendered.contains("untrusted"));
+        }
+        let mut wrong_id = value.clone();
+        wrong_id["id"] = json!(8);
+        assert!(matches!(
+            protocol().accept(wrong_id),
+            Err(Error::Protocol("Devin prompt response identity"))
+        ));
+        assert!(matches!(
+            initialization_response(&value, 8, "session/new"),
+            Err(Error::Protocol("Devin initialization response identity"))
+        ));
+    }
+    // Similar, oversized, and non-string metadata cannot claim this category.
+    for kind in [
+        json!("resource_exhausted_extra"),
+        json!("RESOURCE_EXHAUSTED"),
+        json!("resource_exhausted".repeat(1000)),
+        json!({"resource_exhausted":true}),
+    ] {
+        let value = json!({"id":2,"error":{"code":-32002,"message":"unknown","data":{"cognition.ai/errorKind":kind}}});
+        assert!(matches!(
+            initialization_response(&value, 2, "session/new"),
+            Err(Error::DevinRpc {
+                method: "session/new",
+                code: -32002,
+                category: "provider rejected the operation"
+            })
+        ));
+    }
 }

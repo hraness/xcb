@@ -57,6 +57,9 @@ enum Commands {
         model: String,
         #[arg(long, required_unless_present = "inspect", conflicts_with = "inspect")]
         evidence: Option<PathBuf>,
+        /// Renew only if this existing credential generation still matches.
+        #[arg(long, conflicts_with = "inspect", value_parser = parse_expected_generation)]
+        expected_generation: Option<String>,
         #[arg(long)]
         inspect: bool,
     },
@@ -272,6 +275,20 @@ fn run_output(session: &Id, result: &runner::Outcome) -> serde_json::Value {
     json!({"version":1,"session":session,"state":result.state,"outcome":result.facts,"text":result.text})
 }
 
+fn run_exit_code(result: &runner::Outcome) -> i32 {
+    if result.facts.terminal == Terminal::Completed
+        && result.facts.joined
+        && result.facts.effects != xcb_core::policy::EffectState::Uncertain
+        && !result.facts.pending_attention
+        && result.facts.failure.is_none()
+        && result.state == xcb_core::session::State::Idle
+    {
+        0
+    } else {
+        1
+    }
+}
+
 fn import_acknowledgement(id: &Id) -> serde_json::Value {
     json!({"version":1,"account":id,"sourcePreserved":true,"sessionsMigrated":false})
 }
@@ -457,6 +474,12 @@ async fn egress_forward(
     .await
 }
 
+fn parse_expected_generation(value: &str) -> std::result::Result<String, &'static str> {
+    xcb_runtime::application::validate_expected_generation(value)
+        .map(|()| value.to_owned())
+        .map_err(|_| "expected generation must be 64 lowercase hexadecimal characters")
+}
+
 async fn dispatch(cli: Cli) -> Result<i32> {
     process::initialize_host()?;
     // The provider's MCP helper must not open application state or emit any
@@ -487,6 +510,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         account,
         model,
         evidence,
+        expected_generation,
         inspect,
     }) = &cli.command
     {
@@ -501,6 +525,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             account.clone(),
             model.clone(),
             evidence,
+            expected_generation.as_deref(),
             cli.json,
         )
         .await;
@@ -572,8 +597,17 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 model.as_deref(),
             )?;
             let (cancel, cancelled) = watch::channel(false);
+            // Install both handlers before starting any provider. SIGTERM must
+            // use the same independent join/custody path as interactive Ctrl-C.
+            let mut interrupts =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+            let mut terminates =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
             let interrupt = tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                tokio::select! {
+                    _ = interrupts.recv() => {},
+                    _ = terminates.recv() => {},
+                }
                 let _ = cancel.send(true);
             });
             let observer: Observer = Arc::new(|event| {
@@ -598,11 +632,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             } else {
                 println!("{}", result.text);
             }
-            Ok(if result.facts.terminal == Terminal::Completed {
-                0
-            } else {
-                1
-            })
+            Ok(run_exit_code(&result))
         }
         Some(Commands::Accounts { command }) => {
             match command {
@@ -1212,7 +1242,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         }
         Some(Commands::Recover { run, yes }) => {
             if let Some(run_id) = run {
-                let (run, run_digest) = store
+                let (run, mut run_digest) = store
                     .recovery_candidate(&run_id)?
                     .ok_or(Error::Unavailable("run not found"))?;
                 let pid = run.pid.ok_or(Error::Conflict(
@@ -1227,17 +1257,24 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 if !yes {
                     if cli.json {
                         print_json(
-                            json!({"version":1,"dryRun":true,"run":run.id,"phase":run.phase,"pid":pid}),
+                            json!({"version":1,"dryRun":true,"run":run.id,"phase":run.phase,"pid":pid,"guestCommandProofRequired":run.command_custody.is_some()}),
                         )?;
                     } else {
                         println!(
-                            "Would recover run {} · phase {} · process group {}.\nRepeat with --yes to reconcile retained credentials and release custody.",
+                            "Would recover run {} · phase {} · process group {}.\nRepeat with --yes to independently verify any guest command, reconcile retained credentials and release custody. Staged command edits are never published by recovery.",
                             run.id, run.phase, pid
                         );
                     }
                     return Ok(0);
                 }
                 process::prove_process_group_absent(pid)?;
+                if run.command_custody.is_some() {
+                    xcb_runtime::command_tool::recover(&store, &run, &run_digest).await?;
+                    run_digest = store
+                        .recovery_candidate(&run_id)?
+                        .ok_or(Error::Unavailable("run not found"))?
+                        .1;
+                }
                 let settled = store.recover_run(&run_id, &run_digest, now_ms())?;
                 if cli.json {
                     print_json(
@@ -1324,6 +1361,52 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qualification_generation_flag_is_optional_canonical_and_conflicts_with_inspection() {
+        let base = [
+            "xcb",
+            "qualify-application",
+            "--account",
+            "a_fixture",
+            "--model",
+            "claude/fixture",
+        ];
+        let parse =
+            |tail: &[&str]| Cli::try_parse_from(base.into_iter().chain(tail.iter().copied()));
+        assert!(matches!(
+            parse(&["--evidence", "/private/fixture"]).unwrap().command,
+            Some(Commands::QualifyApplication {
+                expected_generation: None,
+                ..
+            })
+        ));
+        let expected = "0123456789abcdef".repeat(4);
+        assert!(matches!(
+            parse(&["--evidence", "/private/fixture", "--expected-generation", &expected]).unwrap().command,
+            Some(Commands::QualifyApplication { expected_generation: Some(value), .. }) if value == expected
+        ));
+        for invalid in [
+            "".into(),
+            "a".repeat(63),
+            "0".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+            "é".repeat(32),
+        ] {
+            assert!(
+                parse(&[
+                    "--evidence",
+                    "/private/fixture",
+                    "--expected-generation",
+                    &invalid
+                ])
+                .is_err()
+            );
+        }
+        assert!(parse(&["--inspect"]).is_ok());
+        assert!(parse(&["--inspect", "--expected-generation", &expected]).is_err());
+    }
 
     #[test]
     fn devin_import_requires_an_explicit_source_and_preserves_the_label() {
@@ -1474,6 +1557,56 @@ mod tests {
             output["outcome"],
             serde_json::to_value(&result.facts).unwrap()
         );
+    }
+
+    #[test]
+    fn headless_success_requires_completed_joined_settled_idle_outcome() {
+        use xcb_core::{
+            policy::{EffectState, Failure, TurnFacts},
+            session::State,
+        };
+        let mut result = runner::Outcome {
+            text: "Provider said done".into(),
+            facts: TurnFacts {
+                terminal: Terminal::Completed,
+                joined: true,
+                effects: EffectState::None,
+                pending_attention: false,
+                failure: None,
+            },
+            state: State::Idle,
+        };
+        for effects in [EffectState::None, EffectState::Settled] {
+            result.facts.effects = effects;
+            assert_eq!(run_exit_code(&result), 0);
+        }
+        result.facts.effects = EffectState::Uncertain;
+        assert_eq!(run_exit_code(&result), 1);
+        result.facts.effects = EffectState::None;
+        result.facts.joined = false;
+        assert_eq!(run_exit_code(&result), 1);
+        let output = run_output(&Id::new("s_unjoined").unwrap(), &result);
+        assert_eq!(output["outcome"]["joined"], false);
+        assert_eq!(output["outcome"]["terminal"], "completed");
+        result.facts.joined = true;
+        result.facts.pending_attention = true;
+        assert_eq!(run_exit_code(&result), 1);
+        result.facts.pending_attention = false;
+        result.facts.failure = Some(Failure::Unknown);
+        assert_eq!(run_exit_code(&result), 1);
+        result.facts.failure = None;
+        result.state = State::Uncertain;
+        assert_eq!(run_exit_code(&result), 1);
+        result.state = State::Idle;
+        for terminal in [
+            Terminal::Failed,
+            Terminal::Cancelled,
+            Terminal::TokenLimit,
+            Terminal::TurnLimit,
+        ] {
+            result.facts.terminal = terminal;
+            assert_eq!(run_exit_code(&result), 1);
+        }
     }
 
     #[test]

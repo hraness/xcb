@@ -38,6 +38,17 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: bun install --frozen-lockfile --ignore-scripts
       - run: bun run check
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Native helper regressions
+        run: |
+          python3 -I qualification/application-prerequisites.py --self-test
+          python3 -I scripts/application-renewal.test.py
+          python3 -I crates/xcb-runtime/src/command/test_guest.py
+          python3 -I crates/xcb-runtime/src/command/test_git_projection.py
+          python3 -I crates/xcb-runtime/src/command/test_public_cache.py
+          python3 -I scripts/prepare-command-dependencies.test.py
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 

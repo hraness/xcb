@@ -6,6 +6,8 @@ pub mod broker;
 pub mod claude;
 mod claude_protocol;
 pub mod codex;
+pub mod command;
+pub mod command_tool;
 pub mod config;
 pub mod context;
 mod coordination;

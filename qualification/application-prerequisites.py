@@ -218,14 +218,41 @@ def inspect(args):
     return value
 
 
+def test_runtime_fingerprint(name, source):
+    selected = shutil.which(name)
+    require(selected is not None and Path(selected).is_absolute(),
+            "native interoperability runtime unavailable on absolute PATH: " + name)
+    selected = Path(selected)
+    executable = selected.resolve(strict=True)
+    before = file_hash(executable)
+    record, output = run([str(executable), "--version"], source, 5, 4096)
+    require(record["exit_code"] == 0 and output.strip(),
+            "native interoperability runtime identification failed: " + name)
+    current = shutil.which(name)
+    require(current == str(selected) and selected.resolve(strict=True) == executable
+            and file_hash(executable) == before, "native interoperability runtime changed: " + name)
+    return (name, str(selected), str(executable), before, output.decode("utf-8"))
+
+
 def source_fingerprint(source, cargo):
+    # Rust's actual workspace gates also execute TypeScript lock owners through
+    # Node and Bun. Bind their source/import/config inputs as well as crates.
+    inputs = ("Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml", ".cargo", "crates",
+              "src", "package.json", "bun.lock", "bun.lockb", "package-lock.json", "npm-shrinkwrap.json",
+              "yarn.lock", "pnpm-lock.yaml", ":(glob)tsconfig*.json", "bunfig.toml",
+              "qualification/application-prerequisites.py")
     result, output = run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--",
-                          "Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml", ".cargo", "crates", "qualification/application-prerequisites.py"], source, 10, MAX_LOG)
+                          *inputs], source, 10, MAX_LOG)
     require(result["exit_code"] == 0, "cannot enumerate native source inputs")
     names = set(output.rstrip(b"\0").split(b"\0"))
-    for optional in ("rust-toolchain", "rust-toolchain.toml", ".cargo/config", ".cargo/config.toml"):
+    # Local configuration still affects execution even if ignored by Git.
+    for optional in ("rust-toolchain", "rust-toolchain.toml", ".cargo/config", ".cargo/config.toml",
+                     "package.json", "bun.lock", "bun.lockb", "package-lock.json", "npm-shrinkwrap.json",
+                     "yarn.lock", "pnpm-lock.yaml", "bunfig.toml"):
         if (source / optional).exists() or (source / optional).is_symlink():
             names.add(optional.encode())
+    for config in source.glob("tsconfig*.json"):
+        names.add(config.name.encode())
     names = sorted(names)
     require(b"Cargo.toml" in names and b"Cargo.lock" in names and 1 <= len(names) <= 10_000, "native source enumeration")
     hashes = []
@@ -240,10 +267,11 @@ def source_fingerprint(source, cargo):
         result, output = run([str(tool), "--version", "--verbose"], source, 15, MAX_JSON)
         require(result["exit_code"] == 0, "toolchain identification failed")
         toolchain.append((str(tool), file_hash(tool.resolve(strict=True)), output.decode("utf-8")))
+    runtimes = [test_runtime_fingerprint(name, source) for name in ("node", "bun")]
     # These values are hashed only, never included in public output/artifacts.
     environment = sorted((key, value) for key, value in os.environ.items()
                          if key.startswith(("CARGO_", "RUST")))
-    return sha(encoded({"files": hashes, "toolchain": toolchain, "environment": environment}))
+    return sha(encoded({"files": hashes, "toolchain": toolchain, "runtimes": runtimes, "environment": environment}))
 
 
 def required_cases(source, constant):
@@ -524,6 +552,89 @@ def self_test():
 
         def tearDown(self):
             self.temp.cleanup()
+
+        def fingerprint_fixture(self):
+            source = self.directory / "source"
+            source.mkdir()
+            tools = self.directory / "tools"
+            tools.mkdir()
+            for name in ("cargo", "rustc", "node", "bun"):
+                executable = tools / name
+                executable.write_text("#!/bin/sh\nprintf '%s\\n' 'synthetic-1.0.0'\n")
+                executable.chmod(0o700)
+            environment = {"HOME": str(self.directory), "PATH": str(tools) + ":/usr/bin:/bin",
+                           "RUSTC": str(tools / "rustc"), "CARGO_INCREMENTAL": "0",
+                           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
+            with patch.dict(os.environ, environment, clear=True):
+                record, _ = run(["git", "init", "-q"], source, 5, 4096)
+                self.assertEqual(record["exit_code"], 0)
+                for name in ("Cargo.toml", "Cargo.lock", "package.json", "bun.lock", "tsconfig.json", "bunfig.toml",
+                             "src/cli/write-coordination.ts", "src/private-file.ts"):
+                    target = source / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("synthetic initial input\n")
+                record, _ = run(["git", "add", "--", "."], source, 5, 4096)
+                self.assertEqual(record["exit_code"], 0)
+            return source, tools, environment
+
+        def test_fingerprint_tracks_actual_git_typescript_inputs(self):
+            source, tools, environment = self.fingerprint_fixture()
+            with patch.dict(os.environ, environment, clear=True):
+                before = source_fingerprint(source, tools / "cargo")
+                self.assertEqual(source_fingerprint(source, tools / "cargo"), before)
+                for name in ("src/cli/write-coordination.ts", "src/private-file.ts"):
+                    path = source / name
+                    original = path.read_bytes()
+                    path.write_bytes(original + b"changed imported code\n")
+                    self.assertNotEqual(source_fingerprint(source, tools / "cargo"), before)
+                    path.write_bytes(original)
+                (source / "src/new-import.ts").write_text("new untracked source\n")
+                self.assertNotEqual(source_fingerprint(source, tools / "cargo"), before)
+
+        def test_fingerprint_tracks_package_lock_and_ignored_local_configs(self):
+            source, tools, environment = self.fingerprint_fixture()
+            with patch.dict(os.environ, environment, clear=True):
+                before = source_fingerprint(source, tools / "cargo")
+                for name in ("package.json", "bun.lock", "tsconfig.json", "bunfig.toml"):
+                    path = source / name
+                    original = path.read_bytes()
+                    path.write_bytes(original + b"changed input\n")
+                    self.assertNotEqual(source_fingerprint(source, tools / "cargo"), before)
+                    path.write_bytes(original)
+                (source / ".gitignore").write_text("tsconfig.local.json\n")
+                (source / "tsconfig.local.json").write_text("ignored runtime configuration\n")
+                self.assertNotEqual(source_fingerprint(source, tools / "cargo"), before)
+
+        def test_fingerprint_tracks_runtime_bytes_version_and_path_selection(self):
+            source, tools, environment = self.fingerprint_fixture()
+            with patch.dict(os.environ, environment, clear=True):
+                before = source_fingerprint(source, tools / "cargo")
+                for name in ("node", "bun"):
+                    path = tools / name
+                    original = path.read_bytes()
+                    # Same --version output must not hide executable changes.
+                    path.write_bytes(original + b"# changed executable bytes\n")
+                    self.assertNotEqual(source_fingerprint(source, tools / "cargo"), before)
+                    path.write_bytes(original)
+                alternate = self.directory / "alternate"
+                alternate.mkdir()
+                (alternate / "node").write_bytes((tools / "node").read_bytes())
+                (alternate / "node").chmod(0o700)
+                os.environ["PATH"] = str(alternate) + ":" + environment["PATH"]
+                self.assertNotEqual(source_fingerprint(source, tools / "cargo"), before)
+                os.environ["PATH"] = environment["PATH"]
+                # Version output is also evidence, independent of executable bytes.
+                (tools / "node").write_text("#!/bin/sh\nprintf '%s\\n' \"${SYNTHETIC_VERSION:-one}\"\n")
+                first = source_fingerprint(source, tools / "cargo")
+                os.environ["SYNTHETIC_VERSION"] = "two"
+                self.assertNotEqual(source_fingerprint(source, tools / "cargo"), first)
+
+        def test_fingerprint_refuses_missing_required_interop_runtime(self):
+            source, tools, environment = self.fingerprint_fixture()
+            with patch.dict(os.environ, {**environment, "PATH": str(tools)}, clear=True):
+                (tools / "bun").unlink()
+                with self.assertRaisesRegex(ValueError, "runtime unavailable"):
+                    test_runtime_fingerprint("bun", source)
 
         def test_json_is_closed_against_duplicates_and_nonfinite_values(self):
             for raw in (b'{"version":1,"version":1}', b'{"value":NaN}'):

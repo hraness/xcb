@@ -106,8 +106,14 @@ pub async fn qualify_dispatch(
     account: xcb_core::Id,
     model: String,
     evidence: &Path,
+    expected_generation: Option<&str>,
     as_json: bool,
 ) -> Result<i32> {
+    if let Some(expected) = expected_generation
+        && application::validate_expected_generation(expected).is_err()
+    {
+        return failed(FailureCode::InvalidRequest);
+    }
     if !as_json || !root.exists() {
         return failed(FailureCode::Unavailable);
     }
@@ -126,7 +132,14 @@ pub async fn qualify_dispatch(
             Ok(value) => value,
             Err(_) => return failed(FailureCode::Unavailable),
         };
-    let task = application::qualify(store, account, model, evidence, receiver);
+    let task = application::qualify_with_expected_generation(
+        store,
+        account,
+        model,
+        evidence,
+        expected_generation,
+        receiver,
+    );
     tokio::pin!(task);
     let outcome = tokio::select! {
         result = &mut task => result,

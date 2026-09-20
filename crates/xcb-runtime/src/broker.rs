@@ -1,3 +1,6 @@
+pub mod git_snapshot;
+pub mod snapshot;
+
 use crate::{Error, Result, coordination, digest};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, RenameFlags};
 use serde::{Deserialize, Serialize};
@@ -548,6 +551,7 @@ impl Workspace {
 pub fn descriptors() -> Vec<Value> {
     let path = json!({"type":"string","minLength":1,"maxLength":4096});
     [
+        ("workspace_exec", "Run a bounded offline Linux command in a staged workspace, then publish successful joined changes with revision checks. Host credentials, source Git configuration/hooks/history, host dependencies and build outputs are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; Git writes are unavailable. Requires the configured isolated command runner. argv executes directly; use sh -c explicitly for shell syntax.", json!({"argv":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"string","maxLength":32768}},"cwd":path,"timeoutMs":{"type":"integer","minimum":1,"maximum":600000},"network":{"type":"string","enum":["none"]}}), vec!["argv","cwd","timeoutMs","network"]),
         ("workspace_list", "List the bound workspace directory. Use . for its root.", json!({"path":path}), vec!["path"]),
         ("workspace_read", "Read one UTF-8 file and its revision inside the workspace.", json!({"path":path}), vec!["path"]),
         ("workspace_search", "Bounded literal text search inside the workspace.", json!({"path":path,"query":{"type":"string","minLength":1,"maxLength":256}}), vec!["path","query"]),

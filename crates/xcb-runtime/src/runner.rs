@@ -1368,6 +1368,16 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
     result
 }
 
+fn combine_effects(previous: EffectState, next: EffectState) -> EffectState {
+    if previous == EffectState::Uncertain || next == EffectState::Uncertain {
+        EffectState::Uncertain
+    } else if previous == EffectState::Settled || next == EffectState::Settled {
+        EffectState::Settled
+    } else {
+        EffectState::None
+    }
+}
+
 fn settle_tool_effects(
     store: &Store,
     run: &RunRecord,
@@ -1528,6 +1538,9 @@ async fn run_prepared<P: Protocol>(
     let mut quota_failure = None;
     let mut answer = Answer::default();
     let mut thinking = String::new();
+    let workspace = Arc::new(workspace);
+    let mut commands = crate::command_tool::CommandTools::default();
+    let mut commands_joined = true;
     let execution = async {
         spawned?;
         let baseline = store
@@ -1535,7 +1548,7 @@ async fn run_prepared<P: Protocol>(
             .last()
             .map(|point| point.output_tokens)
             .unwrap_or(0);
-        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. There is no shell or arbitrary path access. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
+        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
         if !models.iter().any(|choice| {
             choice.id == session.model.id
                 && (session.model.effort.is_none() || choice.effort == session.model.effort)
@@ -1736,8 +1749,47 @@ async fn run_prepared<P: Protocol>(
                             &digest(serde_json::to_vec(&arguments)?),
                         )?;
                         observer(Progress::Tool(name.clone()));
-                        let (output, call_effects) = workspace.call_observed(&name, &arguments);
-                        settle_tool_effects(&store, &run, &call_id, call_effects, &mut effects)?;
+                        let output = if name == "workspace_exec" {
+                            match commands.start(
+                                store.clone(),
+                                run.clone(),
+                                workspace.clone(),
+                                call_id.clone(),
+                                &arguments,
+                            ) {
+                                Ok(()) => {
+                                    let command = commands.wait().await;
+                                    commands_joined &= command.joined;
+                                    effects = combine_effects(effects, command.effects);
+                                    if !command.joined {
+                                        return Err(Error::Unavailable(
+                                            "command stop is unproven; account custody retained",
+                                        ));
+                                    }
+                                    command.output
+                                }
+                                Err(error) => {
+                                    settle_tool_effects(
+                                        &store,
+                                        &run,
+                                        &call_id,
+                                        EffectState::None,
+                                        &mut effects,
+                                    )?;
+                                    Err(error)
+                                }
+                            }
+                        } else {
+                            let (output, call_effects) = workspace.call_observed(&name, &arguments);
+                            settle_tool_effects(
+                                &store,
+                                &run,
+                                &call_id,
+                                call_effects,
+                                &mut effects,
+                            )?;
+                            output
+                        };
                         let (text, failed) = match output {
                             Ok(output) => (serde_json::to_string(&output)?, false),
                             Err(error) => (error.to_string(), true),
@@ -1825,10 +1877,14 @@ async fn run_prepared<P: Protocol>(
     };
     // Cancellation drops only the execution future. Never cancel independent
     // process/listener joins or credential persistence and custody settlement.
+    if let Some(command) = commands.cancel_and_join().await {
+        commands_joined &= command.joined;
+        effects = combine_effects(effects, command.effects);
+    }
     let process_joined = process.join().await;
     let protocol_joined = protocol.shutdown().await;
     let bridge_joined = close_bridge(bridge).await;
-    let joined = process_joined && protocol_joined && bridge_joined;
+    let joined = process_joined && protocol_joined && bridge_joined && commands_joined;
     let (terminal, models, failure) = match result {
         Ok(Ok((terminal, models))) => (
             terminal,

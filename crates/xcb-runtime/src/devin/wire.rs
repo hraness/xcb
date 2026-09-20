@@ -99,7 +99,13 @@ fn initialization_response(value: &Value, id: u64, method: &'static str) -> Resu
             .collect::<String>()
             .to_ascii_lowercase();
         let contains = |words: &[&str]| words.iter().any(|word| message.contains(word));
-        let category = if contains(&["certificate", "tls", "ssl"]) {
+        // This exact code/kind is defined by the admitted Devin runtime. Do
+        // not infer a balance, reset time, or account/model scope from it.
+        let resource_limit = error["code"].as_i64() == Some(-32011)
+            || error["data"]["cognition.ai/errorKind"].as_str() == Some("resource_exhausted");
+        let category = if resource_limit {
+            "provider quota or resource limit reached"
+        } else if contains(&["certificate", "tls", "ssl"]) {
             "TLS certificate or transport failure"
         } else if contains(&[
             "unauthorized",
