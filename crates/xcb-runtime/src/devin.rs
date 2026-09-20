@@ -5,6 +5,7 @@ mod bridge;
 mod config;
 mod wire;
 
+#[cfg(target_os = "macos")]
 pub(crate) use bridge::DevinBridge;
 pub use bridge::broker_stdio;
 pub use config::{
