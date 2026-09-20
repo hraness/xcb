@@ -404,7 +404,7 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
     let view = summary::snapshot(store, None, config, now_ms())?;
     if as_json {
         return print_json(
-            json!({"version":1,"accounts":view.accounts.iter().map(|account| json!({"id":account.id,"label":account.label,"provider":account.provider,"subscription":account.subscription,"remainingPercent":account.remaining_percent,"resetsAtMs":account.resets_at_ms,"runway":account.runway,"busy":account.busy,"enabled":account.enabled})).collect::<Vec<_>>(),"estimatedPoolSeconds":view.total_runway_seconds,"measuredPools":view.runway_coverage.0,"totalPools":view.runway_coverage.1,"localOnly":true}),
+            json!({"version":1,"accounts":view.accounts.iter().map(|account| json!({"id":account.id,"label":account.label,"provider":account.provider,"subscription":account.subscription,"remainingPercent":account.remaining_percent,"resetsAtMs":account.resets_at_ms,"quotaBlockedUntilMs":account.quota_blocked_until_ms,"runway":account.runway,"busy":account.busy,"enabled":account.enabled})).collect::<Vec<_>>(),"estimatedPoolSeconds":view.total_runway_seconds,"measuredPools":view.runway_coverage.0,"totalPools":view.runway_coverage.1,"localOnly":true}),
         );
     }
     if view.accounts.is_empty() {
@@ -425,7 +425,7 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
             .map(|seconds| format!("~{:.1}h", seconds / 3600.0))
             .unwrap_or_else(|| "unmeasured".into());
         println!(
-            "{} {:<19} {:<9} {:<17} {:<12} {}{}",
+            "{} {:<19} {:<9} {:<17} {:<12} {}{}{}{}",
             if config.default_account.as_ref() == Some(&account.id) {
                 ">"
             } else {
@@ -436,7 +436,12 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
             xcb_core::display_text(&account.subscription, 24),
             remaining,
             runway,
-            if account.busy { " · busy" } else { "" }
+            if account.busy { " · busy" } else { "" },
+            if account.enabled { "" } else { " · disabled" },
+            account
+                .quota_block_label(now_ms())
+                .map(|label| format!(" · {label}"))
+                .unwrap_or_default()
         );
     }
     if let Some(seconds) = view.total_runway_seconds {

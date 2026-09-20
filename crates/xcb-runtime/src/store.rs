@@ -19,6 +19,86 @@ const MAX_ACCOUNTS: i64 = 128;
 const MAX_SESSIONS: i64 = 10_000;
 const MAX_MESSAGES: i64 = 10_000;
 
+fn generation_pool(root: &Path, account: &Account) -> Result<Option<Id>> {
+    if account.provider != Provider::Claude {
+        return Ok(None);
+    }
+    crate::application_qualification::read_generation(root, &account.id)?
+        .map(|generation| {
+            let bytes = serde_json::to_vec(&("xcb-account-quota-v1", &account.id, generation))?;
+            Ok(Id::new(format!("q_{}", digest(bytes)))?)
+        })
+        .transpose()
+}
+
+fn quotas_from(db: &Connection, pool: &Id) -> Result<Vec<QuotaPoint>> {
+    let mut query =
+        db.prepare("SELECT payload FROM quotas WHERE pool=?1 ORDER BY observed_at LIMIT 2049")?;
+    let rows = query.query_map([pool.as_str()], |row| row.get::<_, String>(0))?;
+    let mut points = Vec::new();
+    for row in rows {
+        let point: QuotaPoint = decode(&row?)?;
+        point.validate()?;
+        if &point.pool != pool {
+            return Err(Error::Conflict("stored quota pool mismatch"));
+        }
+        points.push(point);
+    }
+    if points.len() > 2048 {
+        return Err(xcb_core::Error::Limit("quota windows").into());
+    }
+    Ok(points)
+}
+
+fn blocked_until_from(
+    db: &Connection,
+    root: &Path,
+    account: &Account,
+    now: u64,
+) -> Result<Option<u64>> {
+    let Some(pool) = generation_pool(root, account)? else {
+        return Ok(None);
+    };
+    if pool != account.quota_pool {
+        return Ok(None);
+    }
+    let points = quotas_from(db, &pool)?;
+    if generation_pool(root, account)?.as_ref() != Some(&pool) {
+        return Err(Error::Conflict("account credential generation changed"));
+    }
+    Ok(xcb_core::usage::quota_blocked_until(&points, &pool, now))
+}
+
+fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
+    point.validate()?;
+    let json = serde_json::to_string(point)?;
+    let prior: Option<String> = tx
+        .query_row(
+            "SELECT payload FROM quotas WHERE pool=?1 AND window=?2 AND observed_at=?3",
+            params![
+                point.pool.as_str(),
+                point.window.as_str(),
+                sql(point.observed_at_ms)?
+            ],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if prior.as_ref().is_some_and(|old| old != &json) {
+        return Err(Error::Conflict("conflicting quota observation"));
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO quotas VALUES(?1,?2,?3,?4)",
+        params![
+            point.pool.as_str(),
+            point.window.as_str(),
+            sql(point.observed_at_ms)?,
+            json
+        ],
+    )?;
+    tx.execute("DELETE FROM quotas WHERE pool=?1 AND window=?2 AND observed_at NOT IN (SELECT observed_at FROM quotas WHERE pool=?1 AND window=?2 ORDER BY observed_at DESC LIMIT 128)", params![point.pool.as_str(), point.window.as_str()])?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Account {
@@ -660,6 +740,11 @@ impl Store {
         if !account.enabled {
             return Err(Error::Conflict("account is disabled"));
         }
+        if blocked_until_from(&tx, &self.root, &account, now)?.is_some() {
+            return Err(Error::Unavailable(
+                "account quota exhausted until its reported reset; inspect xcb accounts list or refresh account metadata",
+            ));
+        }
         session.revision = session
             .revision
             .checked_add(1)
@@ -1205,36 +1290,86 @@ impl Store {
         observations.reverse();
         Ok(observations)
     }
+    /// Legacy/unbound telemetry. Native provider observations use the owned-run
+    /// seam below so only fresh observations can acquire generation provenance.
     pub fn record_quota(&self, point: &QuotaPoint) -> Result<()> {
-        point.validate()?;
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let json = serde_json::to_string(point)?;
-        let prior: Option<String> = tx
-            .query_row(
-                "SELECT payload FROM quotas WHERE pool=?1 AND window=?2 AND observed_at=?3",
-                params![
-                    point.pool.as_str(),
-                    point.window.as_str(),
-                    sql(point.observed_at_ms)?
-                ],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if prior.as_ref().is_some_and(|old| old != &json) {
-            return Err(Error::Conflict("conflicting quota observation"));
-        }
-        tx.execute(
-            "INSERT OR IGNORE INTO quotas VALUES(?1,?2,?3,?4)",
-            params![
-                point.pool.as_str(),
-                point.window.as_str(),
-                sql(point.observed_at_ms)?,
-                json
-            ],
-        )?;
-        tx.execute("DELETE FROM quotas WHERE pool=?1 AND window=?2 AND observed_at NOT IN (SELECT observed_at FROM quotas WHERE pool=?1 AND window=?2 ORDER BY observed_at DESC LIMIT 128)", params![point.pool.as_str(), point.window.as_str()])?;
+        insert_quota(&tx, point)?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Derive the destination pool from the exact leased account, never from the
+    /// incoming point. Adoption and insertion are one transaction; old/shared
+    /// pools and their observations are preserved, not relabeled or copied.
+    pub(crate) fn record_account_quota(&self, run: &RunRecord, point: &QuotaPoint) -> Result<()> {
+        point.validate()?;
+        if point.observed_at_ms < run.created_at_ms {
+            return Err(Error::Conflict(
+                "quota observation predates its account lease",
+            ));
+        }
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.owned_run_from(&tx, run)?;
+        let payload: String = tx.query_row(
+            "SELECT payload FROM accounts WHERE id=?1",
+            [run.account.as_str()],
+            |row| row.get(0),
+        )?;
+        let mut account: Account = decode(&payload)?;
+        account.validate()?;
+        if account.id != run.account {
+            return Err(Error::Conflict("account identity changed"));
+        }
+        let pool = generation_pool(&self.root, &account)?;
+        if let Some(pool) = &pool {
+            account.quota_pool = pool.clone();
+        }
+        let mut point = point.clone();
+        point.pool = account.quota_pool.clone();
+        insert_quota(&tx, &point)?;
+        if generation_pool(&self.root, &account)? != pool {
+            return Err(Error::Conflict("account credential generation changed"));
+        }
+        self.owned_run_from(&tx, run)?;
+        if tx.execute(
+            "UPDATE accounts SET payload=?1 WHERE id=?2 AND payload=?3",
+            params![
+                serde_json::to_string(&account)?,
+                account.id.as_str(),
+                payload
+            ],
+        )? != 1
+        {
+            return Err(Error::Conflict("account identity changed"));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn quota_blocked_until(&self, id: &Id, now: u64) -> Result<Option<u64>> {
+        let db = self.db()?;
+        let payload: String = db.query_row(
+            "SELECT payload FROM accounts WHERE id=?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )?;
+        let account: Account = decode(&payload)?;
+        account.validate()?;
+        if &account.id != id {
+            return Err(Error::Conflict("account identity changed"));
+        }
+        blocked_until_from(&db, &self.root, &account, now)
+    }
+
+    pub(crate) fn require_quota_available(&self, id: &Id, now: u64) -> Result<()> {
+        if self.quota_blocked_until(id, now)?.is_some() {
+            return Err(Error::Unavailable(
+                "account quota exhausted until its reported reset; inspect xcb accounts list or refresh account metadata",
+            ));
+        }
         Ok(())
     }
     pub fn select_pane(&self, id: &Id, pane: &Id) -> Result<()> {
@@ -1386,19 +1521,7 @@ impl Store {
     }
     pub fn quotas(&self, pool: &Id) -> Result<Vec<QuotaPoint>> {
         let db = self.db()?;
-        let mut query =
-            db.prepare("SELECT payload FROM quotas WHERE pool=?1 ORDER BY observed_at LIMIT 2049")?;
-        let rows = query.query_map([pool.as_str()], |row| row.get::<_, String>(0))?;
-        let mut points = Vec::new();
-        for row in rows {
-            let point: QuotaPoint = decode(&row?)?;
-            point.validate()?;
-            points.push(point);
-        }
-        if points.len() > 2048 {
-            return Err(xcb_core::Error::Limit("quota windows").into());
-        }
-        Ok(points)
+        quotas_from(&db, pool)
     }
 }
 
@@ -1441,6 +1564,258 @@ mod tests {
             )
             .unwrap();
         run
+    }
+
+    fn quota_point(pool: &Id, window: &str, used: f64, observed: u64, reset: u64) -> QuotaPoint {
+        QuotaPoint {
+            pool: pool.clone(),
+            window: Id::new(window).unwrap(),
+            used_percent: used,
+            observed_at_ms: observed,
+            resets_at_ms: reset,
+        }
+    }
+
+    #[test]
+    fn quota_availability_adopts_only_new_observations_and_preserves_legacy_pool() {
+        let dir = root();
+        let base = dir.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Legacy", "Test", 1)
+            .unwrap();
+        let old = quota_point(&account.quota_pool, "seven_day", 100.0, 2, 9_000_000);
+        store.record_quota(&old).unwrap();
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 500_000).unwrap(),
+            None
+        );
+        assert!(
+            !store
+                .account_root(&account.id)
+                .unwrap()
+                .join("application-generation.json")
+                .exists()
+        );
+        let run = store.prepare_probe(&account.id, None, 3).unwrap();
+        // Missing generations stay unbound; quota observation never creates one.
+        store
+            .record_account_quota(
+                &run,
+                &quota_point(&account.quota_pool, "five_hour", 100.0, 3, 2_000_000),
+            )
+            .unwrap();
+        assert_eq!(
+            store.account(&account.id).unwrap().quota_pool,
+            account.quota_pool
+        );
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 500_000).unwrap(),
+            None
+        );
+        crate::application_qualification::ensure_generation(&store, &run).unwrap();
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 500_000).unwrap(),
+            None
+        );
+        store
+            .record_account_quota(
+                &run,
+                &quota_point(&account.quota_pool, "five_hour", 25.0, 4, 2_000_000),
+            )
+            .unwrap();
+        let pool = store.account(&account.id).unwrap().quota_pool;
+        assert_ne!(pool, account.quota_pool);
+        assert_eq!(store.quotas(&pool).unwrap().len(), 1);
+        assert_eq!(store.quotas(&account.quota_pool).unwrap().len(), 2);
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 500_000).unwrap(),
+            None
+        );
+        store.settle(&run, State::Idle, 5).unwrap();
+    }
+
+    #[test]
+    fn quota_availability_rechecks_at_lease_acquisition_and_summary_keeps_stale_block() {
+        let dir = root();
+        let base = dir.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Claude, "A", "Test", 1).unwrap();
+        let session = store
+            .create_session(&account.id, choice(), &base.join("work"), 2)
+            .unwrap();
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 500_000).unwrap(),
+            None
+        );
+        // Another terminal records exhaustion between preflight and prepare_run.
+        let other = Store::open(store.root()).unwrap();
+        let run = other.prepare_probe(&account.id, None, 3).unwrap();
+        crate::application_qualification::ensure_generation(&other, &run).unwrap();
+        other
+            .record_account_quota(
+                &run,
+                &quota_point(&account.quota_pool, "seven_day", 100.0, 3, 9_000_000),
+            )
+            .unwrap();
+        other
+            .record_account_quota(
+                &run,
+                &quota_point(&account.quota_pool, "five_hour", 50.0, 499_999, 2_000_000),
+            )
+            .unwrap();
+        other.settle(&run, State::Idle, 500_000).unwrap();
+        assert!(
+            store
+                .prepare_run(&session.id, session.revision, 500_000)
+                .is_err()
+        );
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert_eq!(
+            store.session(&session.id).unwrap().unwrap().revision,
+            session.revision
+        );
+        let view =
+            crate::summary::snapshot(&store, None, &crate::config::Config::default(), 500_000)
+                .unwrap();
+        assert_eq!(view.accounts[0].remaining_percent, Some(50.0));
+        assert_eq!(view.accounts[0].quota_blocked_until_ms, Some(9_000_000));
+        let probe = store.prepare_probe(&account.id, None, 500_001).unwrap();
+        store
+            .record_account_quota(
+                &probe,
+                &quota_point(&account.quota_pool, "seven_day", 5.0, 500_001, 10_000_000),
+            )
+            .unwrap();
+        store.settle(&probe, State::Idle, 500_002).unwrap();
+        let turn = store
+            .prepare_run(&session.id, session.revision, 500_003)
+            .unwrap();
+        store.settle(&turn, State::Idle, 500_004).unwrap();
+    }
+
+    #[test]
+    fn quota_availability_recording_requires_exact_owned_live_lease() {
+        let dir = root();
+        let base = dir.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Claude, "A", "Test", 1).unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        crate::application_qualification::ensure_generation(&store, &run).unwrap();
+        let point = quota_point(&account.quota_pool, "five_hour", 100.0, 3, 1000);
+        assert!(
+            store
+                .record_account_quota(
+                    &run,
+                    &quota_point(&account.quota_pool, "five_hour", 100.0, 1, 1000)
+                )
+                .is_err()
+        );
+        let foreign = Store::open(store.root()).unwrap();
+        assert!(foreign.record_account_quota(&run, &point).is_err());
+        let mut forged = run.clone();
+        forged.revision += 1;
+        assert!(store.record_account_quota(&forged, &point).is_err());
+        assert_eq!(
+            store.account(&account.id).unwrap().quota_pool,
+            account.quota_pool
+        );
+        store.record_account_quota(&run, &point).unwrap();
+        let pool = store.account(&account.id).unwrap().quota_pool;
+        let mut conflict = point.clone();
+        conflict.used_percent = 10.0;
+        assert!(store.record_account_quota(&run, &conflict).is_err());
+        assert_eq!(store.quotas(&pool).unwrap().len(), 1);
+        store.settle(&run, State::Idle, 4).unwrap();
+        assert!(store.record_account_quota(&run, &point).is_err());
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 5).unwrap(),
+            Some(1000)
+        );
+        assert_eq!(store.quota_blocked_until(&account.id, 1000).unwrap(), None);
+    }
+
+    #[test]
+    fn quota_availability_generation_rotation_invalidates_without_copying_history() {
+        let dir = root();
+        let base = dir.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Claude, "A", "Test", 1).unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        let generation = crate::application_qualification::ensure_generation(&store, &run).unwrap();
+        store
+            .record_account_quota(
+                &run,
+                &quota_point(&account.quota_pool, "five_hour", 100.0, 3, 1000),
+            )
+            .unwrap();
+        let old_pool = store.account(&account.id).unwrap().quota_pool;
+        assert_eq!(
+            crate::application_qualification::ensure_generation(&store, &run)
+                .unwrap()
+                .generation,
+            generation.generation
+        );
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 4).unwrap(),
+            Some(1000)
+        );
+        store.settle(&run, State::Idle, 4).unwrap();
+        let run = store.prepare_probe(&account.id, None, 4).unwrap();
+        crate::application_qualification::rotate_generation(&store, &run).unwrap();
+        assert_eq!(store.quota_blocked_until(&account.id, 4).unwrap(), None);
+        assert_eq!(store.account(&account.id).unwrap().quota_pool, old_pool);
+        store
+            .record_account_quota(&run, &quota_point(&old_pool, "five_hour", 20.0, 4, 1000))
+            .unwrap();
+        assert_ne!(store.account(&account.id).unwrap().quota_pool, old_pool);
+        assert_eq!(store.quotas(&old_pool).unwrap()[0].used_percent, 100.0);
+        assert_eq!(store.quota_blocked_until(&account.id, 5).unwrap(), None);
+        store.settle(&run, State::Idle, 6).unwrap();
+    }
+
+    #[test]
+    fn quota_availability_rejects_bad_generation_and_does_not_infer_other_scopes() {
+        let dir = root();
+        let base = dir.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        for provider in Provider::ALL {
+            let account = store.add_account(provider, "A", "Test", 1).unwrap();
+            let run = store.prepare_probe(&account.id, None, 2).unwrap();
+            crate::application_qualification::ensure_generation(&store, &run).unwrap();
+            let window = if provider == Provider::Claude {
+                "seven_day_opus"
+            } else {
+                "five_hour"
+            };
+            store
+                .record_account_quota(
+                    &run,
+                    &quota_point(&account.quota_pool, window, 100.0, 3, 1000),
+                )
+                .unwrap();
+            assert_eq!(store.quota_blocked_until(&account.id, 4).unwrap(), None);
+            let path = store
+                .account_root(&account.id)
+                .unwrap()
+                .join("application-generation.json");
+            let original = private::read(&path, 1024).unwrap();
+            private::replace(&path, b"{}", &digest(original)).unwrap();
+            if provider == Provider::Claude {
+                assert!(store.quota_blocked_until(&account.id, 4).is_err());
+                assert!(
+                    store
+                        .record_account_quota(
+                            &run,
+                            &quota_point(&account.quota_pool, "five_hour", 100.0, 4, 1000)
+                        )
+                        .is_err()
+                );
+            } else {
+                assert_eq!(store.quota_blocked_until(&account.id, 4).unwrap(), None);
+            }
+            store.settle(&run, State::Idle, 5).unwrap();
+        }
     }
 
     #[test]

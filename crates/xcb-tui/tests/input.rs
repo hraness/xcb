@@ -336,6 +336,7 @@ fn picker_account(
         subscription: "subscription".into(),
         remaining_percent: None,
         resets_at_ms: None,
+        quota_blocked_until_ms: None,
         runway: xcb_core::usage::Estimate::Unknown {
             reason: "unknown".into(),
         },
@@ -441,4 +442,37 @@ fn remote_turn_cancellation_explains_ownership_in_composer_and_dialogs() {
         );
         assert_eq!(app.modal.is_some(), dialog);
     }
+}
+
+#[test]
+fn known_quota_block_repaints_and_labels_account_even_when_usage_is_stale() {
+    let (tx, _rx) = sync_channel(2);
+    let mut app = App::default();
+    let mut view = xcb_core::ui::View {
+        accounts: vec![picker_account("limited", xcb_core::Provider::Claude, true)],
+        ..xcb_core::ui::View::default()
+    };
+    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view.clone()))));
+    assert!(app.take_dirty());
+    view.accounts[0].quota_blocked_until_ms = Some(u64::MAX);
+    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view.clone()))));
+    assert!(
+        app.take_dirty(),
+        "known exhaustion must repaint without fresh usage"
+    );
+    app.composer.set_text("/accounts");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let Some(Modal::Picker { items, .. }) = &app.modal else {
+        panic!("account picker")
+    };
+    assert!(items[0].label.contains("quota limited"));
+    assert!(items[0].label.contains("retry in"));
+    assert!(!items[0].label.contains("quota unknown"));
+    app.take_dirty();
+    view.accounts[0].quota_blocked_until_ms = None;
+    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view))));
+    assert!(
+        app.take_dirty(),
+        "reset expiration must repaint without a usage sample"
+    );
 }

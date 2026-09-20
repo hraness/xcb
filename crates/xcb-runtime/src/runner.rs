@@ -863,7 +863,11 @@ async fn probe_codex(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<V
                 .read_quotas(&mut process, &store.account(account)?.quota_pool)
                 .await?
             {
-                store.record_quota(&point)?;
+                store.record_account_quota(
+                    run.as_ref()
+                        .ok_or(Error::Conflict("quota probe has no lease"))?,
+                    &point,
+                )?;
             }
         }
         Ok(models)
@@ -1347,7 +1351,7 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
                 }
                 Err(Error::Protocol("usage frame limit"))
             }).await.map_err(|_| Error::Unavailable("usage query timed out"))??;
-            for point in parse_quotas(&response, &store.account(account)?.quota_pool, now_ms())? { store.record_quota(&point)?; }
+            for point in parse_quotas(&response, &store.account(account)?.quota_pool, now_ms())? { store.record_account_quota(run.as_ref().ok_or(Error::Conflict("quota probe has no lease"))?, &point)?; }
         }
         Ok::<_, Error>(models)
     }.await;
@@ -1730,7 +1734,7 @@ async fn run_prepared<P: Protocol>(
                                 resets_at_ms,
                             };
                             if point.validate().is_ok() {
-                                store.record_quota(&point)?;
+                                store.record_account_quota(&run, &point)?;
                             }
                         }
                     }

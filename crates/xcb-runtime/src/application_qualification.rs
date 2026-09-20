@@ -628,6 +628,31 @@ fn verify_prerequisites_verified(
     })
 }
 
+/// Read the opaque auth generation without creating it or taking a Store lock.
+/// `account` comes from a validated account row; the filesystem-only signature is
+/// safe inside the Store's account-lease transaction. Missing legacy state is
+/// unknown, while malformed or unsafe state remains an error.
+pub(crate) fn read_generation(root: &Path, account: &Id) -> Result<Option<String>> {
+    let mut reader = Reader::default();
+    let accounts = root.join("accounts");
+    let directory = accounts.join(account.as_str());
+    for path in [root, accounts.as_path(), directory.as_path()] {
+        reader.directory(path)?;
+    }
+    let bytes = match reader.read(&directory.join("application-generation.json"), 1024) {
+        Ok(bytes) => bytes,
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            reader.finish()?;
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let record: CredentialGeneration = serde_json::from_slice(&bytes)?;
+    require(record.version == 1 && &record.account == account && sha256(&record.generation))?;
+    reader.finish()?;
+    Ok(Some(record.generation))
+}
+
 /// Called only by trusted qualification after reserving this account. Existing
 /// generation bytes are returned unchanged; legacy creation is a durable effect.
 pub(crate) fn ensure_generation(
@@ -700,6 +725,41 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn quota_availability_generation_reader_validates_parents_without_creation() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = private::directory(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let accounts = private::directory(&root.join("accounts")).unwrap();
+        let account = Id::new("synthetic").unwrap();
+        let directory = private::directory(&accounts.join(account.as_str())).unwrap();
+        assert_eq!(read_generation(&root, &account).unwrap(), None);
+        assert!(!directory.join("application-generation.json").exists());
+        let record = CredentialGeneration {
+            version: 1,
+            account: account.clone(),
+            generation: "a".repeat(64),
+        };
+        private::create(
+            &directory.join("application-generation.json"),
+            &serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            read_generation(&root, &account).unwrap(),
+            Some(record.generation)
+        );
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(read_generation(&root, &account).is_err());
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let moved = accounts.join("moved");
+        fs::rename(&directory, &moved).unwrap();
+        symlink(&moved, &directory).unwrap();
+        assert!(read_generation(&root, &account).is_err());
+        fs::remove_file(&directory).unwrap();
+        assert!(read_generation(&root, &account).is_err());
+        assert!(!directory.exists());
+    }
 
     const NOW: u64 = 1_900_000_000_000;
 

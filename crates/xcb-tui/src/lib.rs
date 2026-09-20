@@ -74,11 +74,22 @@ struct SessionDraft {
 /// Bound on remembered per-session drafts; the least recently used is evicted.
 const MAX_DRAFT_SESSIONS: usize = 64;
 
+fn display_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 /// Fingerprint of the rendered parts of a `View`. Used to skip repaints when a
 /// refresh publishes a snapshot identical to what is already on screen. Only
 /// fields the renderer reads participate; messages are append-only in the
 /// store, so the transcript is identified by its tail.
 fn fingerprint(view: &View) -> u64 {
+    fingerprint_at(view, display_now_ms())
+}
+
+fn fingerprint_at(view: &View, now: u64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (view.state as u8).hash(&mut hasher);
@@ -116,6 +127,9 @@ fn fingerprint(view: &View) -> u64 {
             .map(f64::to_bits)
             .hash(&mut hasher);
         account.resets_at_ms.hash(&mut hasher);
+        account.quota_blocked_until_ms.hash(&mut hasher);
+        // Retry estimates repaint only when their displayed minute changes.
+        account.quota_block_label(now).hash(&mut hasher);
         match &account.runway {
             Estimate::Known { seconds } => seconds.to_bits().hash(&mut hasher),
             Estimate::Unknown { reason } => reason.hash(&mut hasher),
@@ -383,7 +397,7 @@ impl App {
             "/default" => self.send(output, Intent::SetDefault),
             "/model" | "/models" if arguments.is_empty() => self.picker("Models · fixed, Adaptive, and Fusion", self.view.models.iter().map(|choice| PickItem { label: format!("{} · {}{} · {:?}", choice.provider, choice.label, choice.resolved.as_ref().map(|resolved| format!(" → {resolved}")).unwrap_or_default(), choice.mode), action: PickAction::Model(choice.key()) }).collect()),
             "/model" => self.send(output, Intent::Model(arguments.into())),
-            "/accounts" => self.picker("Accounts · select an account", self.view.accounts.iter().map(|account| PickItem { label: format!("{} · {} · {} · {}{}{}", account.label, account.provider, account.subscription, account.remaining_percent.map(|percent| format!("{percent:.0}% left")).unwrap_or_else(|| "quota unknown".into()), if account.busy { " · busy" } else { "" }, if account.enabled { "" } else { " · disabled" }), action: PickAction::Account(account.id.clone()) }).collect()),
+            "/accounts" => self.picker("Accounts · select an account", self.view.accounts.iter().map(|account| PickItem { label: format!("{} · {} · {} · {}{}{}", account.label, account.provider, account.subscription, account.quota_block_label(display_now_ms()).unwrap_or_else(|| account.remaining_percent.map(|percent| format!("{percent:.0}% left")).unwrap_or_else(|| "quota unknown".into())), if account.busy { " · busy" } else { "" }, if account.enabled { "" } else { " · disabled" }), action: PickAction::Account(account.id.clone()) }).collect()),
             "/sessions" => self.picker("Sessions", self.view.sessions.iter().map(|session| PickItem { label: format!("{} · {} · {}", session.title, session.model.label, session.state.label()), action: PickAction::Session(session.id.clone()) }).collect()),
             "/pane" if arguments.is_empty() => {
                 let mut items: Vec<_> = self.view.panes.iter().map(|pane| PickItem { label: format!("{} · {}", pane.id, pane.title), action: PickAction::Pane(pane.id.clone()) }).collect();
@@ -828,4 +842,36 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod quota_display_tests {
+    use super::*;
+
+    #[test]
+    fn idle_quota_countdown_repaints_at_the_displayed_minute_boundary() {
+        let mut view = View {
+            accounts: vec![xcb_core::ui::AccountRow {
+                id: xcb_core::Id::new("limited").unwrap(),
+                provider: xcb_core::Provider::Claude,
+                label: "Limited".into(),
+                subscription: "Max".into(),
+                remaining_percent: None,
+                resets_at_ms: None,
+                quota_blocked_until_ms: Some(600_000),
+                runway: Estimate::unknown("stale"),
+                busy: false,
+                enabled: true,
+            }],
+            ..View::default()
+        };
+        assert_eq!(fingerprint_at(&view, 0), fingerprint_at(&view, 59_999));
+        assert_ne!(fingerprint_at(&view, 59_999), fingerprint_at(&view, 60_000));
+        assert_ne!(
+            fingerprint_at(&view, 599_999),
+            fingerprint_at(&view, 600_000)
+        );
+        view.accounts[0].quota_blocked_until_ms = None;
+        assert_eq!(fingerprint_at(&view, 0), fingerprint_at(&view, u64::MAX));
+    }
 }
