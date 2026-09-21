@@ -44,6 +44,19 @@ fn clean(text: &str) -> String {
     display_text(text, 256 * 1024)
 }
 
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Compact elapsed time for the working badge: `12s`, `3m 7s`, `1h 4m`.
+fn elapsed_label(seconds: u64) -> String {
+    if seconds >= 3600 {
+        format!("{}h {}m", seconds / 3600, seconds % 3600 / 60)
+    } else if seconds >= 60 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     let area = frame.area();
     if area.width < 24 || area.height < 7 {
@@ -76,16 +89,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         .and_then(|session| std::path::Path::new(&session.workspace).file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "local workspace".into());
-    let rate = app
-        .view
-        .tokens_per_second
-        .map(|rate| format!("{rate:.1} tok/s"))
-        .unwrap_or_else(|| "usage: unmeasured".into());
-    let rate = app
-        .view
-        .share_percent
-        .map(|share| format!("{rate} · {share:.0}% local"))
-        .unwrap_or(rate);
+    // Header stays quiet until throughput is actually measured.
+    let rate = match (app.view.tokens_per_second, app.view.share_percent) {
+        (Some(rate), Some(share)) => format!("{rate:.1} tok/s · {share:.0}% local"),
+        (Some(rate), None) => format!("{rate:.1} tok/s"),
+        (None, Some(share)) => format!("{share:.0}% local"),
+        (None, None) => String::new(),
+    };
     let header = Layout::horizontal([
         Constraint::Min(8),
         Constraint::Length((rate.len() as u16).min(area.width / 2)),
@@ -167,29 +177,41 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         } else if app.view.state == State::Working {
             "Type a follow-up while the agent works"
         } else {
-            "Message, /model, /accounts, /pane · Ctrl-V pastes images"
+            "Message · / for commands · Ctrl-V pastes"
         });
     frame.render_widget(&app.composer.textarea, parts[4]);
     if let Some((matches, selected)) = app.slash_menu() {
         render_slash_menu(frame, &matches, selected, parts[4]);
     }
-    let mut color = status_color(app.view.state);
-    if app.view.state.attention() && !app.view.reduced_motion && (ticks / 16).is_multiple_of(2) {
-        color = Color::LightYellow;
-    }
     // A live run owned by a sibling terminal is normal parallel work, not a
     // session needing recovery.
-    let status = if app.view.remote_active {
-        format!(
-            " {} running in another terminal ",
-            status_symbol(State::Working)
-        )
+    let badge_state = if app.view.remote_active {
+        State::Working
     } else {
-        format!(
-            " {} {} ",
-            status_symbol(app.view.state),
-            app.view.state.label()
-        )
+        app.view.state
+    };
+    let mut color = status_color(badge_state);
+    if badge_state.attention() && !app.view.reduced_motion && (ticks / 16).is_multiple_of(2) {
+        color = Color::LightYellow;
+    }
+    let status = if matches!(badge_state, State::Working) {
+        let elapsed = app
+            .working_since
+            .map(|since| elapsed_label(since.elapsed().as_secs()))
+            .unwrap_or_else(|| "0s".into());
+        let frame = if app.view.reduced_motion {
+            "●"
+        } else {
+            SPINNER[(ticks / 3) as usize % SPINNER.len()]
+        };
+        let label = if app.view.remote_active {
+            "working elsewhere"
+        } else {
+            "Working"
+        };
+        format!(" {frame} {label} · {elapsed} ")
+    } else {
+        format!(" {} {} ", status_symbol(badge_state), badge_state.label())
     };
     let footer = Layout::horizontal([
         Constraint::Min(0),
@@ -228,6 +250,30 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     );
     if let Some(modal) = &mut app.modal {
         render_modal(frame, modal, area);
+    }
+}
+
+/// A completed tool call renders as a compact `• name` cell so the transcript
+/// narrates the work; Ctrl-U expands the first lines of its output inline.
+fn render_tool_turn(lines: &mut Vec<Line<'static>>, text: &str, expanded: bool) {
+    let (name, output) = text.split_once(": ").unwrap_or((text, ""));
+    lines.push(Line::from(vec![
+        Span::styled("• ", muted()),
+        Span::styled(clean(name), Style::default().add_modifier(Modifier::BOLD)),
+    ]));
+    if !expanded {
+        return;
+    }
+    let output: Vec<String> = clean(output)
+        .lines()
+        .take(9)
+        .map(|line| display_text(line, 160))
+        .collect();
+    for line in output.iter().take(8) {
+        lines.push(Line::from(Span::styled(format!("  {line}"), muted())));
+    }
+    if output.len() > 8 {
+        lines.push(Line::from(Span::styled("  …", muted())));
     }
 }
 
@@ -451,7 +497,9 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
                         );
                         lines.push(Line::default());
                     }
-                    Role::Tool | Role::System => (),
+                    // A finished tool call is a compact cell in the story.
+                    Role::Tool => render_tool_turn(&mut lines, &message.text, app.show_activity),
+                    Role::System => (),
                 }
             }
             for (text, attachments) in app.pending_echoes() {
@@ -475,6 +523,29 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
                         .lines()
                         .map(|line| Line::from(line.to_owned())),
                 );
+            }
+            // Tools started but not yet persisted keep narrating the turn at
+            // the tail until their result cell lands — but only while a run
+            // is live; stale activity stays hidden behind Ctrl-U's detail.
+            // `activity` only lists the current run's calls, so count this
+            // turn's settled cells.
+            if matches!(app.view.state, State::Working) || app.view.remote_active {
+                let turn_start = messages
+                    .iter()
+                    .rposition(|message| message.role == Role::User)
+                    .map(|index| index + 1)
+                    .unwrap_or(0);
+                let settled = messages[turn_start..]
+                    .iter()
+                    .filter(|message| message.role == Role::Tool)
+                    .count();
+                for name in app.view.activity.iter().skip(settled) {
+                    lines.push(Line::from(vec![
+                        Span::styled("• ", muted()),
+                        Span::raw(clean(name)),
+                        Span::styled(" …", muted()),
+                    ]));
+                }
             }
             if lines.len() == 1 {
                 lines.push(Line::from(Span::styled(
@@ -735,8 +806,8 @@ fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, area: Rect) {
                     [
                         "Enter send · Alt/Shift-Enter or Ctrl-J newline",
                         "Ctrl-V paste text/image · Alt-Backspace remove last attachment",
-                        "PageUp pause/older · PageDown newer · End follow newest",
-                        "Ctrl-T thinking · Ctrl-O history · Ctrl-U tools",
+                        "Wheel/PageUp older · PageDown newer · End follows newest",
+                        "Ctrl-T thinking · Ctrl-O history · Ctrl-U tool output",
                         "Ctrl-P models · Ctrl-R prompt history · Ctrl-G editor",
                         "Esc stops the running turn · Esc also closes dialogs and the / menu",
                         "Ctrl-C stops a live turn, clears a draft, quits when idle · Ctrl-D quits on empty",

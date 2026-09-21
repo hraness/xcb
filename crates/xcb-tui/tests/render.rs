@@ -219,7 +219,7 @@ fn a_run_owned_by_another_terminal_is_not_rendered_as_recovery() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(contents.contains("running in another terminal"));
+    assert!(contents.contains("working elsewhere"));
     assert!(!contents.contains("needs recovery"));
 
     // The same session without a live owner still reports recovery.
@@ -442,4 +442,138 @@ fn a_submitted_prompt_echoes_in_the_transcript_immediately() {
         .collect();
     assert!(contents.contains("You"));
     assert!(contents.contains("ship the fix"));
+}
+
+#[test]
+fn tool_calls_render_as_compact_cells_and_expand_on_ctrl_u() {
+    let mut app = app();
+    app.view.pane = Pane::focus();
+    app.view.messages = vec![
+        Message {
+            id: Id::new("u1").unwrap(),
+            role: Role::User,
+            text: "run it".into(),
+            at_ms: 1,
+            attachments: vec![],
+            provenance: None,
+        },
+        Message {
+            id: Id::new("t1").unwrap(),
+            role: Role::Tool,
+            text: "workspace_exec: {\"stdout\":\"hi there\"}".into(),
+            at_ms: 2,
+            attachments: vec![],
+            provenance: None,
+        },
+        Message {
+            id: Id::new("a1").unwrap(),
+            role: Role::Assistant,
+            text: "done".into(),
+            at_ms: 3,
+            attachments: vec![],
+            provenance: None,
+        },
+    ];
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    // Collapsed: the call narrates the turn without dumping its output.
+    assert!(contents.contains("workspace_exec"));
+    assert!(!contents.contains("hi there"));
+
+    app.show_activity = true;
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(contents.contains("hi there"));
+}
+
+#[test]
+fn a_tool_in_flight_shows_at_the_tail_until_its_cell_lands() {
+    let mut app = app();
+    app.view.state = State::Working;
+    app.view.session.as_mut().unwrap().state = State::Working;
+    app.view.messages = vec![
+        Message {
+            id: Id::new("u1").unwrap(),
+            role: Role::User,
+            text: "run it".into(),
+            at_ms: 1,
+            attachments: vec![],
+            provenance: None,
+        },
+        Message {
+            id: Id::new("t1").unwrap(),
+            role: Role::Tool,
+            text: "workspace_exec: ok".into(),
+            at_ms: 2,
+            attachments: vec![],
+            provenance: None,
+        },
+    ];
+    app.view.activity = vec!["workspace_exec".into(), "workspace_write".into()];
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    // The settled call renders once; only the still-running call trails.
+    assert!(contents.contains("workspace_exec"));
+    assert!(contents.contains("workspace_write …"));
+    assert!(!contents.contains("workspace_exec …"));
+}
+
+#[test]
+fn the_working_badge_shows_elapsed_time_and_respects_reduced_motion() {
+    let mut app = app();
+    app.view.state = State::Working;
+    app.view.session.as_mut().unwrap().state = State::Working;
+    app.working_since = Some(std::time::Instant::now() - std::time::Duration::from_millis(90_500));
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(contents.contains("Working · 1m 30s"));
+    assert!(!contents.contains("unmeasured"));
+
+    app.view.reduced_motion = true;
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(contents.contains("● Working · 1m 30s"));
 }
