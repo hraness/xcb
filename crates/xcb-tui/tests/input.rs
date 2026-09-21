@@ -477,3 +477,95 @@ fn known_quota_block_repaints_and_labels_account_even_when_usage_is_stale() {
         "reset expiration must repaint without a usage sample"
     );
 }
+
+#[test]
+fn slash_typeahead_lists_navigates_and_runs_commands() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = App::default();
+
+    // A bare "/" lists the whole registry; a prefix narrows it.
+    app.composer.set_text("/");
+    let (matches, selected) = app.slash_menu().expect("menu for bare /");
+    assert_eq!(selected, 0);
+    assert_eq!(matches.len(), xcb_tui::SLASH_COMMANDS.len());
+    app.composer.set_text("/se");
+    let (matches, _) = app.slash_menu().unwrap();
+    assert_eq!(matches[0].name, "/sessions");
+
+    // Enter runs the highlighted argument-free command through the real
+    // dispatch path: /sessions opens the session picker.
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(
+        matches!(app.modal, Some(Modal::Picker { .. })),
+        "sessions picker"
+    );
+    assert!(app.composer.text().is_empty());
+    app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        &tx,
+    );
+    assert!(app.modal.is_none());
+    assert!(rx.try_recv().is_err());
+
+    // Arrow keys and Ctrl-N/P wrap through the matches.
+    app.composer.set_text("/");
+    picker_key(&mut app, &tx, KeyCode::Up);
+    let (matches, selected) = app.slash_menu().unwrap();
+    assert_eq!(selected, matches.len() - 1);
+    let count = matches.len();
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL)),
+        &tx
+    ));
+    assert_eq!(app.slash_menu().unwrap().1, 0);
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+        &tx
+    ));
+    assert_eq!(app.slash_menu().unwrap().1, count - 1);
+
+    // Tab completes argument-requiring commands and closes the menu.
+    app.composer.set_text("/at");
+    picker_key(&mut app, &tx, KeyCode::Tab);
+    assert_eq!(app.composer.text(), "/attach ");
+    assert!(app.slash_menu().is_none());
+
+    // Esc hides the menu without canceling the run; editing reopens it.
+    app.composer.set_text("/re");
+    assert!(app.slash_menu().is_some());
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert!(app.slash_menu().is_none());
+    assert!(rx.try_recv().is_err());
+    picker_key(&mut app, &tx, KeyCode::Char('l'));
+    assert_eq!(app.composer.text(), "/rel");
+    assert!(app.slash_menu().is_some());
+
+    // Typing a space closes the menu; Enter then submits arguments normally.
+    picker_key(&mut app, &tx, KeyCode::Char(' '));
+    assert!(app.slash_menu().is_none());
+}
+
+#[test]
+fn slash_typeahead_runs_quit_and_ignores_unknown_commands() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = App::default();
+    app.composer.set_text("/qu");
+    assert!(
+        !app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &tx
+        ),
+        "/quit exits the event loop"
+    );
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Quit)));
+
+    let mut app = App::default();
+    app.composer.set_text("/zzz");
+    assert!(app.slash_menu().is_none());
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &tx
+    ));
+    assert!(app.notice.contains("Unknown command"));
+    assert!(rx.try_recv().is_err());
+}

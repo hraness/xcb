@@ -170,6 +170,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
             "Message, /model, /accounts, /pane · Ctrl-V pastes images"
         });
     frame.render_widget(&app.composer.textarea, parts[4]);
+    if let Some((matches, selected)) = app.slash_menu() {
+        render_slash_menu(frame, &matches, selected, parts[4]);
+    }
     let mut color = status_color(app.view.state);
     if app.view.state.attention() && !app.view.reduced_motion && (ticks / 16).is_multiple_of(2) {
         color = Color::LightYellow;
@@ -567,6 +570,54 @@ fn modal_area(area: Rect) -> Rect {
     )
 }
 
+/// Slash-command typeahead: a compact popup anchored above the composer that
+/// lists matching commands with their usage and summary.
+fn render_slash_menu(
+    frame: &mut Frame<'_>,
+    matches: &[&crate::SlashCommand],
+    selected: usize,
+    composer: Rect,
+) {
+    let height = (matches.len() as u16 + 2).min(10).min(composer.y);
+    if height < 3 {
+        return;
+    }
+    let area = Rect::new(
+        composer.x,
+        composer.y - height,
+        composer.width.min(64),
+        height,
+    );
+    frame.render_widget(Clear, area);
+    let items: Vec<_> = matches
+        .iter()
+        .map(|command| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{} {}", command.name, command.args)
+                        .trim_end()
+                        .to_owned(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  {}", command.summary), muted()),
+            ]))
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(Some(selected));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(
+                Block::bordered()
+                    .title(" commands ")
+                    .title_bottom(" ↑↓ choose · Tab completes · Enter runs · Esc hides "),
+            )
+            .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+            .highlight_symbol("› "),
+        area,
+        &mut state,
+    );
+}
+
 fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, area: Rect) {
     let area = modal_area(area);
     frame.render_widget(Clear, area);
@@ -587,7 +638,10 @@ fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, area: Rect) {
                         "Ctrl-P models · Ctrl-R prompt history · Ctrl-G editor",
                         "Ctrl-C cancels the running turn — even inside dialogs · Esc closes them",
                         "Ctrl-D quits when the draft is empty",
+                        "Pickers: ↑↓ or Ctrl-P/N move · PgUp/PgDn page · Home/End ends",
+                        "Ctrl-U clears the filter · Enter selects · Esc closes",
                         "",
+                        "Type / for the command menu — arrows choose, Tab completes, Enter runs.",
                         "/model · /accounts · /sessions · /new · /default",
                         "/pane [edit|generate …] · /attach <path>",
                         "/plugin <name> on|off · /reload · /quit",
