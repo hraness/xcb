@@ -685,3 +685,109 @@ fn ctrl_c_cancels_a_live_turn_then_clears_a_draft_then_quits() {
     assert!(app.notice.is_empty());
     assert!(rx.try_recv().is_err());
 }
+
+#[test]
+fn single_letter_aliases_dispatch_the_full_command() {
+    // /m opens the model picker; /m <query> quick-switches the model.
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    app.composer.set_text("/m");
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &tx
+    ));
+    assert!(matches!(app.modal, Some(Modal::Picker { .. })));
+    app.modal = None;
+    app.composer.set_text("/m sonnet");
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &tx
+    ));
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Model(query)) if query == "sonnet"));
+
+    // /a opens the account picker.
+    app.view.accounts = vec![picker_account("only", xcb_core::Provider::Claude, true)];
+    app.composer.set_text("/a");
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &tx
+    ));
+    match &app.modal {
+        Some(Modal::Picker { title, .. }) => assert!(title.contains("Accounts")),
+        _ => panic!("account picker"),
+    }
+    app.modal = None;
+
+    // /q quits.
+    app.composer.set_text("/q");
+    assert!(!app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &tx
+    ));
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Quit)));
+
+    // /s opens the session picker.
+    let (tx, _rx) = sync_channel(4);
+    let mut app = App::default();
+    app.composer.set_text("/s");
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &tx
+    ));
+    match &app.modal {
+        Some(Modal::Picker { title, .. }) => assert_eq!(title, "Sessions"),
+        _ => panic!("session picker"),
+    }
+}
+
+#[test]
+fn the_wheel_scrolls_the_transcript_never_the_composer() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    app.composer.set_text("a draft the wheel must not touch");
+    let wheel = |kind| {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    assert!(app.handle(wheel(MouseEventKind::ScrollUp), &tx));
+    assert!(app.paused.get(), "wheel up pauses the transcript");
+    assert_eq!(app.composer.text(), "a draft the wheel must not touch");
+    assert!(app.handle(wheel(MouseEventKind::ScrollDown), &tx));
+    assert!(!app.paused.get(), "wheel back to the tail resumes follow");
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn the_wheel_moves_picker_selection() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+    let (tx, _rx) = sync_channel(4);
+    let mut app = App::default();
+    app.view.accounts = (0..6)
+        .map(|index| picker_account(&format!("acct{index}"), xcb_core::Provider::Claude, true))
+        .collect();
+    app.composer.set_text("/a");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let wheel = |kind| {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    assert!(app.handle(wheel(MouseEventKind::ScrollDown), &tx));
+    match &app.modal {
+        Some(Modal::Picker { selected, .. }) => assert_eq!(*selected, 3),
+        _ => panic!("picker open"),
+    }
+    assert!(app.handle(wheel(MouseEventKind::ScrollUp), &tx));
+    match &app.modal {
+        Some(Modal::Picker { selected, .. }) => assert_eq!(*selected, 0),
+        _ => panic!("picker open"),
+    }
+}

@@ -207,12 +207,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
             )
         })
         .or_else(|| {
-            app.view.pending_route.as_ref().map(|route| {
-                format!(
-                    "{} · {} · {} · ? help",
-                    route.provider, route.model, route.account
-                )
-            })
+            app.view
+                .pending_route
+                .as_ref()
+                .map(|route| format!("{} · {} · ? help", route.model, route.account))
         })
         .unwrap_or_else(|| "Choose an account with /accounts · ? help".into());
     frame.render_widget(
@@ -325,7 +323,7 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
             };
             lines.push(Line::from(Span::styled(
                 if app.paused.get() {
-                    format!("{heading} · ↑ paused · End follows")
+                    format!("↑ paused · End follows · {heading}")
                 } else {
                     heading.into()
                 },
@@ -362,44 +360,104 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
         }
         Source::Responses => {
             let heading = if app.show_history {
-                "▾ Responses · Ctrl-O collapses history"
+                "▾ Transcript · Ctrl-O collapses history"
             } else {
-                "▸ Earlier responses · Ctrl-O expands"
+                "▸ Transcript · Ctrl-O expands history"
             };
+            // The paused marker leads so terminal width cannot truncate it.
             lines.push(Line::from(Span::styled(
                 if app.paused.get() {
-                    format!("{heading} · ↑ paused · End follows")
+                    format!("↑ paused · End follows · {heading}")
                 } else {
                     heading.into()
                 },
                 muted(),
             )));
-            let responses: Vec<_> = app
-                .view
-                .messages
-                .iter()
-                .filter(|message| message.role == Role::Assistant)
-                .collect();
-            let selected = if app.show_history {
-                responses.as_slice()
+            let messages = &app.view.messages;
+            // Collapsed shows the latest turn: everything since the last user
+            // message, or the trailing message when no prompt exists yet.
+            let start = if app.show_history {
+                0
             } else {
-                &responses[responses.len().saturating_sub(1)..]
+                messages
+                    .iter()
+                    .rposition(|message| message.role == Role::User)
+                    .unwrap_or_else(|| messages.len().saturating_sub(1))
+                    .min(messages.len())
             };
             let mut previous: Option<&xcb_core::session::MessageProvenance> = None;
-            for message in selected {
-                if let Some(provenance) = message.provenance.as_ref() {
-                    let label = provenance.boundary_label(previous);
-                    if !label.is_empty() {
-                        lines.push(Line::from(Span::styled(label, muted())));
+            for message in &messages[start..] {
+                match message.role {
+                    Role::User => {
+                        lines.push(Line::from(Span::styled(
+                            "You",
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        )));
+                        lines.extend(
+                            clean(&message.text)
+                                .lines()
+                                .map(|line| Line::from(line.to_owned())),
+                        );
+                        if !message.attachments.is_empty() {
+                            lines.push(Line::from(Span::styled(
+                                format!("{} attached image(s)", message.attachments.len()),
+                                muted(),
+                            )));
+                        }
+                        lines.push(Line::default());
                     }
-                    previous = Some(provenance);
+                    // Reasoning always precedes the response it produced and
+                    // shares the transcript's boundary tracking.
+                    Role::Thinking => {
+                        if let Some(provenance) = message.provenance.as_ref() {
+                            let label = provenance.boundary_label(previous);
+                            if !label.is_empty() {
+                                lines.push(Line::from(Span::styled(label, muted())));
+                            }
+                            previous = Some(provenance);
+                        }
+                        if app.show_thinking {
+                            lines.push(Line::from(Span::styled("▾ thinking", muted())));
+                            lines.extend(
+                                clean(&message.text)
+                                    .lines()
+                                    .map(|line| Line::from(Span::styled(line.to_owned(), muted()))),
+                            );
+                        } else {
+                            lines.push(Line::from(Span::styled("▸ thinking", muted())));
+                        }
+                    }
+                    Role::Assistant => {
+                        if let Some(provenance) = message.provenance.as_ref() {
+                            let label = provenance.boundary_label(previous);
+                            if !label.is_empty() {
+                                lines.push(Line::from(Span::styled(label, muted())));
+                            }
+                            previous = Some(provenance);
+                        }
+                        lines.extend(
+                            clean(&message.text)
+                                .lines()
+                                .map(|line| Line::from(line.to_owned())),
+                        );
+                        lines.push(Line::default());
+                    }
+                    Role::Tool | Role::System => (),
                 }
-                lines.extend(
-                    clean(&message.text)
-                        .lines()
-                        .map(|line| Line::from(line.to_owned())),
-                );
-                lines.push(Line::default());
+            }
+            if !app.thinking.is_empty() {
+                if app.show_thinking {
+                    lines.push(Line::from(Span::styled("▾ thinking", muted())));
+                    lines.extend(
+                        clean(&app.thinking)
+                            .lines()
+                            .map(|line| Line::from(Span::styled(line.to_owned(), muted()))),
+                    );
+                } else {
+                    lines.push(Line::from(Span::styled("▸ thinking", muted())));
+                }
             }
             if !app.stream.is_empty() {
                 lines.extend(
@@ -408,7 +466,7 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
                         .map(|line| Line::from(line.to_owned())),
                 );
             }
-            if selected.is_empty() && app.stream.is_empty() {
+            if lines.len() == 1 {
                 lines.push(Line::from(Span::styled(
                     "/help for commands · /pane to change this view",
                     muted(),
@@ -538,14 +596,33 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
             );
         }
     }
-    let scroll = if matches!(source, Source::Responses | Source::Thinking) {
-        let width = area.width.max(1) as usize;
-        let content_height: usize = lines
+    if matches!(source, Source::Responses | Source::Thinking) {
+        // The heading row stays pinned; only the body scrolls, so the paused
+        // marker is always visible no matter where the viewport sits.
+        let empty = [Line::default()];
+        let (heading, body) = match lines.split_first() {
+            Some((heading, body)) => (heading.clone(), body),
+            None => (Line::default(), &empty[..]),
+        };
+        frame.render_widget(
+            Paragraph::new(Text::from(vec![heading])),
+            Rect { height: 1, ..area },
+        );
+        let body_area = Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            ..area
+        };
+        if body_area.height == 0 {
+            return;
+        }
+        let width = body_area.width.max(1) as usize;
+        let content_height: usize = body
             .iter()
             .map(|line| line.width().max(1).div_ceil(width))
             .sum();
-        let tail =
-            u32::try_from(content_height.saturating_sub(area.height as usize)).unwrap_or(u32::MAX);
+        let tail = u32::try_from(content_height.saturating_sub(body_area.height as usize))
+            .unwrap_or(u32::MAX);
         // While paused the viewport stays on the absolute line index in
         // `scroll`; a growing tail cannot drift it. Otherwise it follows.
         let top = if app.paused.get() {
@@ -555,16 +632,18 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
         };
         app.scroll_top.set(app.scroll_top.get().max(top));
         app.scroll_tail.set(app.scroll_tail.get().max(tail));
-        u16::try_from(top).unwrap_or(u16::MAX)
+        frame.render_widget(
+            Paragraph::new(Text::from(body.to_vec()))
+                .wrap(Wrap { trim: false })
+                .scroll((u16::try_from(top).unwrap_or(u16::MAX), 0)),
+            body_area,
+        );
     } else {
-        0
-    };
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        area,
-    );
+        frame.render_widget(
+            Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+            area,
+        );
+    }
 }
 
 fn modal_area(area: Rect) -> Rect {
@@ -600,6 +679,11 @@ fn render_slash_menu(
     let items: Vec<_> = matches
         .iter()
         .map(|command| {
+            let summary = if command.alias.is_empty() {
+                format!("  {}", command.summary)
+            } else {
+                format!("  {} · {}", command.alias, command.summary)
+            };
             ListItem::new(Line::from(vec![
                 Span::styled(
                     format!("{} {}", command.name, command.args)
@@ -607,7 +691,7 @@ fn render_slash_menu(
                         .to_owned(),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("  {}", command.summary), muted()),
+                Span::styled(summary, muted()),
             ]))
         })
         .collect();
@@ -650,9 +734,9 @@ fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, area: Rect) {
                         "Ctrl-U clears the filter · Enter selects · Esc closes",
                         "",
                         "Type / for the command menu — arrows choose, Tab completes, Enter runs.",
-                        "/model · /accounts · /sessions · /new · /default",
-                        "/pane [edit|generate …] · /attach <path>",
-                        "/plugin <name> on|off · /reload · /quit",
+                        "/model /m · /accounts /a · /sessions /s · /new /n · /pane /p",
+                        "/pane [edit|generate …] · /attach <path> · /default /d · /help /h",
+                        "/plugin <name> on|off · /reload /r · /quit /q · /exit /e",
                     ]
                     .join("\n"),
                 )
