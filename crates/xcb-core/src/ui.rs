@@ -10,7 +10,10 @@ use crate::{
 pub struct AccountRow {
     pub id: Id,
     pub provider: Provider,
-    pub label: String,
+    /// Fixed display identity: the provider account email once observed,
+    /// otherwise `provider/<id prefix>`. Never a user-authored label.
+    pub name: String,
+    pub email: Option<String>,
     pub subscription: String,
     pub remaining_percent: Option<f64>,
     pub resets_at_ms: Option<u64>,
@@ -26,7 +29,9 @@ impl AccountRow {
     pub fn quota_block_label(&self, now: u64) -> Option<String> {
         let until = self.quota_blocked_until_ms.filter(|until| *until > now)?;
         let minutes = (until - now).div_ceil(60_000);
-        let wait = if minutes >= 60 {
+        let wait = if minutes >= 60 * 24 {
+            format!("{}d", minutes / (60 * 24))
+        } else if minutes >= 60 {
             format!("{}h {}m", minutes / 60, minutes % 60)
         } else {
             format!("{minutes}m")

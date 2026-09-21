@@ -80,6 +80,9 @@ pub(crate) struct CodexProtocol {
     prompt: Option<Value>,
     settings: Option<Value>,
     settings_count: u8,
+    /// Provider-reported account identity observed during `account/read`.
+    observed_email: Option<String>,
+    observed_plan: Option<String>,
 }
 
 fn require(ok: bool, reason: &'static str) -> Result<()> {
@@ -317,11 +320,6 @@ fn quota_windows(
 
 pub fn parse_quotas(value: &Value, pool: &Id, observed: u64) -> Result<Vec<QuotaPoint>> {
     object(value)?;
-    if value["ordinaryUsageAllowed"] == false {
-        return Err(Error::Unavailable(
-            "Codex reports included usage unavailable; inspect account limits",
-        ));
-    }
     let mut points = Vec::new();
     if let Some(buckets) = value["rateLimitsByLimitId"].as_object() {
         require(buckets.len() <= 64, "Codex quota bucket bound")?;
@@ -345,6 +343,14 @@ pub fn parse_quotas(value: &Value, pool: &Id, observed: u64) -> Result<Vec<Quota
         points.iter().all(|p| seen.insert(p.window.clone())),
         "Codex duplicate quota window",
     )?;
+    // A denied account still reports truthful bucket levels: record them so the
+    // display shows 0% remaining plus the reset instead of "unmeasured". Only
+    // when no usable window data exists is the report genuinely unavailable.
+    if points.is_empty() && value["ordinaryUsageAllowed"] == false {
+        return Err(Error::Unavailable(
+            "Codex reports included usage unavailable; inspect account limits",
+        ));
+    }
     Ok(points)
 }
 
@@ -432,6 +438,8 @@ impl CodexProtocol {
             prompt: None,
             settings: None,
             settings_count: 0,
+            observed_email: None,
+            observed_plan: None,
         })
     }
     fn envelope(&mut self, bytes: &[u8]) -> Result<Value> {
@@ -1127,6 +1135,10 @@ impl Protocol for CodexProtocol {
     fn refreshes_catalog(&self) -> bool {
         self.options.metadata_only
     }
+    /// The email/plan the provider reported for the connected account, if any.
+    fn account_identity(&self) -> (Option<String>, Option<String>) {
+        (self.observed_email.clone(), self.observed_plan.clone())
+    }
     async fn next(&mut self, process: &mut StreamProcess) -> Result<Batch> {
         let frame = process
             .frame_bounded(WIRE_FRAME_BYTES)
@@ -1168,6 +1180,27 @@ impl Protocol for CodexProtocol {
             account["requiresOpenaiAuth"] == true,
             "Codex authentication provider changed",
         )?;
+        // The signed-in account's own email/plan: bounded, optional, and only
+        // ever the display identity — never credential material.
+        self.observed_email = account["account"]["email"]
+            .as_str()
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 320
+                    && value.contains('@')
+                    && !value.chars().any(char::is_control)
+                    && value.trim() == *value
+            })
+            .map(str::to_owned);
+        self.observed_plan = account["account"]["planType"]
+            .as_str()
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 64
+                    && !value.chars().any(char::is_control)
+                    && value.trim() == *value
+            })
+            .map(|value| format!("ChatGPT {value}"));
         if !self.options.metadata_only {
             require(
                 account["account"]["type"] == "chatgpt",

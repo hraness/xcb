@@ -66,6 +66,12 @@ pub(crate) trait Protocol: Send {
         true
     }
 
+    /// Provider-reported account identity observed during initialization:
+    /// `(email, plan)`. Display metadata only — never credential material.
+    fn account_identity(&self) -> (Option<String>, Option<String>) {
+        (None, None)
+    }
+
     fn next(&mut self, process: &mut StreamProcess) -> impl Future<Output = Result<Batch>> + Send {
         async move {
             let frame = process.frame().await?.ok_or(crate::Error::Protocol(

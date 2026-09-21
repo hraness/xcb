@@ -174,9 +174,10 @@ enum UpdateCommand {
 
 #[derive(Subcommand)]
 enum AccountCommand {
+    /// Add an account. Its name is fixed: the provider account email once
+    /// observed, otherwise `provider/<id>` — there are no custom labels.
     Add {
         provider: Provider,
-        label: String,
         #[arg(long, default_value = "Subscription")]
         plan: String,
     },
@@ -201,21 +202,15 @@ enum AccountCommand {
     ImportAgentmixer {
         #[arg(long)]
         source: PathBuf,
-        #[arg(long, default_value = "AgentMixer account")]
-        label: String,
     },
     ImportCodex {
         #[arg(long)]
         source: PathBuf,
-        #[arg(long, default_value = "Codex account")]
-        label: String,
     },
     /// Copy one existing Devin sign-in into a private xcb account.
     ImportDevin {
         #[arg(long)]
         source: PathBuf,
-        #[arg(long, default_value = "Devin account")]
-        label: String,
     },
 }
 #[derive(Subcommand)]
@@ -351,7 +346,8 @@ async fn broker_stdio() -> Result<i32> {
 struct PublicAccount<'a> {
     id: &'a Id,
     provider: Provider,
-    label: &'a str,
+    name: String,
+    email: Option<&'a str>,
     subscription: &'a str,
     enabled: bool,
 }
@@ -360,7 +356,8 @@ impl<'a> From<&'a xcb_runtime::store::Account> for PublicAccount<'a> {
         Self {
             id: &record.id,
             provider: record.provider,
-            label: &record.label,
+            name: record.name(),
+            email: record.email.as_deref(),
             subscription: &record.subscription,
             enabled: record.enabled,
         }
@@ -371,7 +368,7 @@ impl PublicAccount<'_> {
     fn added_message(&self) -> String {
         let added = format!(
             "Added {} ({}) · {}",
-            xcb_core::display_text(self.label, 80),
+            xcb_core::display_text(&self.name, 80),
             self.provider,
             self.id
         );
@@ -442,42 +439,62 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
     let view = summary::snapshot(store, None, config, now_ms())?;
     if as_json {
         return print_json(
-            json!({"version":1,"accounts":view.accounts.iter().map(|account| json!({"id":account.id,"label":account.label,"provider":account.provider,"subscription":account.subscription,"remainingPercent":account.remaining_percent,"resetsAtMs":account.resets_at_ms,"quotaBlockedUntilMs":account.quota_blocked_until_ms,"runway":account.runway,"busy":account.busy,"enabled":account.enabled})).collect::<Vec<_>>(),"estimatedPoolSeconds":view.total_runway_seconds,"measuredPools":view.runway_coverage.0,"totalPools":view.runway_coverage.1,"localOnly":true}),
+            json!({"version":1,"accounts":view.accounts.iter().map(|account| json!({"id":account.id,"name":account.name,"email":account.email,"provider":account.provider,"subscription":account.subscription,"remainingPercent":account.remaining_percent,"resetsAtMs":account.resets_at_ms,"quotaBlockedUntilMs":account.quota_blocked_until_ms,"runway":account.runway,"busy":account.busy,"enabled":account.enabled})).collect::<Vec<_>>(),"estimatedPoolSeconds":view.total_runway_seconds,"measuredPools":view.runway_coverage.0,"totalPools":view.runway_coverage.1,"localOnly":true}),
         );
     }
     if view.accounts.is_empty() {
         println!(
-            "No accounts yet.\n\nxcb accounts add claude personal --plan Max\nxcb doctor --provider claude\nxcb accounts login personal\nxcb accounts refresh personal"
+            "No accounts yet.\n\nxcb accounts add claude --plan Max\nxcb doctor --provider claude\nxcb accounts login <account>\nxcb accounts refresh <account>"
         );
         return Ok(());
     }
-    println!("  ACCOUNT             PROVIDER  PLAN              REMAINING    EST. RUNWAY");
+    println!(
+        "  ACCOUNT                             PROVIDER  PLAN                REMAINING              EST. RUNWAY"
+    );
+    let now = now_ms();
     for account in view.accounts {
+        let reset = account
+            .resets_at_ms
+            .filter(|at| *at > now)
+            .map(|at| {
+                let minutes = (at - now).div_ceil(60_000);
+                if minutes >= 60 * 24 {
+                    format!(" · resets in ~{}d", minutes / (60 * 24))
+                } else if minutes >= 60 {
+                    format!(" · resets in ~{}h{}m", minutes / 60, minutes % 60)
+                } else {
+                    format!(" · resets in ~{minutes}m")
+                }
+            })
+            .unwrap_or_default();
         let remaining = account
             .remaining_percent
-            .map(|percent| format!("{percent:.0}%"))
-            .unwrap_or_else(|| "unknown".into());
+            .map(|percent| format!("{percent:.0}% left{reset}"))
+            .unwrap_or_else(|| "unmeasured".into());
         let runway = account
             .runway
             .seconds()
             .map(|seconds| format!("~{:.1}h", seconds / 3600.0))
             .unwrap_or_else(|| "unmeasured".into());
+        // codeql[rust/cleartext-logging]: the account name is the user's own
+        // provider email rendered as the account's display identity, which is
+        // the documented purpose of this local status table.
         println!(
-            "{} {:<19} {:<9} {:<17} {:<12} {}{}{}{}",
+            "{} {:<35} {:<9} {:<19} {:<22} {}{}{}{}",
             if config.default_account.as_ref() == Some(&account.id) {
                 ">"
             } else {
                 " "
             },
-            xcb_core::display_text(&account.label, 32),
+            xcb_core::display_text(&account.name, 35),
             account.provider,
-            xcb_core::display_text(&account.subscription, 24),
+            xcb_core::display_text(&account.subscription, 19),
             remaining,
             runway,
             if account.busy { " · busy" } else { "" },
             if account.enabled { "" } else { " · disabled" },
             account
-                .quota_block_label(now_ms())
+                .quota_block_label(now)
                 .map(|label| format!(" · {label}"))
                 .unwrap_or_default()
         );
@@ -689,12 +706,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         Some(Commands::Accounts { command }) => {
             match command {
                 None => accounts(&store, &config, cli.json)?,
-                Some(AccountCommand::Add {
-                    provider,
-                    label,
-                    plan,
-                }) => {
-                    let account = store.add_account(provider, &label, &plan, now_ms())?;
+                Some(AccountCommand::Add { provider, plan }) => {
+                    let account = store.add_account(provider, &plan, now_ms(), None)?;
                     let (mut config, revision) = Config::load(store.root())?;
                     if config.default_account.is_none() {
                         config.default_account = Some(account.id.clone());
@@ -742,9 +755,13 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     if cli.json {
                         print_json(json!({"version":1,"account":account.id,"stored":true}))?;
                     } else {
+                        // codeql[rust/cleartext-logging]: the account name is
+                        // the user's own provider email, intentionally shown as
+                        // the account's display identity after sign-in.
                         println!(
                             "Sign-in completed for {}. Run xcb accounts refresh {} to refresh available account metadata.",
-                            account.label, account.id
+                            account.name(),
+                            account.id
                         );
                     }
                 }
@@ -777,7 +794,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     } else {
                         println!(
                             "Credential stored for {}",
-                            xcb_core::display_text(&account.label, 80)
+                            xcb_core::display_text(&account.name(), 80)
                         );
                     }
                 }
@@ -806,10 +823,10 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     store.set_models(account.provider, &models)?;
                     accounts(&store, &config, cli.json)?;
                 }
-                Some(AccountCommand::ImportAgentmixer { source, label }) => {
+                Some(AccountCommand::ImportAgentmixer { source }) => {
                     // This is a generated public routing ID, never a credential
                     // or an internal account record.
-                    let id: Id = auth::import_agentmixer_token(&store, &source, &label)?;
+                    let id: Id = auth::import_agentmixer_token(&store, &source)?;
                     if cli.json {
                         print_json(import_acknowledgement(&id))?;
                     } else {
@@ -818,8 +835,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         );
                     }
                 }
-                Some(AccountCommand::ImportCodex { source, label }) => {
-                    let id = auth::import_codex_account(&store, &source, &label)?;
+                Some(AccountCommand::ImportCodex { source }) => {
+                    let id = auth::import_codex_account(&store, &source)?;
                     if cli.json {
                         print_json(import_acknowledgement(&id))?;
                     } else {
@@ -828,8 +845,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         );
                     }
                 }
-                Some(AccountCommand::ImportDevin { source, label }) => {
-                    let id = xcb_runtime::devin::auth::import_account(&store, &source, &label)?;
+                Some(AccountCommand::ImportDevin { source }) => {
+                    let id = xcb_runtime::devin::auth::import_account(&store, &source)?;
                     if cli.json {
                         print_json(import_acknowledgement(&id))?;
                     } else {
@@ -1550,21 +1567,23 @@ mod tests {
     }
 
     #[test]
-    fn devin_import_requires_an_explicit_source_and_preserves_the_label() {
+    fn devin_import_requires_an_explicit_source() {
         let cli = Cli::try_parse_from([
             "xcb",
             "accounts",
             "import-devin",
             "--source",
             "/private/source/credentials.toml",
-            "--label",
-            "Work account",
         ])
         .unwrap();
         assert!(matches!(cli.command, Some(Commands::Accounts {
-            command: Some(AccountCommand::ImportDevin { source, label }),
-        }) if source == std::path::Path::new("/private/source/credentials.toml") && label == "Work account"));
+            command: Some(AccountCommand::ImportDevin { source }),
+        }) if source == std::path::Path::new("/private/source/credentials.toml")));
         assert!(Cli::try_parse_from(["xcb", "accounts", "import-devin"]).is_err());
+        assert!(
+            Cli::try_parse_from(["xcb", "accounts", "import-devin", "--label", "Work account"])
+                .is_err()
+        );
         assert!(
             Cli::try_parse_from(["xcb", "accounts", "import-devin", "--token", "synthetic"])
                 .is_err()
@@ -1577,7 +1596,8 @@ mod tests {
         let account = PublicAccount {
             id: &id,
             provider: Provider::Devin,
-            label: "Work",
+            name: "devin/a_devin".into(),
+            email: None,
             subscription: "Subscription",
             enabled: true,
         };
@@ -1596,10 +1616,10 @@ mod tests {
             .join(xcb_runtime::new_id("xcb_cli").as_str());
         let store = Store::open(&directory).unwrap();
         let devin = store
-            .add_account(Provider::Devin, "Work", "Subscription", now_ms())
+            .add_account(Provider::Devin, "Subscription", now_ms(), None)
             .unwrap();
         let claude = store
-            .add_account(Provider::Claude, "Other", "Subscription", now_ms())
+            .add_account(Provider::Claude, "Subscription", now_ms(), None)
             .unwrap();
         assert!(catalog_account(&store, Provider::Devin, None, false).is_err());
         assert!(catalog_account(&store, Provider::Devin, Some(devin.id.as_str()), false).is_err());
@@ -1630,24 +1650,26 @@ mod tests {
     }
 
     #[test]
-    fn codex_import_requires_an_explicit_source_and_preserves_the_label() {
+    fn codex_import_requires_an_explicit_source() {
         let cli = Cli::try_parse_from([
             "xcb",
             "accounts",
             "import-codex",
             "--source",
             "/private/source/auth.json",
-            "--label",
-            "Work account",
         ])
         .unwrap();
         assert!(matches!(
             cli.command,
             Some(Commands::Accounts {
-                command: Some(AccountCommand::ImportCodex { source, label }),
-            }) if source == std::path::Path::new("/private/source/auth.json") && label == "Work account"
+                command: Some(AccountCommand::ImportCodex { source }),
+            }) if source == std::path::Path::new("/private/source/auth.json")
         ));
         assert!(Cli::try_parse_from(["xcb", "accounts", "import-codex"]).is_err());
+        assert!(
+            Cli::try_parse_from(["xcb", "accounts", "import-codex", "--label", "Work account"])
+                .is_err()
+        );
     }
 
     #[test]
@@ -1755,7 +1777,8 @@ mod tests {
         let account = PublicAccount {
             id: &Id::new("a_codex").unwrap(),
             provider: Provider::Codex,
-            label: "Work",
+            name: "codex/a_codex".into(),
+            email: None,
             subscription: "Pro",
             enabled: true,
         };
@@ -1771,7 +1794,8 @@ mod tests {
         let record = xcb_runtime::store::Account {
             id: Id::new("a_0123456789abcdef0123456789abcdef").unwrap(),
             provider: Provider::Claude,
-            label: "Personal".into(),
+            label: "claude/a_01234567".into(),
+            email: Some("user@example.com".into()),
             subscription: "Max".into(),
             quota_pool: Id::new("private-custody-pool").unwrap(),
             enabled: true,
@@ -1783,7 +1807,8 @@ mod tests {
             json!({
                 "id": "a_0123456789abcdef0123456789abcdef",
                 "provider": "claude",
-                "label": "Personal",
+                "name": "user@example.com",
+                "email": "user@example.com",
                 "subscription": "Max",
                 "enabled": true,
             })
@@ -1794,11 +1819,12 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_labels_keep_distinct_public_ids_and_copyable_login_commands() {
+    fn accounts_with_shared_email_keep_distinct_public_ids_and_login_commands() {
         let first = xcb_runtime::store::Account {
             id: Id::new("a_0123456789abcdef0123456789abcdef").unwrap(),
             provider: Provider::Claude,
-            label: "Personal".into(),
+            label: "claude/a_01234567".into(),
+            email: None,
             subscription: "Max".into(),
             quota_pool: Id::new("private-custody-pool").unwrap(),
             enabled: true,
@@ -1811,10 +1837,12 @@ mod tests {
         let first_output = PublicAccount::from(&first).added_message();
         let second_output = PublicAccount::from(&second).added_message();
         assert!(
-            first_output.contains("Added Personal (claude) · a_0123456789abcdef0123456789abcdef")
+            first_output
+                .contains("Added claude/a_01234567 (claude) · a_0123456789abcdef0123456789abcdef")
         );
         assert!(
-            second_output.contains("Added Personal (claude) · a_fedcba9876543210fedcba9876543210")
+            second_output
+                .contains("Added claude/a_fedcba98 (claude) · a_fedcba9876543210fedcba9876543210")
         );
         assert!(first_output.ends_with("xcb accounts login a_0123456789abcdef0123456789abcdef"));
         assert!(second_output.ends_with("xcb accounts login a_fedcba9876543210fedcba9876543210"));

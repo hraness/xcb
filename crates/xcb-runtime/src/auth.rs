@@ -176,6 +176,36 @@ fn captured_claude_token(bytes: &[u8]) -> Result<Zeroizing<String>> {
     Ok(value)
 }
 
+/// Best-effort account identity: browser sign-in makes Claude Code write
+/// `oauthAccount.emailAddress` into `.claude.json` under its config/home dir.
+/// Reading our own launch artifacts is the only ambient-free source — the
+/// control protocol reports no account identity.
+pub(crate) fn claude_profile_email(dirs: &[&Path]) -> Option<String> {
+    for dir in dirs {
+        let Ok(bytes) = private::read(&dir.join(".claude.json"), 256 * 1024) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let Some(email) = value
+            .pointer("/oauthAccount/emailAddress")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        if !email.is_empty()
+            && email.len() <= 320
+            && email.contains('@')
+            && !email.chars().any(char::is_control)
+            && email.trim() == email
+        {
+            return Some(email.to_owned());
+        }
+    }
+    None
+}
+
 fn finish_claude_login(
     store: &Store,
     run: &RunRecord,
@@ -201,7 +231,14 @@ fn finish_claude_login(
     let result = (|| {
         let bytes = output?;
         let value = captured_claude_token(&bytes)?;
-        publish_claude_token(store, run, publication, &value, &mut publication_attempted)
+        publish_claude_token(store, run, publication, &value, &mut publication_attempted)?;
+        // The provider wrote this file inside our own launch profile; a
+        // missing or unparseable one just leaves the fixed account name.
+        let base = artifacts.path();
+        if let Some(email) = claude_profile_email(&[&base.join("home"), &base.join("profile")]) {
+            store.set_account_identity(&run.account, Some(email), None)?;
+        }
+        Ok(())
     })();
     if result.is_ok() || !publication_attempted {
         store.settle(
@@ -283,7 +320,7 @@ pub async fn login_with_cancel(
 /// Explicit legacy import: reads a pre-0.4.0 AgentMixer `claude-oauth-token`
 /// file from `source` and stores it as a new Claude account. The legacy state
 /// root is never a live default; the source directory is left untouched.
-pub fn import_agentmixer_token(store: &Store, source: &Path, name: &str) -> Result<Id> {
+pub fn import_agentmixer_token(store: &Store, source: &Path) -> Result<Id> {
     private::check_directory(source)?;
     let bytes = Zeroizing::new(private::read(&source.join("claude-oauth-token"), 2048)?);
     if !std::str::from_utf8(&bytes).is_ok_and(|text| valid_token(text.trim())) {
@@ -293,9 +330,9 @@ pub fn import_agentmixer_token(store: &Store, source: &Path, name: &str) -> Resu
     }
     let account = store.add_account(
         Provider::Claude,
-        name,
         "Imported subscription",
         crate::now_ms(),
+        None,
     )?;
     store_token(store, &account.id, &bytes)?;
     Ok(account.id)
@@ -327,8 +364,16 @@ struct CodexTokens<'a> {
 #[derive(serde::Deserialize)]
 struct CodexClaims<'a> {
     sub: Option<&'a str>,
+    email: Option<&'a str>,
     #[serde(rename = "https://api.openai.com/auth", borrow)]
     auth: Option<CodexIdentityClaims<'a>>,
+}
+
+/// What the credential proves about itself: a continuity digest plus the
+/// account email the provider signed into the identity token.
+pub struct CodexIdentity {
+    pub digest: String,
+    pub email: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -338,10 +383,11 @@ struct CodexIdentityClaims<'a> {
     user_id: Option<&'a str>,
 }
 
-/// Validate the supported ChatGPT file shape and return only a continuity
-/// digest. This is not token verification: the provider must authenticate it.
-/// Borrow parsed secrets from zeroized input; never return parser diagnostics.
-fn codex_identity(bytes: &[u8]) -> Result<String> {
+/// Validate the supported ChatGPT file shape and return a continuity digest
+/// plus the identity-token email. This is not token verification: the provider
+/// must authenticate it. Borrow parsed secrets from zeroized input; never
+/// return parser diagnostics.
+fn codex_identity(bytes: &[u8]) -> Result<CodexIdentity> {
     use base64::Engine;
     let invalid = || Error::Unavailable("invalid Codex ChatGPT credential file");
     if bytes.is_empty() || bytes.len() > MAX_CODEX_AUTH_BYTES {
@@ -403,8 +449,23 @@ fn codex_identity(bytes: &[u8]) -> Result<String> {
     }) {
         return Err(invalid());
     }
+    // The signed email claim becomes the account's fixed display identity.
+    // Keep it optional: an older token shape without it stays importable.
+    let email = claims
+        .email
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 320
+                && value.contains('@')
+                && !value.chars().any(char::is_control)
+                && value.trim() == *value
+        })
+        .map(str::to_owned);
     let identity = Zeroizing::new(serde_json::to_vec(&(account, user))?);
-    Ok(crate::digest(&identity))
+    Ok(CodexIdentity {
+        digest: crate::digest(&identity),
+        email,
+    })
 }
 
 fn codex_auth_path(store: &Store, id: &Id) -> Result<std::path::PathBuf> {
@@ -447,18 +508,19 @@ pub fn import_codex_auth(store: &Store, id: &Id, source: &Path) -> Result<()> {
 
 /// Create a Codex account only after the explicitly selected credential file
 /// has passed private-file and ChatGPT shape validation. Source bytes are read
-/// once; no global configuration or provider sessions are imported.
-pub fn import_codex_account(store: &Store, source: &Path, label: &str) -> Result<Id> {
+/// once; no global configuration or provider sessions are imported. The
+/// account's display identity comes from the credential's own email claim.
+pub fn import_codex_account(store: &Store, source: &Path) -> Result<Id> {
     if source.file_name().and_then(|name| name.to_str()) != Some("auth.json") {
         return Err(Error::Unavailable("select a private Codex auth.json file"));
     }
     let bytes = Zeroizing::new(private::read(source, MAX_CODEX_AUTH_BYTES)?);
-    codex_identity(&bytes)?;
+    let identity = codex_identity(&bytes)?;
     let account = store.add_account(
         Provider::Codex,
-        label,
         "ChatGPT subscription",
         crate::now_ms(),
+        identity.email,
     )?;
     import_codex_bytes(store, &account.id, &bytes)?;
     Ok(account.id)
@@ -488,6 +550,10 @@ fn import_codex_bytes(store: &Store, id: &Id, bytes: &[u8]) -> Result<()> {
             private::create(&target, bytes)?;
         }
         store.settle_tool(&run, "xcb_auth_import")?;
+        // The credential's signed email claim becomes the display identity.
+        if let Ok(identity) = codex_identity(bytes) {
+            store.set_account_identity(id, identity.email, None)?;
+        }
         Ok(())
     })();
     if result.is_ok() || !publication_attempted {
@@ -665,7 +731,7 @@ pub(crate) fn recover_codex_auth(
     if metadata
         .account_identity
         .as_ref()
-        .is_some_and(|expected| *expected != identity)
+        .is_some_and(|expected| *expected != identity.digest)
     {
         return Err(Error::Conflict("Codex credential account identity changed"));
     }
@@ -743,7 +809,7 @@ pub fn snapshot_codex_auth(
         profile,
         directory_identity: (metadata.dev(), metadata.ino()),
         original_revision: Some(revision),
-        account_identity: Some(identity),
+        account_identity: Some(identity.digest),
     };
     register_codex_recovery(store, run, &snapshot, false)?;
     private::create(&target, &bytes)?;
@@ -799,7 +865,7 @@ pub fn persist_codex_auth(
     if snapshot
         .account_identity
         .as_ref()
-        .is_some_and(|expected| *expected != identity)
+        .is_some_and(|expected| *expected != identity.digest)
     {
         return Err(Error::Conflict("Codex credential account identity changed"));
     }
@@ -809,7 +875,10 @@ pub fn persist_codex_auth(
     } else {
         private::create(&target, &bytes)?;
     }
-    store.settle_tool(run, CODEX_AUTH_CALL)
+    store.settle_tool(run, CODEX_AUTH_CALL)?;
+    // Identity was proven unchanged above; the email claim just fills in the
+    // display identity for accounts imported before it was captured.
+    store.set_account_identity(&run.account, identity.email, None)
 }
 
 /// The caller owns process-group supervision, bounded wait/cancellation and
@@ -853,7 +922,7 @@ pub fn prepare_codex_login(
     };
     let account_identity = original
         .as_ref()
-        .map(|bytes| codex_identity(bytes))
+        .map(|bytes| codex_identity(bytes).map(|identity| identity.digest))
         .transpose()?;
     let original_revision = original.as_ref().map(crate::digest);
     let home = private::directory(&profile.join("login-home"))?;
@@ -904,9 +973,7 @@ mod auth_custody_tests {
         let directory = tempfile::tempdir().unwrap();
         let base = directory.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Claude", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";
         store_token(&store, &account.id, original).unwrap();
         let run = store.prepare_probe(&account.id, None, 2).unwrap();
@@ -936,7 +1003,7 @@ mod auth_custody_tests {
         let base = directory.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
-            .add_account(Provider::Codex, "Codex", "ChatGPT", 1)
+            .add_account(Provider::Codex, "ChatGPT", 1, None)
             .unwrap();
         let run = store.prepare_probe(&account.id, None, 2).unwrap();
         store

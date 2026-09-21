@@ -29,9 +29,7 @@ fn staged_residue(directory: &Path) -> Vec<String> {
 fn sqlite_sidecars_stay_valid_by_descriptor_while_the_store_is_live() {
     let (_temp, state) = state();
     let store = Store::open(&state).unwrap();
-    store
-        .add_account(Provider::Claude, "Personal", "Max", 1)
-        .unwrap();
+    store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     // The WAL and SHM siblings belong to the live connection and mutate
     // constantly; custody is judged on the open descriptor, never a racing
     // path re-check. The rollback journal only exists inside a commit and is

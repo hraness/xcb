@@ -28,7 +28,7 @@ async fn twenty_terminals_share_account_custody_and_remote_resume_cannot_cancel_
         let state = base.join("state");
         let inspector = Store::open(&state).unwrap();
         let account = inspector
-            .add_account(provider, "Shared synthetic account", "Synthetic", 1)
+            .add_account(provider, "Synthetic", 1, None)
             .unwrap();
         let model = ModelChoice {
             provider,

@@ -56,17 +56,32 @@ fn blocked_until_from(
     account: &Account,
     now: u64,
 ) -> Result<Option<u64>> {
-    let Some(pool) = generation_pool(root, account)? else {
-        return Ok(None);
+    // Claude binds quota to the live credential generation so a rotated
+    // sign-in cannot inherit another identity's block; an absent generation
+    // stays unbound. Other providers use the account's own stable pool.
+    let pool = if account.provider == Provider::Claude {
+        match generation_pool(root, account)? {
+            Some(pool) => pool,
+            None => return Ok(None),
+        }
+    } else {
+        account.quota_pool.clone()
     };
     if pool != account.quota_pool {
         return Ok(None);
     }
     let points = quotas_from(db, &pool)?;
-    if generation_pool(root, account)?.as_ref() != Some(&pool) {
+    if account.provider == Provider::Claude
+        && generation_pool(root, account)?.as_ref() != Some(&pool)
+    {
         return Err(Error::Conflict("account credential generation changed"));
     }
-    Ok(xcb_core::usage::quota_blocked_until(&points, &pool, now))
+    Ok(xcb_core::usage::quota_blocked_until(
+        &points,
+        &pool,
+        account.provider,
+        now,
+    ))
 }
 
 fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
@@ -104,7 +119,14 @@ fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
 pub struct Account {
     pub id: Id,
     pub provider: Provider,
+    /// Legacy display label retained for resolution compatibility only; the
+    /// rendered account name is always system-derived via `name()`.
     pub label: String,
+    /// Provider-reported account email, captured at import or during a probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// Provider-reported plan when known (e.g. ChatGPT planType); otherwise
+    /// the plan text supplied at creation.
     pub subscription: String,
     pub quota_pool: Id,
     pub enabled: bool,
@@ -114,8 +136,29 @@ impl Account {
     pub fn validate(&self) -> Result<()> {
         label(&self.label, 80)?;
         label(&self.subscription, 80)?;
+        if let Some(email) = &self.email {
+            email_label(email)?;
+        }
         Ok(())
     }
+    /// Fixed, system-derived display identity: the provider account email once
+    /// observed, otherwise `provider/<id prefix>`. Never a user-authored label.
+    pub fn name(&self) -> String {
+        self.email.clone().unwrap_or_else(|| self.fixed_name())
+    }
+    /// The stable non-email identity; also stored as `label` for new accounts.
+    pub fn fixed_name(&self) -> String {
+        let short: String = self.id.as_str().chars().take(10).collect();
+        format!("{}/{short}", self.provider)
+    }
+}
+
+fn email_label(value: &str) -> Result<()> {
+    label(value, 320)?;
+    if !value.contains('@') {
+        return Err(xcb_core::Error::Invalid("account email").into());
+    }
+    Ok(())
 }
 
 /// Identity of the xcb process instance that owns a run. Persisted on the run
@@ -466,22 +509,28 @@ impl Store {
     pub fn add_account(
         &self,
         provider: Provider,
-        name: &str,
         subscription: &str,
         now: u64,
+        email: Option<String>,
     ) -> Result<Account> {
-        label(name, 80)?;
         label(subscription, 80)?;
+        if let Some(email) = &email {
+            email_label(email)?;
+        }
         let id = new_id("a");
-        let account = Account {
+        let mut account = Account {
             quota_pool: id.clone(),
             id,
             provider,
-            label: name.to_owned(),
+            label: String::new(),
+            email,
             subscription: subscription.to_owned(),
             enabled: true,
             created_at_ms: now,
         };
+        // The stored label is the fixed system-derived identity; it is never
+        // user-authored and keeps older strict readers seeing a valid label.
+        account.label = account.fixed_name();
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let count: i64 = tx.query_row("SELECT count(*) FROM accounts", [], |row| row.get(0))?;
@@ -524,14 +573,56 @@ impl Store {
         let matches: Vec<_> = self
             .accounts()?
             .into_iter()
-            .filter(|account| account.id.as_str() == value || account.label == value)
+            .filter(|account| {
+                account.id.as_str() == value
+                    || account.name() == value
+                    // Legacy labels still resolve so stored references keep working.
+                    || account.label == value
+            })
             .collect();
         if matches.len() != 1 {
             return Err(Error::Unavailable(
-                "account not found or label is ambiguous; use its id",
+                "account not found or name is ambiguous; use its id",
             ));
         }
         Ok(matches.into_iter().next().expect("one account"))
+    }
+    /// Record provider-observed identity: email and, when reported, the plan.
+    /// Only fresh observations are written; a `None` email never clears a
+    /// known one.
+    pub fn set_account_identity(
+        &self,
+        id: &Id,
+        email: Option<String>,
+        subscription: Option<String>,
+    ) -> Result<()> {
+        if let Some(email) = &email {
+            email_label(email)?;
+        }
+        if let Some(subscription) = &subscription {
+            label(subscription, 80)?;
+        }
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let json: String = tx.query_row(
+            "SELECT payload FROM accounts WHERE id=?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )?;
+        let mut account: Account = decode(&json)?;
+        if let Some(email) = email {
+            account.email = Some(email);
+        }
+        if let Some(subscription) = subscription {
+            account.subscription = subscription;
+        }
+        account.validate()?;
+        tx.execute(
+            "UPDATE accounts SET payload=?1 WHERE id=?2",
+            params![serde_json::to_string(&account)?, id.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn account_root(&self, id: &Id) -> Result<PathBuf> {
         self.account(id)?;
@@ -1582,7 +1673,7 @@ mod tests {
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
-            .add_account(Provider::Claude, "Legacy", "Test", 1)
+            .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
         let old = quota_point(&account.quota_pool, "seven_day", 100.0, 2, 9_000_000);
         store.record_quota(&old).unwrap();
@@ -1640,7 +1731,9 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store.add_account(Provider::Claude, "A", "Test", 1).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -1699,7 +1792,9 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store.add_account(Provider::Claude, "A", "Test", 1).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
         let run = store.prepare_probe(&account.id, None, 2).unwrap();
         crate::application_qualification::ensure_generation(&store, &run).unwrap();
         let point = quota_point(&account.quota_pool, "five_hour", 100.0, 3, 1000);
@@ -1740,7 +1835,9 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store.add_account(Provider::Claude, "A", "Test", 1).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
         let run = store.prepare_probe(&account.id, None, 2).unwrap();
         let generation = crate::application_qualification::ensure_generation(&store, &run).unwrap();
         store
@@ -1780,7 +1877,7 @@ mod tests {
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         for provider in Provider::ALL {
-            let account = store.add_account(provider, "A", "Test", 1).unwrap();
+            let account = store.add_account(provider, "Test", 1, None).unwrap();
             let run = store.prepare_probe(&account.id, None, 2).unwrap();
             crate::application_qualification::ensure_generation(&store, &run).unwrap();
             let window = if provider == Provider::Claude {
@@ -1824,7 +1921,7 @@ mod tests {
         let path = dir.path().canonicalize().unwrap().join("state");
         let writer = Store::open(&path).unwrap();
         let account = writer
-            .add_account(Provider::Claude, "Personal", "Max", 1)
+            .add_account(Provider::Claude, "Max", 1, None)
             .unwrap();
         fs::remove_file(path.join(".initialize.lock")).unwrap();
         let reader = Store::open_read_only(&path).unwrap();
@@ -1838,9 +1935,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(writer.accounts().unwrap().len(), 1);
-        let second = writer
-            .add_account(Provider::Codex, "Second", "Pro", 2)
-            .unwrap();
+        let second = writer.add_account(Provider::Codex, "Pro", 2, None).unwrap();
         assert!(
             reader
                 .accounts()
@@ -1877,9 +1972,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
         let running = store.mark_spawned(&prepared, i32::MAX as u32).unwrap();
         let digest = crate::digest(serde_json::to_string(&running).unwrap());
@@ -1924,9 +2017,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -1955,9 +2046,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -1987,9 +2076,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -2004,9 +2091,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -2024,9 +2109,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -2041,9 +2124,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -2064,9 +2145,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -2088,11 +2167,9 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let personal = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let personal = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let work = store
-            .add_account(Provider::Claude, "Work", "Team", 1)
+            .add_account(Provider::Claude, "Team", 1, None)
             .unwrap();
         let original = choice();
         let session = store
@@ -2126,9 +2203,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -2183,9 +2258,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -2222,9 +2295,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
         let mut running = orphaned(
             &store,
@@ -2267,9 +2338,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let model = choice();
         let run = store
             .prepare_probe(&account.id, Some(model.clone()), 1)
@@ -2297,9 +2366,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -2322,9 +2389,7 @@ mod tests {
         let dir = root();
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -2369,9 +2434,7 @@ mod tests {
         let path = base.join("state");
         // Two handles on one state root stand in for two terminals.
         let owner = Store::open(&path).unwrap();
-        let account = owner
-            .add_account(Provider::Claude, "Personal", "Max", 1)
-            .unwrap();
+        let account = owner.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = owner
             .create_session(&account.id, choice(), &base.join("work"), 2)
             .unwrap();
@@ -2458,7 +2521,7 @@ mod tests {
         let dir = root();
         let store = Store::open(&dir.path().canonicalize().unwrap().join("state")).unwrap();
         let account = store
-            .add_account(Provider::Claude, "Synthetic", "Test", 1)
+            .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
         let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
         let unmarked = serde_json::to_value(&prepared).unwrap();
@@ -2502,7 +2565,7 @@ mod tests {
         let store = Store::open(&path).unwrap();
         let sibling = Store::open(&path).unwrap();
         let account = store
-            .add_account(Provider::Claude, "Synthetic", "Test", 1)
+            .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
         let run = store.prepare_probe(&account.id, None, 2).unwrap();
         let custody = command_custody(&run);
@@ -2551,7 +2614,7 @@ mod tests {
         let base = dir.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
-            .add_account(Provider::Claude, "Synthetic", "Test", 1)
+            .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
         let session = store
             .create_session(&account.id, choice(), &base.join("work"), 2)
@@ -2621,7 +2684,7 @@ mod tests {
         let dir = root();
         let store = Store::open(&dir.path().canonicalize().unwrap().join("state")).unwrap();
         let account = store
-            .add_account(Provider::Claude, "Synthetic", "Test", 1)
+            .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
         let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
         let run = store.mark_spawned(&prepared, i32::MAX as u32).unwrap();

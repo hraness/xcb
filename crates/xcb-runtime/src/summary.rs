@@ -64,7 +64,8 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
         view.accounts.push(AccountRow {
             id: account.id.clone(),
             provider: account.provider,
-            label: account.label,
+            name: account.name(),
+            email: account.email,
             subscription: account.subscription,
             remaining_percent,
             resets_at_ms,

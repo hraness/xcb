@@ -27,11 +27,9 @@ fn accounts_are_separate_and_labels_cannot_override_a_credential_path() {
     let dir = root();
     let path = dir.path().canonicalize().unwrap().join("state");
     let store = Store::open(&path).unwrap();
-    let a = store
-        .add_account(Provider::Claude, "Personal", "Max", 1)
-        .unwrap();
+    let a = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let b = store
-        .add_account(Provider::Claude, "Work", "Team", 1)
+        .add_account(Provider::Claude, "Team", 1, None)
         .unwrap();
     assert_ne!(a.id, b.id);
     assert_ne!(
@@ -41,7 +39,7 @@ fn accounts_are_separate_and_labels_cannot_override_a_credential_path() {
     assert_eq!(store.accounts().unwrap().len(), 2);
     assert!(
         store
-            .add_account(Provider::Claude, "\u{1b}[2J", "Max", 1)
+            .add_account(Provider::Claude, "\u{1b}[2J", 1, None)
             .is_err()
     );
     assert_eq!(
@@ -102,9 +100,7 @@ fn revision_checked_messages_persist_across_reopen() {
     let base = dir.path().canonicalize().unwrap();
     let path = base.join("state");
     let store = Store::open(&path).unwrap();
-    let account = store
-        .add_account(Provider::Claude, "Personal", "Max", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let session = store
         .create_session(&account.id, choice(), &base.join("work"), 2)
         .unwrap();
@@ -136,9 +132,7 @@ fn a_prepared_run_keeps_exclusive_account_custody_after_restart() {
     let base = dir.path().canonicalize().unwrap();
     let path = base.join("state");
     let store = Store::open(&path).unwrap();
-    let account = store
-        .add_account(Provider::Claude, "Personal", "Max", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let session = store
         .create_session(&account.id, choice(), &base.join("work"), 2)
         .unwrap();
@@ -160,9 +154,7 @@ fn pruning_never_erases_an_active_session() {
     let dir = root();
     let base = dir.path().canonicalize().unwrap();
     let store = Store::open(&base.join("state")).unwrap();
-    let account = store
-        .add_account(Provider::Claude, "Personal", "Max", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let idle = store
         .create_session(&account.id, choice(), &base.join("work"), 2)
         .unwrap();
@@ -190,9 +182,8 @@ fn storage_process_worker() {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     let store = Store::open(&base.join("state")).unwrap();
-    let label = std::env::var("XCB_STORAGE_TEST_LABEL").unwrap();
     let account = store
-        .add_account(Provider::Claude, &label, "Synthetic", 1)
+        .add_account(Provider::Claude, "Synthetic", 1, None)
         .unwrap();
     let session = store
         .create_session(&account.id, choice(), &base.join("work"), 2)
@@ -219,11 +210,10 @@ fn twenty_processes_initialize_and_write_one_fresh_store() {
     let base = directory.path().canonicalize().unwrap();
     let executable = std::env::current_exe().unwrap();
     let children: Vec<_> = (0..20)
-        .map(|index| {
+        .map(|_| {
             std::process::Command::new(&executable)
                 .args(["--exact", "storage_process_worker", "--nocapture"])
                 .env("XCB_STORAGE_TEST_BASE", &base)
-                .env("XCB_STORAGE_TEST_LABEL", format!("worker-{index}"))
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())

@@ -1187,10 +1187,10 @@ mod tests {
         let store = Store::open(&base.join("state")).unwrap();
         let workspace = crate::private::directory(&base.join("work")).unwrap();
         let blocked = store
-            .add_account(Provider::Claude, "Default", "Test", 1)
+            .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
         let fallback = store
-            .add_account(Provider::Claude, "Fallback", "Test", 2)
+            .add_account(Provider::Claude, "Test", 2, None)
             .unwrap();
         for account in [&blocked, &fallback] {
             auth::store_token(
@@ -1304,8 +1304,8 @@ mod tests {
             effort: None,
             observed_at_ms: 1,
         };
-        let first = store.add_account(Provider::Devin, "A", "Test", 1).unwrap();
-        let second = store.add_account(Provider::Devin, "B", "Test", 1).unwrap();
+        let first = store.add_account(Provider::Devin, "Test", 1, None).unwrap();
+        let second = store.add_account(Provider::Devin, "Test", 1, None).unwrap();
         let a = store
             .create_session(&first.id, model.clone(), &workspace, 2)
             .unwrap();
@@ -1345,9 +1345,7 @@ mod tests {
             let base = directory.path().canonicalize().unwrap();
             let store = Arc::new(Store::open(&base.join("state")).unwrap());
             let workspace = crate::private::directory(&base.join("workspace")).unwrap();
-            let account = store
-                .add_account(provider, "Disabled later", "Test", 1)
-                .unwrap();
+            let account = store.add_account(provider, "Test", 1, None).unwrap();
             let session = store
                 .create_session(
                     &account.id,
@@ -1440,22 +1438,22 @@ mod tests {
         let state = directory.path().canonicalize().unwrap().join("state");
         let store = Store::open(&state).unwrap();
         let current = store
-            .add_account(Provider::Devin, "Current", "Subscription", 1)
+            .add_account(Provider::Devin, "Subscription", 1, None)
             .unwrap();
         let default = store
-            .add_account(Provider::Devin, "Default", "Subscription", 2)
+            .add_account(Provider::Devin, "Subscription", 2, None)
             .unwrap();
         let fallback = store
-            .add_account(Provider::Devin, "Fallback", "Subscription", 3)
+            .add_account(Provider::Devin, "Subscription", 3, None)
             .unwrap();
         let unsigned = store
-            .add_account(Provider::Devin, "Unsigned", "Subscription", 4)
+            .add_account(Provider::Devin, "Subscription", 4, None)
             .unwrap();
         let disabled = store
-            .add_account(Provider::Devin, "Disabled", "Subscription", 5)
+            .add_account(Provider::Devin, "Subscription", 5, None)
             .unwrap();
         let other = store
-            .add_account(Provider::Claude, "Other provider", "Subscription", 6)
+            .add_account(Provider::Claude, "Subscription", 6, None)
             .unwrap();
         for account in [&current, &default, &fallback, &disabled] {
             crate::devin::auth::store_token(&store, &account.id, b"synthetic-token").unwrap();
@@ -1506,13 +1504,13 @@ mod tests {
         let workspace = crate::private::directory(&base.join("workspace")).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let unsigned = store
-            .add_account(Provider::Devin, "Unsigned default", "Subscription", 1)
+            .add_account(Provider::Devin, "Subscription", 1, None)
             .unwrap();
         let connected = store
-            .add_account(Provider::Devin, "Connected", "Subscription", 2)
+            .add_account(Provider::Devin, "Subscription", 2, None)
             .unwrap();
         let claude = store
-            .add_account(Provider::Claude, "Other provider", "Subscription", 3)
+            .add_account(Provider::Claude, "Subscription", 3, None)
             .unwrap();
         let config = Config {
             default_account: Some(unsigned.id.clone()),
@@ -1588,7 +1586,7 @@ mod tests {
         let store = Arc::new(Store::open(&state).unwrap());
         let other = Store::open(&state).unwrap();
         let account = store
-            .add_account(Provider::Devin, "Shared", "Subscription", 1)
+            .add_account(Provider::Devin, "Subscription", 1, None)
             .unwrap();
         let model = ModelChoice {
             provider: Provider::Devin,
@@ -1629,7 +1627,7 @@ mod tests {
         );
         other.settle(&run, State::Idle, 4).unwrap();
         let imported = other
-            .add_account(Provider::Codex, "New account", "Subscription", 5)
+            .add_account(Provider::Codex, "Subscription", 5, None)
             .unwrap();
         other
             .set_models(Provider::Devin, std::slice::from_ref(&model))

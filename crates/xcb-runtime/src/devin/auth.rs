@@ -209,7 +209,7 @@ fn read_import_source(source: &Path) -> Result<Zeroizing<Vec<u8>>> {
 
 /// Explicit source import only. Preserve the source, copy only its opaque
 /// token, and never inherit endpoint overrides, plugins or provider state.
-pub fn import_account(store: &Store, source: &Path, label: &str) -> Result<Id> {
+pub fn import_account(store: &Store, source: &Path) -> Result<Id> {
     if !source.is_absolute()
         || source.file_name().and_then(|name| name.to_str()) != Some("credentials.toml")
         || source.canonicalize()? != source
@@ -220,9 +220,9 @@ pub fn import_account(store: &Store, source: &Path, label: &str) -> Result<Id> {
     let token = credential_token(&bytes)?;
     let account = store.add_account(
         Provider::Devin,
-        label,
         "Imported subscription",
         crate::now_ms(),
+        None,
     )?;
     store_token(store, &account.id, token.as_bytes())?;
     Ok(account.id)

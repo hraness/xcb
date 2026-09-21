@@ -1225,7 +1225,7 @@ mod tests {
         let store =
             crate::store::Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
         let account = store
-            .add_account(Provider::Claude, "Synthetic", "Synthetic", NOW)
+            .add_account(Provider::Claude, "Synthetic", NOW, None)
             .unwrap();
         let path = store
             .account_root(&account.id)

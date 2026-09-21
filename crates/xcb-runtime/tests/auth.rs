@@ -9,15 +9,13 @@ fn importing_one_explicit_legacy_token_preserves_the_source() {
     let fixture = b"sk-ant-oat01-synthetic_fixture_not_a_real_token";
     private::create(&source.join("claude-oauth-token"), fixture).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
-    let account = auth::import_agentmixer_token(&store, &source, "Legacy").unwrap();
+    let account = auth::import_agentmixer_token(&store, &source).unwrap();
     assert!(auth::has_token(&store, &account).unwrap());
     assert_eq!(
         private::read(&source.join("claude-oauth-token"), 2048).unwrap(),
         fixture
     );
-    let other = store
-        .add_account(Provider::Claude, "Other", "Max", 1)
-        .unwrap();
+    let other = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     assert!(!auth::has_token(&store, &other.id).unwrap());
     auth::store_token(&store, &account, fixture).unwrap();
 }
@@ -29,7 +27,7 @@ fn tokens_rotate_atomically_and_invalid_input_preserves_the_current_credential()
     let base = directory.path().canonicalize().unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
-        .add_account(Provider::Claude, "Test", "Test", 1)
+        .add_account(Provider::Claude, "Test", 1, None)
         .unwrap();
     let previous = b"sk-ant-oat01-previous_synthetic_fixture_not_real";
     let rotated = b"sk-ant-oat01-rotated_synthetic_fixture_not_real";
@@ -70,7 +68,7 @@ fn credential_rotation_rejects_symlink_targets() {
     let base = directory.path().canonicalize().unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
-        .add_account(Provider::Claude, "Test", "Test", 1)
+        .add_account(Provider::Claude, "Test", 1, None)
         .unwrap();
     let sibling = private::directory(&base.join("sibling")).unwrap();
     let target = sibling.join("another-account-token");
@@ -99,9 +97,7 @@ fn claude_token_rotation_respects_busy_and_disabled_accounts() {
         let directory = tempfile::tempdir().unwrap();
         let base = directory.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Claude", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";
         auth::store_token(&store, &account.id, original).unwrap();
         let held = if busy {
@@ -159,9 +155,7 @@ fn claude_token_receipt_failures_release_only_before_publication() {
         let directory = tempfile::tempdir().unwrap();
         let base = directory.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Claude", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";
         let replacement = b"sk-ant-oat01-replacement_synthetic_fixture_not_real";
         auth::store_token(&store, &account.id, original).unwrap();
@@ -238,17 +232,13 @@ fn codex_auth_import_is_explicit_private_provider_scoped_and_preserves_its_sourc
     private::create(&source, &bytes).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
-        .add_account(Provider::Codex, "Codex", "ChatGPT", 1)
+        .add_account(Provider::Codex, "ChatGPT", 1, None)
         .unwrap();
     let other = store
-        .add_account(Provider::Codex, "Other", "ChatGPT", 1)
+        .add_account(Provider::Codex, "ChatGPT", 1, None)
         .unwrap();
-    let claude = store
-        .add_account(Provider::Claude, "Claude", "Max", 1)
-        .unwrap();
-    let devin = store
-        .add_account(Provider::Devin, "Devin", "Core", 1)
-        .unwrap();
+    let claude = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+    let devin = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
     assert!(!auth::has_credentials(&store, &account.id).unwrap());
     auth::import_codex_auth(&store, &account.id, &source).unwrap();
     assert!(auth::has_credentials(&store, &account.id).unwrap());
@@ -282,7 +272,7 @@ fn codex_auth_import_rejects_links_public_files_invalid_json_and_api_keys() {
     private::create(&source, &good).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
-        .add_account(Provider::Codex, "Codex", "ChatGPT", 1)
+        .add_account(Provider::Codex, "ChatGPT", 1, None)
         .unwrap();
     std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(auth::import_codex_auth(&store, &account.id, &source).is_err());
@@ -328,7 +318,7 @@ fn codex_refresh_requires_joined_exclusive_account_custody_and_preserves_rotatio
     private::create(&source, &original).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
-        .add_account(Provider::Codex, "Codex", "ChatGPT", 1)
+        .add_account(Provider::Codex, "ChatGPT", 1, None)
         .unwrap();
     auth::import_codex_auth(&store, &account.id, &source).unwrap();
     let run = codex_run(&store, &account.id, &base.join("work"));
@@ -370,7 +360,7 @@ fn codex_refresh_rejects_account_switch_and_stale_persistent_revision() {
         private::create(&source, &original).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
-            .add_account(Provider::Codex, "Codex", "ChatGPT", 1)
+            .add_account(Provider::Codex, "ChatGPT", 1, None)
             .unwrap();
         auth::import_codex_auth(&store, &account.id, &source).unwrap();
         let run = codex_run(&store, &account.id, &base.join("work"));
@@ -433,7 +423,7 @@ fn codex_unstarted_discard_is_idempotent_and_snapshot_cannot_escape_state() {
     let base = directory.path().canonicalize().unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
-        .add_account(Provider::Codex, "Codex", "ChatGPT", 1)
+        .add_account(Provider::Codex, "ChatGPT", 1, None)
         .unwrap();
     let run = codex_run(&store, &account.id, &base.join("work"));
     assert!(auth::discard_unstarted_codex_auth(&store, &run, false).is_err());
@@ -470,7 +460,7 @@ fn codex_device_login_plan_is_isolated_and_can_persist_a_fixture_without_spawnin
     let base = directory.path().canonicalize().unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
-        .add_account(Provider::Codex, "Codex", "ChatGPT", 1)
+        .add_account(Provider::Codex, "ChatGPT", 1, None)
         .unwrap();
     let run = codex_run(&store, &account.id, &base.join("work"));
     let executable = base.join("synthetic-codex");
@@ -528,7 +518,7 @@ fn codex_account_import_validates_before_creating_account_and_copies_once() {
         .join("auth.json");
     let store = Store::open(&base.join("state")).unwrap();
     private::create(&source, b"invalid-secret-fixture").unwrap();
-    assert!(auth::import_codex_account(&store, &source, "Codex").is_err());
+    assert!(auth::import_codex_account(&store, &source).is_err());
     assert!(store.accounts().unwrap().is_empty());
     assert!(store.unsettled_runs().unwrap().is_empty());
     let good = codex_auth_fixture("account-one", "user-one", "synthetic-refresh-one");
@@ -538,7 +528,7 @@ fn codex_account_import_validates_before_creating_account_and_copies_once() {
         &xcb_runtime::digest(b"invalid-secret-fixture"),
     )
     .unwrap();
-    let id = auth::import_codex_account(&store, &source, "Codex").unwrap();
+    let id = auth::import_codex_account(&store, &source).unwrap();
     assert_eq!(store.accounts().unwrap().len(), 1);
     assert!(auth::has_credentials(&store, &id).unwrap());
     assert_eq!(private::read(&source, 65536).unwrap(), good);
@@ -575,7 +565,7 @@ fn codex_recovery_preserves_refresh_and_retries_after_publication_before_receipt
     let base = directory.path().canonicalize().unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
-        .add_account(Provider::Codex, "Recovery", "ChatGPT", 1)
+        .add_account(Provider::Codex, "ChatGPT", 1, None)
         .unwrap();
     let target = store
         .account_root(&account.id)
@@ -655,7 +645,7 @@ fn codex_recovery_rejects_missing_or_changed_evidence_and_never_releases_custody
         let base = directory.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
-            .add_account(Provider::Codex, "Recovery", "ChatGPT", 1)
+            .add_account(Provider::Codex, "ChatGPT", 1, None)
             .unwrap();
         let target = store
             .account_root(&account.id)
@@ -749,7 +739,7 @@ fn codex_recovery_finishes_new_device_login_or_empty_failed_flow_without_spawnin
         let base = directory.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
-            .add_account(Provider::Codex, "Login recovery", "ChatGPT", 1)
+            .add_account(Provider::Codex, "ChatGPT", 1, None)
             .unwrap();
         // Preparation and generation publication belong to the live owner.
         // Simulate its death only after the login plan/receipt exists below.
@@ -839,9 +829,7 @@ async fn claude_login_captures_privately_and_settles_joined_invalid_or_failed_ou
         let directory = tempfile::tempdir().unwrap();
         let base = directory.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
-        let account = store
-            .add_account(Provider::Claude, "Claude", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";
         auth::store_token(&store, &account.id, original).unwrap();
         let pin = claude_login_pin(&base, script);
@@ -884,9 +872,7 @@ async fn claude_login_cancellation_joins_before_releasing_and_busy_accounts_do_n
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let store = std::sync::Arc::new(Store::open(&base.join("state")).unwrap());
-    let account = store
-        .add_account(Provider::Claude, "Claude", "Max", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let pin = claude_login_pin(&base, "sleep 30");
     let (sender, cancel) = tokio::sync::watch::channel(false);
     let owned_store = store.clone();
@@ -936,9 +922,7 @@ async fn claude_login_preserves_a_changed_prior_token_and_retains_uncertain_rece
         let directory = tempfile::tempdir().unwrap();
         let base = directory.path().canonicalize().unwrap();
         let store = std::sync::Arc::new(Store::open(&base.join("state")).unwrap());
-        let account = store
-            .add_account(Provider::Claude, "Claude", "Max", 1)
-            .unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";
         let changed = b"sk-ant-oat01-changed_synthetic_fixture_not_real";
         let generated = b"sk-ant-oat01-login_synthetic_fixture_not_real";
@@ -1008,9 +992,7 @@ async fn dropped_claude_login_keeps_durable_custody_after_attempting_group_stop(
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let store = std::sync::Arc::new(Store::open(&base.join("state")).unwrap());
-    let account = store
-        .add_account(Provider::Claude, "Claude", "Max", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let pin = claude_login_pin(&base, "sleep 30");
     let owned_store = store.clone();
     let id = account.id.clone();
@@ -1054,9 +1036,7 @@ fn explicit_claude_token_replacement_rotates_generation_before_publishing() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let store = Store::open(&base.join("state")).unwrap();
-    let account = store
-        .add_account(Provider::Claude, "Claude", "Max", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";
     auth::store_token(&store, &account.id, original).unwrap();
     let root = store.account_root(&account.id).unwrap();

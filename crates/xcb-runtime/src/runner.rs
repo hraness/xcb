@@ -859,6 +859,10 @@ async fn probe_codex(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<V
             .initialize(&mut process, "Metadata only; do not create or run a task.")
             .await?;
         if let Some(account) = account {
+            let (email, plan) = protocol.account_identity();
+            if email.is_some() || plan.is_some() {
+                store.set_account_identity(account, email, plan)?;
+            }
             for point in protocol
                 .read_quotas(&mut process, &store.account(account)?.quota_pool)
                 .await?
@@ -1352,6 +1356,27 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
                 Err(Error::Protocol("usage frame limit"))
             }).await.map_err(|_| Error::Unavailable("usage query timed out"))??;
             for point in parse_quotas(&response, &store.account(account)?.quota_pool, now_ms())? { store.record_account_quota(run.as_ref().ok_or(Error::Conflict("quota probe has no lease"))?, &point)?; }
+            // subscription_type is the provider's own plan report; the profile
+            // file inside our launch profile may carry the account email.
+            let plan = response
+                .get("subscription_type")
+                .and_then(Value::as_str)
+                .filter(|value| {
+                    !value.is_empty()
+                        && value.len() <= 64
+                        && !value.chars().any(char::is_control)
+                        && value.trim() == *value
+                })
+                .map(|value| format!("Claude {value}"));
+            let base = launch.artifacts.path();
+            let email = auth::claude_profile_email(&[
+                &base.join("scratch").join("config"),
+                &base.join("scratch").join("home"),
+                &base.join("profile"),
+            ]);
+            if email.is_some() || plan.is_some() {
+                store.set_account_identity(account, email, plan)?;
+            }
         }
         Ok::<_, Error>(models)
     }.await;
@@ -1563,6 +1588,10 @@ async fn run_prepared<P: Protocol>(
         }
         if protocol.refreshes_catalog() {
             store.set_models(session.model.provider, &models)?;
+        }
+        let (email, plan) = protocol.account_identity();
+        if email.is_some() || plan.is_some() {
+            store.set_account_identity(&session.account, email, plan)?;
         }
         let history = store
             .messages(&session.id, 512)?
@@ -2013,7 +2042,7 @@ mod tests {
             let base = root.path().canonicalize().unwrap();
             let store = Store::open(&base.join("state")).unwrap();
             let account = store
-                .add_account(Provider::Claude, "Test", "Test", 1)
+                .add_account(Provider::Claude, "Test", 1, None)
                 .unwrap();
             let run = store.prepare_probe(&account.id, None, 2).unwrap();
             let mut artifacts = LaunchArtifacts::create(&base).unwrap();
@@ -2058,7 +2087,7 @@ mod tests {
             let base = root.path().canonicalize().unwrap();
             let store = Store::open(&base.join("state")).unwrap();
             let account = store
-                .add_account(Provider::Claude, "Test", "Test", 1)
+                .add_account(Provider::Claude, "Test", 1, None)
                 .unwrap();
             let run = store.prepare_probe(&account.id, None, 2).unwrap();
             let mut artifacts = LaunchArtifacts::create(&base).unwrap();
@@ -2195,7 +2224,7 @@ mod tests {
             Workspace::open_with_coordination(&workspace_root, &base.join("coordination")).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
-            .add_account(Provider::Claude, "Test", "Test", 1)
+            .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
         let run = store.prepare_probe(&account.id, None, 2).unwrap();
         let arguments = json!({"path":"file","text":"clobber","expectedRevision":digest("stale")});
@@ -2226,7 +2255,7 @@ mod tests {
         let base = root.path().canonicalize().unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
-            .add_account(Provider::Claude, "Test", "Test", 1)
+            .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
         let run = store.prepare_probe(&account.id, None, 2).unwrap();
         let mut effects = EffectState::None;
@@ -2434,7 +2463,7 @@ mod tests {
                 std::fs::create_dir(&workspace).unwrap();
                 let store = Arc::new(Store::open(&base.join("state")).unwrap());
                 let account = store
-                    .add_account(provider, "Fixture", "Fixture", now_ms())
+                    .add_account(provider, "Fixture", now_ms(), None)
                     .unwrap();
                 let model = ModelChoice {
                     provider,
@@ -2514,7 +2543,7 @@ mod tests {
         std::fs::create_dir(&workspace).unwrap();
         let store = Arc::new(Store::open(&base.join("state")).unwrap());
         let account = store
-            .add_account(Provider::Claude, "Fixture", "Fixture", now_ms())
+            .add_account(Provider::Claude, "Fixture", now_ms(), None)
             .unwrap();
         let model = ModelChoice {
             provider: Provider::Claude,
@@ -2624,7 +2653,7 @@ mod tests {
             std::fs::create_dir(&workspace).unwrap();
             let store = Arc::new(Store::open(&base.join("state")).unwrap());
             let account = store
-                .add_account(Provider::Devin, "Fixture", "Fixture", now_ms())
+                .add_account(Provider::Devin, "Fixture", now_ms(), None)
                 .unwrap();
             let model = ModelChoice {
                 provider: Provider::Devin,

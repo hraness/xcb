@@ -104,9 +104,7 @@ async fn a_run_owned_by_a_sibling_terminal_is_remote_not_recovery() {
     let path = base.join("state");
     // Terminal one opens the state root and starts a run on the session.
     let owner = Store::open(&path).unwrap();
-    let account = owner
-        .add_account(Provider::Claude, "Personal", "Max", 1)
-        .unwrap();
+    let account = owner.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let session = owner
         .create_session(&account.id, choice(), &base.join("work"), 2)
         .unwrap();
@@ -151,11 +149,9 @@ fn explicit_model_selects_its_provider_instead_of_an_unrelated_default_account()
     let base = dir.path().canonicalize().unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let claude = store
-        .add_account(Provider::Claude, "Claude", "Test", 1)
+        .add_account(Provider::Claude, "Test", 1, None)
         .unwrap();
-    let codex = store
-        .add_account(Provider::Codex, "Codex", "Test", 1)
-        .unwrap();
+    let codex = store.add_account(Provider::Codex, "Test", 1, None).unwrap();
     let claude_model = choice();
     let codex_model = xcb_core::models::ModelChoice {
         provider: Provider::Codex,

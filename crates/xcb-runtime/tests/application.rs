@@ -52,7 +52,7 @@ fn capabilities_do_not_claim_qualification_or_expose_state_paths() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
     let account = store
-        .add_account(Provider::Claude, "Synthetic account", "Synthetic", 1)
+        .add_account(Provider::Claude, "Synthetic", 1, None)
         .unwrap();
     // An unrelated unqualified catalog must not become actionable application
     // inventory or overflow a consumer's bounded discovery envelope.
@@ -88,7 +88,7 @@ async fn unqualified_request_has_no_provider_or_session_effects() {
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap());
     let account = store
-        .add_account(Provider::Claude, "Synthetic", "Synthetic", 1)
+        .add_account(Provider::Claude, "Synthetic", 1, None)
         .unwrap();
     let mut value = request();
     value["account"] = json!(account.id);

@@ -14,15 +14,9 @@ fn devin_tokens_are_provider_scoped_private_and_rotated_without_exposure() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let store = Store::open(&base.join("state")).unwrap();
-    let account = store
-        .add_account(Provider::Devin, "Devin", "Core", 1)
-        .unwrap();
-    let other = store
-        .add_account(Provider::Devin, "Other", "Core", 1)
-        .unwrap();
-    let claude = store
-        .add_account(Provider::Claude, "Claude", "Max", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
+    let other = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
+    let claude = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     assert!(!auth::has_credentials(&store, &account.id).unwrap());
     auth::store_token(&store, &account.id, b"synthetic-first\n").unwrap();
     assert_eq!(
@@ -69,7 +63,7 @@ fn devin_explicit_native_import_preserves_source_and_copies_only_the_token() {
     private::create(&source, &bytes).unwrap();
     std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o644)).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
-    let id = auth::import_account(&store, &source, "Imported Devin").unwrap();
+    let id = auth::import_account(&store, &source).unwrap();
     assert_eq!(store.account(&id).unwrap().provider, Provider::Devin);
     assert!(auth::has_credentials(&store, &id).unwrap());
     assert_eq!(&*auth::token(&store, &id).unwrap(), "synthetic-import-only");
@@ -104,7 +98,7 @@ fn devin_native_hostname_field_imports_without_rewriting_the_source() {
         .replace("https://app.devin.ai", "app.devin.ai");
     private::create(&source, bytes.as_bytes()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
-    let id = auth::import_account(&store, &source, "Native hostname").unwrap();
+    let id = auth::import_account(&store, &source).unwrap();
     assert_eq!(&*auth::token(&store, &id).unwrap(), "synthetic-hostname");
     assert_eq!(std::fs::read(&source).unwrap(), bytes.as_bytes());
     for alternate in [
@@ -119,7 +113,7 @@ fn devin_native_hostname_field_imports_without_rewriting_the_source() {
             &xcb_runtime::digest(bytes.as_bytes()),
         )
         .unwrap();
-        assert!(auth::import_account(&store, &source, "Invalid host").is_err());
+        assert!(auth::import_account(&store, &source).is_err());
         private::replace(
             &source,
             bytes.as_bytes(),
@@ -142,27 +136,20 @@ fn devin_import_rejects_unsafe_sources_before_creating_accounts() {
     let store = Store::open(&base.join("state")).unwrap();
     for mode in [0o620, 0o602, 0o666] {
         std::fs::set_permissions(&source, std::fs::Permissions::from_mode(mode)).unwrap();
-        assert!(auth::import_account(&store, &source, "Writable by others").is_err());
+        assert!(auth::import_account(&store, &source).is_err());
     }
     std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
     let linked = private::directory(&base.join("linked"))
         .unwrap()
         .join("credentials.toml");
     symlink(&source, &linked).unwrap();
-    assert!(auth::import_account(&store, &linked, "Symlink").is_err());
+    assert!(auth::import_account(&store, &linked).is_err());
     std::fs::remove_file(&linked).unwrap();
     std::fs::hard_link(&source, &linked).unwrap();
-    assert!(auth::import_account(&store, &source, "Hardlink").is_err());
+    assert!(auth::import_account(&store, &source).is_err());
     std::fs::remove_file(linked).unwrap();
     symlink(source.parent().unwrap(), base.join("linked-parent")).unwrap();
-    assert!(
-        auth::import_account(
-            &store,
-            &base.join("linked-parent/credentials.toml"),
-            "Linked parent"
-        )
-        .is_err()
-    );
+    assert!(auth::import_account(&store, &base.join("linked-parent/credentials.toml")).is_err());
     assert!(store.accounts().unwrap().is_empty());
 }
 
@@ -197,7 +184,7 @@ fn devin_native_parser_rejects_custom_endpoints_ambiguous_and_unbounded_inputs()
             &xcb_runtime::digest(good.as_bytes()),
         )
         .unwrap();
-        let error = auth::import_account(&store, &source, "Invalid")
+        let error = auth::import_account(&store, &source)
             .unwrap_err()
             .to_string();
         assert!(!error.contains("synthetic-secret-marker"));
@@ -217,9 +204,7 @@ fn devin_token_changes_respect_existing_account_custody() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let store = Store::open(&base.join("state")).unwrap();
-    let account = store
-        .add_account(Provider::Devin, "Devin", "Core", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
     auth::store_token(&store, &account.id, b"synthetic-original").unwrap();
     let workspace = base.join("work");
     std::fs::create_dir(&workspace).unwrap();
@@ -249,9 +234,7 @@ fn devin_credential_target_links_are_rejected_and_receipt_failure_retains_custod
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let store = Store::open(&base.join("state")).unwrap();
-    let account = store
-        .add_account(Provider::Devin, "Devin", "Core", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
     let target = store
         .account_root(&account.id)
         .unwrap()
@@ -285,9 +268,7 @@ fn devin_generation_receipt_failure_preserves_credential_and_retains_custody() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let store = Store::open(&base.join("state")).unwrap();
-    let account = store
-        .add_account(Provider::Devin, "Devin", "Core", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
     auth::store_token(&store, &account.id, b"synthetic-original").unwrap();
     let root = store.account_root(&account.id).unwrap();
     let generation = root.join("application-generation.json");

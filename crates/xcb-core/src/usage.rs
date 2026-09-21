@@ -1,4 +1,4 @@
-use crate::{Error, Id, Result};
+use crate::{Error, Id, Provider, Result};
 use serde::{Deserialize, Serialize};
 
 pub const COUNTER_LIMIT: u64 = 1_000_000_000_000;
@@ -64,13 +64,26 @@ impl QuotaPoint {
     }
 }
 
-/// The latest observation in each known Claude account-wide window is authoritative
-/// until its reported reset, even after percentage telemetry becomes stale. Callers
-/// must bind `pool` to the current account credential generation; model-specific and
-/// other-provider windows are deliberately not inferred to have account scope.
-pub fn quota_blocked_until(points: &[QuotaPoint], pool: &Id, now: u64) -> Option<u64> {
-    ["five_hour", "seven_day"]
-        .into_iter()
+/// The latest observation in each known account-wide window is authoritative
+/// until its reported reset, even after percentage telemetry becomes stale.
+/// Claude uses `five_hour`/`seven_day`; Codex's account-level ChatGPT windows
+/// arrive as `codex.primary`/`codex.secondary`. Callers must bind `pool` to the
+/// current account credential generation; model-specific and other-provider
+/// windows are deliberately not inferred to have account scope.
+pub fn quota_blocked_until(
+    points: &[QuotaPoint],
+    pool: &Id,
+    provider: Provider,
+    now: u64,
+) -> Option<u64> {
+    let windows: &[&str] = match provider {
+        Provider::Claude => &["five_hour", "seven_day"],
+        Provider::Codex => &["codex.primary", "codex.secondary"],
+        Provider::Devin => &[],
+    };
+    windows
+        .iter()
+        .copied()
         .filter_map(|window| {
             points
                 .iter()
@@ -243,36 +256,39 @@ mod quota_availability_tests {
         ];
         assert!(!points[0].fresh(500_000));
         assert_eq!(
-            quota_blocked_until(&points, &pool, 500_000),
+            quota_blocked_until(&points, &pool, Provider::Claude, 500_000),
             Some(9_000_000)
         );
         points.push(point("five_hour", 20.0, 499_999, 2_000_000));
         assert_eq!(
-            quota_blocked_until(&points, &pool, 500_000),
+            quota_blocked_until(&points, &pool, Provider::Claude, 500_000),
             Some(9_000_000)
         );
         points.push(point("seven_day", 10.0, 500_000, 10_000_000));
         points.reverse();
-        assert_eq!(quota_blocked_until(&points, &pool, 500_000), None);
+        assert_eq!(
+            quota_blocked_until(&points, &pool, Provider::Claude, 500_000),
+            None
+        );
     }
 
     #[test]
     fn quota_availability_has_exact_observed_and_reset_boundaries() {
         let p = point("five_hour", 100.0, 10, 20);
         assert_eq!(
-            quota_blocked_until(std::slice::from_ref(&p), &p.pool, 9),
+            quota_blocked_until(std::slice::from_ref(&p), &p.pool, Provider::Claude, 9),
             None
         );
         assert_eq!(
-            quota_blocked_until(std::slice::from_ref(&p), &p.pool, 10),
+            quota_blocked_until(std::slice::from_ref(&p), &p.pool, Provider::Claude, 10),
             Some(20)
         );
         assert_eq!(
-            quota_blocked_until(std::slice::from_ref(&p), &p.pool, 19),
+            quota_blocked_until(std::slice::from_ref(&p), &p.pool, Provider::Claude, 19),
             Some(20)
         );
         assert_eq!(
-            quota_blocked_until(std::slice::from_ref(&p), &p.pool, 20),
+            quota_blocked_until(std::slice::from_ref(&p), &p.pool, Provider::Claude, 20),
             None
         );
     }
@@ -289,9 +305,54 @@ mod quota_availability_tests {
             point("primary", 100.0, 1, 1000),
             point("five_hour", 99.99, 1, 1000),
         ];
-        assert_eq!(quota_blocked_until(&points, &pool, 2), None);
         assert_eq!(
-            quota_blocked_until(&[point("seven_day", f64::NAN, 1, 1000)], &pool, 2),
+            quota_blocked_until(&points, &pool, Provider::Claude, 2),
+            None
+        );
+        assert_eq!(
+            quota_blocked_until(
+                &[point("seven_day", f64::NAN, 1, 1000)],
+                &pool,
+                Provider::Claude,
+                2
+            ),
+            None
+        );
+        // Claude window names never scope a Codex account and vice versa.
+        assert_eq!(
+            quota_blocked_until(
+                &[point("codex.primary", 100.0, 1, 1000)],
+                &pool,
+                Provider::Claude,
+                2
+            ),
+            None
+        );
+        assert_eq!(
+            quota_blocked_until(
+                &[point("codex.primary", 100.0, 1, 1000)],
+                &pool,
+                Provider::Codex,
+                2
+            ),
+            Some(1000)
+        );
+        assert_eq!(
+            quota_blocked_until(
+                &[point("five_hour", 100.0, 1, 1000)],
+                &pool,
+                Provider::Codex,
+                2
+            ),
+            None
+        );
+        assert_eq!(
+            quota_blocked_until(
+                &[point("five_hour", 100.0, 1, 1000)],
+                &pool,
+                Provider::Devin,
+                2
+            ),
             None
         );
     }
