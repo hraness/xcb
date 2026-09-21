@@ -124,6 +124,7 @@ test("native source upgrade validates staged bytes, atomically replaces, and bac
     expect(manifest.versionString).toBe("0.4.0");
     expect(manifest.helperPath).toBe(join(f.prefix, "share/xcb/install-native.sh"));
     expect(existsSync(manifest.helperPath)).toBe(true);
+    expect(statSync(join(f.prefix, "share/xcb")).mode & 0o777).toBe(0o700);
   } finally { closeSync(old); }
 });
 
