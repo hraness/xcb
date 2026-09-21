@@ -19,7 +19,7 @@ test("comparison has an addressable accessible table and active navigation", () 
     .on("time", { element(element) { reviewedDates.push(element.getAttribute("datetime") ?? ""); } })
     .transform(html);
   expect(headings).toEqual(["compare-title"]);
-  expect(rows).toHaveLength(5);
+  expect(rows).toHaveLength(4);
   expect(columns).toHaveLength(3);
   expect(currentCompare).toBe(true);
   expect(scrollRegion).toBe(true);
@@ -37,7 +37,6 @@ test("comparison attaches official evidence and retains current support boundari
     "https://opencode.ai/docs/agents/",
     "https://docs.devin.ai/enterprise/deployment/overview",
     "https://docs.devin.ai/use-cases/gallery/batch-3-agents-best-solution",
-    "https://docs.langchain.com/oss/python/langgraph/overview",
   ]) expect(html).toContain(`href="${source}"`);
   expect(html).toContain("Native xcb is a source preview");
   expect(html).toContain("tested account hit quota before coding acceptance");

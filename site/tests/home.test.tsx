@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import Home from "../app/page";
 import Docs from "../app/docs/page";
+import Compare from "../app/compare/page";
 import { publishedRelease } from "../app/publication";
 import RootLayout from "../app/layout";
 import { siteDefaultPalette } from "../palette";
@@ -66,4 +67,40 @@ test("support boundaries appear before installation without implying offline inf
   expect(html.indexOf('id="readiness"')).toBeLessThan(html.indexOf('id="install"'));
   expect(html).toContain('href="/compare"');
   expect(html).toContain('href="/docs/getting-started"');
+});
+
+
+test("the shared header keeps a named home link and exact-artwork foil fallback", () => {
+  for (const Page of [Home, Docs, Compare]) {
+    const html = renderToStaticMarkup(<Page />);
+    const homeLinks: string[] = [];
+    const marks: string[] = [];
+    const fallbackImages: string[] = [];
+    const masks: string[] = [];
+    new HTMLRewriter()
+      .on('header a[aria-label="xcb home"]', {
+        element(element) {
+          homeLinks.push(element.getAttribute("href") ?? "");
+          expect(element.hasAttribute("data-foil")).toBe(true);
+        },
+      })
+      .on('header a[aria-label="xcb home"] .hraness-foil-mark', {
+        element(element) { marks.push(element.getAttribute("aria-hidden") ?? ""); },
+      })
+      .on('header a[aria-label="xcb home"] .hraness-foil-mark img', {
+        element(element) {
+          fallbackImages.push(element.getAttribute("src") ?? "");
+          expect(element.hasAttribute("alt")).toBe(true);
+          expect(element.getAttribute("alt") ?? "").toBe("");
+        },
+      })
+      .on('header a[aria-label="xcb home"] .hraness-foil-mark__paint', {
+        element(element) { masks.push((element.getAttribute("style") ?? "").replaceAll("&quot;", '"')); },
+      })
+      .transform(html);
+    expect(homeLinks).toEqual(["/"]);
+    expect(marks).toEqual(["true"]);
+    expect(fallbackImages).toEqual(["/marks/xcb.svg"]);
+    expect(masks).toEqual(['--hraness-foil-mask:url("/marks/xcb.svg")']);
+  }
 });

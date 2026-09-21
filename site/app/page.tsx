@@ -74,7 +74,7 @@ export default function Home() {
               <div><h3>Delegate or build workflows</h3><p>Cloud agents take work into remote environments. Orchestration frameworks help you build coordinated agent applications.</p></div>
               <div><h3>Bring your workspace together</h3><p>xcb puts supported accounts, model choice, local history, and usage behind one terminal interface.</p></div>
             </div>
-            <a className="xcb-text-link" href="/compare">Compare with Codex, Claude Code, OpenCode, Devin, and LangGraph ↗</a>
+            <a className="xcb-text-link" href="/compare">Compare with Codex, Claude Code, OpenCode, and Devin ↗</a>
           </MarketingSection>
           <MarketingSection id="readiness" heading="Useful today. Clear about the edges." headingId="readiness-title" summary="Native xcb is a source preview. The current evidence covers specific builds and tested accounts, not every provider or machine.">
             <div className="xcb-readiness">

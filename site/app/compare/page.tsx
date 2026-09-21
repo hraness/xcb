@@ -3,8 +3,8 @@ import { MarketingPage, MarketingSection, ProductHero } from "@hraness/design-ki
 import { AskAiAboutThis } from "@hraness/ui";
 import { SiteHeader } from "../site-header";
 
-const title = "Compare xcb with coding agents and orchestration tools";
-const description = "See where xcb fits alongside Claude Code, Codex, OpenCode, Devin cloud, and LangGraph. Compare product focus, workflows, and current limits.";
+const title = "Compare xcb with coding agents and developer tools";
+const description = "See where xcb fits alongside Claude Code, Codex, OpenCode, and Devin. Compare product focus, workflows, and current limits.";
 
 export const metadata: Metadata = {
   title,
@@ -42,7 +42,7 @@ export default function Compare() {
             <p className="xcb-compare-scroll-hint" id="comparison-scroll-hint">On a small screen, scroll the table sideways to compare each approach.</p>
             <div className="xcb-comparison-scroll" role="region" aria-labelledby="comparison-caption" aria-describedby="comparison-scroll-hint" tabIndex={0}>
               <table className="xcb-comparison-table">
-                <caption id="comparison-caption">Coding agents, local workspaces, and orchestration frameworks</caption>
+                <caption id="comparison-caption">Coding agents and local workspaces</caption>
                 <thead>
                   <tr><th scope="col">Approach</th><th scope="col">What it gives you</th><th scope="col">When it fits</th></tr>
                 </thead>
@@ -67,15 +67,10 @@ export default function Compare() {
                     <td><p>Delegate work into development environments with a shell, browser, and editor. Documented workflows can compare parallel Devin sessions.</p><div className="xcb-comparison-sources"><a href="https://docs.devin.ai/enterprise/deployment/overview">Deployment docs</a><a href="https://docs.devin.ai/use-cases/gallery/batch-3-agents-best-solution">Parallel workflow</a></div></td>
                     <td><p>You want managed remote task environments. xcb keeps its terminal and session state locally. Its Devin adapter uses the local ACP candidate, a separate path whose tested account hit quota before coding acceptance.</p><a href="/docs/providers#devin">xcb’s Devin status</a></td>
                   </tr>
-                  <tr>
-                    <th scope="row"><span className="xcb-comparison-name">LangGraph</span><span className="xcb-comparison-kind">Orchestration framework</span></th>
-                    <td><p>Build custom stateful agent workflows with persistence, durable execution, and human review points.</p><a href="https://docs.langchain.com/oss/python/langgraph/overview">LangGraph overview</a></td>
-                    <td><p>You need to design an application’s workflow graph. xcb provides a terminal workspace and bounded application integration around admitted provider accounts.</p><a href="/docs/application-api">Application integration</a></td>
-                  </tr>
                 </tbody>
               </table>
             </div>
-            <p className="xcb-compare-note">The fit guidance is our interpretation of these documented capabilities. It does not claim that other tools lack account controls, customization, local storage, or parallel work.</p>
+            <p className="xcb-compare-note">This page focuses on user-facing coding tools. xcb is a local workspace and control plane around those tools, not a general-purpose multi-agent task graph. The fit guidance is our interpretation of documented capabilities; it does not claim that other tools lack account controls, customization, local storage, or parallel work.</p>
           </MarketingSection>
 
           <MarketingSection

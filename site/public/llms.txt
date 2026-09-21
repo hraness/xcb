@@ -9,7 +9,7 @@ The workspace broker can read and edit files. A separately configured Linux ARM6
 ## Pages
 
 - [Overview](https://xcb.dev/): value proposition, illustrative workspace, capabilities, and source installation.
-- [Compare](https://xcb.dev/compare): product-focus comparison with Claude Code, Codex CLI, OpenCode, Devin cloud, and LangGraph, with primary sources.
+- [Compare](https://xcb.dev/compare): product-focus comparison with Claude Code, Codex CLI, OpenCode, and Devin cloud, with primary sources. xcb is a local workspace around coding tools, not a general-purpose multi-agent task graph.
 - [Documentation](https://xcb.dev/docs): task-oriented guides and current readiness.
 - [Getting started](https://xcb.dev/docs/getting-started): build native xcb and connect an account.
 - [Accounts and providers](https://xcb.dev/docs/providers): supported builds, authentication, model selection, quota windows.

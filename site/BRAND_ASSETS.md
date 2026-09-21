@@ -1,9 +1,15 @@
 # xcb website identity
 
-The † dagger mark identifies xcb (Excalibur): a small, sharp, local instrument. Header and browser marks use `public/xcb.svg`, a single-path glyph that follows the color scheme.
+The header uses the checked transparent `public/marks/xcb.svg` artwork through
+`MarketingSiteHeader`’s `brandMark` option. The shared design-kit paints metallic
+foil with a subtle rainbow reflection on the original silhouette and wordmark.
+It retains the original image when masking is unavailable or forced colors are
+active. The enclosing home link supplies the accessible product name.
 
-The former AgentMixer artwork (`public/icon.png`, `public/apple-icon.png`) is retained in-tree but no longer referenced by the site.
+The mark bytes are unchanged from the canonical artwork adoption in PR #64.
+Do not use an opaque favicon as an alpha mask or redraw the product geometry.
+Browser and touch icons keep their existing bytes and metadata references.
 
-| File | Format | Notes |
-| --- | --- | --- |
-| xcb.svg | SVG, 64×80 viewBox | Current mark; `prefers-color-scheme` aware |
+| File | SHA-256 |
+| --- | --- |
+| marks/xcb.svg | `b4ec105e14536638e960f3f0d31f80e6292fef97e9ce47b1cf9d5b596fb136bc` |
