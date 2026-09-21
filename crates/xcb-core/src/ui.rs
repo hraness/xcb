@@ -40,6 +40,17 @@ impl AccountRow {
     }
 }
 
+/// The route a fresh session would take right now — the account with the
+/// most remaining quota and the provider's default model. Previewed in the
+/// chrome when no session is bound; nothing is persisted until a real
+/// submission creates the session.
+#[derive(Debug, Clone)]
+pub struct RoutePreview {
+    pub account: String,
+    pub provider: Provider,
+    pub model: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct View {
     pub session: Option<Session>,
@@ -58,6 +69,8 @@ pub struct View {
     /// True when the focused session's live run is owned by another terminal
     /// instance; the session is actively working elsewhere, not unsettled.
     pub remote_active: bool,
+    /// Set only while no session is bound.
+    pub pending_route: Option<RoutePreview>,
     pub tokens_per_second: Option<f64>,
     pub share_percent: Option<f64>,
     pub total_runway_seconds: Option<f64>,
@@ -81,6 +94,7 @@ impl Default for View {
             pane_error: None,
             state: State::Idle,
             remote_active: false,
+            pending_route: None,
             tokens_per_second: None,
             share_percent: None,
             total_runway_seconds: None,

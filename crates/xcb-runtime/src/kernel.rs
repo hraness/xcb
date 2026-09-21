@@ -26,7 +26,7 @@ use xcb_core::{
     panes::Pane,
     policy::{RouteCandidate, Terminal, next_route, should_continue},
     session::{Message, MessageProvenance, Role, Session, State, Subagent},
-    ui::{Intent, Update},
+    ui::{Intent, RoutePreview, Update},
 };
 
 pub fn choose_model(
@@ -920,6 +920,21 @@ fn publish(
             view.state = State::Uncertain;
         }
     }
+    if current.is_none() {
+        view.pending_route = usable_account(store, None, None, config)
+            .ok()
+            .flatten()
+            .and_then(|id| store.account(&id).ok())
+            .and_then(|account| {
+                choose_model(store, account.provider, None, config)
+                    .ok()
+                    .map(|model| RoutePreview {
+                        account: account.name(),
+                        provider: account.provider,
+                        model: model.label,
+                    })
+            });
+    }
     queue(outbox, Update::View(Box::new(view)));
     Ok(())
 }
@@ -1358,6 +1373,61 @@ mod tests {
             outbox.lock().unwrap().updates.back(),
             Some(Update::View(_))
         ));
+    }
+
+    #[test]
+    fn publish_previews_the_pending_route_until_a_session_is_bound() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let workspace = crate::private::directory(&base.join("workspace")).unwrap();
+        let account = store
+            .add_account(Provider::Devin, "Subscription", 1, None)
+            .unwrap();
+        crate::devin::auth::store_token(&store, &account.id, b"synthetic-token").unwrap();
+        let model = ModelChoice {
+            provider: Provider::Devin,
+            id: Id::new("swe-2-high").unwrap(),
+            label: "SWE-2 High".into(),
+            mode: xcb_core::models::Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        store
+            .set_models(Provider::Devin, std::slice::from_ref(&model))
+            .unwrap();
+        let config = Config::default();
+        let outbox = Mutex::new(Outbox::default());
+
+        publish(&store, None, &config, &BTreeMap::new(), &outbox).unwrap();
+        let view = match outbox.lock().unwrap().updates.pop_front() {
+            Some(Update::View(view)) => *view,
+            _ => panic!("publish emits a full view"),
+        };
+        let route = view.pending_route.expect("pending route preview");
+        assert_eq!(route.provider, Provider::Devin);
+        assert_eq!(route.account, account.name());
+        assert_eq!(route.model, "SWE-2 High");
+
+        // A bound session replaces the preview with the committed route.
+        let session = store
+            .create_session(&account.id, model, &workspace, 2)
+            .unwrap();
+        publish(
+            &store,
+            Some(&session.id),
+            &config,
+            &BTreeMap::new(),
+            &outbox,
+        )
+        .unwrap();
+        let view = match outbox.lock().unwrap().updates.pop_front() {
+            Some(Update::View(view)) => *view,
+            _ => panic!("publish emits a full view"),
+        };
+        assert!(view.pending_route.is_none());
+        assert!(view.session.is_some());
     }
 
     #[tokio::test]
