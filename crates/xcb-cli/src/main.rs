@@ -897,12 +897,27 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             }
                         }
                     }
-                    Err(error) => {
-                        reports.push(json!({"provider":provider,"error":error.to_string()}));
-                        if !cli.json {
-                            println!("{provider}: {error}");
+                    Err(error) => match process::Pin::load(&root, provider) {
+                        Ok(pin) => {
+                            let native = runner::provider_admitted(&pin);
+                            let detail = if native {
+                                "pinned · per-run boundary verification required"
+                            } else {
+                                "metadata pin only · native execution unavailable"
+                            };
+                            reports.push(json!({"provider":provider,"version":pin.version,"sha256":pin.sha256,"nativeCandidate":native,"storedPin":true,"detail":detail}));
+                            if !cli.json {
+                                println!("{provider}: {} · {detail}", pin.version);
+                            }
+                            found += 1;
                         }
-                    }
+                        Err(_) => {
+                            reports.push(json!({"provider":provider,"error":error.to_string()}));
+                            if !cli.json {
+                                println!("{provider}: {error}");
+                            }
+                        }
+                    },
                 }
             }
             let judge_key = judge::judge_token(store.root())?.map(|(_, source)| source);
