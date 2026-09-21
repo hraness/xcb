@@ -110,6 +110,7 @@ fn help_and_tail_navigation_do_not_modify_the_draft() {
 fn ctrl_c_cancels_the_run_even_while_a_dialog_is_open() {
     let (tx, rx) = sync_channel(4);
     let mut app = App::default();
+    app.view.state = xcb_core::session::State::Working;
     app.handle(
         Event::Key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)),
         &tx,
@@ -567,5 +568,120 @@ fn slash_typeahead_runs_quit_and_ignores_unknown_commands() {
         &tx
     ));
     assert!(app.notice.contains("Unknown command"));
+    assert!(rx.try_recv().is_err());
+}
+
+fn catalog_model(
+    provider: xcb_core::Provider,
+    id: &str,
+    effort: Option<&str>,
+) -> xcb_core::models::ModelChoice {
+    xcb_core::models::ModelChoice {
+        provider,
+        id: xcb_core::Id::new(id).unwrap(),
+        label: id.into(),
+        mode: xcb_core::models::Mode::Fixed,
+        resolved: None,
+        effort: effort.map(|value| xcb_core::Id::new(value).unwrap()),
+        observed_at_ms: 1,
+    }
+}
+
+#[test]
+fn model_picker_filters_to_the_bound_sessions_provider() {
+    let (tx, _rx) = sync_channel(4);
+    let models = vec![
+        catalog_model(xcb_core::Provider::Devin, "swe-2-high", None),
+        catalog_model(xcb_core::Provider::Claude, "sonnet", Some("high")),
+        catalog_model(xcb_core::Provider::Codex, "gpt-6-astra", Some("high")),
+    ];
+
+    // A bound session only lists its own provider's catalog.
+    let mut app = App::default();
+    let mut view = view_for("s_one");
+    view.models = models.clone();
+    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view))));
+    app.composer.set_text("/model");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let Some(Modal::Picker { items, .. }) = &app.modal else {
+        panic!("model picker")
+    };
+    assert_eq!(items.len(), 1);
+    assert!(items[0].label.starts_with("devin"));
+
+    // Without a session the whole observed catalog is offered.
+    let mut app = App::default();
+    let view = xcb_core::ui::View {
+        models,
+        ..xcb_core::ui::View::default()
+    };
+    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view))));
+    app.composer.set_text("/model");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let Some(Modal::Picker { items, .. }) = &app.modal else {
+        panic!("model picker")
+    };
+    assert_eq!(items.len(), 3);
+}
+
+#[test]
+fn ctrl_c_cancels_a_live_turn_then_clears_a_draft_then_quits() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = App::default();
+    let mut view = view_for("s_one");
+    view.state = xcb_core::session::State::Working;
+    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view))));
+
+    // While a turn runs, Ctrl-C cancels it and never touches the draft.
+    app.composer.set_text("keep this draft");
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &tx
+    ));
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
+    assert_eq!(app.composer.text(), "keep this draft");
+    assert!(app.notice.contains("Stopping"));
+
+    // Esc inside a dialog closes the dialog first; once closed, Esc stops the
+    // live turn.
+    app.modal = Some(Modal::Help);
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        &tx
+    ));
+    assert!(app.modal.is_none());
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        &tx
+    ));
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
+
+    // Idle with a draft: Ctrl-C clears it and warns once.
+    let mut view = view_for("s_one");
+    view.state = xcb_core::session::State::Idle;
+    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view))));
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &tx
+    ));
+    assert!(app.composer.text().is_empty());
+    assert!(app.notice.contains("Ctrl-C again to quit"));
+    assert!(rx.try_recv().is_err());
+
+    // Idle and empty: Ctrl-C quits.
+    assert!(!app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &tx
+    ));
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Quit)));
+
+    // Idle Esc is a quiet no-op — no stale "stopping" notice, no intent.
+    let (tx, rx) = sync_channel(8);
+    let mut app = App::default();
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        &tx
+    ));
+    assert!(app.notice.is_empty());
     assert!(rx.try_recv().is_err());
 }

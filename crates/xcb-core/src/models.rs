@@ -55,14 +55,25 @@ pub struct Preference {
     pub effort: Option<Id>,
 }
 
+/// First entry per provider is the automatic route: the provider's own model
+/// at high effort, never the premium max tier. Later entries are ordering
+/// preferences for pickers and graceful fallbacks when a catalog lacks the
+/// default.
 pub fn default_preferences() -> Vec<Preference> {
     [
         (Provider::Devin, "swe-2-high", None),
+        (Provider::Devin, "swe-2-max", None),
         (Provider::Devin, "gpt-6-astra-max", None),
         (Provider::Devin, "gpt-5-6-sol-max", None),
+        (Provider::Claude, "default", Some("high")),
+        (Provider::Claude, "default", Some("xhigh")),
+        (Provider::Claude, "sonnet", Some("high")),
         (Provider::Claude, "claude-fable-5-1", Some("max")),
         (Provider::Claude, "opus[1m]", Some("max")),
+        (Provider::Codex, "gpt-6-astra", Some("high")),
+        (Provider::Codex, "gpt-6-astra", Some("xhigh")),
         (Provider::Codex, "gpt-6-astra", Some("ultra")),
+        (Provider::Codex, "gpt-5.6-sol", Some("high")),
         (Provider::Codex, "gpt-5.6-sol", Some("ultra")),
     ]
     .into_iter()
