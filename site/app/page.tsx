@@ -90,6 +90,7 @@ cd xcb
 rustup toolchain install 1.97.1 --profile minimal
 ./scripts/install-native.sh
 export PATH="$HOME/.local/bin:$PATH"
+xcb update enable --policy notify
 xcb --help`}</code></pre>
             <a className="xcb-text-link" href="/docs/getting-started">Follow the complete setup guide ↗</a>
             <details className="xcb-release-details"><summary>Package and release details</summary>

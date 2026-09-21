@@ -34,7 +34,16 @@ rustup toolchain install 1.97.1 --profile minimal
 export PATH="$HOME/.local/bin:$PATH"
 xcb --version
 xcb --help`}</Code>
-      <p>The installer builds with the lockfile and installs <code>~/.local/bin/xcb</code>. Use <code>XCB_INSTALL_PREFIX</code> to choose another prefix. Run <code>command -v xcb</code> if you also have the older TypeScript CLI installed; both use the same command name.</p>
+      <p>The installer builds with the lockfile and installs <code>~/.local/bin/xcb</code>. Use <code>XCB_INSTALL_PREFIX</code> to choose another prefix. Run <code>command -v xcb</code> if you also have the older TypeScript CLI installed; both use the same command name. The installer records its method and keeps a verified helper beside the binary for future upgrades.</p>
+      <h2 id="updates">4. Keep the global install current</h2>
+      <p>Updates are user-level and release-based. XCB defaults to <code>notify</code>; choose <code>auto</code> to let the macOS user scheduler install only an exact stable archive with its adjacent SHA-256 checksum. Project settings cannot change this policy.</p>
+      <Code>{`xcb update check
+xcb update enable --policy notify   # daily check, no replacement
+xcb update enable --policy auto     # daily check and verified install
+xcb update status
+xcb upgrade
+xcb update disable`}</Code>
+      <p>No native xcb release is published yet, so checks fail closed and leave a source install untouched. After an upgrade, restart open terminals and rerun <code>xcb doctor</code>; provider and application qualification is tied to the exact version and digest of the installed executable.</p>
       <h2 id="connect">2. Connect Claude</h2>
       <p>Install an admitted Claude Code binary: major version 2, version 2.1.268 or newer. Then create an account and complete the browser sign-in. XCB does not silently import an existing provider login.</p>
       <Code>{`xcb accounts add claude personal --plan Max
@@ -105,7 +114,7 @@ xcb doctor --provider devin
 xcb accounts import-devin --source /absolute/path/to/credentials.toml --label devin-personal
 xcb accounts refresh devin-personal
 xcb models`}</Code>
-      <p>Import preserves the original credentials and sessions. To refresh just the catalog, use <code>xcb models refresh devin --account devin-personal</code>. Native XCB currently supports fixed ACP model choices; compatibility catalog entries for Adaptive or Fusion do not establish native support.</p>
+      <p>Import preserves the original credentials and sessions. To refresh just the catalog, use <code>xcb models refresh devin --account devin-personal</code>. Native XCB currently supports fixed ACP model choices; compatibility catalog entries for Adaptive or Fusion do not establish native support. A successful <code>devin auth status</code> and populated catalog confirm provider access, not a qualified XCB coding turn; the recorded live attempt reached provider quota before inference.</p>
       <h2 id="selection">Select an account and model</h2>
       <p>Copy the matching full key from <code>xcb models</code>. Defaults apply to new interactive sessions; a saved session keeps its account binding.</p>
       <Code>{`xcb accounts default <account>

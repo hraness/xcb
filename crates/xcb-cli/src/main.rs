@@ -111,6 +111,18 @@ enum Commands {
         executable: Option<PathBuf>,
     },
     Config,
+    /// Check for a verified native release, configure update policy, or run
+    /// the background update check used by a user-level scheduler.
+    Update {
+        #[command(subcommand)]
+        command: Option<UpdateCommand>,
+    },
+    /// Install the latest verified native release (alias: `xcb update install`).
+    Upgrade {
+        version: Option<String>,
+        #[arg(long, hide = true)]
+        quiet: bool,
+    },
     Recover {
         run: Option<Id>,
         #[arg(long)]
@@ -131,6 +143,32 @@ enum Commands {
     },
     Completions {
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpdateCommand {
+    /// Query immutable GitHub release metadata without changing the binary.
+    Check,
+    /// Show the local update policy and the last cached result.
+    Status,
+    /// Set the user-level policy. The default is notify.
+    Enable {
+        #[arg(long, default_value = "notify", value_parser = parse_update_policy)]
+        policy: xcb_runtime::update::Policy,
+    },
+    /// Disable update checks and scheduled upgrades.
+    Disable,
+    /// Install a verified release using the recorded global installer.
+    Install {
+        version: Option<String>,
+        #[arg(long, hide = true)]
+        quiet: bool,
+    },
+    /// Run one scheduled check; intended for LaunchAgent/systemd user timers.
+    Daemon {
+        #[arg(long, hide = true)]
+        quiet: bool,
     },
 }
 
@@ -477,6 +515,15 @@ async fn egress_forward(
         child,
     )
     .await
+}
+
+fn parse_update_policy(value: &str) -> std::result::Result<xcb_runtime::update::Policy, String> {
+    match value {
+        "notify" => Ok(xcb_runtime::update::Policy::Notify),
+        "auto" => Ok(xcb_runtime::update::Policy::Auto),
+        "disable" => Ok(xcb_runtime::update::Policy::Disable),
+        _ => Err("update policy must be notify, auto, or disable".to_owned()),
+    }
 }
 
 fn parse_expected_generation(value: &str) -> std::result::Result<String, &'static str> {
@@ -1241,6 +1288,95 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Some(Commands::Update { command }) => {
+            match command.unwrap_or(UpdateCommand::Check) {
+                UpdateCommand::Check => {
+                    let result = xcb_runtime::update::check(
+                        store.root(),
+                        env!("CARGO_PKG_VERSION"),
+                        cli.json,
+                    );
+                    if cli.json {
+                        print_json(result?)?;
+                    } else {
+                        result?;
+                    }
+                }
+                UpdateCommand::Status => {
+                    let state = xcb_runtime::update::load(store.root())?;
+                    if cli.json {
+                        print_json(
+                            json!({"version":1,"policy":state.policy,"lastCheckMs":state.last_check_ms,"availableVersion":state.available_version}),
+                        )?;
+                    } else {
+                        println!(
+                            "update policy: {} · last check {} · available {}",
+                            state.policy,
+                            state.last_check_ms,
+                            state.available_version.as_deref().unwrap_or("none")
+                        );
+                    }
+                }
+                UpdateCommand::Enable { policy } => {
+                    xcb_runtime::update::configure_scheduler(&std::env::current_exe()?, true)?;
+                    let state = xcb_runtime::update::set_policy(store.root(), policy)?;
+                    if cli.json {
+                        print_json(
+                            json!({"version":1,"policy":state.policy,"enabled":state.policy != xcb_runtime::update::Policy::Disable}),
+                        )?;
+                    } else {
+                        println!("xcb updates: {}", state.policy);
+                    }
+                }
+                UpdateCommand::Disable => {
+                    xcb_runtime::update::configure_scheduler(&std::env::current_exe()?, false)?;
+                    let state = xcb_runtime::update::set_policy(
+                        store.root(),
+                        xcb_runtime::update::Policy::Disable,
+                    )?;
+                    if cli.json {
+                        print_json(json!({"version":1,"policy":state.policy,"enabled":false}))?;
+                    } else {
+                        println!("xcb updates disabled");
+                    }
+                }
+                UpdateCommand::Install { version, quiet } => {
+                    xcb_runtime::update::upgrade(
+                        store.root(),
+                        env!("CARGO_PKG_VERSION"),
+                        version.as_deref(),
+                        quiet || cli.json,
+                    )?;
+                }
+                UpdateCommand::Daemon { quiet } => {
+                    if xcb_runtime::update::should_check(store.root())? {
+                        let result = xcb_runtime::update::check(
+                            store.root(),
+                            env!("CARGO_PKG_VERSION"),
+                            quiet || cli.json,
+                        )?;
+                        if xcb_runtime::update::load(store.root())?.policy
+                            == xcb_runtime::update::Policy::Auto
+                            && result.release_available
+                        {
+                            xcb_runtime::update::upgrade(
+                                store.root(),
+                                env!("CARGO_PKG_VERSION"),
+                                None,
+                                quiet || cli.json,
+                            )?;
+                        }
+                    }
+                }
+            }
+            Ok(0)
+        }
+        Some(Commands::Upgrade { version, quiet }) => xcb_runtime::update::upgrade(
+            store.root(),
+            env!("CARGO_PKG_VERSION"),
+            version.as_deref(),
+            quiet || cli.json,
+        ),
         Some(Commands::Config) => {
             print_json(config)?;
             Ok(0)
@@ -1686,6 +1822,28 @@ mod tests {
             assert!(!output.contains("private-custody-pool"));
             assert!(!output.contains("987654321\n"));
         }
+    }
+
+    #[test]
+    fn update_cli_shape_accepts_policy_and_upgrade_aliases() {
+        let cli = Cli::try_parse_from(["xcb", "update", "enable", "--policy", "auto"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Update {
+                command: Some(UpdateCommand::Enable {
+                    policy: xcb_runtime::update::Policy::Auto
+                })
+            })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "update", "install", "0.5.0"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Update { command: Some(UpdateCommand::Install { version: Some(version), quiet: false }) }) if version == "0.5.0")
+        );
+        let cli = Cli::try_parse_from(["xcb", "upgrade", "0.5.0"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Upgrade { version: Some(version), quiet: false }) if version == "0.5.0")
+        );
+        assert!(Cli::try_parse_from(["xcb", "update", "enable", "--policy", "project"]).is_err());
     }
 
     #[test]

@@ -38,6 +38,11 @@ for setup, supported boundaries, and current limits.
 | Devin | Native ACP candidate on macOS for exact build **3000.10.31**; authenticated model discovery passed; tested account hit provider quota before a coding turn | ACP implementation exists; task execution disabled pending exact-runtime qualification |
 
 A successful `doctor` or a visible model does not prove a working coding session.
+The current Devin CLI can be authenticated and can return its model catalog, but
+that provider login is separate from XCB's explicit credential import and from
+an admitted coding turn. The last recorded XCB Devin coding attempt stopped at
+provider quota before inference; treat that boundary as current until a fresh
+qualified turn proves otherwise.
 Native `doctor` reports `metadata pin only` for unqualified providers. Codex and
 Devin candidates require the checked executable digest as well as the version;
 other builds and their Linux execution paths remain unavailable. Automated
@@ -73,6 +78,32 @@ xcb --help
 The installer builds with the lockfile and installs `~/.local/bin/xcb`.
 `XCB_INSTALL_PREFIX` changes the prefix. Both the old TypeScript CLI and the
 native CLI use the name `xcb`; use `command -v xcb` to check which one is active.
+The installer also records a private install manifest under the prefix and
+keeps the exact installer beside the binary, so later upgrades use the same
+verified path.
+
+### Updates and global operation
+
+The native binary is a user-global install when it lives in `~/.local/bin` and
+that directory is on `PATH`. XCB follows an OpenCode-style policy: `notify` is
+the default, `auto` installs only an exact stable release with its checksum,
+and `disable` turns checks off. A macOS LaunchAgent runs the check once a day
+when you enable it; it never reads project settings or updates from `main`.
+
+```sh
+xcb update check
+xcb update enable --policy notify   # check daily and tell you when a release exists
+xcb update enable --policy auto     # check daily and install verified releases
+xcb update status
+xcb upgrade                         # install the latest verified native release
+xcb update disable
+```
+
+There is currently no published native xcb release, so the updater fails closed
+and leaves the source-installed binary alone until the first verified
+`xcb-<version>-<platform>-<arch>.tar.gz` release is available. After any
+replacement, restart open terminals and rerun `xcb doctor`; provider and
+application qualification is bound to the exact installed executable bytes.
 
 ### First Claude session
 
