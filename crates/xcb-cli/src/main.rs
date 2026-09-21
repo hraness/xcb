@@ -476,6 +476,9 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
             .seconds()
             .map(|seconds| format!("~{:.1}h", seconds / 3600.0))
             .unwrap_or_else(|| "unmeasured".into());
+        // codeql[rust/cleartext-logging]: the account name is the user's own
+        // provider email rendered as the account's display identity, which is
+        // the documented purpose of this local status table.
         println!(
             "{} {:<35} {:<9} {:<19} {:<22} {}{}{}{}",
             if config.default_account.as_ref() == Some(&account.id) {
@@ -752,6 +755,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     if cli.json {
                         print_json(json!({"version":1,"account":account.id,"stored":true}))?;
                     } else {
+                        // codeql[rust/cleartext-logging]: the account name is
+                        // the user's own provider email, intentionally shown as
+                        // the account's display identity after sign-in.
                         println!(
                             "Sign-in completed for {}. Run xcb accounts refresh {} to refresh available account metadata.",
                             account.name(),
