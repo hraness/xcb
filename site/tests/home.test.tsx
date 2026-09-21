@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import Home from "../app/page";
 import Docs from "../app/docs/page";
+import Compare from "../app/compare/page";
 import { publishedRelease } from "../app/publication";
 import RootLayout from "../app/layout";
 import { siteDefaultPalette } from "../palette";
@@ -69,8 +70,8 @@ test("support boundaries appear before installation without implying offline inf
 });
 
 
-test("the header keeps a named home link and exact-artwork foil fallback", () => {
-  for (const Page of [Home]) {
+test("the shared header keeps a named home link and exact-artwork foil fallback", () => {
+  for (const Page of [Home, Docs, Compare]) {
     const html = renderToStaticMarkup(<Page />);
     const homeLinks: string[] = [];
     const marks: string[] = [];
