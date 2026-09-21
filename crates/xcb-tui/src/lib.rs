@@ -288,7 +288,11 @@ pub struct App {
     pub modal: Option<Modal>,
     pub show_thinking: bool,
     pub show_history: bool,
+    /// Also expands persisted tool-call output inline in the transcript.
     pub show_activity: bool,
+    /// When the current run started, set on the first View reporting it;
+    /// drives the elapsed-time status badge while a turn is live.
+    pub working_since: Option<Instant>,
     /// Absolute index of the viewport's top line while `paused`; ignored when
     /// the viewport follows the tail.
     pub scroll: Cell<u32>,
@@ -476,6 +480,13 @@ impl App {
                     self.dirty = true;
                 }
                 self.view = *view;
+                // The badge timer follows the run lifecycle, not session
+                // identity — a remote-owned run still counts as working.
+                if matches!(self.view.state, State::Working) || self.view.remote_active {
+                    self.working_since.get_or_insert_with(Instant::now);
+                } else {
+                    self.working_since = None;
+                }
                 if !self.pending_echoes.is_empty() {
                     let current = self.view.session.as_ref().map(|session| session.id.clone());
                     // Unbound echoes adopt the session the kernel bound the
@@ -1291,9 +1302,14 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
             }
         }
         needs_draw |= app.take_dirty();
-        // The attention blink is the only state that changes with time alone.
+        // The attention blink and the working spinner/elapsed badge are the
+        // only states that change with time alone.
         let phase = (ticks / 16) % 2;
         if !needs_draw && app.view.state.attention() && !app.view.reduced_motion && phase != blink {
+            needs_draw = true;
+        }
+        let live = matches!(app.view.state, State::Working) || app.view.remote_active;
+        if !needs_draw && live && ticks.is_multiple_of(4) {
             needs_draw = true;
         }
         if needs_draw {
