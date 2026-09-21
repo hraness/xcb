@@ -148,12 +148,14 @@ mv -f "$stage/candidate" "$destination"
 if [ -n "$previous_digest" ]; then echo "Previous binary preserved at $backup"; fi
 
 # Keep the exact installer beside the user-global binary so `xcb upgrade` can
-# delegate release updates to the same checksum and atomic-swap contract.
+# delegate release updates to the same checksum and atomic-swap contract. This
+# share directory is also the default private state root, so it must satisfy
+# the owner-only directory contract.
 install_prefix=$(cd "$(dirname "$bin_dir")" && pwd -P)
 share_dir="$install_prefix/share/xcb"
 [ ! -L "$install_prefix" ] && [ ! -L "$share_dir" ] || fail "install metadata parent must not be a symlink"
 mkdir -p "$share_dir"
-chmod 0755 "$share_dir"
+chmod 0700 "$share_dir"
 if [ -e "$share_dir/install-native.sh" ] || [ -L "$share_dir/install-native.sh" ]; then
   regular_file "$share_dir/install-native.sh" || fail "existing installer metadata helper is unsafe"
 fi
