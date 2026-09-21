@@ -4,7 +4,7 @@ pub mod render;
 use composer::{Composer, ComposerAction};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
         KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
         PushKeyboardEnhancementFlags,
     },
@@ -27,6 +27,90 @@ use xcb_core::{
     ui::{Intent, Update, View},
     usage::Estimate,
 };
+
+/// One slash command as shown in the typeahead menu and `/help`. `args` is the
+/// usage hint; `needs_args` marks commands that cannot run bare — completing
+/// one lands the cursor after a space instead of executing immediately.
+pub struct SlashCommand {
+    pub name: &'static str,
+    pub args: &'static str,
+    pub summary: &'static str,
+    pub needs_args: bool,
+}
+pub const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        name: "/accounts",
+        args: "",
+        summary: "pick the billing account",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/attach",
+        args: "<path>",
+        summary: "attach a file or image",
+        needs_args: true,
+    },
+    SlashCommand {
+        name: "/default",
+        args: "",
+        summary: "make this account/model the default",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/exit",
+        args: "",
+        summary: "quit xcb",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/help",
+        args: "",
+        summary: "keyboard shortcuts and commands",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/model",
+        args: "[query]",
+        summary: "pick a model",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/new",
+        args: "",
+        summary: "start a new session",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/pane",
+        args: "[id|edit|generate …]",
+        summary: "switch or manage panes",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/plugin",
+        args: "<name> on|off",
+        summary: "toggle an extension",
+        needs_args: true,
+    },
+    SlashCommand {
+        name: "/quit",
+        args: "",
+        summary: "quit xcb",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/reload",
+        args: "",
+        summary: "refresh provider metadata",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/sessions",
+        args: "",
+        summary: "switch sessions",
+        needs_args: false,
+    },
+];
 
 #[derive(Clone)]
 pub enum PickAction {
@@ -197,6 +281,12 @@ pub struct App {
     /// Session an in-flight attachment belongs to; the arriving image is routed
     /// there even if the user switched sessions meanwhile.
     pending_image_session: Option<Id>,
+    /// Highlighted row of the slash-command typeahead menu.
+    slash_selected: Cell<usize>,
+    /// Esc closes the menu without canceling the turn; typing reopens it.
+    slash_dismissed: Cell<bool>,
+    /// Composer text the menu state belongs to; any edit resets selection.
+    slash_text: std::cell::RefCell<String>,
     dirty: bool,
     view_fingerprint: u64,
 }
@@ -212,6 +302,37 @@ impl App {
     /// True when state changed since the last draw and a repaint is needed.
     pub fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
+    }
+    /// Commands matching the composer's current `/` prefix, in menu order. The
+    /// menu only covers the command token — typing a space closes it.
+    pub fn slash_matches(&self) -> Vec<&'static SlashCommand> {
+        let text = self.composer.text();
+        if !text.starts_with('/') || text.contains(char::is_whitespace) || text.len() > 64 {
+            return Vec::new();
+        }
+        SLASH_COMMANDS
+            .iter()
+            .filter(|command| command.name.starts_with(&text))
+            .collect()
+    }
+    /// The open typeahead menu as `(matches, selected)`, if any. Lazily resyncs
+    /// menu state against the live composer text so any edit — typed, pasted,
+    /// or a restored draft — resets selection and un-dismisses the menu.
+    pub fn slash_menu(&self) -> Option<(Vec<&'static SlashCommand>, usize)> {
+        let text = self.composer.text();
+        if *self.slash_text.borrow() != text {
+            *self.slash_text.borrow_mut() = text;
+            self.slash_selected.set(0);
+            self.slash_dismissed.set(false);
+        }
+        let matches = self.slash_matches();
+        if matches.is_empty() || self.slash_dismissed.get() {
+            return None;
+        }
+        Some((
+            matches.clone(),
+            self.slash_selected.get().min(matches.len() - 1),
+        ))
     }
     fn save_draft(&mut self, session: Id, draft: SessionDraft) {
         if let Some(position) = self.drafts.iter().position(|(id, _)| id == &session) {
@@ -391,31 +512,136 @@ impl App {
         let (command, arguments) = input.split_once(' ').unwrap_or((input, ""));
         let arguments = arguments.trim();
         match command {
-            "/help" => self.notice = "/model · /accounts · /sessions · /new · /default · /pane [edit|generate ...] · /attach path · /plugin name on|off · Ctrl-T thinking · Ctrl-O history · Ctrl-U tools · /quit".into(),
-            "/quit" | "/exit" => { self.send(output, Intent::Quit); return false; }
+            "/help" => self.modal = Some(Modal::Help),
+            "/quit" | "/exit" => {
+                self.send(output, Intent::Quit);
+                return false;
+            }
             "/new" => self.send(output, Intent::NewSession),
             "/default" => self.send(output, Intent::SetDefault),
-            "/model" | "/models" if arguments.is_empty() => self.picker("Models · fixed, Adaptive, and Fusion", self.view.models.iter().map(|choice| PickItem { label: format!("{} · {}{} · {:?}", choice.provider, choice.label, choice.resolved.as_ref().map(|resolved| format!(" → {resolved}")).unwrap_or_default(), choice.mode), action: PickAction::Model(choice.key()) }).collect()),
+            "/model" | "/models" if arguments.is_empty() => self.picker(
+                "Models · fixed, Adaptive, and Fusion",
+                self.view
+                    .models
+                    .iter()
+                    .map(|choice| PickItem {
+                        label: format!(
+                            "{} · {}{} · {:?}",
+                            choice.provider,
+                            choice.label,
+                            choice
+                                .resolved
+                                .as_ref()
+                                .map(|resolved| format!(" → {resolved}"))
+                                .unwrap_or_default(),
+                            choice.mode
+                        ),
+                        action: PickAction::Model(choice.key()),
+                    })
+                    .collect(),
+            ),
             "/model" => self.send(output, Intent::Model(arguments.into())),
-            "/accounts" => self.picker("Accounts · select an account", self.view.accounts.iter().map(|account| PickItem { label: format!("{} · {} · {} · {}{}{}", account.name, account.provider, account.subscription, account.quota_block_label(display_now_ms()).unwrap_or_else(|| account.remaining_percent.map(|percent| format!("{percent:.0}% left")).unwrap_or_else(|| "usage unmeasured".into())), if account.busy { " · busy" } else { "" }, if account.enabled { "" } else { " · disabled" }), action: PickAction::Account(account.id.clone()) }).collect()),
-            "/sessions" => self.picker("Sessions", self.view.sessions.iter().map(|session| PickItem { label: format!("{} · {} · {}", session.title, session.model.label, session.state.label()), action: PickAction::Session(session.id.clone()) }).collect()),
+            "/accounts" => self.picker(
+                "Accounts · select an account",
+                self.view
+                    .accounts
+                    .iter()
+                    .map(|account| PickItem {
+                        label: format!(
+                            "{} · {} · {} · {}{}{}",
+                            account.name,
+                            account.provider,
+                            account.subscription,
+                            account
+                                .quota_block_label(display_now_ms())
+                                .unwrap_or_else(|| account
+                                    .remaining_percent
+                                    .map(|percent| format!("{percent:.0}% left"))
+                                    .unwrap_or_else(|| "usage unmeasured".into())),
+                            if account.busy { " · busy" } else { "" },
+                            if account.enabled { "" } else { " · disabled" }
+                        ),
+                        action: PickAction::Account(account.id.clone()),
+                    })
+                    .collect(),
+            ),
+            "/sessions" => self.picker(
+                "Sessions",
+                self.view
+                    .sessions
+                    .iter()
+                    .map(|session| PickItem {
+                        label: format!(
+                            "{} · {} · {}",
+                            session.title,
+                            session.model.label,
+                            session.state.label()
+                        ),
+                        action: PickAction::Session(session.id.clone()),
+                    })
+                    .collect(),
+            ),
             "/pane" if arguments.is_empty() => {
-                let mut items: Vec<_> = self.view.panes.iter().map(|pane| PickItem { label: format!("{} · {}", pane.id, pane.title), action: PickAction::Pane(pane.id.clone()) }).collect();
-                items.push(PickItem { label: "Edit this pane".into(), action: PickAction::EditPane });
-                items.push(PickItem { label: "Generate a pane…".into(), action: PickAction::Text("/pane generate ".into()) });
+                let mut items: Vec<_> = self
+                    .view
+                    .panes
+                    .iter()
+                    .map(|pane| PickItem {
+                        label: format!("{} · {}", pane.id, pane.title),
+                        action: PickAction::Pane(pane.id.clone()),
+                    })
+                    .collect();
+                items.push(PickItem {
+                    label: "Edit this pane".into(),
+                    action: PickAction::EditPane,
+                });
+                items.push(PickItem {
+                    label: "Generate a pane…".into(),
+                    action: PickAction::Text("/pane generate ".into()),
+                });
                 self.picker("Panes", items);
             }
-            "/pane" if arguments == "edit" => self.edit_pane(&self.view.pane.clone(), self.view.pane_revision.clone()),
-            "/pane" if arguments.starts_with("generate ") => self.send(output, Intent::GeneratePane(arguments[9..].into())),
-            "/pane" => match Id::new(arguments) { Ok(id) => self.send(output, Intent::Pane(id)), Err(_) => self.notice = "Use /pane, /pane edit, or /pane generate <description>".into() },
-            "/attach" if !arguments.is_empty() => { self.pending_image = true; self.pending_image_session = self.view.session.as_ref().map(|session| session.id.clone()); self.send(output, Intent::AttachPath(arguments.trim_matches('"').trim_matches('\'').into())); }
+            "/pane" if arguments == "edit" => {
+                self.edit_pane(&self.view.pane.clone(), self.view.pane_revision.clone())
+            }
+            "/pane" if arguments.starts_with("generate ") => {
+                self.send(output, Intent::GeneratePane(arguments[9..].into()))
+            }
+            "/pane" => match Id::new(arguments) {
+                Ok(id) => self.send(output, Intent::Pane(id)),
+                Err(_) => {
+                    self.notice = "Use /pane, /pane edit, or /pane generate <description>".into()
+                }
+            },
+            "/attach" if !arguments.is_empty() => {
+                self.pending_image = true;
+                self.pending_image_session =
+                    self.view.session.as_ref().map(|session| session.id.clone());
+                self.send(
+                    output,
+                    Intent::AttachPath(arguments.trim_matches('"').trim_matches('\'').into()),
+                );
+            }
             "/plugin" => {
                 let pieces: Vec<_> = arguments.split_whitespace().collect();
-                if pieces.len() == 2 && ["on", "off"].contains(&pieces[1]) { self.send(output, Intent::Extension { name: pieces[0].into(), enabled: pieces[1] == "on" }); }
-                else { self.notice = "/plugin auto-continue|gobstopper|usage|hooks on|off".into(); }
+                if pieces.len() == 2 && ["on", "off"].contains(&pieces[1]) {
+                    self.send(
+                        output,
+                        Intent::Extension {
+                            name: pieces[0].into(),
+                            enabled: pieces[1] == "on",
+                        },
+                    );
+                } else {
+                    self.notice = "/plugin auto-continue|gobstopper|usage|hooks on|off".into();
+                }
             }
             "/reload" => self.send(output, Intent::Refresh),
-            _ => self.notice = "Unknown command. /help lists commands; no command text was sent to the model.".into(),
+            _ => {
+                self.notice =
+                    "Unknown command. /help lists commands; no command text was sent to the model."
+                        .into()
+            }
         }
         true
     }
@@ -430,6 +656,75 @@ impl App {
         if let Event::Key(key) = &event {
             if key.kind == KeyEventKind::Release {
                 return true;
+            }
+            // An open slash-command menu owns navigation and completion; global
+            // toggles and Ctrl-C cancel stay reachable.
+            if let Some((matches, selected)) = self.slash_menu() {
+                match key.code {
+                    KeyCode::Up
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        self.slash_selected.set(if selected == 0 {
+                            matches.len() - 1
+                        } else {
+                            selected - 1
+                        });
+                        return true;
+                    }
+                    KeyCode::Down
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                    {
+                        self.slash_selected.set((selected + 1) % matches.len());
+                        return true;
+                    }
+                    KeyCode::Char('p') | KeyCode::Char('n')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        self.slash_selected.set(if key.code == KeyCode::Char('p') {
+                            if selected == 0 {
+                                matches.len() - 1
+                            } else {
+                                selected - 1
+                            }
+                        } else {
+                            (selected + 1) % matches.len()
+                        });
+                        return true;
+                    }
+                    KeyCode::Tab => {
+                        let mut text = matches[selected].name.to_owned();
+                        if matches[selected].needs_args {
+                            text.push(' ');
+                        }
+                        self.composer.set_text(&text);
+                        return true;
+                    }
+                    KeyCode::Enter => {
+                        let command = matches[selected];
+                        if command.needs_args {
+                            self.composer.set_text(&format!("{} ", command.name));
+                            return true;
+                        }
+                        // Route through the composer's own submit path so the
+                        // command lands in prompt history like a typed line.
+                        self.composer.set_text(command.name);
+                        if let ComposerAction::Submit(text) = self.composer.handle(Event::Key(
+                            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                        )) {
+                            return self.slash(&text, output);
+                        }
+                        return true;
+                    }
+                    KeyCode::Esc => {
+                        self.slash_dismissed.set(true);
+                        return true;
+                    }
+                    _ => (),
+                }
             }
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 match key.code {
@@ -495,25 +790,8 @@ impl App {
                     return true;
                 }
                 KeyCode::Tab if self.composer.text().starts_with('/') => {
-                    let current = self.composer.text();
-                    if let Some(command) = [
-                        "/accounts",
-                        "/attach ",
-                        "/default",
-                        "/help",
-                        "/model",
-                        "/new",
-                        "/pane",
-                        "/plugin ",
-                        "/quit",
-                        "/reload",
-                        "/sessions",
-                    ]
-                    .into_iter()
-                    .find(|command| command.starts_with(&current))
-                    {
-                        self.composer.set_text(command);
-                    }
+                    // The menu is open iff matches exist and it is not
+                    // dismissed; a dismissed menu leaves Tab a no-op.
                     return true;
                 }
                 _ => (),
@@ -664,11 +942,47 @@ impl App {
                         if key.kind == KeyEventKind::Release {
                             return;
                         }
+                        let filtered = items
+                            .iter()
+                            .filter(|item| {
+                                item.label.to_lowercase().contains(&query.to_lowercase())
+                            })
+                            .count();
                         match key.code {
-                            KeyCode::Up => *selected = selected.saturating_sub(1),
-                            KeyCode::Down => *selected = selected.saturating_add(1),
+                            KeyCode::Up | KeyCode::Char('p')
+                                if !key.modifiers.contains(KeyModifiers::ALT)
+                                    && (key.code == KeyCode::Up
+                                        || key.modifiers.contains(KeyModifiers::CONTROL)) =>
+                            {
+                                *selected = if *selected == 0 {
+                                    filtered.saturating_sub(1)
+                                } else {
+                                    *selected - 1
+                                };
+                            }
+                            KeyCode::Down | KeyCode::Char('n')
+                                if !key.modifiers.contains(KeyModifiers::ALT)
+                                    && (key.code == KeyCode::Down
+                                        || key.modifiers.contains(KeyModifiers::CONTROL)) =>
+                            {
+                                if filtered > 0 {
+                                    *selected = (*selected + 1) % filtered;
+                                }
+                            }
+                            KeyCode::PageUp => {
+                                *selected = selected.saturating_sub(10);
+                            }
+                            KeyCode::PageDown => {
+                                *selected = (*selected + 10).min(filtered.saturating_sub(1));
+                            }
+                            KeyCode::Home => *selected = 0,
+                            KeyCode::End => *selected = filtered.saturating_sub(1),
                             KeyCode::Backspace => {
                                 query.pop();
+                                *selected = 0;
+                            }
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                query.clear();
                                 *selected = 0;
                             }
                             KeyCode::Char(ch)

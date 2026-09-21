@@ -312,3 +312,41 @@ fn response_and_thinking_provenance_boundaries_are_visible_without_repetition() 
     assert!(contents.contains("third"));
     assert!(contents.contains("thought"));
 }
+
+#[test]
+fn slash_typeahead_menu_renders_above_the_composer() {
+    let mut app = app();
+    app.composer.set_text("/ac");
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(contents.contains("/accounts"));
+    assert!(contents.contains("pick the billing account"));
+    assert!(contents.contains("commands"));
+}
+
+#[test]
+fn slash_typeahead_menu_stays_hidden_for_plain_text() {
+    let mut app = app();
+    app.composer.set_text("hello world");
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(!contents.contains("Tab completes"));
+}
