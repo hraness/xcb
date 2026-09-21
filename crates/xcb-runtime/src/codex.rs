@@ -758,9 +758,7 @@ impl CodexProtocol {
             self.turn_id = Some(turn);
             self.turn_rpc = None;
             self.ready = true;
-            events.push(Event::Ready {
-                resolved_model: Some(self.options.model.id.to_string()),
-            });
+            events.push(Event::Ready);
             return Ok((events, outgoing));
         }
         let method = text(&value["method"], 160)?;

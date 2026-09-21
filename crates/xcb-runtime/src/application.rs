@@ -1000,7 +1000,7 @@ async fn execute<P: Protocol>(
                 .ok_or(FailureCode::OutputLimit)?;
             for event in batch.events {
                 match event {
-                    Event::Ready { .. } if !admitted => admitted = true,
+                    Event::Ready if !admitted => admitted = true,
                     Event::Delta {
                         thinking: false,
                         text,
@@ -1279,9 +1279,7 @@ mod tests {
     }
 
     fn ready() -> Event {
-        Event::Ready {
-            resolved_model: None,
-        }
+        Event::Ready
     }
     fn result(text: &str) -> Event {
         Event::Result {

@@ -231,8 +231,32 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     }
 }
 
-fn preferred_height(node: &Node) -> Constraint {
+fn render_user_turn(lines: &mut Vec<Line<'static>>, text: &str, attachments: usize) {
+    lines.push(Line::from(Span::styled(
+        "You",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(clean(text).lines().map(|line| Line::from(line.to_owned())));
+    if attachments > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("{attachments} attached image(s)"),
+            muted(),
+        )));
+    }
+    lines.push(Line::default());
+}
+
+fn preferred_height(node: &Node, app: &App) -> Constraint {
     match node {
+        // List widgets collapse entirely when they have nothing to show.
+        Node::Widget { source, .. }
+            if matches!(source, Source::Subagents) && app.view.subagents.is_empty()
+                || matches!(source, Source::Extensions) && app.view.extensions.is_empty() =>
+        {
+            Constraint::Length(0)
+        }
         Node::Widget {
             lines: Some(lines), ..
         }
@@ -255,7 +279,7 @@ fn render_node(frame: &mut Frame<'_>, node: &Node, area: Rect, app: &App) {
                     if horizontal {
                         Constraint::Ratio(1, children.len() as u32)
                     } else {
-                        preferred_height(node)
+                        preferred_height(node, app)
                     }
                 })
                 .collect();
@@ -389,24 +413,7 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
             for message in &messages[start..] {
                 match message.role {
                     Role::User => {
-                        lines.push(Line::from(Span::styled(
-                            "You",
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        )));
-                        lines.extend(
-                            clean(&message.text)
-                                .lines()
-                                .map(|line| Line::from(line.to_owned())),
-                        );
-                        if !message.attachments.is_empty() {
-                            lines.push(Line::from(Span::styled(
-                                format!("{} attached image(s)", message.attachments.len()),
-                                muted(),
-                            )));
-                        }
-                        lines.push(Line::default());
+                        render_user_turn(&mut lines, &message.text, message.attachments.len())
                     }
                     // Reasoning always precedes the response it produced and
                     // shares the transcript's boundary tracking.
@@ -446,6 +453,9 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
                     }
                     Role::Tool | Role::System => (),
                 }
+            }
+            for (text, attachments) in app.pending_echoes() {
+                render_user_turn(&mut lines, text, attachments);
             }
             if !app.thinking.is_empty() {
                 if app.show_thinking {

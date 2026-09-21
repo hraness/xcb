@@ -890,12 +890,7 @@ impl Protocol for DevinProtocol {
         };
         if self.ready && !self.announced {
             self.announced = true;
-            batch.events.insert(
-                0,
-                Event::Ready {
-                    resolved_model: Some(self.options.model.id.to_string()),
-                },
-            );
+            batch.events.insert(0, Event::Ready);
         }
         Ok(batch)
     }

@@ -20,9 +20,7 @@ pub(crate) struct Prompt {
 #[derive(Debug)]
 pub(crate) enum Event {
     /// Exact provider/config/tool admission has completed for this turn.
-    Ready {
-        resolved_model: Option<String>,
-    },
+    Ready,
     Delta {
         thinking: bool,
         text: String,
