@@ -831,9 +831,14 @@ impl CodexProtocol {
             "thread/settings/updated" => self.settings_update(p)?,
             "thread/status/changed" => {
                 self.thread_scope(p)?;
+                let status_type = p["status"]["type"].as_str().unwrap_or("");
                 require(
-                    ["idle", "active"].contains(&p["status"]["type"].as_str().unwrap_or(""))
-                        && p["status"]
+                    ["idle", "active"].contains(&status_type),
+                    "Codex unexpected thread status",
+                )?;
+                require(
+                    status_type != "active"
+                        || p["status"]
                             .get("activeFlags")
                             .is_none_or(|v| v == &json!([])),
                     "Codex active permission flags",
