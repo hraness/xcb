@@ -931,7 +931,7 @@ fn publish(
                     .map(|model| RoutePreview {
                         account: account.name(),
                         provider: account.provider,
-                        model: model.label,
+                        model: model.key(),
                     })
             });
     }
@@ -1408,7 +1408,7 @@ mod tests {
         let route = view.pending_route.expect("pending route preview");
         assert_eq!(route.provider, Provider::Devin);
         assert_eq!(route.account, account.name());
-        assert_eq!(route.model, "SWE-2 High");
+        assert_eq!(route.model, "devin/swe-2-high");
 
         // A bound session replaces the preview with the committed route.
         let session = store

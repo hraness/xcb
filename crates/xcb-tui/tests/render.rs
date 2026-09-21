@@ -279,16 +279,16 @@ fn response_and_thinking_provenance_boundaries_are_visible_without_repetition() 
         },
         Message {
             id: Id::new("m3").unwrap(),
-            role: Role::Assistant,
-            text: "third".into(),
+            role: Role::Thinking,
+            text: "thought".into(),
             attachments: vec![],
             at_ms: 3,
             provenance: Some(provenance(Some("r2"))),
         },
         Message {
             id: Id::new("m4").unwrap(),
-            role: Role::Thinking,
-            text: "thought".into(),
+            role: Role::Assistant,
+            text: "third".into(),
             attachments: vec![],
             at_ms: 4,
             provenance: Some(provenance(Some("r2"))),
@@ -305,12 +305,17 @@ fn response_and_thinking_provenance_boundaries_are_visible_without_repetition() 
         .iter()
         .map(|cell| cell.symbol())
         .collect();
+    // One boundary label per run change, shared across thinking and responses.
     assert_eq!(contents.matches("r1").count(), 1);
-    assert_eq!(contents.matches("r2").count(), 2);
+    assert_eq!(contents.matches("r2").count(), 1);
     assert!(contents.contains("first"));
     assert!(contents.contains("second"));
     assert!(contents.contains("third"));
     assert!(contents.contains("thought"));
+    // Reasoning renders before the response it produced.
+    let thought = contents.find("thought").unwrap();
+    let third = contents.find("third").unwrap();
+    assert!(thought < third);
 }
 
 #[test]
@@ -356,7 +361,7 @@ fn footer_previews_the_pending_route_without_a_session() {
     app.view.pending_route = Some(xcb_core::ui::RoutePreview {
         account: "pilot@example.com".into(),
         provider: Provider::Claude,
-        model: "Default (recommended)".into(),
+        model: "claude/default/high".into(),
     });
     let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
     terminal
@@ -369,6 +374,6 @@ fn footer_previews_the_pending_route_without_a_session() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(contents.contains("claude · Default (recommended) · pilot@example.com"));
+    assert!(contents.contains("claude/default/high · pilot@example.com"));
     assert!(!contents.contains("Choose an account"));
 }

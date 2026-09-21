@@ -4,9 +4,9 @@ pub mod render;
 use composer::{Composer, ComposerAction};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -33,6 +33,8 @@ use xcb_core::{
 /// one lands the cursor after a space instead of executing immediately.
 pub struct SlashCommand {
     pub name: &'static str,
+    /// Single-letter shortcut, e.g. "/m" for "/model"; "" when none.
+    pub alias: &'static str,
     pub args: &'static str,
     pub summary: &'static str,
     pub needs_args: bool,
@@ -40,72 +42,84 @@ pub struct SlashCommand {
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/accounts",
+        alias: "/a",
         args: "",
         summary: "pick the billing account",
         needs_args: false,
     },
     SlashCommand {
         name: "/attach",
+        alias: "",
         args: "<path>",
         summary: "attach a file or image",
         needs_args: true,
     },
     SlashCommand {
         name: "/default",
+        alias: "/d",
         args: "",
         summary: "make this account/model the default",
         needs_args: false,
     },
     SlashCommand {
         name: "/exit",
+        alias: "/e",
         args: "",
         summary: "quit xcb",
         needs_args: false,
     },
     SlashCommand {
         name: "/help",
+        alias: "/h",
         args: "",
         summary: "keyboard shortcuts and commands",
         needs_args: false,
     },
     SlashCommand {
         name: "/model",
+        alias: "/m",
         args: "[query]",
         summary: "pick a model",
         needs_args: false,
     },
     SlashCommand {
         name: "/new",
+        alias: "/n",
         args: "",
         summary: "start a new session",
         needs_args: false,
     },
     SlashCommand {
         name: "/pane",
+        alias: "/p",
         args: "[id|edit|generate …]",
         summary: "switch or manage panes",
         needs_args: false,
     },
     SlashCommand {
         name: "/plugin",
+        alias: "",
         args: "<name> on|off",
         summary: "toggle an extension",
         needs_args: true,
     },
     SlashCommand {
         name: "/quit",
+        alias: "/q",
         args: "",
         summary: "quit xcb",
         needs_args: false,
     },
     SlashCommand {
         name: "/reload",
+        alias: "/r",
         args: "",
         summary: "refresh provider metadata",
         needs_args: false,
     },
     SlashCommand {
         name: "/sessions",
+        alias: "/s",
         args: "",
         summary: "switch sessions",
         needs_args: false,
@@ -298,6 +312,28 @@ impl App {
     /// Tail offset rendered last frame; used to resume following on PageDown.
     pub fn scroll_tail(&self) -> u32 {
         self.scroll_tail.get()
+    }
+    /// Scroll the transcript viewport: negative deltas pin an absolute line
+    /// index upward so streamed output cannot move what the user is reading;
+    /// positive deltas step down and resume following at the tail.
+    fn scroll_transcript(&self, delta: i32) {
+        if delta < 0 {
+            let top = if self.paused.get() {
+                self.scroll.get()
+            } else {
+                self.scroll_top.get()
+            };
+            self.scroll.set(top.saturating_sub(delta.unsigned_abs()));
+            self.paused.set(true);
+        } else if self.paused.get() {
+            let next = self.scroll.get().saturating_add(delta as u32);
+            if next >= self.scroll_tail.get() {
+                self.paused.set(false);
+                self.scroll.set(0);
+            } else {
+                self.scroll.set(next);
+            }
+        }
     }
     /// True when state changed since the last draw and a repaint is needed.
     pub fn take_dirty(&mut self) -> bool {
@@ -510,6 +546,11 @@ impl App {
     }
     fn slash(&mut self, input: &str, output: &SyncSender<Intent>) -> bool {
         let (command, arguments) = input.split_once(' ').unwrap_or((input, ""));
+        // Single-letter aliases resolve to the full command before dispatch.
+        let command = SLASH_COMMANDS
+            .iter()
+            .find(|entry| entry.alias == command)
+            .map_or(command, |entry| entry.name);
         let arguments = arguments.trim();
         match command {
             "/help" => self.modal = Some(Modal::Help),
@@ -785,27 +826,11 @@ impl App {
                     return true;
                 }
                 KeyCode::PageUp => {
-                    // Pin the viewport to an absolute line index so streamed
-                    // output can never move what the user is reading.
-                    let top = if self.paused.get() {
-                        self.scroll.get()
-                    } else {
-                        self.scroll_top.get()
-                    };
-                    self.scroll.set(top.saturating_sub(10));
-                    self.paused.set(true);
+                    self.scroll_transcript(-10);
                     return true;
                 }
                 KeyCode::PageDown => {
-                    if self.paused.get() {
-                        let next = self.scroll.get().saturating_add(10);
-                        if next >= self.scroll_tail.get() {
-                            self.paused.set(false);
-                            self.scroll.set(0);
-                        } else {
-                            self.scroll.set(next);
-                        }
-                    }
+                    self.scroll_transcript(10);
                     return true;
                 }
                 KeyCode::End => {
@@ -824,6 +849,17 @@ impl App {
                 }
                 _ => (),
             }
+        }
+        if let Event::Mouse(mouse) = &event {
+            // The wheel always scrolls the transcript — never the composer.
+            // With mouse capture enabled the terminal delivers real scroll
+            // events instead of translating them into arrow keys.
+            match mouse.kind {
+                MouseEventKind::ScrollUp => self.scroll_transcript(-3),
+                MouseEventKind::ScrollDown => self.scroll_transcript(3),
+                _ => (),
+            }
+            return true;
         }
         if self.pending_image && matches!(&event, Event::Key(key) if key.code == KeyCode::Enter) {
             self.notice = "Waiting for the image to finish loading; your draft is retained.".into();
@@ -973,16 +1009,24 @@ impl App {
                     selected,
                     ..
                 } => {
+                    let filtered = items
+                        .iter()
+                        .filter(|item| item.label.to_lowercase().contains(&query.to_lowercase()))
+                        .count();
+                    if let Event::Mouse(mouse) = event {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => *selected = selected.saturating_sub(3),
+                            MouseEventKind::ScrollDown => {
+                                *selected = (*selected + 3).min(filtered.saturating_sub(1))
+                            }
+                            _ => (),
+                        }
+                        return true;
+                    }
                     if let Event::Key(key) = event {
                         if key.kind == KeyEventKind::Release {
                             return true;
                         }
-                        let filtered = items
-                            .iter()
-                            .filter(|item| {
-                                item.label.to_lowercase().contains(&query.to_lowercase())
-                            })
-                            .count();
                         match key.code {
                             KeyCode::Up | KeyCode::Char('p')
                                 if !key.modifiers.contains(KeyModifiers::ALT)
@@ -1133,6 +1177,7 @@ impl Drop for Restore {
             io::stdout(),
             PopKeyboardEnhancementFlags,
             DisableBracketedPaste,
+            DisableMouseCapture,
             LeaveAlternateScreen
         );
         let _ = disable_raw_mode();
@@ -1151,6 +1196,7 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
         io::stdout(),
         EnterAlternateScreen,
         EnableBracketedPaste,
+        EnableMouseCapture,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;

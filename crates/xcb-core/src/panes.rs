@@ -79,8 +79,6 @@ impl Pane {
                 "focus",
                 "Focus",
                 vec![
-                    widget(Source::LastUser, Some(5)),
-                    widget(Source::Thinking, Some(2)),
                     widget(Source::Responses, None),
                     widget(Source::Subagents, Some(3)),
                 ],
@@ -95,7 +93,6 @@ impl Pane {
                             widget(Source::Accounts, None),
                         ],
                     },
-                    widget(Source::LastUser, Some(4)),
                     widget(Source::Responses, None),
                 ],
             ),
@@ -103,7 +100,6 @@ impl Pane {
                 "inspect",
                 "Inspect",
                 vec![
-                    widget(Source::LastUser, Some(4)),
                     widget(Source::Responses, None),
                     widget(Source::Activity, Some(8)),
                     widget(Source::Extensions, Some(3)),
