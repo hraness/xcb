@@ -41,7 +41,7 @@ export default async function DocsTopicPage({ params }: { params: Promise<{ slug
           {next && <a href={`/docs/${next.slug}`}><span>Next</span>{next.title} →</a>}
         </nav>
       </DocsShell>
-      <AskAiAboutThis className="ask-ai" url={`https://xcb.dev/docs/${topic.slug}`} />
+      <AskAiAboutThis className="ask-ai" url={`https://xcb.sh/docs/${topic.slug}`} />
     </>
   );
 }

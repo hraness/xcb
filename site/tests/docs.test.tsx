@@ -42,7 +42,7 @@ describe("organized documentation", () => {
       const aiLinks = attributeValues(html, 'nav[aria-label="Ask AI about this"] a', "href");
       expect(aiLinks.length).toBeGreaterThan(0);
       for (const href of aiLinks) {
-        expect(decodeURIComponent(href)).toContain(`https://xcb.dev/docs/${topic.slug}`);
+        expect(decodeURIComponent(href)).toContain(`https://xcb.sh/docs/${topic.slug}`);
       }
     }
     await expect(renderTopic("missing-topic")).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");

@@ -18,7 +18,7 @@ function XcbMark() {
 export default function OpengraphImage() {
   return createSocialImageResponse({
     description: "Your accounts, models, sessions, and usage. One local workspace.",
-    domain: "xcb.dev",
+    domain: "xcb.sh",
     eyebrow: "xcb / Excalibur",
     mark: <XcbMark />,
     theme: {

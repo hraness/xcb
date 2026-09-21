@@ -106,15 +106,15 @@ describe("built xcb site", () => {
       const [home, docs, robots, llms] = await Promise.all([homeResponse.text(), docsResponse.text(), robotsResponse.text(), llmsResponse.text()]);
       expect(homeResponse.status).toBe(200);
       expect(home).toContain(publishedRelease === null ? "First xcb package release in preparation" : `Current verified compatibility release · v${publishedRelease.version}`);
-      expect(home).toContain('<link rel="canonical" href="https://xcb.dev"');
+      expect(home).toContain('<link rel="canonical" href="https://xcb.sh"');
       expect(home).toContain('aria-label="Ask AI about this"');
       expect(docsResponse.status).toBe(200);
-      expect(docs).toContain('<link rel="canonical" href="https://xcb.dev/docs"');
+      expect(docs).toContain('<link rel="canonical" href="https://xcb.sh/docs"');
       expect(docs).toContain('id="standalone-package"');
       expect(robotsResponse.status).toBe(200);
-      expect(robots).toContain("Sitemap: https://xcb.dev/sitemap.xml");
+      expect(robots).toContain("Sitemap: https://xcb.sh/sitemap.xml");
       expect(llmsResponse.status).toBe(200);
-      expect(llms).toContain("https://xcb.dev/docs");
+      expect(llms).toContain("https://xcb.sh/docs");
       expect(docs).toContain('og:site_name" content="xcb"');
       expect(docs).toContain('twitter:title" content="Documentation · XCB"');
       expect(docs).toContain('twitter:card" content="summary_large_image"');
@@ -129,7 +129,7 @@ describe("built xcb site", () => {
         expect(response.status).toBe(200);
         const body = await response.text();
         expect(body.match(/<h1\b/gu)).toHaveLength(1);
-        expect(body).toContain('href="https://xcb.dev' + (path === "/" ? "" : path) + '"');
+        expect(body).toContain('href="https://xcb.sh' + (path === "/" ? "" : path) + '"');
         documents.set(path, body);
       }
       for (const [path, body] of documents) {
@@ -149,7 +149,7 @@ describe("built xcb site", () => {
       const sitemapResponse = await fetch(`${server.origin}/sitemap.xml`);
       expect(sitemapResponse.status).toBe(200);
       const sitemap = await sitemapResponse.text();
-      for (const path of paths) expect(sitemap).toContain(`<loc>https://xcb.dev${path}</loc>`);
+      for (const path of paths) expect(sitemap).toContain(`<loc>https://xcb.sh${path}</loc>`);
     } finally {
       await stopBuiltSite(server);
     }

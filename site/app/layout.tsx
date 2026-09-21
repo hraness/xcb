@@ -22,7 +22,7 @@ const description =
   "Bring your Claude, Codex, and Devin accounts into one local workspace. Choose models, resume sessions, and see usage. Open-source native preview, with setup guides and comparisons.";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://xcb.dev"),
+  metadataBase: new URL("https://xcb.sh"),
   title,
   description,
   alternates: { canonical: "/" },

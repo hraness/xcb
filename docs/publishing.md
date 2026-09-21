@@ -62,7 +62,7 @@ pre-npm job only admits a retry that is an exact continuation of the same run.
 
 ## Site deployment
 
-`site/` deploys to Vercel as `xcb.dev` through the standard Git
+`site/` deploys to Vercel as `xcb.sh` through the standard Git
 integration on `main`. The site is informational only; it carries no product
 runtime and no release authority.
 

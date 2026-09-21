@@ -25,7 +25,7 @@ const questions = [
 
 export default function Home() {
   const structuredData = [
-    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: "xcb", description: summary, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.dev" },
+    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: "xcb", description: summary, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.sh" },
     { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: questions.map(({ question, answer }) => ({ "@type": "Question", name: question, acceptedAnswer: { "@type": "Answer", text: answer } })) },
   ];
   return (
@@ -102,7 +102,7 @@ xcb --help`}</code></pre>
           <MarketingCallToAction heading="Your accounts. Your workflow." headingId="cta-title" summary="A local workspace for developers who work with more than one coding agent." actions={[{ href: "/docs/getting-started", label: "Get started ↗" }, { href: repository, label: "Explore the source" }]} footnote="xcb / Excalibur · Built by Hraness · MIT licensed" />
         </MarketingPage>
       </main>
-      <AskAiAboutThis className="ask-ai" url="https://xcb.dev" />
+      <AskAiAboutThis className="ask-ai" url="https://xcb.sh" />
     </div>
   );
 }
