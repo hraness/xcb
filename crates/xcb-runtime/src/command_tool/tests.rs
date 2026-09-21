@@ -362,7 +362,7 @@ fn registered_command(fixture: &mut Fixture, input: &OwnedSnapshot) -> (Store, R
     )
     .unwrap();
     let account = store
-        .add_account(xcb_core::Provider::Claude, "synthetic", "test", 1)
+        .add_account(xcb_core::Provider::Claude, "test", 1, None)
         .unwrap();
     let run = store.prepare_probe(&account.id, None, 2).unwrap();
     fixture.outcome.custody.run_id = run.id.clone();

@@ -310,9 +310,21 @@ fn quota_read_prefers_multi_bucket_data_without_inventing_recovery() {
     assert_eq!(points.len(), 2);
     assert_eq!(points[0].used_percent, 20.0);
     assert_eq!(points[0].window.as_str(), "codex.primary");
+    // A denied account still reports truthful bucket levels; they are recorded
+    // so the exhausted account shows its real remaining/reset rather than an
+    // opaque unavailability.
     let mut denied = value;
     denied["ordinaryUsageAllowed"] = json!(false);
-    assert!(parse_quotas(&denied, &pool, 1000).is_err());
+    assert_eq!(parse_quotas(&denied, &pool, 1000).unwrap().len(), 2);
+    // Denial with no usable window data at all stays an explicit unavailability.
+    assert!(
+        parse_quotas(
+            &json!({"ordinaryUsageAllowed":false,"rateLimitsByLimitId":null,"rateLimits":{"primary":null,"secondary":null}}),
+            &pool,
+            1000
+        )
+        .is_err()
+    );
     assert!(
         parse_quotas(
             &json!({"rateLimits":{"primary":{"usedPercent":20,"resetsAt":1}}}),

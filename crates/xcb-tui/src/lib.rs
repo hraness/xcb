@@ -397,7 +397,7 @@ impl App {
             "/default" => self.send(output, Intent::SetDefault),
             "/model" | "/models" if arguments.is_empty() => self.picker("Models · fixed, Adaptive, and Fusion", self.view.models.iter().map(|choice| PickItem { label: format!("{} · {}{} · {:?}", choice.provider, choice.label, choice.resolved.as_ref().map(|resolved| format!(" → {resolved}")).unwrap_or_default(), choice.mode), action: PickAction::Model(choice.key()) }).collect()),
             "/model" => self.send(output, Intent::Model(arguments.into())),
-            "/accounts" => self.picker("Accounts · select an account", self.view.accounts.iter().map(|account| PickItem { label: format!("{} · {} · {} · {}{}{}", account.label, account.provider, account.subscription, account.quota_block_label(display_now_ms()).unwrap_or_else(|| account.remaining_percent.map(|percent| format!("{percent:.0}% left")).unwrap_or_else(|| "quota unknown".into())), if account.busy { " · busy" } else { "" }, if account.enabled { "" } else { " · disabled" }), action: PickAction::Account(account.id.clone()) }).collect()),
+            "/accounts" => self.picker("Accounts · select an account", self.view.accounts.iter().map(|account| PickItem { label: format!("{} · {} · {} · {}{}{}", account.name, account.provider, account.subscription, account.quota_block_label(display_now_ms()).unwrap_or_else(|| account.remaining_percent.map(|percent| format!("{percent:.0}% left")).unwrap_or_else(|| "usage unmeasured".into())), if account.busy { " · busy" } else { "" }, if account.enabled { "" } else { " · disabled" }), action: PickAction::Account(account.id.clone()) }).collect()),
             "/sessions" => self.picker("Sessions", self.view.sessions.iter().map(|session| PickItem { label: format!("{} · {} · {}", session.title, session.model.label, session.state.label()), action: PickAction::Session(session.id.clone()) }).collect()),
             "/pane" if arguments.is_empty() => {
                 let mut items: Vec<_> = self.view.panes.iter().map(|pane| PickItem { label: format!("{} · {}", pane.id, pane.title), action: PickAction::Pane(pane.id.clone()) }).collect();
@@ -854,7 +854,8 @@ mod quota_display_tests {
             accounts: vec![xcb_core::ui::AccountRow {
                 id: xcb_core::Id::new("limited").unwrap(),
                 provider: xcb_core::Provider::Claude,
-                label: "Limited".into(),
+                name: "claude/limited".into(),
+                email: None,
                 subscription: "Max".into(),
                 remaining_percent: None,
                 resets_at_ms: None,

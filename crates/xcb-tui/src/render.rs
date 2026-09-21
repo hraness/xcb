@@ -452,7 +452,7 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
                 lines.push(Line::from(format!(
                     "{} {} · {} · {remaining}{time}{}",
                     if account.busy { "*" } else { " " },
-                    clean(&account.label),
+                    clean(&account.name),
                     account.provider,
                     if account.enabled { "" } else { " · disabled" }
                 )));

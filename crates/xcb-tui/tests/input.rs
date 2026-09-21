@@ -332,7 +332,8 @@ fn picker_account(
     xcb_core::ui::AccountRow {
         id: xcb_core::Id::new(id).unwrap(),
         provider,
-        label: id.into(),
+        name: id.into(),
+        email: None,
         subscription: "subscription".into(),
         remaining_percent: None,
         resets_at_ms: None,

@@ -17,9 +17,7 @@ fn local_aicharts_session_export_is_deterministic_bounded_and_private() {
     let base = temp.path().canonicalize().unwrap();
     fs::create_dir(base.join("work")).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
-    let account = store
-        .add_account(Provider::Claude, "Personal", "Max", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let model = ModelChoice {
         provider: Provider::Claude,
         id: Id::new("default").unwrap(),
@@ -163,9 +161,7 @@ fn per_session_aicharts_export_is_stable_and_idempotent() {
     let base = temp.path().canonicalize().unwrap();
     fs::create_dir(base.join("work")).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
-    let account = store
-        .add_account(Provider::Claude, "Personal", "Max", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let model = ModelChoice {
         provider: Provider::Claude,
         id: Id::new("default").unwrap(),
@@ -245,9 +241,7 @@ fn idle_export_writes_no_file_when_session_has_no_usage() {
     let base = temp.path().canonicalize().unwrap();
     fs::create_dir(base.join("work")).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
-    let account = store
-        .add_account(Provider::Claude, "Personal", "Max", 1)
-        .unwrap();
+    let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let model = ModelChoice {
         provider: Provider::Claude,
         id: Id::new("default").unwrap(),

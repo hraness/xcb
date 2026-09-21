@@ -210,7 +210,11 @@ pub struct Capabilities {
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationAccount {
     pub id: Id,
-    pub label: String,
+    /// Fixed system-derived identity — the provider email once observed,
+    /// otherwise `provider/<id prefix>`.
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
     pub provider: Provider,
     pub enabled: bool,
     pub busy: bool,
@@ -315,8 +319,9 @@ pub fn capabilities(store: &Store) -> Result<Capabilities> {
             None
         };
         result.accounts.push(ApplicationAccount {
+            name: account.name(),
+            email: account.email.clone(),
             id: account.id,
-            label: account.label,
             provider: account.provider,
             enabled: account.enabled,
             busy,
@@ -1093,7 +1098,8 @@ mod tests {
         fn account() -> ApplicationAccount {
             ApplicationAccount {
                 id: Id::new("a_fixture").unwrap(),
-                label: "Synthetic".into(),
+                name: "claude/a_fixture".into(),
+                email: None,
                 provider: Provider::Claude,
                 enabled: true,
                 busy: false,
@@ -1126,7 +1132,7 @@ mod tests {
         assert!(validate_capability_bounds(&value).is_err());
         value.accounts.clear();
         let mut oversized = account();
-        oversized.label = "a".repeat(MAX_CAPABILITY_BYTES);
+        oversized.name = "a".repeat(MAX_CAPABILITY_BYTES);
         value.accounts.push(oversized);
         assert!(validate_capability_bounds(&value).is_err());
     }
@@ -1201,7 +1207,7 @@ mod tests {
         let store =
             Arc::new(Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap());
         let account = store
-            .add_account(Provider::Claude, "Synthetic", "Synthetic", 1)
+            .add_account(Provider::Claude, "Synthetic", 1, None)
             .unwrap();
         let model = ModelChoice {
             provider: Provider::Claude,
@@ -1371,9 +1377,7 @@ mod tests {
                 let temp = tempfile::tempdir().unwrap();
                 let store =
                     Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
-                let account = store
-                    .add_account(provider, "Synthetic", "Synthetic", 1)
-                    .unwrap();
+                let account = store.add_account(provider, "Synthetic", 1, None).unwrap();
                 let path = store
                     .account_root(&account.id)
                     .unwrap()
@@ -1418,7 +1422,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
         let account = store
-            .add_account(Provider::Claude, "Synthetic", "Synthetic", 1)
+            .add_account(Provider::Claude, "Synthetic", 1, None)
             .unwrap();
         let run = store.prepare_probe(&account.id, None, now_ms()).unwrap();
         // Unconditional callers retain legacy generation creation.
@@ -1447,7 +1451,7 @@ mod tests {
             let temp = tempfile::tempdir().unwrap();
             let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
             let account = store
-                .add_account(Provider::Claude, "Synthetic", "Synthetic", 1)
+                .add_account(Provider::Claude, "Synthetic", 1, None)
                 .unwrap();
             let run = store.prepare_probe(&account.id, None, now_ms()).unwrap();
             store
@@ -1493,7 +1497,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
         let account = store
-            .add_account(Provider::Claude, "Synthetic", "Synthetic", 1)
+            .add_account(Provider::Claude, "Synthetic", 1, None)
             .unwrap();
         let run = store.prepare_probe(&account.id, None, now_ms()).unwrap();
         let failure = preparation_failed(
