@@ -350,3 +350,25 @@ fn slash_typeahead_menu_stays_hidden_for_plain_text() {
         .collect();
     assert!(!contents.contains("Tab completes"));
 }
+#[test]
+fn footer_previews_the_pending_route_without_a_session() {
+    let mut app = App::default();
+    app.view.pending_route = Some(xcb_core::ui::RoutePreview {
+        account: "pilot@example.com".into(),
+        provider: Provider::Claude,
+        model: "Default (recommended)".into(),
+    });
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(contents.contains("claude · Default (recommended) · pilot@example.com"));
+    assert!(!contents.contains("Choose an account"));
+}

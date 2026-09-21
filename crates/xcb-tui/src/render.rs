@@ -206,6 +206,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                 session.model.provider, session.model.label
             )
         })
+        .or_else(|| {
+            app.view.pending_route.as_ref().map(|route| {
+                format!(
+                    "{} · {} · {} · ? help",
+                    route.provider, route.model, route.account
+                )
+            })
+        })
         .unwrap_or_else(|| "Choose an account with /accounts · ? help".into());
     frame.render_widget(
         Paragraph::new(clean(&model)).style(Style::default().add_modifier(Modifier::BOLD)),
