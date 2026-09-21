@@ -42,7 +42,7 @@
 - `scripts/` holds the dist build, packed-package smoke check, and the
   dependency-free release writers and admission checks.
 - `site/` is the informational xcb product page (Next.js, canonical origin
-  xcb.dev); it has no product-runtime connection. The `@hraness/xcb`
+  xcb.sh); it has no product-runtime connection. The `@hraness/xcb`
   TypeScript package and its verified publication datum remain a separate
   compatibility surface.
 - `.github/workflows/` holds the read-only CI matrix and the tag-gated

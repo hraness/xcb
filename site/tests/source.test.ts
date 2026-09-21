@@ -62,8 +62,8 @@ describe("xcb site source contract", () => {
     expect(packageJson).toContain('"@hraness/ui": "github:hraness/ui#v0.5.16"');
     expect(packageJson).toContain('"@hraness/design-kit": "github:hraness/design-kit#v0.11.1"');
     expect(home).toContain('import { AskAiAboutThis } from "@hraness/ui"');
-    expect(home).toContain('<AskAiAboutThis className="ask-ai" url="https://xcb.dev" />');
-    expect(docs).toContain('<AskAiAboutThis className="ask-ai" url="https://xcb.dev/docs" />');
+    expect(home).toContain('<AskAiAboutThis className="ask-ai" url="https://xcb.sh" />');
+    expect(docs).toContain('<AskAiAboutThis className="ask-ai" url="https://xcb.sh/docs" />');
     expect(generated).toContain('export const readmeTitle = "xcb";');
     expect(generated).toContain("export const readmeHtml = ");
   });
@@ -78,15 +78,15 @@ describe("xcb site source contract", () => {
 
   test("keeps the sitemap and robots on the canonical origin", async () => {
     const [sitemap, robots] = await Promise.all([read("public/sitemap.xml"), read("public/robots.txt")]);
-    expect(sitemap).toContain("<loc>https://xcb.dev/</loc>");
-    expect(sitemap).toContain("<loc>https://xcb.dev/docs</loc>");
-    expect(robots).toContain("Sitemap: https://xcb.dev/sitemap.xml");
+    expect(sitemap).toContain("<loc>https://xcb.sh/</loc>");
+    expect(sitemap).toContain("<loc>https://xcb.sh/docs</loc>");
+    expect(robots).toContain("Sitemap: https://xcb.sh/sitemap.xml");
   });
 
   test("keeps the llms.txt map and docs social metadata on the canonical origin", async () => {
     const [llms, docs] = await Promise.all([read("public/llms.txt"), read("app/docs/page.tsx")]);
-    expect(llms).toContain("https://xcb.dev/");
-    expect(llms).toContain("https://xcb.dev/docs");
+    expect(llms).toContain("https://xcb.sh/");
+    expect(llms).toContain("https://xcb.sh/docs");
     expect(llms).not.toContain("http://");
     expect(docs).toContain('siteName: "xcb"');
     expect(docs).toContain('card: "summary_large_image"');

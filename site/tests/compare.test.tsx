@@ -53,6 +53,6 @@ test("comparison metadata and Ask AI target its canonical public URL", () => {
   expect(metadata.openGraph).toMatchObject({ url: "/compare", siteName: "xcb", type: "website" });
   expect(metadata.twitter).toMatchObject({ card: "summary_large_image" });
   const html = renderToStaticMarkup(<Compare />);
-  expect(html).toContain(encodeURIComponent("https://xcb.dev/compare"));
+  expect(html).toContain(encodeURIComponent("https://xcb.sh/compare"));
   expect(html.match(/<footer\b/gu)).toBeNull();
 });

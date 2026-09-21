@@ -12,8 +12,8 @@ execution boundaries are explicit; it is not a replacement for every feature
 of the original provider tools.
 <!-- hraness:xcb-landing:end -->
 
-[Project site](https://xcb.dev) · [Getting started](https://xcb.dev/docs/getting-started) ·
-[Compare tools](https://xcb.dev/compare) · [Source](https://github.com/hraness/xcb) ·
+[Project site](https://xcb.sh) · [Getting started](https://xcb.sh/docs/getting-started) ·
+[Compare tools](https://xcb.sh/compare) · [Source](https://github.com/hraness/xcb) ·
 [Application API](docs/application-api.md) · [Compatibility reference](docs/compatibility.md) · [Contributing](CONTRIBUTING.md)
 
 ## Readiness

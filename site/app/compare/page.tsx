@@ -90,7 +90,7 @@ export default function Compare() {
           </MarketingSection>
         </MarketingPage>
       </main>
-      <AskAiAboutThis className="ask-ai" url="https://xcb.dev/compare" />
+      <AskAiAboutThis className="ask-ai" url="https://xcb.sh/compare" />
     </div>
   );
 }

@@ -52,7 +52,7 @@ export default function Docs() {
           </section>
         </article>
       </DocsShell>
-      <AskAiAboutThis className="ask-ai" url="https://xcb.dev/docs" />
+      <AskAiAboutThis className="ask-ai" url="https://xcb.sh/docs" />
     </>
   );
 }
