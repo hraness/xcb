@@ -23,7 +23,7 @@ use tui_textarea::TextArea;
 use xcb_core::{
     Id,
     panes::Pane,
-    session::Attachment,
+    session::{Attachment, State},
     ui::{Intent, Update, View},
     usage::Estimate,
 };
@@ -524,6 +524,14 @@ impl App {
                 self.view
                     .models
                     .iter()
+                    // A bound session only offers its own provider's catalog;
+                    // without one every observed provider is listed.
+                    .filter(|choice| {
+                        self.view
+                            .session
+                            .as_ref()
+                            .is_none_or(|session| choice.provider == session.model.provider)
+                    })
                     .map(|choice| PickItem {
                         label: format!(
                             "{} · {}{} · {:?}",
@@ -650,8 +658,7 @@ impl App {
             self.dirty = true;
         }
         if self.modal.is_some() {
-            self.modal_event(event, output);
-            return true;
+            return self.modal_event(event, output);
         }
         if let Event::Key(key) = &event {
             if key.kind == KeyEventKind::Release {
@@ -728,6 +735,27 @@ impl App {
             }
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 match key.code {
+                    KeyCode::Char('c') => {
+                        // Standard interrupt ordering: a live turn is cancelled
+                        // first, then a draft clears, then an idle empty
+                        // composer quits.
+                        if matches!(self.view.state, State::Working) || self.view.remote_active {
+                            self.send(output, Intent::Cancel);
+                            self.notice = if self.view.remote_active {
+                                "This turn is running in another terminal; cancel it there."
+                            } else {
+                                "Stopping the current turn and queued follow-ups."
+                            }
+                            .into();
+                        } else if !self.composer.text().is_empty() {
+                            self.composer.set_text("");
+                            self.notice = "Draft cleared. Press Ctrl-C again to quit.".into();
+                        } else {
+                            self.send(output, Intent::Quit);
+                            return false;
+                        }
+                        return true;
+                    }
                     KeyCode::Char('t') => {
                         self.show_thinking = !self.show_thinking;
                         return true;
@@ -829,13 +857,16 @@ impl App {
                 }
             }
             ComposerAction::Cancel => {
-                self.send(output, Intent::Cancel);
-                self.notice = if self.view.remote_active {
-                    "This turn is running in another terminal; cancel it there."
-                } else {
-                    "Stopping the current turn and queued follow-ups."
+                // Esc interrupts a live turn; idle it is a quiet no-op.
+                if matches!(self.view.state, State::Working) || self.view.remote_active {
+                    self.send(output, Intent::Cancel);
+                    self.notice = if self.view.remote_active {
+                        "This turn is running in another terminal; cancel it there."
+                    } else {
+                        "Stopping the current turn and queued follow-ups."
+                    }
+                    .into();
                 }
-                .into();
             }
             ComposerAction::Quit => {
                 self.send(output, Intent::Quit);
@@ -897,22 +928,26 @@ impl App {
             self.notice = "No supported text or image on the clipboard.".into();
         }
     }
-    fn modal_event(&mut self, event: Event, output: &SyncSender<Intent>) {
-        // Ctrl-C always cancels the active run first, even inside dialogs; the
-        // dialog itself stays open and Esc still closes it.
+    fn modal_event(&mut self, event: Event, output: &SyncSender<Intent>) -> bool {
+        // Ctrl-C inside a dialog keeps the global ordering: cancel a live run
+        // first, quit when idle. Esc still only closes the dialog.
         if let Event::Key(key) = &event
             && key.kind != KeyEventKind::Release
             && key.code == KeyCode::Char('c')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
-            self.send(output, Intent::Cancel);
-            self.notice = if self.view.remote_active {
-                "This turn is running in another terminal; cancel it there."
-            } else {
-                "Stopping the current turn and queued follow-ups."
+            if matches!(self.view.state, State::Working) || self.view.remote_active {
+                self.send(output, Intent::Cancel);
+                self.notice = if self.view.remote_active {
+                    "This turn is running in another terminal; cancel it there."
+                } else {
+                    "Stopping the current turn and queued follow-ups."
+                }
+                .into();
+                return true;
             }
-            .into();
-            return;
+            self.send(output, Intent::Quit);
+            return false;
         }
         if matches!(
             (&self.modal, &event),
@@ -926,7 +961,7 @@ impl App {
             Event::Key(key) if key.kind != KeyEventKind::Release && key.code == KeyCode::Esc
         ) {
             self.modal = None;
-            return;
+            return true;
         }
         let mut chosen = None;
         let mut save = None;
@@ -940,7 +975,7 @@ impl App {
                 } => {
                     if let Event::Key(key) = event {
                         if key.kind == KeyEventKind::Release {
-                            return;
+                            return true;
                         }
                         let filtered = items
                             .iter()
@@ -1064,12 +1099,12 @@ impl App {
             match self.view.accounts.iter().find(|account| &account.id == id) {
                 Some(account) if !account.enabled => {
                     self.notice = "This account is disabled. Enable it before selecting it.".into();
-                    return;
+                    return true;
                 }
                 None => {
                     self.notice =
                         "This account is no longer available. Reopen the account picker.".into();
-                    return;
+                    return true;
                 }
                 _ => (),
             }
@@ -1087,6 +1122,7 @@ impl App {
                 }
             }
         }
+        true
     }
 }
 

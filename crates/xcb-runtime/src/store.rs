@@ -2,6 +2,7 @@ use crate::{Error, Result, digest, new_id, private};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
+    collections::BTreeMap,
     fs,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -1613,6 +1614,25 @@ impl Store {
     pub fn quotas(&self, pool: &Id) -> Result<Vec<QuotaPoint>> {
         let db = self.db()?;
         quotas_from(&db, pool)
+    }
+
+    /// The account's freshest remaining percentage: the minimum across the
+    /// latest live observation in each window. `None` means usage is
+    /// unmeasured, not that it is unlimited.
+    pub fn remaining_percent(&self, pool: &Id, now: u64) -> Result<Option<f64>> {
+        let mut by_window: BTreeMap<Id, Vec<QuotaPoint>> = BTreeMap::new();
+        for point in self.quotas(pool)? {
+            by_window
+                .entry(point.window.clone())
+                .or_default()
+                .push(point);
+        }
+        Ok(by_window
+            .values()
+            .filter_map(|points| points.last())
+            .filter(|point| point.fresh(now))
+            .map(|point| 100.0 - point.used_percent)
+            .reduce(f64::min))
     }
 }
 

@@ -351,15 +351,37 @@ fn usable_account(
         .into_iter()
         .map(|run| run.account)
         .collect();
+    let now = now_ms();
     let mut accounts = store.accounts()?;
-    accounts.sort_by_key(|account| {
-        if current == Some(&account.id) {
-            0
-        } else if config.default_account.as_ref() == Some(&account.id) {
-            1
-        } else {
-            2
+    let mut remaining: BTreeMap<Id, f64> = BTreeMap::new();
+    for account in &accounts {
+        if let Some(percent) = store.remaining_percent(&account.quota_pool, now)? {
+            remaining.insert(account.id.clone(), percent);
         }
+    }
+    // The session's account stays sticky across a model switch. Otherwise
+    // usable accounts with measured quota order by remaining headroom —
+    // unmeasured accounts cannot claim availability and sort behind them,
+    // with the configured default leading that tail.
+    accounts.sort_by(|left, right| {
+        let rank = |account: &crate::store::Account| {
+            if current == Some(&account.id) {
+                0
+            } else if remaining.contains_key(&account.id) {
+                1
+            } else if config.default_account.as_ref() == Some(&account.id) {
+                2
+            } else {
+                3
+            }
+        };
+        rank(left).cmp(&rank(right)).then_with(|| {
+            remaining
+                .get(&right.id)
+                .copied()
+                .partial_cmp(&remaining.get(&left.id).copied())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
     for account in accounts {
         if provider.is_none_or(|provider| account.provider == provider)
@@ -1495,6 +1517,135 @@ mod tests {
         assert_eq!(store.unsettled_runs().unwrap().len(), 2);
         store.settle(&current_run, State::Idle, 9).unwrap();
         store.settle(&default_run, State::Idle, 10).unwrap();
+    }
+
+    #[test]
+    fn usable_account_prefers_the_most_remaining_quota() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().canonicalize().unwrap().join("state");
+        let store = Store::open(&state).unwrap();
+        let spent = store
+            .add_account(Provider::Claude, "Subscription", 1, None)
+            .unwrap();
+        let frugal = store
+            .add_account(Provider::Claude, "Subscription", 2, None)
+            .unwrap();
+        let unmeasured = store
+            .add_account(Provider::Claude, "Subscription", 3, None)
+            .unwrap();
+        for account in [&spent, &frugal, &unmeasured] {
+            auth::store_token(
+                &store,
+                &account.id,
+                b"sk-ant-oat01-syntheticToken000000000000",
+            )
+            .unwrap();
+        }
+        let now = now_ms();
+        for (account, used) in [(&spent, 80.0), (&frugal, 20.0)] {
+            store
+                .record_quota(&xcb_core::usage::QuotaPoint {
+                    pool: account.quota_pool.clone(),
+                    window: Id::new("five_hour").unwrap(),
+                    used_percent: used,
+                    observed_at_ms: now,
+                    resets_at_ms: now + 9_000_000,
+                })
+                .unwrap();
+        }
+        let config = Config {
+            default_account: Some(spent.id.clone()),
+            ..Config::default()
+        };
+        // The account with the most measured headroom wins, even over the
+        // configured default and never-measured accounts.
+        assert_eq!(
+            usable_account(&store, Some(Provider::Claude), None, &config).unwrap(),
+            Some(frugal.id.clone())
+        );
+        // A bound session's account stays sticky across a model switch.
+        assert_eq!(
+            usable_account(&store, Some(Provider::Claude), Some(&spent.id), &config).unwrap(),
+            Some(spent.id.clone())
+        );
+        // A fresh 100% observation drops the leader behind the next measured
+        // account; unmeasured accounts still cannot claim availability.
+        store
+            .record_quota(&xcb_core::usage::QuotaPoint {
+                pool: frugal.quota_pool.clone(),
+                window: Id::new("five_hour").unwrap(),
+                used_percent: 100.0,
+                observed_at_ms: now + 1,
+                resets_at_ms: now + 9_000_000,
+            })
+            .unwrap();
+        assert_eq!(
+            usable_account(&store, Some(Provider::Claude), None, &config).unwrap(),
+            Some(spent.id.clone())
+        );
+    }
+
+    #[test]
+    fn choose_model_defaults_to_the_high_effort_non_premium_route() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().canonicalize().unwrap().join("state");
+        let store = Store::open(&state).unwrap();
+        let fixed = |provider: Provider, model: &str, effort: Option<&str>| ModelChoice {
+            provider,
+            id: Id::new(model).unwrap(),
+            label: model.into(),
+            mode: xcb_core::models::Mode::Fixed,
+            resolved: None,
+            effort: effort.map(|value| Id::new(value).unwrap()),
+            observed_at_ms: 1,
+        };
+        store
+            .set_models(
+                Provider::Claude,
+                &[
+                    fixed(Provider::Claude, "claude-fable-5-1", Some("max")),
+                    fixed(Provider::Claude, "default", Some("high")),
+                    fixed(Provider::Claude, "sonnet", Some("max")),
+                ],
+            )
+            .unwrap();
+        store
+            .set_models(
+                Provider::Codex,
+                &[
+                    fixed(Provider::Codex, "gpt-6-astra", Some("ultra")),
+                    fixed(Provider::Codex, "gpt-6-astra", Some("high")),
+                ],
+            )
+            .unwrap();
+        store
+            .set_models(
+                Provider::Devin,
+                &[
+                    fixed(Provider::Devin, "gpt-6-astra-max", None),
+                    fixed(Provider::Devin, "swe-2-high", None),
+                ],
+            )
+            .unwrap();
+        let config = Config::default();
+        assert_eq!(
+            choose_model(&store, Provider::Claude, None, &config)
+                .unwrap()
+                .key(),
+            "claude/default/high"
+        );
+        assert_eq!(
+            choose_model(&store, Provider::Codex, None, &config)
+                .unwrap()
+                .key(),
+            "codex/gpt-6-astra/high"
+        );
+        assert_eq!(
+            choose_model(&store, Provider::Devin, None, &config)
+                .unwrap()
+                .key(),
+            "devin/swe-2-high"
+        );
     }
 
     #[test]

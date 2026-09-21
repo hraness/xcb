@@ -32,10 +32,7 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
             .filter_map(|points| points.last())
             .filter(|point| point.fresh(now))
             .collect();
-        let remaining_percent = fresh
-            .iter()
-            .map(|point| 100.0 - point.used_percent)
-            .reduce(f64::min);
+        let remaining_percent = store.remaining_percent(&account.quota_pool, now)?;
         let resets_at_ms = fresh.iter().map(|point| point.resets_at_ms).min();
         let estimates: Vec<_> = by_window
             .values()

@@ -47,6 +47,9 @@ impl Composer {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                 match key.code {
+                    // The app intercepts Ctrl-C before this point — it cancels
+                    // a live turn, clears a draft, then quits an idle empty
+                    // composer. The arm below is the composer's own fallback.
                     KeyCode::Char('c') if ctrl => {
                         self.set_text("");
                         self.history_index = None;
