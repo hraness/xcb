@@ -2,7 +2,7 @@
 
 > One terminal for your coding agents. xcb (Excalibur) brings supported provider accounts, model choices, local sessions, and usage into one workspace.
 
-Native xcb is an MIT-licensed Rust source preview. No native xcb binary or @hraness/xcb npm package is published; historical v0.3.0 assets are AgentMixer. Claude and Codex coding workflows passed on macOS ARM64 with tested accounts and admitted builds. Devin authentication and model discovery passed, but the tested account reached provider quota before coding acceptance. Provider builds and host qualification have explicit limits.
+Native xcb is an MIT-licensed Rust source preview. No native xcb binary or @hraness/xcb npm package is published; historical v0.3.0 assets are AgentMixer. Claude and Codex coding workflows passed on macOS ARM64 with tested accounts and admitted builds. Devin authentication and model discovery passed, but the tested account reached provider quota before coding acceptance. The native installer is user-global, records its verified install helper, and supports `xcb update check`, `xcb upgrade`, and a macOS daily `notify` or opt-in `auto` policy; no update follows main or an unverified moving artifact. Provider builds and host qualification have explicit limits.
 
 The workspace broker can read and edit files. A separately configured Linux ARM64 command runner supports offline tests/builds, prepared public Cargo/Bun dependencies, and filtered read-only Git inspection. It does not run native macOS commands, arbitrary network operations, private dependency installs, commits, or pushes. Model requests still go to the selected provider; local state does not mean offline inference. xcb is not an unlimited parallel agent fleet.
 

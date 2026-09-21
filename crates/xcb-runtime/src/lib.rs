@@ -29,6 +29,7 @@ pub mod runner;
 pub mod sandbox;
 pub mod store;
 pub mod summary;
+pub mod update;
 
 use sha2::{Digest, Sha256};
 use xcb_core::Id;

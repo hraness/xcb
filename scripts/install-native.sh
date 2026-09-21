@@ -7,6 +7,10 @@ set -eu
 : "${XCB_VERSION:=}"
 : "${XCB_GITHUB:=hraness/xcb}"
 
+script_path="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
+source_root=
+install_method=release
+
 fail() { echo "error: $*" >&2; exit 1; }
 version_valid() {
   printf '%s\n' "$1" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
@@ -79,7 +83,9 @@ install_from_release() {
 }
 
 install_from_source() {
-  root=$(cd "$(dirname "$0")/.." && pwd -P)
+  install_method=source
+  root=$(cd "$(dirname "$script_path")/.." && pwd -P)
+  source_root=$root
   expected_version=$(awk '
     /^\[workspace\.package\]$/ { section=1; next }
     section && /^\[/ { exit }
@@ -141,12 +147,51 @@ mv -f "$stage/candidate" "$destination"
 [ "$candidate_digest" = "$(sha256 "$destination")" ] || fail "installed binary changed"
 if [ -n "$previous_digest" ]; then echo "Previous binary preserved at $backup"; fi
 
+# Keep the exact installer beside the user-global binary so `xcb upgrade` can
+# delegate release updates to the same checksum and atomic-swap contract.
+install_prefix=$(cd "$(dirname "$bin_dir")" && pwd -P)
+share_dir="$install_prefix/share/xcb"
+[ ! -L "$install_prefix" ] && [ ! -L "$share_dir" ] || fail "install metadata parent must not be a symlink"
+mkdir -p "$share_dir"
+chmod 0755 "$share_dir"
+if [ -e "$share_dir/install-native.sh" ] || [ -L "$share_dir/install-native.sh" ]; then
+  regular_file "$share_dir/install-native.sh" || fail "existing installer metadata helper is unsafe"
+fi
+cp "$script_path" "$stage/install-native.sh"
+chmod 0755 "$stage/install-native.sh"
+mv -f "$stage/install-native.sh" "$share_dir/install-native.sh"
+# Paths are host-generated absolute paths; reject control characters before
+# writing the small machine-readable manifest. Escape the two JSON characters
+# that can occur in a user-selected install prefix.
+case "$install_prefix$share_dir$source_root" in *[![:print:]]*) fail "install path contains a control character" ;; esac
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+manifest_prefix=$(json_escape "$install_prefix")
+manifest_helper=$(json_escape "$share_dir/install-native.sh")
+manifest_source=$(json_escape "$source_root")
+manifest_binary=$(json_escape "$destination")
+printf '{"version":1,"installMethod":"%s","channel":"stable","versionString":"%s","prefix":"%s","helperPath":"%s","sourceRoot":"%s","binaryPath":"%s"}\n' \
+  "$install_method" "$expected_version" "$manifest_prefix" "$manifest_helper" "$manifest_source" "$manifest_binary" > "$stage/install.json"
+chmod 0600 "$stage/install.json"
+if [ -e "$share_dir/install.json" ] || [ -L "$share_dir/install.json" ]; then
+  regular_file "$share_dir/install.json" || fail "existing install manifest is unsafe"
+fi
+mv -f "$stage/install.json" "$share_dir/install.json"
+
 case ":$PATH:" in
   *":$bin_dir:"*) ;;
   *)
     if [ "${XCB_ADD_PATH:-ask}" = yes ]; then
-      printf '\nexport PATH="%s:$PATH"\n' "$bin_dir" >> "$HOME/.profile"
-      echo "Added $bin_dir to PATH in $HOME/.profile"
+      startup="$HOME/.profile"
+      case "${SHELL##*/}" in
+        zsh) startup="$HOME/.zprofile" ;;
+        bash) startup="$HOME/.bash_profile" ;;
+      esac
+      mkdir -p "$(dirname "$startup")"
+      path_line="export PATH=\"$bin_dir:\$PATH\""
+      if [ ! -f "$startup" ] || ! grep -Fqx "$path_line" "$startup"; then
+        printf '\n%s\n' "$path_line" >> "$startup"
+      fi
+      echo "Added $bin_dir to PATH in $startup"
     else
       echo "$bin_dir is not on PATH. Add it with:"
       echo "  export PATH=\"$bin_dir:\$PATH\""

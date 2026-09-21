@@ -119,6 +119,11 @@ test("native source upgrade validates staged bytes, atomically replaces, and bac
     expect(cargoArgs[7]).toEndWith("/cargo-install");
     expect(cargoArgs[8]).toBe("--no-track");
     expect(readdirSync(join(f.prefix, "bin")).some(name => name.startsWith(".xcb-install"))).toBe(false);
+    const manifest = JSON.parse(readFileSync(join(f.prefix, "share/xcb/install.json"), "utf8")) as { installMethod: string; versionString: string; helperPath: string };
+    expect(manifest.installMethod).toBe("source");
+    expect(manifest.versionString).toBe("0.4.0");
+    expect(manifest.helperPath).toBe(join(f.prefix, "share/xcb/install-native.sh"));
+    expect(existsSync(manifest.helperPath)).toBe(true);
   } finally { closeSync(old); }
 });
 
