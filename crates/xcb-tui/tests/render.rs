@@ -377,3 +377,69 @@ fn footer_previews_the_pending_route_without_a_session() {
     assert!(contents.contains("claude/default/high · pilot@example.com"));
     assert!(!contents.contains("Choose an account"));
 }
+
+#[test]
+fn empty_subagent_and_extension_lists_collapse() {
+    let mut app = app();
+    app.view.pane = Pane::focus();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(!contents.contains("Subagents"));
+    assert!(!contents.contains("No subagent activity"));
+
+    // A live subagent expands the widget again.
+    app.view.subagents = vec![xcb_core::session::Subagent {
+        id: Id::new("worker").unwrap(),
+        label: "auditing".into(),
+        state: State::Working,
+        model: None,
+    }];
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(contents.contains("Subagents"));
+    assert!(contents.contains("auditing"));
+}
+
+#[test]
+fn a_submitted_prompt_echoes_in_the_transcript_immediately() {
+    let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+    let mut app = app();
+    app.composer.set_text("ship the fix");
+    app.handle(
+        crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        )),
+        &tx,
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(contents.contains("You"));
+    assert!(contents.contains("ship the fix"));
+}

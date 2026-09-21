@@ -791,3 +791,48 @@ fn the_wheel_moves_picker_selection() {
         _ => panic!("picker open"),
     }
 }
+
+#[test]
+fn submitted_prompts_echo_instantly_then_reconcile_with_the_view() {
+    use xcb_core::session::{Message, Role};
+    use xcb_core::ui::Update;
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    let enter = || Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    app.composer.set_text("ship it");
+    assert!(app.handle(enter(), &tx));
+    assert!(
+        matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Submit { text, .. }) if text == "ship it")
+    );
+    assert_eq!(app.pending_echoes().count(), 1, "echo is instant");
+
+    // The kernel binds a session before the message lands — the echo follows.
+    let mut view = view_for("s_one");
+    assert!(app.apply(Update::View(Box::new(view.clone()))));
+    assert_eq!(app.pending_echoes().count(), 1);
+
+    // Once the persisted message arrives the echo reconciles — no duplicates.
+    view.messages.push(Message {
+        id: xcb_core::Id::new("m1").unwrap(),
+        role: Role::User,
+        text: "ship it".into(),
+        at_ms: 1,
+        attachments: vec![],
+        provenance: None,
+    });
+    assert!(app.apply(Update::View(Box::new(view))));
+    assert_eq!(app.pending_echoes().count(), 0);
+
+    // A rejected submission retracts its echo when the draft returns.
+    app.composer.set_text("nope");
+    assert!(app.handle(enter(), &tx));
+    assert!(rx.try_recv().is_ok());
+    assert_eq!(app.pending_echoes().count(), 1);
+    assert!(app.apply(Update::Draft {
+        text: "nope".into(),
+        attachments: vec![],
+    }));
+    assert_eq!(app.pending_echoes().count(), 0);
+    assert_eq!(app.composer.text(), "nope");
+}

@@ -1693,19 +1693,11 @@ async fn run_prepared<P: Protocol>(
             }
             for event in batch.events {
                 match event {
-                    TurnEvent::Ready { resolved_model } => {
+                    TurnEvent::Ready => {
                         if admitted {
                             return Err(Error::Protocol("duplicate initialization"));
                         }
                         admitted = true;
-                        if let Some(reported) = resolved_model
-                            && reported != session.model.id.as_str()
-                            && Id::new(reported.clone()).is_ok()
-                        {
-                            observer(Progress::Notice(format!(
-                                "provider resolved the model to {reported}"
-                            )));
-                        }
                     }
                     TurnEvent::OutputTokens(total) if admitted => {
                         if total < output_tokens || total > xcb_core::usage::COUNTER_LIMIT {
@@ -2418,9 +2410,7 @@ mod tests {
             if self.step == 1 {
                 let mut events = vec![];
                 if !self.before_ready {
-                    events.push(TurnEvent::Ready {
-                        resolved_model: None,
-                    });
+                    events.push(TurnEvent::Ready);
                 }
                 events.push(TurnEvent::Tool {
                     id: "fixture-call".into(), name: "workspace_write".into(),

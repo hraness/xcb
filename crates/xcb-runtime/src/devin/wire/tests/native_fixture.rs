@@ -154,7 +154,7 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
             let batch=codec.next(&mut process).await?;
             for event in batch.events {
                 match event {
-                    Event::Ready{..}=>{require(!admitted,"duplicate fixture admission")?;admitted=true;},
+                    Event::Ready=>{require(!admitted,"duplicate fixture admission")?;admitted=true;},
                     Event::Tool{id,name,arguments}=>{
                         require(admitted,"fixture tool before admission")?;recorded.push(json!({"name":name,"arguments":arguments}));
                         let value=workspace.call(&name,&arguments)?;

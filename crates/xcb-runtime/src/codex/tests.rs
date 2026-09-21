@@ -32,7 +32,7 @@ fn started() -> CodexProtocol {
     let (events, _) = codec
         .accept(json!({"id":7,"result":{"turn":{"id":"turn1"}}}))
         .unwrap();
-    assert!(matches!(events[0], Event::Ready { .. }));
+    assert!(matches!(events[0], Event::Ready));
     codec
 }
 fn notice(method: &str, item: Value) -> Value {
@@ -279,7 +279,7 @@ fn exact_native_echo_trace_replays_with_current_wire_shapes() {
         let frame = c.envelope(&serde_json::to_vec(&frame).unwrap()).unwrap();
         for event in c.accept(frame).unwrap().0 {
             match event {
-                Event::Ready { .. } => ready += 1,
+                Event::Ready => ready += 1,
                 Event::Tool { id, .. } => {
                     tools += 1;
                     let (_, response) = c

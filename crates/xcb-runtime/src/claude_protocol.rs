@@ -76,12 +76,7 @@ impl Protocol for ClaudeProtocol {
         match claude::parse_event(frame)? {
             claude::Event::Initialize(value) => {
                 runner::validate_init(&value, &self.cwd, &self.model, self.tools)?;
-                events.push(Event::Ready {
-                    resolved_model: value
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                });
+                events.push(Event::Ready);
             }
             claude::Event::Delta { thinking, text } => events.push(Event::Delta { thinking, text }),
             claude::Event::Assistant { text, .. } => events.push(Event::Assistant(text)),

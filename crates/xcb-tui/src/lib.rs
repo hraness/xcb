@@ -268,6 +268,15 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
     hasher.finish()
 }
 
+/// A submitted prompt not yet confirmed by a View carrying its message.
+struct PendingEcho {
+    /// Session the submit targeted; `None` when no session was bound — the
+    /// kernel binds whatever session it creates, so the echo follows.
+    session: Option<Id>,
+    text: String,
+    attachments: usize,
+}
+
 #[derive(Default)]
 pub struct App {
     pub view: View,
@@ -295,6 +304,10 @@ pub struct App {
     /// Session an in-flight attachment belongs to; the arriving image is routed
     /// there even if the user switched sessions meanwhile.
     pending_image_session: Option<Id>,
+    /// Submitted prompts echoed into the transcript optimistically until a
+    /// View confirms the message landed — submit feedback is instant while
+    /// the kernel persists and the provider starts.
+    pending_echoes: VecDeque<PendingEcho>,
     /// Highlighted row of the slash-command typeahead menu.
     slash_selected: Cell<usize>,
     /// Esc closes the menu without canceling the turn; typing reopens it.
@@ -334,6 +347,16 @@ impl App {
                 self.scroll.set(next);
             }
         }
+    }
+    /// Optimistic echoes of submitted prompts still awaiting a View carrying
+    /// the persisted message — `(text, attachment count)` pairs bound to the
+    /// current session or still awaiting the session the kernel creates.
+    pub fn pending_echoes(&self) -> impl Iterator<Item = (&str, usize)> {
+        let current = self.view.session.as_ref().map(|session| &session.id);
+        self.pending_echoes
+            .iter()
+            .filter(move |echo| echo.session.is_none() || echo.session.as_ref() == current)
+            .map(|echo| (echo.text.as_str(), echo.attachments))
     }
     /// True when state changed since the last draw and a repaint is needed.
     pub fn take_dirty(&mut self) -> bool {
@@ -453,6 +476,37 @@ impl App {
                     self.dirty = true;
                 }
                 self.view = *view;
+                if !self.pending_echoes.is_empty() {
+                    let current = self.view.session.as_ref().map(|session| session.id.clone());
+                    // Unbound echoes adopt the session the kernel bound the
+                    // submit to; echoes for other sessions stay pending.
+                    for echo in &mut self.pending_echoes {
+                        if echo.session.is_none() {
+                            echo.session = current.clone();
+                        }
+                    }
+                    let mut consumed = vec![false; self.view.messages.len()];
+                    self.pending_echoes.retain(|echo| {
+                        if echo.session != current {
+                            return true;
+                        }
+                        !self
+                            .view
+                            .messages
+                            .iter()
+                            .enumerate()
+                            .any(|(index, message)| {
+                                !consumed[index]
+                                    && message.role == xcb_core::session::Role::User
+                                    && message.text == echo.text
+                                    && {
+                                        consumed[index] = true;
+                                        true
+                                    }
+                            })
+                    });
+                    self.dirty = true;
+                }
             }
             Update::Delta {
                 session,
@@ -485,6 +539,14 @@ impl App {
                 self.dirty = true;
             }
             Update::Draft { text, attachments } => {
+                // A rejected submission retracts its optimistic echo.
+                if let Some(position) = self
+                    .pending_echoes
+                    .iter()
+                    .rposition(|echo| echo.text == text)
+                {
+                    self.pending_echoes.remove(position);
+                }
                 self.restore_draft(text, attachments);
                 self.dirty = true;
             }
@@ -872,8 +934,19 @@ impl App {
                 }
                 if !text.trim().is_empty() || !self.attachments.is_empty() {
                     let attachments = std::mem::take(&mut self.attachments);
+                    let echo = PendingEcho {
+                        session: self.view.session.as_ref().map(|session| session.id.clone()),
+                        attachments: attachments.len(),
+                        text: text.clone(),
+                    };
                     match output.try_send(Intent::Submit { text, attachments }) {
-                        Ok(()) => self.notice.clear(),
+                        Ok(()) => {
+                            self.pending_echoes.push_back(echo);
+                            while self.pending_echoes.len() > 8 {
+                                self.pending_echoes.pop_front();
+                            }
+                            self.notice.clear();
+                        }
                         Err(
                             std::sync::mpsc::TrySendError::Full(Intent::Submit {
                                 text,
