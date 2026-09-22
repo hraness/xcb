@@ -1,0 +1,97 @@
+{
+  "schema": "agentmixer.live-provider-smoke.v1",
+  "evidenceKind": "live-claude-subscription-cli-smoke",
+  "observedAt": "2026-09-22T15:53:45.000Z",
+  "platform": "darwin-arm64",
+  "host": {
+    "product": "macOS",
+    "version": "26.5.1",
+    "build": "25F80"
+  },
+  "supplements": "qualification/2026-09-17-live-claude-subscription.json",
+  "question": "Does the admitted-version floor introduced in #97 hold live, on a runtime newer than the one the 2026-09-17 receipt attests?",
+  "source": {
+    "branch": "main",
+    "commit": "ccefc0a80013774aade57f9625760fd4aa2a2bdb",
+    "gitTree": "fc6ee2f6d9651368917b8befc6be2eeabcf667b4",
+    "runnerSourceSha256": "18fbe38d61c977222383ebe4eb9d05c62ff41f3cabd1ca4f674fbbe9278963cd",
+    "claudeRuntimeSourceSha256": "544cdd056d1b25f7dc3fcda873e58f21e2bf255d43fc802dae29e10590a1c286",
+    "sandboxSourceSha256": "82acbec3bfd837678a5644dc2f3dc7a7d7a12d32403ab8c01c6e8881d80b9091",
+    "trackedWorkingTreeCleanAgainstCommit": true,
+    "binaryBuiltFromThisCommit": true,
+    "sourceModifiedForThisRun": false
+  },
+  "runtime": {
+    "provider": "claude",
+    "version": "2.1.278",
+    "admittedBy": "version floor",
+    "minVersion": "2.1.268",
+    "maxMajor": 2,
+    "exactVersionPinned": false,
+    "executableSha256": "bd245662fb8a0e321b3bf133e930371d6563c387527885f30b2613aef3ba14d6",
+    "xcbExecutableSha256": "f910143ae1948363721d519c04f4471b72fce7164bd3451dd128bbd224d68478"
+  },
+  "admission": {
+    "route": "native",
+    "authentication": "subscription",
+    "admittedAt": "2026-09-22T15:52:30.954Z",
+    "boundaryAssertionsEnforcedAtRunTime": [
+      "claude_code_version is admitted by the floor and major ceiling",
+      "cwd equals the launched workspace",
+      "model is the exact identifier for a concrete choice, or any well-formed identifier for an alias",
+      "apiKeySource is none",
+      "permissionMode is dontAsk",
+      "effective tool inventory equals the expected broker manifest",
+      "skills is empty",
+      "plugins is empty",
+      "mcp_servers count and identity match the broker"
+    ]
+  },
+  "sandbox": {
+    "backend": "seatbelt",
+    "policyGeneratedPerRun": true,
+    "unsandboxedFallbackAvailableOnDarwin": false,
+    "runArtifactsRemovedAfterJoin": false,
+    "runArtifactCustody": "retained under the private state directory, mode 0700; the per-run provider copy is 0500 and the generated policy is 0600. Nine launch directories were present on this host, each holding its own copy of the 217 MB provider executable.",
+    "independentSyntheticBoundaryEvidence": "qualification/2026-09-17-darwin-arm64.json"
+  },
+  "request": {
+    "requestedModelKey": "claude/sonnet/low",
+    "catalogResolvedModel": "claude-sonnet-5",
+    "effort": "low",
+    "workspace": "disposable-empty-directory",
+    "workspaceEntriesAfterRun": 0,
+    "prompt": "Reply with exactly: agentmixer live",
+    "expectedOutput": "agentmixer live",
+    "observedOutput": "agentmixer live",
+    "completed": true,
+    "liveProviderRequests": 1,
+    "billingImpact": "subscription-plan-consumption-not-measured"
+  },
+  "custody": {
+    "providerExitedAndJoinedBeforeCompletionPersisted": true,
+    "reportedEffects": "none",
+    "pendingAttention": false
+  },
+  "privacy": {
+    "realCredentialUsed": true,
+    "credentialMaterialRecorded": false,
+    "accountIdentityRecorded": false,
+    "authorizationUrlRecorded": false,
+    "localFilesystemPathsRecorded": false,
+    "localSessionIdentifierRecorded": false
+  },
+  "claims": {
+    "authenticatedProviderTurnObserved": true,
+    "exactExpectedResponseObserved": true,
+    "versionFloorAdmittedANewerRuntimeLive": true,
+    "boundaryAssertionsPassedOnThatRuntime": true,
+    "productionQualificationIssued": false,
+    "productionActivationIssued": false
+  },
+  "notEstablished": [
+    "that any runtime other than 2.1.278 is admissible in practice, only that this one was",
+    "that the floor is safe for every future release within major 2; the per-run boundary assertion remains the enforcement, not this receipt",
+    "any measurement of subscription usage, other models, other hosts, or production activation"
+  ]
+}
