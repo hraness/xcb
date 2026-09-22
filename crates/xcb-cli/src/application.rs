@@ -178,3 +178,24 @@ pub fn inspect_dispatch(
         Err(_) => failed(FailureCode::Unavailable),
     }
 }
+
+/// Read only sanitized metadata; never initialize state or launch a provider.
+pub fn diagnostic_dispatch(
+    root: &Path,
+    account: &xcb_core::Id,
+    request: &xcb_core::Id,
+    as_json: bool,
+) -> Result<i32> {
+    if !as_json {
+        return failed(FailureCode::InvalidRequest);
+    }
+    match Store::open_read_only(root)
+        .and_then(|store| xcb_runtime::application_diagnostic::read(&store, account, request))
+    {
+        Ok(Some(value)) => {
+            emit(&value)?;
+            Ok(0)
+        }
+        Ok(None) | Err(_) => failed(FailureCode::Unavailable),
+    }
+}
