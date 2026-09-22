@@ -102,6 +102,36 @@ and `custody_unproven`. `joined: true` and `effects: none` appear only when
 independently established. Failure responses never include generated text,
 provider payloads, stderr, credentials or private paths.
 
+For an execution failure, the host may retain one bounded private diagnostic per
+account. Inspect it using the exact account and application request ID:
+
+```sh
+xcb --json application-diagnostic --account ACCOUNT_ID --request application_REQUEST_ID
+```
+
+This command is read-only: it does not initialize state, refresh an account,
+read credentials or launch a provider. An absent, older, replaced or unreadable
+record returns `unavailable`; it does not reconstruct details from past runs.
+The existing version-one `generate` and qualification failure objects are
+unchanged.
+
+The diagnostic contains request/run/account identities, provider, timestamp,
+a closed execution stage and category, and optional closed RPC operation,
+numeric RPC code and protocol-check reason. For example, a Devin resource
+refusal can retain `receive`, `quota_or_resource_limit`, `session_prompt` and
+`-32011`; a model-selection mismatch retains `initialize`, `protocol` and
+`model_changed`. Unknown protocol checks become `other`. No original error
+string, prompt, reply, provider payload, stderr, credentials or path is stored.
+
+Publication uses the existing account lease and replaces only that account's
+previous diagnostic, with a 4 KiB limit and owner-only file permissions. It is
+best effort: a diagnostic I/O failure never changes the execution result or
+weakens cleanup. Preparation, initialization, prompt start, response decoding
+and rejected output can produce records. Pre-admission refusals, cancellation,
+deadlines and output-size limits need not produce one. A diagnostic is **not**
+proof of process termination, account settlement, qualification, cost or an
+entitlement; use the command's settlement fields and normal qualification gates.
+
 ## Cancellation and recovery
 
 Send SIGINT or SIGTERM and wait for the command to finish its cleanup. XCB
