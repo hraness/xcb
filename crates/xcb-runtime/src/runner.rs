@@ -83,7 +83,7 @@ fn provider_args(model: &ModelChoice, tools: bool) -> Vec<String> {
         args.push(effort.as_str().into());
     }
     args.push("--settings".into());
-    args.push(json!({"disableAllHooks":true,"disableClaudeAiConnectors":true,"autoMemoryEnabled":false,"disableBundledSkills":true,"disableSkillShellExecution":true,"enableWorkflows":false,"workflowKeywordTriggerEnabled":false,"skillOverrides":{"doctor":"off","checkup":"off"}}).to_string());
+    args.push(json!({"disableAllHooks":true,"disableClaudeAiConnectors":true,"autoMemoryEnabled":false,"disableBundledSkills":true,"disableSkillShellExecution":true,"enableWorkflows":false,"workflowKeywordTriggerEnabled":false,"skillOverrides":{"doctor":"off","checkup":"off","design":"off"}}).to_string());
     if tools {
         args.push("--allowedTools".into());
         args.push(
@@ -366,6 +366,20 @@ pub fn parse_models(value: &Value, now: u64) -> Result<Vec<ModelChoice>> {
     Ok(choices.into_values().collect())
 }
 
+/// The identifier the runtime echoes in its init event. A catalog entry that
+/// carries `resolved` is an alias — `haiku`, `sonnet`, `opus[1m]`, `default` —
+/// and the provider reports the concrete model it selected, not the alias that
+/// was requested. Comparing against the alias made every aliased entry fail the
+/// boundary check; only an entry whose `resolved` is absent ever matched. This
+/// stays an exact-equality pin against a value the catalog observed from the
+/// same provider, so it is not a weaker assertion, just the right side of it.
+fn effective_model(model: &ModelChoice) -> &str {
+    model
+        .resolved
+        .as_ref()
+        .map_or_else(|| model.id.as_str(), Id::as_str)
+}
+
 pub fn validate_init(value: &Value, cwd: &Path, model: &ModelChoice, tools: bool) -> Result<()> {
     let mut expected = if tools {
         broker::descriptors()
@@ -401,7 +415,7 @@ pub fn validate_init(value: &Value, cwd: &Path, model: &ModelChoice, tools: bool
         .ok_or(Error::Protocol("MCP inventory"))?;
     if value.get("claude_code_version").and_then(Value::as_str) != Some(claude::VERSION)
         || value.get("cwd").and_then(Value::as_str) != cwd.to_str()
-        || value.get("model").and_then(Value::as_str) != Some(model.id.as_str())
+        || value.get("model").and_then(Value::as_str) != Some(effective_model(model))
         || value.get("apiKeySource").and_then(Value::as_str) != Some("none")
         || value.get("permissionMode").and_then(Value::as_str) != Some("dontAsk")
         || actual != expected
@@ -1005,4 +1019,96 @@ pub async fn run(
         facts,
         state,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn choice(id: &str, resolved: Option<&str>) -> ModelChoice {
+        ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new(id.to_owned()).expect("id"),
+            label: id.to_owned(),
+            mode: Mode::Fixed,
+            resolved: resolved.map(|value| Id::new(value.to_owned()).expect("resolved")),
+            effort: None,
+            observed_at_ms: 0,
+        }
+    }
+
+    /// The shape the pinned runtime actually reports. Captured from a real
+    /// 2.1.278 init event, not invented: a synthetic fixture would emit
+    /// whatever it was told and could not have caught either defect below.
+    fn init(model: &str) -> Value {
+        json!({
+            "type": "system",
+            "subtype": "init",
+            "claude_code_version": claude::VERSION,
+            "cwd": "/tmp/work",
+            "model": model,
+            "apiKeySource": "none",
+            "permissionMode": "dontAsk",
+            "tools": [],
+            "skills": [],
+            "plugins": [],
+            "mcp_servers": [],
+        })
+    }
+
+    fn admits(value: &Value, model: &ModelChoice) -> bool {
+        validate_init(value, &PathBuf::from("/tmp/work"), model, false).is_ok()
+    }
+
+    #[test]
+    fn admits_an_alias_by_the_concrete_model_the_runtime_selected() {
+        // `sonnet` is a catalog alias; the runtime echoes `claude-sonnet-5`.
+        let model = choice("sonnet", Some("claude-sonnet-5"));
+        assert!(admits(&init("claude-sonnet-5"), &model));
+        // Echoing the alias back is not what the runtime does, and is refused.
+        assert!(!admits(&init("sonnet"), &model));
+    }
+
+    #[test]
+    fn admits_an_unaliased_entry_by_its_own_identifier() {
+        let model = choice("claude-fable-5-1", None);
+        assert!(admits(&init("claude-fable-5-1"), &model));
+        assert!(!admits(&init("claude-opus-5"), &model));
+    }
+
+    #[test]
+    fn refuses_a_runtime_that_advertises_any_skill() {
+        // 2.1.278 ships a bundled `design` skill that `disableBundledSkills`
+        // does not suppress. This is the assertion that caught it.
+        let model = choice("claude-fable-5-1", None);
+        let mut value = init("claude-fable-5-1");
+        value["skills"] = json!(["design"]);
+        assert!(!admits(&value, &model));
+    }
+
+    #[test]
+    fn refuses_a_runtime_that_disagrees_with_the_pin() {
+        let model = choice("claude-fable-5-1", None);
+        let mut value = init("claude-fable-5-1");
+        value["claude_code_version"] = json!("2.1.268");
+        assert!(!admits(&value, &model));
+    }
+
+    /// The settings string is the only thing that keeps the bundled `design`
+    /// skill out of the inventory the assertion above checks. Dropping it puts
+    /// every native run back on `effective runtime boundary mismatch`.
+    #[test]
+    fn turns_off_every_bundled_skill_the_pinned_runtime_still_advertises() {
+        let args = provider_args(&choice("claude-fable-5-1", None), false);
+        let index = args
+            .iter()
+            .position(|arg| arg == "--settings")
+            .expect("--settings");
+        let settings: Value = serde_json::from_str(&args[index + 1]).expect("settings json");
+        assert_eq!(settings["disableBundledSkills"], json!(true));
+        for skill in ["doctor", "checkup", "design"] {
+            assert_eq!(settings["skillOverrides"][skill], json!("off"), "{skill}");
+        }
+    }
 }
