@@ -33,7 +33,7 @@ test("public entry pages keep one optional support footer and no product signup"
 test("the homepage clearly separates source installation from verified releases", () => {
   const html = renderToStaticMarkup(<Home />);
   expect(html.match(/<h1\b/gu)).toHaveLength(1);
-  expect(html).toContain("Your subscriptions. Routed.");
+  expect(html).toContain("All your AI subscriptions. One router.");
   expect(html).toContain("./scripts/install-native.sh");
   if (publishedRelease === null) {
     expect(html).toContain("No native release is published yet; install from source");

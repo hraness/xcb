@@ -19,7 +19,7 @@ test("comparison has an addressable accessible table and active navigation", () 
     .on("time", { element(element) { reviewedDates.push(element.getAttribute("datetime") ?? ""); } })
     .transform(html);
   expect(headings).toEqual(["compare-title"]);
-  expect(rows).toHaveLength(9);
+  expect(rows).toHaveLength(10);
   expect(columns).toHaveLength(3);
   expect(currentCompare).toBe(true);
   expect(scrollRegion).toBe(true);

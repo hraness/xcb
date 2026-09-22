@@ -10,7 +10,7 @@ const releaseLine = publishedRelease === null
 
 const body = `# xcb
 
-> Subscription routing for coding agents. xcb (Excalibur) selects an eligible account/model route across your own Claude, Codex, and Devin accounts, runs one bounded turn, and proves account custody when the work settles.
+> One router for the AI coding subscriptions you already pay for. xcb (Excalibur) selects an eligible account/model route across your Claude, Codex, and Devin accounts, runs one bounded turn, and proves account custody when the work settles.
 
 Another coding agent calls `xcb --json route`: one closed JSON task document on stdin, one bounded JSON result on stdout, with `dryRun` for selection without reserving an account. Applications embed the TypeScript SDK's `createSubscriptionRouter`, which wraps the account lease store and host-qualified task adapters. A terminal workspace is the reference host; the managed harness is experimental and is being rebuilt as a self-evolving ALGAL harness — the current build does not execute self-modifying orchestration policies.
 
