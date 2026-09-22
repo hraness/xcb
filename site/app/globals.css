@@ -2,40 +2,19 @@
 @import "@hraness/ui/styles.css";
 @import "@hraness/design-kit/fonts.css";
 @import "@hraness/design-kit/components.css";
-@import "@hraness/design-kit/mockups.css";
 @import "@hraness/design-kit/palettes.css";
-@import "@hraness/design-kit/syntax-highlighting.css";
 @import "@hraness/design-kit/product-marketing.css";
-@import "@hraness/design-kit/plain-site.css";
-@import "@hraness/design-kit/plain-publication.css";
-@import "@hraness/design-kit/typography.css";
-@import "@hraness/design-kit/status-page.css";
 
 @import "../vendor/paper-theme/paper-theme.css";
-@import "@hraness/design-kit/palette-system.css";
 @import "../vendor/hraness-marketing/product-marketing-preset.css";
 @import "../vendor/hraness-lantern/lantern-material.css";
 @import "@hraness/site-footer/styles.css";
-@import "../vendor/hraness-forced-colors/marketing-forced-colors.css";
 
 :root {
-  --hraness-site-accent: var(--primary);
-  --hraness-site-accent-ink: var(--primary-foreground);
   --inverse-background: #14202a;
   --xcb-code-foreground: #eef2ea;
-  --font-heading: var(--font-text);
   font-synthesis: none;
   line-height: 1.55;
-}
-
-/* xcb sets every heading in its sans text face, including h1 and h2. The
- * editorial preset declares its serif display face on each element that
- * carries `data-hraness-marketing-preset`, so a value on :root alone never
- * reaches those pages; the override sits on both. */
-:root,
-[data-hraness-marketing-preset="editorial"] {
-  --hraness-marketing-display-font: var(--font-text);
-  --hraness-marketing-display-weight: 600;
 }
 
 * {
@@ -50,9 +29,6 @@ html {
 }
 
 body {
-  min-height: 100dvh;
-  display: flex;
-  flex-direction: column;
   margin: 0;
   font-family: var(--font-text);
   overflow-x: clip;
@@ -63,11 +39,11 @@ code,
 kbd,
 samp,
 pre {
-  font-family: var(--font-mono, ui-monospace, monospace);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 a:focus-visible {
-  outline: 2px solid var(--focus);
+  outline: 2px solid var(--hraness-site-accent);
   outline-offset: 3px;
 }
 
@@ -107,8 +83,8 @@ a:focus-visible {
 .hraness-marketing-maker__links a,
 .hraness-marketing-question__answer a {
   color: var(--foreground);
-  text-decoration: underline dotted;
-  text-decoration-color: color-mix(in srgb, var(--foreground) 35%, transparent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklch, var(--foreground) 35%, transparent);
   text-underline-offset: 0.18em;
 }
 
@@ -201,7 +177,7 @@ a:focus-visible {
 
 .site-footer a:hover {
   color: var(--foreground);
-  text-decoration: underline dotted;
+  text-decoration: underline;
 }
 
 .skip-link {
@@ -241,19 +217,19 @@ a { text-underline-offset: 0.2em; }
   padding: 3rem 1.25rem 5rem;
 }
 .document-page h1, .document-page h2, .document-page h3 { text-wrap: balance; line-height: 1.2; }
-.document-page h2 { margin-top: 2.5rem; padding-top: 1.25rem; }
-.document-page pre { overflow-x: auto; padding: 1rem; border: 1px solid var(--ui-surface-edge, var(--hraness-material-seam)); border-radius: .875rem; background: var(--surface); box-shadow: var(--elevation-inset, var(--hraness-material-inset)); }
+.document-page h2 { margin-top: 2.5rem; border-top: 1px solid var(--line); padding-top: 1.25rem; }
+.document-page pre { overflow-x: auto; padding: 1rem; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
 .document-page code { font-family: var(--font-mono); font-size: 0.92em; }
 .document-page table { border-collapse: collapse; width: 100%; display: block; overflow-x: auto; }
 .document-page th, .document-page td { border-bottom: 1px solid var(--line); padding: 0.5rem 0.6rem; text-align: left; vertical-align: top; }
 .document-nav { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.5rem; font-size: 0.95rem; }
 
-.document-page h1 { margin: 1.75rem 0 1rem; font-family: var(--hraness-type-h1-font); font-size: var(--hraness-type-h1-size); font-weight: var(--hraness-type-h1-weight); }
-.document-page h2 { font-family: var(--hraness-type-h2-font); font-size: var(--hraness-type-h2-size); font-weight: var(--hraness-type-h2-weight); margin-bottom: 1rem; }
-.document-page h3 { font-family: var(--hraness-type-h3-font); font-size: var(--hraness-type-h3-size); font-weight: var(--hraness-type-h3-weight); margin: 1.75rem 0 0.75rem; }
+.document-page h1 { margin: 1.75rem 0 1rem; font-size: var(--hraness-paper-heading-size); font-weight: 600; }
+.document-page h2 { font-size: var(--hraness-paper-section-heading-size); font-weight: 600; margin-bottom: 1rem; }
+.document-page h3 { font-size: 1.25rem; font-weight: 600; margin: 1.75rem 0 0.75rem; }
 .document-page p { margin: 1rem 0; }
 .document-page pre { margin: 1.25rem 0; }
-.document-page article a { text-decoration: underline dotted; }
+.document-page article a { text-decoration: underline; }
 .document-page article ul { list-style: disc; padding-left: 1.5rem; margin: 1rem 0; }
 .document-page article ol { list-style: decimal; padding-left: 1.5rem; margin: 1rem 0; }
 .document-page article li + li { margin-top: 0.5rem; }
@@ -286,34 +262,13 @@ a { text-underline-offset: 0.2em; }
   --hraness-marketing-surface: var(--hraness-material-plane);
   box-shadow: var(--hraness-material-lift);
 }
-
-/* A framed component already draws its own boundary; a ruled section directly
-   after it would stack a second hairline on the card edge. */
-:is(
-  .hraness-marketing-install,
-  .hraness-marketing-proof,
-  .hraness-marketing-proof-frame
-) + :is(
-  .hraness-marketing-section,
-  .hraness-marketing-primitives,
-  .hraness-marketing-interfaces,
-  .hraness-marketing-trust,
-  .hraness-marketing-quotes,
-  .hraness-marketing-pricing,
-  .hraness-marketing-questions,
-  .hraness-marketing-maker,
-  .hraness-marketing-related,
-  .hraness-marketing-cta
-) {
-  border-block-start: 0;
-}
 [data-hraness-material="lantern"] .hraness-marketing-question[open] > summary {
   background-color: var(--hraness-material-warm-plane);
   color: var(--hraness-material-ink);
 }
 [data-hraness-material="lantern"] :is(.document-page pre, .install-command) {
   background: var(--hraness-material-plane);
-  border-color: var(--ui-surface-edge, var(--hraness-material-seam));
+  border-color: var(--hraness-material-seam);
   color: var(--hraness-material-ink);
 }
 
@@ -323,23 +278,48 @@ a { text-underline-offset: 0.2em; }
 .xcb-header-wrap { position: sticky; top: 0; z-index: 40; }
 .xcb-header-wrap .hraness-marketing-header { position: relative; }
 .xcb-header-wrap .hraness-marketing-header__brand { gap: .5rem; }
-.xcb-opening .xcb-marketing-hero { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); align-items: center; gap: clamp(2rem, 4vw, 4rem); padding-block: clamp(3rem, 7vw, 5rem); }
-.xcb-opening .hraness-marketing-hero__frame { width: 100%; max-width: 34rem; min-width: 0; margin: 0; }
-/* A deliberately larger hero than the shared h1 token, in the same face. */
-.xcb-opening .hraness-marketing-hero__heading { max-width: 16ch; font-size: clamp(2.8rem, 4.6vw, 4.5rem); line-height: 1.05; letter-spacing: -.055em; }
+.xcb-opening .xcb-marketing-hero { display: flex; flex-direction: column; gap: 2.8rem; padding-block: 3.5rem 5rem; }
+.xcb-opening .hraness-marketing-hero__frame { order: -1; width: 100%; max-width: 45rem; margin-inline: auto; margin-block: 0; }
+.xcb-opening .hraness-marketing-hero__heading { max-width: 16ch; font-size: clamp(3.2rem, 6vw, 4.9rem); }
 .xcb-opening .hraness-marketing-hero__summary { max-width: 49ch; }
 .xcb-opening .hraness-marketing-hero__boundary { margin-top: 1.3rem; }
-.xcb-evolve-loop { display: flex; flex-wrap: wrap; align-items: stretch; gap: .7rem; margin-block: 1.4rem 1.2rem; }
-.xcb-evolve-step { flex: 1 1 7rem; border: 1px solid var(--line); border-radius: .5rem; padding: .8rem .9rem; background: var(--hraness-material-plane); }
-.xcb-evolve-step strong { display: block; font: .7rem var(--font-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--hraness-site-accent); margin-bottom: .3rem; }
-.xcb-evolve-step span { font-size: .8rem; color: var(--muted); }
-.xcb-evolve-arrow { align-self: center; color: var(--muted); }
+.xcb-preview { margin: 0; text-align: left; }
+.xcb-terminal { overflow: hidden; border: 1px solid var(--hraness-material-seam); border-radius: .65rem; background: var(--hraness-marketing-terminal-background); color: var(--hraness-marketing-terminal-ink); box-shadow: var(--hraness-marketing-terminal-shadow); }
+.xcb-terminal-bar { min-height: 2.8rem; padding: .65rem 1.25rem; display: flex; justify-content: space-between; gap: 1rem; align-items: center; background: var(--hraness-marketing-terminal-chrome); border-bottom: 1px solid var(--line); font-size: .85rem; }
+.xcb-terminal-bar > span > span:first-child { color: var(--hraness-site-accent); margin-right: .35rem; font-size: 1.2rem; }
+.xcb-terminal-path, .xcb-terminal-local, .xcb-preview-hint { color: var(--hraness-marketing-terminal-muted); font-size: .75rem; }
+.xcb-preview-controls { display: flex; align-items: center; gap: .25rem; padding: .6rem 1rem; border-bottom: 1px solid var(--line); }
+.xcb-preview-controls button { padding: .4rem .75rem; font: inherit; font-size: .8rem; border: 1px solid transparent; border-radius: .3rem; cursor: pointer; background: transparent; color: var(--hraness-marketing-terminal-muted); min-height: 2.25rem; }
+.xcb-preview-controls button[aria-pressed="true"] { color: var(--hraness-marketing-terminal-ink); background: var(--hraness-material-warm-plane); border-color: var(--hraness-material-seam); }
+.xcb-preview-controls button:hover { background: var(--hraness-material-warm-plane); }
+.xcb-preview-controls button:focus-visible, summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.xcb-preview-hint { margin-left: auto; }
+.xcb-terminal-body { padding: 1.25rem 1.5rem 0; min-height: 19rem; display: flex; flex-direction: column; }
+.xcb-terminal-prompt { font-size: 1.03rem; margin: 0 0 1.25rem; }
+.xcb-terminal-steps { margin: 0; padding: 0; list-style: none; display: grid; gap: 1rem; }
+.xcb-terminal-steps li { display: flex; align-items: start; gap: .9rem; }
+.xcb-step-mark { font-family: var(--font-mono); color: var(--hraness-marketing-terminal-muted); font-size: .72rem; padding-top: .2rem; }
+.xcb-terminal-steps strong { display: block; font-size: .86rem; font-weight: 500; }
+.xcb-terminal-steps small { display: block; font-size: .78rem; color: var(--hraness-marketing-terminal-muted); margin-top: .1rem; }
+.xcb-step-result { margin-left: auto; color: var(--hraness-marketing-terminal-command); font: .72rem var(--font-mono); padding-top: .2rem; }
+.xcb-terminal-input { margin-top: auto; padding-block: 1rem; display: flex; gap: .6rem; align-items: center; border-top: 1px solid var(--line); font: .8rem var(--font-mono); }
+.xcb-terminal-input > span:last-child { margin-left: auto; font: .75rem var(--font-text); color: var(--hraness-marketing-terminal-muted); }
+.xcb-terminal-input > span:first-child { color: var(--hraness-marketing-terminal-command); }
+.xcb-preview figcaption { margin: .8rem 0 0; font-size: .72rem; color: var(--muted); text-align: right; }
+.xcb-preview figcaption a { text-decoration: underline; }
+.xcb-example-accounts, .xcb-example-usage { margin: 0; display: grid; }
+.xcb-example-accounts > div, .xcb-example-usage > div { display: flex; flex-wrap: wrap; align-items: center; gap: .8rem; padding-block: .6rem; border-bottom: 1px solid var(--line); font-size: .8rem; }
+.xcb-example-accounts strong { min-width: 4.5rem; font-weight: 500; }
+.xcb-example-accounts > div > :last-child { margin-left: auto; font-size: .75rem; }
+.xcb-example-usage dt { font-weight: 500; }
+.xcb-example-usage dd { margin-left: auto; color: var(--hraness-marketing-terminal-command); }
+.xcb-preview-note { color: var(--hraness-marketing-terminal-muted); font-size: .75rem; margin-block: .8rem 1rem; max-width: 58ch; }
 .xcb-story-list { display: grid; gap: 1.8rem; }
 .xcb-story-list > div { display: flex; gap: 1.2rem; }
 .xcb-story-number { font: .8rem var(--font-mono); color: var(--muted); padding-top: .3rem; }
-.xcb-readiness h3 { margin: 0 0 .5rem; font-family: var(--hraness-type-h3-font); font-size: var(--hraness-type-h3-size); font-weight: var(--hraness-type-h3-weight); line-height: 1.3; text-wrap: balance; }
+.xcb-story-list h3, .xcb-fit-grid h3, .xcb-readiness h3 { margin: 0 0 .5rem; font: 500 1.05rem/1.4 var(--font-text); }
 .xcb-story-list p, .xcb-fit-grid p, .xcb-readiness p, .xcb-pane-example p { margin: 0; color: var(--muted); line-height: 1.65; }
-.xcb-text-link { display: inline-flex; align-items: center; width: fit-content; color: var(--foreground); text-decoration: underline dotted; text-decoration-color: color-mix(in srgb, var(--foreground) 30%, transparent); text-underline-offset: .25em; font-size: .9rem; }
+.xcb-text-link { display: inline-flex; align-items: center; width: fit-content; color: var(--foreground); text-decoration: underline; text-decoration-color: color-mix(in oklch, var(--foreground) 30%, transparent); text-underline-offset: .25em; font-size: .9rem; }
 .xcb-text-link:hover { text-decoration-color: currentColor; }
 .xcb-workflow-proof { border: 1px solid var(--hraness-material-seam); background: var(--hraness-material-plane); border-radius: .6rem; padding: clamp(1.2rem, 3vw, 2rem); }
 .xcb-proof-line { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; justify-content: space-between; font-size: .9rem; }
@@ -350,110 +330,43 @@ a { text-underline-offset: 0.2em; }
 .xcb-pane-example { display: grid; gap: 1.5rem; }
 .xcb-pane-options { display: grid; gap: .5rem; }
 .xcb-pane-options code { padding: .9rem 1rem; border: 1px solid var(--line); border-radius: .4rem; font-size: .88rem; background: var(--hraness-material-plane); }
-.xcb-download-platforms { display: grid; gap: 1.75rem; }
-.xcb-download-platforms p { margin: 0; }
 .xcb-fit-grid, .xcb-readiness { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2rem; }
 .xcb-fit-grid > div { border-top: 1px solid var(--line); padding-top: 1.3rem; }
 .xcb-fit-grid { margin-bottom: 1.6rem; }
 .xcb-interface-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2rem; }
 .xcb-interface-grid > div { border-top: 1px solid var(--line); padding-top: 1.3rem; }
+.xcb-interface-grid h3 { margin: 0 0 .5rem; font: 500 1.05rem/1.4 var(--font-text); }
 .xcb-interface-grid p { margin: 0 0 1.1rem; color: var(--muted); line-height: 1.65; }
 .xcb-badge { display: inline-block; width: fit-content; font: .68rem var(--font-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: .3rem .8rem; }
+.xcb-terminal-code { padding-block-end: 1.25rem; }
+.xcb-code { margin: 0; font: .76rem/1.75 var(--font-mono); white-space: pre; overflow-x: auto; color: var(--hraness-marketing-terminal-ink); min-height: 17rem; }
 .xcb-readiness { font-size: .91rem; }
-.xcb-readiness a { display: inline-block; margin-top: 1rem; text-decoration: underline dotted; font-size: .85rem; }
+.xcb-readiness a { display: inline-block; margin-top: 1rem; text-decoration: underline; font-size: .85rem; }
 .xcb-status-dot { display: block; width: .45rem; height: .45rem; border-radius: 50%; background: light-dark(#386345, #a7c397); margin: 0 0 1rem; }
-.xcb-provider-marks { display: inline-flex; gap: .3rem; vertical-align: -.18em; margin-inline-end: .45rem; }
-.xcb-provider-heading { display: flex; align-items: center; gap: .55rem; }
 .xcb-status-caution { background: light-dark(#8b631f, #d6b670); }
 .xcb-status-neutral { background: var(--muted); }
 .xcb-release-details { width: 100%; max-width: 44rem; text-align: left; border-top: 1px solid var(--line); margin: 1.25rem auto 0; padding-top: 1rem; color: var(--muted); font-size: .85rem; }
 .xcb-release-details summary { cursor: pointer; width: fit-content; }
 .xcb-release-details p { margin-block: .75rem; }
-.xcb-release-details a { text-decoration: underline dotted; }
-
-/* The hero carries the three-command source install and the signed-off
-   release line, both read from the publication datum. */
-.xcb-hero-install { display: grid; gap: .9rem; width: 100%; max-width: 44rem; margin: 1.75rem 0 0; }
-.xcb-hero-install > p { margin: 0; color: var(--muted); font-size: .85rem; }
-.xcb-hero-install .install-command { margin: 0; width: 100%; font-size: .8rem; line-height: 1.75; text-align: left; overflow-x: auto; border: 1px solid var(--line); border-radius: .5rem; padding: 1rem 1.25rem; }
-.xcb-release-summary { margin: 0; font-size: .82rem; color: var(--muted); }
-.xcb-release-summary a { text-decoration: underline dotted; }
-.xcb-native-downloads { display: grid; gap: .75rem; width: 100%; text-align: left; }
-.xcb-native-downloads ul { list-style: none; margin: 0; padding: 0; display: grid; }
-.xcb-native-downloads li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .3rem 1rem; padding-block: .55rem; border-bottom: 1px solid var(--line); }
-.xcb-native-downloads li:first-child { border-top: 1px solid var(--line); }
-.xcb-native-downloads p { margin: 0; }
-.xcb-native-downloads a { text-decoration: underline dotted; }
+.xcb-release-details a { text-decoration: underline; }
 .hraness-marketing-install .install-command { font-size: .83rem; line-height: 1.8; text-align: left; overflow-x: auto; max-width: 100%; border: 1px solid var(--line); padding: 1.2rem 1.5rem; border-radius: .5rem; }
 .hraness-marketing-install > .xcb-text-link { margin-inline: auto; }
 section[id], h2[id], h3[id] { scroll-margin-top: 6.5rem; }
 @media (max-width: 48rem) {
-  .xcb-header-wrap { position: relative; }
+  .xcb-header-wrap { position: static; }
   .xcb-opening .xcb-marketing-hero { padding-block: 1.7rem 3.5rem; gap: 2rem; }
   .xcb-opening .hraness-marketing-hero__heading { font-size: clamp(2.8rem, 9vw, 4rem); }
   .xcb-fit-grid, .xcb-readiness, .xcb-interface-grid { grid-template-columns: 1fr; gap: 1.8rem; }
-  .xcb-readiness > div { padding-top: 1.25rem; }
-  .xcb-hero-terminal { min-height: auto; }
-  .xcb-lanes li { gap: .2rem .7rem; }
-  .xcb-lanes small { display: none; }
-  .xcb-lane-state { white-space: normal; }
+  .xcb-readiness > div { border-top: 1px solid var(--line); padding-top: 1.25rem; }
+  .xcb-terminal-body { padding: 1rem 1rem 0; min-height: 20rem; }
+  .xcb-preview-hint, .xcb-terminal-local, .xcb-step-result { display: none; }
+  .xcb-terminal-input > span:last-child { font-size: .68rem; }
   .xcb-example-usage > div { display: block; }
   .xcb-example-usage dd { margin: .2rem 0 0; }
   .xcb-example-accounts > div { gap: .3rem .6rem; }
   .xcb-example-accounts > div > :last-child { margin-left: 0; }
+  .xcb-preview figcaption { font-size: .68rem; text-align: left; }
+  .xcb-preview figcaption a { display: inline-block; }
   section[id], h2[id], h3[id] { scroll-margin-top: 1rem; }
 }
-
-@media (max-width: 68rem) {
-  .xcb-opening .xcb-marketing-hero { grid-template-columns: minmax(0, 1fr); }
-  .xcb-opening .hraness-marketing-hero__copy { max-width: 46rem; }
-  .xcb-opening .hraness-marketing-hero__frame { max-width: 36rem; justify-self: center; }
-}
-
-/* Keep the appearance panel inside the viewport when navigation wraps. */
-@media (max-width: 48rem) {
-  .xcb-header-wrap .hraness-marketing-header__actions { margin-inline-start: auto; }
-}
-
-:root { --hraness-site-footer-measure: 72rem; }
-body > div[data-hraness-marketing-preset] { flex: 1; }
-.xcb-header-wrap .hraness-marketing-header__nav a, .xcb-header-wrap .hraness-marketing-header__brand { min-block-size: 2.75rem; min-inline-size: 2.75rem; display: inline-flex; align-items: center; }
-
-/* Primary actions and native appearance controls keep their phone hit area. */
-[data-hraness-marketing-preset] .hraness-marketing-action,
-.xcb-header-wrap .hraness-design-palette-menu > summary {
-  min-inline-size: max(2.75rem, var(--interactive-target-compact, 2.75rem));
-  min-block-size: max(2.75rem, var(--interactive-target-compact, 2.75rem));
-}
-
-@media (forced-colors: active) {
-  .hraness-platform-install__tab[aria-selected="true"] {
-    forced-color-adjust: none;
-    background-color: Highlight;
-    border-color: Highlight;
-    color: HighlightText;
-  }
-}
-
-/* Launch kit: the router illustration in the hero and the link to the launch post. */
-.xcb-home-showcase { width: 100%; }
-.xcb-launch-link { margin: 0; font-size: .95rem; }
-.xcb-launch-showcase { margin: 1.5rem 0; }
-
-/* Phone tap targets: the router showcase's tabs and mode buttons sit in the
-   hero header, and every header control on a phone is at least 44px tall. */
-@media (max-width: 600px) {
-  .hkm-showcase .hkm-tab,
-  .hkm-showcase .hkm-segmented button {
-    min-block-size: 44px;
-  }
-}
-
-.xcb-comparison-details { margin-block-start: 1.5rem; color: var(--muted); }
-.xcb-comparison-details > summary { cursor: pointer; font-weight: 560; color: var(--foreground); }
-.xcb-comparison-details > summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
-.xcb-comparison-details dl > div { padding-block: 1.25rem; border-bottom: 1px solid var(--line); }
-.xcb-comparison-details dt { color: var(--foreground); font-weight: 600; margin-block-end: .5rem; }
-.xcb-comparison-details dd { margin: 0; max-inline-size: 72ch; }
-.xcb-comparison-details dd + dd { margin-block-start: .5rem; }
-.xcb-comparison-details strong { color: var(--foreground); margin-inline-end: .4em; }
+@media (pointer: coarse) { .xcb-preview-controls button { min-height: 2.75rem; } }
