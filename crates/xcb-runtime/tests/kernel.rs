@@ -57,6 +57,7 @@ async fn a_rejected_submission_returns_the_full_draft() {
 
     commands
         .send(Intent::Submit {
+            id: Id::new("m_task").unwrap(),
             text: "do the thing".into(),
             attachments: vec![image()],
         })

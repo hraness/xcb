@@ -40,6 +40,25 @@ impl AccountRow {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ConversationRow {
+    pub id: Id,
+    pub title: String,
+    pub workspace: String,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskRow {
+    pub id: Id,
+    pub title: String,
+    pub state: State,
+    pub detail: String,
+    pub route: Option<String>,
+    pub workspace: String,
+    pub updated_at_ms: u64,
+}
+
 /// The route a fresh session would take right now — the account with the
 /// most remaining quota and the provider's default model. Previewed in the
 /// chrome when no session is bound; nothing is persisted until a real
@@ -53,11 +72,14 @@ pub struct RoutePreview {
 
 #[derive(Debug, Clone)]
 pub struct View {
+    pub conversation: Option<Id>,
+    pub conversations: Vec<ConversationRow>,
     pub session: Option<Session>,
     pub sessions: Vec<Session>,
     pub accounts: Vec<AccountRow>,
     pub models: Vec<ModelChoice>,
     pub messages: Vec<Message>,
+    pub tasks: Vec<TaskRow>,
     pub subagents: Vec<Subagent>,
     pub activity: Vec<String>,
     pub extensions: Vec<(String, String)>,
@@ -80,11 +102,14 @@ pub struct View {
 impl Default for View {
     fn default() -> Self {
         Self {
+            conversation: None,
+            conversations: vec![],
             session: None,
             sessions: vec![],
             accounts: vec![],
             models: vec![],
             messages: vec![],
+            tasks: vec![],
             subagents: vec![],
             activity: vec![],
             extensions: vec![],
@@ -106,12 +131,14 @@ impl Default for View {
 
 pub enum Intent {
     Submit {
+        id: Id,
         text: String,
         attachments: Vec<Attachment>,
     },
     Cancel,
     Quit,
     NewSession,
+    Conversation(Id),
     Resume(Id),
     Account(Id),
     Model(String),

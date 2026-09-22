@@ -18,6 +18,7 @@ pub mod hooks;
 pub mod jev;
 pub mod judge;
 pub mod kernel;
+pub mod managed;
 pub mod panes;
 pub mod private;
 pub mod process;

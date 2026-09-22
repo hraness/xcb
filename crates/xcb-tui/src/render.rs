@@ -82,13 +82,35 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
             Constraint::Length(1),
         ])
         .split(area);
-    let project = app
+    let mut project = app
         .view
         .session
         .as_ref()
-        .and_then(|session| std::path::Path::new(&session.workspace).file_name())
+        .map(|session| session.workspace.as_str())
+        .or_else(|| {
+            app.view.conversation.as_ref().and_then(|id| {
+                app.view
+                    .conversations
+                    .iter()
+                    .find(|conversation| &conversation.id == id)
+                    .map(|conversation| conversation.workspace.as_str())
+            })
+        })
+        .or_else(|| app.view.tasks.first().map(|task| task.workspace.as_str()))
+        .and_then(|workspace| std::path::Path::new(workspace).file_name())
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "local workspace".into());
+    if app.view.session.is_none()
+        && let Some(title) = app.view.conversation.as_ref().and_then(|id| {
+            app.view
+                .conversations
+                .iter()
+                .find(|conversation| &conversation.id == id)
+                .map(|conversation| conversation.title.clone())
+        })
+    {
+        project = title;
+    }
     // Header stays quiet until throughput is actually measured.
     let rate = match (app.view.tokens_per_second, app.view.share_percent) {
         (Some(rate), Some(share)) => format!("{rate:.1} tok/s · {share:.0}% local"),
@@ -229,6 +251,33 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
             )
         })
         .or_else(|| {
+            (!app.view.tasks.is_empty()).then(|| {
+                let working = app
+                    .view
+                    .tasks
+                    .iter()
+                    .filter(|task| task.state == State::Working)
+                    .count();
+                let waiting = app
+                    .view
+                    .tasks
+                    .iter()
+                    .filter(|task| task.state.attention())
+                    .count();
+                format!(
+                    "{working} working · {waiting} needs you · {} chats · /t tasks · ? help",
+                    app.view.conversations.len()
+                )
+            })
+        })
+        .or_else(|| {
+            app.view
+                .extensions
+                .iter()
+                .any(|(name, _)| name == "algal supervisor")
+                .then(|| "global dispatcher · / for commands · ? help".into())
+        })
+        .or_else(|| {
             app.view
                 .pending_route
                 .as_ref()
@@ -248,8 +297,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         ),
         footer[1],
     );
+    let managed = app
+        .view
+        .extensions
+        .iter()
+        .any(|(name, _)| name == "algal supervisor");
     if let Some(modal) = &mut app.modal {
-        render_modal(frame, modal, area);
+        render_modal(frame, modal, area, managed);
     }
 }
 
@@ -298,7 +352,9 @@ fn preferred_height(node: &Node, app: &App) -> Constraint {
     match node {
         // List widgets collapse entirely when they have nothing to show.
         Node::Widget { source, .. }
-            if matches!(source, Source::Subagents) && app.view.subagents.is_empty()
+            if matches!(source, Source::Subagents)
+                && app.view.subagents.is_empty()
+                && app.view.tasks.is_empty()
                 || matches!(source, Source::Extensions) && app.view.extensions.is_empty() =>
         {
             Constraint::Length(0)
@@ -548,15 +604,46 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
                 }
             }
             if lines.len() == 1 {
-                lines.push(Line::from(Span::styled(
-                    "/help for commands · /pane to change this view",
-                    muted(),
-                )));
+                let hint = if app
+                    .view
+                    .extensions
+                    .iter()
+                    .any(|(name, _)| name == "algal supervisor")
+                {
+                    "Describe work or ask about the running task swarm"
+                } else {
+                    "/help for commands · /pane to change this view"
+                };
+                lines.push(Line::from(Span::styled(hint, muted())));
             }
         }
         Source::Subagents => {
-            lines.push(Line::from(Span::styled("Subagents", muted())));
-            if app.view.subagents.is_empty() {
+            lines.push(Line::from(Span::styled(
+                if app.view.tasks.is_empty() {
+                    "Subagents"
+                } else {
+                    "Tasks · /tasks"
+                },
+                muted(),
+            )));
+            for task in &app.view.tasks {
+                let project = std::path::Path::new(&task.workspace)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("workspace");
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", status_symbol(task.state)),
+                        Style::default().fg(status_color(task.state)),
+                    ),
+                    Span::styled(
+                        clean(&task.title),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!(" · {project} · {}", clean(&task.detail)), muted()),
+                ]));
+            }
+            if app.view.tasks.is_empty() && app.view.subagents.is_empty() {
                 lines.push(Line::from(Span::styled(
                     "No subagent activity reported",
                     muted(),
@@ -791,11 +878,44 @@ fn render_slash_menu(
     );
 }
 
-fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, area: Rect) {
+fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, area: Rect, managed: bool) {
     let area = modal_area(area);
     frame.render_widget(Clear, area);
     match modal {
         Modal::Help => {
+            let cancel = if managed {
+                "Esc requests cancellation for managed work · Esc also closes dialogs and the / menu"
+            } else {
+                "Esc stops the running turn · Esc also closes dialogs and the / menu"
+            };
+            let quit = if managed {
+                "Ctrl-C requests cancellation, clears a draft, then detaches · Ctrl-D detaches on empty"
+            } else {
+                "Ctrl-C stops a live turn, clears a draft, quits when idle · Ctrl-D quits on empty"
+            };
+            let mode_keys = if managed {
+                "Ctrl-P managed tasks · Ctrl-R prompt history · Ctrl-G editor"
+            } else {
+                "Ctrl-P models · Ctrl-R prompt history · Ctrl-G editor"
+            };
+            let lifecycle = if managed {
+                "Closing xcb never implies worker settlement; background tasks keep running"
+            } else {
+                "Direct sessions stay bound to this terminal; use plain `xcb` for managed work"
+            };
+            let commands = if managed {
+                [
+                    "/tasks /t · /new /n · /attach <path> · /sessions /s",
+                    "/help /h · /quit /q · /exit /e",
+                    "Say `remember: …` to keep a workspace preference",
+                ]
+            } else {
+                [
+                    "/tasks /t · /new /n · /model /m · /accounts /a · /sessions /s · /pane /p",
+                    "/pane [edit|generate …] · /attach <path> · /default /d · /help /h",
+                    "/plugin <name> on|off · /reload /r · /quit /q · /exit /e",
+                ]
+            };
             let block = Block::bordered()
                 .title(" Keyboard & commands ")
                 .title_bottom(" ? or Esc closes ");
@@ -808,16 +928,17 @@ fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, area: Rect) {
                         "Ctrl-V paste text/image · Alt-Backspace remove last attachment",
                         "Wheel/PageUp older · PageDown newer · End follows newest",
                         "Ctrl-T thinking · Ctrl-O history · Ctrl-U tool output",
-                        "Ctrl-P models · Ctrl-R prompt history · Ctrl-G editor",
-                        "Esc stops the running turn · Esc also closes dialogs and the / menu",
-                        "Ctrl-C stops a live turn, clears a draft, quits when idle · Ctrl-D quits on empty",
+                        mode_keys,
+                        cancel,
+                        quit,
+                        lifecycle,
                         "Pickers: ↑↓ or Ctrl-P/N move · PgUp/PgDn page · Home/End ends",
                         "Ctrl-U clears the filter · Enter selects · Esc closes",
                         "",
                         "Type / for the command menu — arrows choose, Tab completes, Enter runs.",
-                        "/model /m · /accounts /a · /sessions /s · /new /n · /pane /p",
-                        "/pane [edit|generate …] · /attach <path> · /default /d · /help /h",
-                        "/plugin <name> on|off · /reload /r · /quit /q · /exit /e",
+                        commands[0],
+                        commands[1],
+                        commands[2],
                     ]
                     .join("\n"),
                 )

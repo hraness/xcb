@@ -43,7 +43,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Chat,
+    Chat {
+        #[arg(long)]
+        resume: Option<Id>,
+    },
     /// Bounded, ephemeral application inference with no tools or hooks.
     Generate {
         #[arg(long)]
@@ -88,6 +91,11 @@ enum Commands {
         #[command(subcommand)]
         command: Option<SessionCommand>,
     },
+    Tasks {
+        #[command(subcommand)]
+        command: Option<TaskCommand>,
+    },
+    Conversations,
     Panes {
         #[command(subcommand)]
         command: Option<PaneCommand>,
@@ -128,6 +136,8 @@ enum Commands {
         #[arg(long)]
         yes: bool,
     },
+    #[command(name = "managed-daemon", hide = true)]
+    ManagedDaemon,
     #[command(name = "broker-stdio", hide = true)]
     BrokerStdio,
     #[command(name = "egress-forward", hide = true)]
@@ -241,6 +251,10 @@ enum SessionCommand {
         #[arg(long)]
         yes: bool,
     },
+}
+#[derive(Subcommand)]
+enum TaskCommand {
+    Show { id: Id },
 }
 #[derive(Subcommand)]
 enum PaneCommand {
@@ -572,6 +586,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         return egress_forward(socket, *port, lo_up, env_file, *target_port, child).await;
     }
     let root = cli.state.unwrap_or(private::default_root()?);
+    if matches!(&cli.command, Some(Commands::ManagedDaemon)) {
+        return xcb_runtime::managed::daemon(root).await;
+    }
     if let Some(Commands::Generate { capabilities }) = &cli.command {
         return application::dispatch(&root, *capabilities, cli.json).await;
     }
@@ -602,10 +619,17 @@ async fn dispatch(cli: Cli) -> Result<i32> {
     let store = Arc::new(Store::open(&root)?);
     let (mut config, _) = Config::load(store.root())?;
     match cli.command {
-        Some(Commands::Generate { .. } | Commands::QualifyApplication { .. }) => {
-            unreachable!("application dispatch returns above")
+        Some(
+            Commands::Generate { .. }
+            | Commands::QualifyApplication { .. }
+            | Commands::ManagedDaemon,
+        ) => {
+            unreachable!("early dispatch returns above")
         }
-        None | Some(Commands::Chat) => chat(store, cli.cwd.canonicalize()?, None, cli.json).await,
+        None => managed_chat(store, cli.cwd.canonicalize()?, None, cli.json).await,
+        Some(Commands::Chat { resume }) => {
+            managed_chat(store, cli.cwd.canonicalize()?, resume, cli.json).await
+        }
         Some(Commands::Resume { id }) => {
             let id = id
                 .or_else(|| {
@@ -619,7 +643,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             let session = store
                 .session(&id)?
                 .ok_or(Error::Unavailable("session not found"))?;
-            chat(store, PathBuf::from(session.workspace), Some(id), cli.json).await
+            direct_chat(store, PathBuf::from(session.workspace), Some(id), cli.json).await
         }
         Some(Commands::Run {
             prompt,
@@ -1118,6 +1142,52 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Some(Commands::Conversations) => {
+            let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
+            let conversations = managed.conversations(256)?;
+            if cli.json {
+                print_json(conversations)?;
+            } else if conversations.is_empty() {
+                println!("No managed conversations.");
+            } else {
+                for conversation in conversations {
+                    println!(
+                        "{}  {} · {}",
+                        conversation.id, conversation.title, conversation.workspace
+                    );
+                }
+            }
+            Ok(0)
+        }
+        Some(Commands::Tasks { command }) => {
+            let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
+            match command {
+                None => {
+                    let tasks = xcb_runtime::managed::list(&managed)?;
+                    if cli.json {
+                        print_json(tasks)?;
+                    } else if tasks.is_empty() {
+                        println!("No managed tasks.");
+                    } else {
+                        for task in tasks {
+                            println!(
+                                "{}  {} · {} · {}",
+                                task.id,
+                                task.state.as_str(),
+                                task.title,
+                                task.detail
+                            );
+                        }
+                    }
+                }
+                Some(TaskCommand::Show { id }) => {
+                    let task = xcb_runtime::managed::inspect(&managed, &id)?
+                        .ok_or(Error::Unavailable("managed task not found"))?;
+                    print_json(task)?;
+                }
+            }
+            Ok(0)
+        }
         Some(Commands::Panes { command }) => {
             match command {
                 None => {
@@ -1495,7 +1565,49 @@ async fn dispatch(cli: Cli) -> Result<i32> {
     }
 }
 
-async fn chat(store: Arc<Store>, cwd: PathBuf, session: Option<Id>, json: bool) -> Result<i32> {
+async fn managed_chat(
+    store: Arc<Store>,
+    cwd: PathBuf,
+    resume: Option<Id>,
+    json: bool,
+) -> Result<i32> {
+    if json {
+        return Err(Error::Unavailable(
+            "interactive chat is not a JSON transport; use xcb tasks --json or xcb run --json",
+        ));
+    }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(Error::Unavailable(
+            "chat requires a terminal; use xcb run for headless tasks",
+        ));
+    }
+    let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
+    let conversation = match resume {
+        Some(id) => managed
+            .conversation(&id)?
+            .ok_or(Error::Unavailable("managed conversation not found"))?,
+        None => managed.create_conversation(&cwd).await?,
+    };
+    let executable = std::env::current_exe()?;
+    let (updates, display) = sync_channel(256);
+    let (commands, input) = sync_channel(32);
+    let ui = tokio::task::spawn_blocking(move || xcb_tui::run(display, commands));
+    let result =
+        xcb_runtime::managed::serve_ui(store, conversation.id, input, updates, executable).await;
+    let ui = ui
+        .await
+        .map_err(|_| Error::Unavailable("terminal task failed"))?;
+    ui?;
+    result?;
+    Ok(0)
+}
+
+async fn direct_chat(
+    store: Arc<Store>,
+    cwd: PathBuf,
+    session: Option<Id>,
+    json: bool,
+) -> Result<i32> {
     if json {
         return Err(Error::Unavailable(
             "interactive chat is not a JSON transport; use xcb run --json",
@@ -1695,12 +1807,24 @@ mod tests {
                 .command,
             Some(Commands::BrokerStdio)
         ));
+        assert!(matches!(
+            Cli::try_parse_from(["xcb", "managed-daemon"])
+                .unwrap()
+                .command,
+            Some(Commands::ManagedDaemon)
+        ));
         assert!(Cli::try_parse_from(["xcb", "broker-stdio", "--token", "synthetic"]).is_err());
         assert!(
             !Cli::command()
                 .render_long_help()
                 .to_string()
                 .contains("broker-stdio")
+        );
+        assert!(
+            !Cli::command()
+                .render_long_help()
+                .to_string()
+                .contains("managed-daemon")
         );
     }
 
@@ -1887,6 +2011,27 @@ mod tests {
             matches!(cli.command, Some(Commands::Upgrade { version: Some(version), quiet: false }) if version == "0.5.0")
         );
         assert!(Cli::try_parse_from(["xcb", "update", "enable", "--policy", "project"]).is_err());
+    }
+
+    #[test]
+    fn managed_task_cli_lists_and_inspects_without_exposing_daemon_controls() {
+        let cli = Cli::try_parse_from(["xcb", "chat"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Chat { resume: None })));
+        let cli = Cli::try_parse_from(["xcb", "chat", "--resume", "c_example"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Chat { resume: Some(id) }) if id.as_str() == "c_example")
+        );
+        let cli = Cli::try_parse_from(["xcb", "conversations"]).unwrap();
+        assert!(matches!(cli.command, Some(Commands::Conversations)));
+        let cli = Cli::try_parse_from(["xcb", "tasks"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Tasks { command: None })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "tasks", "show", "t_example"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Tasks { command: Some(TaskCommand::Show { id }) }) if id.as_str() == "t_example")
+        );
     }
 
     #[test]

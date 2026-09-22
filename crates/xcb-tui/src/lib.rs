@@ -86,7 +86,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/new",
         alias: "/n",
         args: "",
-        summary: "start a new session",
+        summary: "start fresh work",
         needs_args: false,
     },
     SlashCommand {
@@ -121,7 +121,14 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/sessions",
         alias: "/s",
         args: "",
-        summary: "switch sessions",
+        summary: "switch conversations or sessions",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/tasks",
+        alias: "/t",
+        args: "",
+        summary: "inspect managed work",
         needs_args: false,
     },
 ];
@@ -131,7 +138,9 @@ pub enum PickAction {
     Pane(Id),
     Model(String),
     Account(Id),
+    Conversation(Id),
     Session(Id),
+    Task(Id),
     Text(String),
     EditPane,
 }
@@ -169,8 +178,14 @@ struct SessionDraft {
     attachments: Vec<Attachment>,
 }
 
-/// Bound on remembered per-session drafts; the least recently used is evicted.
+/// Bound on remembered per-context drafts; the least recently used is evicted.
 const MAX_DRAFT_SESSIONS: usize = 64;
+
+fn view_context(view: &View) -> Option<Id> {
+    view.conversation
+        .clone()
+        .or_else(|| view.session.as_ref().map(|session| session.id.clone()))
+}
 
 fn display_now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -199,6 +214,13 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
     view.total_runway_seconds
         .map(f64::to_bits)
         .hash(&mut hasher);
+    view.conversation.as_ref().map(Id::as_str).hash(&mut hasher);
+    for conversation in &view.conversations {
+        conversation.id.as_str().hash(&mut hasher);
+        conversation.title.hash(&mut hasher);
+        conversation.workspace.hash(&mut hasher);
+        conversation.updated_at_ms.hash(&mut hasher);
+    }
     if let Some(session) = &view.session {
         session.id.as_str().hash(&mut hasher);
         session.account.as_str().hash(&mut hasher);
@@ -244,6 +266,14 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         last.text.len().hash(&mut hasher);
         last.attachments.len().hash(&mut hasher);
     }
+    for task in &view.tasks {
+        task.id.as_str().hash(&mut hasher);
+        task.title.hash(&mut hasher);
+        (task.state as u8).hash(&mut hasher);
+        task.detail.hash(&mut hasher);
+        task.route.hash(&mut hasher);
+        task.updated_at_ms.hash(&mut hasher);
+    }
     for agent in &view.subagents {
         agent.id.as_str().hash(&mut hasher);
         (agent.state as u8).hash(&mut hasher);
@@ -270,8 +300,9 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
 
 /// A submitted prompt not yet confirmed by a View carrying its message.
 struct PendingEcho {
-    /// Session the submit targeted; `None` when no session was bound — the
-    /// kernel binds whatever session it creates, so the echo follows.
+    id: Id,
+    /// Conversation/session context the submit targeted; `None` when unbound —
+    /// the kernel binds whatever context it creates, so the echo follows.
     session: Option<Id>,
     text: String,
     attachments: usize,
@@ -322,6 +353,21 @@ pub struct App {
     view_fingerprint: u64,
 }
 impl App {
+    fn managed_mode(&self) -> bool {
+        self.view
+            .extensions
+            .iter()
+            .any(|(name, _)| name == "algal supervisor")
+    }
+    fn has_live_work(&self) -> bool {
+        matches!(self.view.state, State::Working)
+            || self.view.remote_active
+            || self
+                .view
+                .tasks
+                .iter()
+                .any(|task| task.state == State::Working)
+    }
     /// Absolute top line index rendered last frame; used to anchor PageUp.
     pub fn scroll_top(&self) -> u32 {
         self.scroll_top.get()
@@ -354,12 +400,12 @@ impl App {
     }
     /// Optimistic echoes of submitted prompts still awaiting a View carrying
     /// the persisted message — `(text, attachment count)` pairs bound to the
-    /// current session or still awaiting the session the kernel creates.
+    /// current conversation/session or still awaiting the context the kernel creates.
     pub fn pending_echoes(&self) -> impl Iterator<Item = (&str, usize)> {
-        let current = self.view.session.as_ref().map(|session| &session.id);
+        let current = view_context(&self.view);
         self.pending_echoes
             .iter()
-            .filter(move |echo| echo.session.is_none() || echo.session.as_ref() == current)
+            .filter(move |echo| echo.session.is_none() || echo.session == current)
             .map(|echo| (echo.text.as_str(), echo.attachments))
     }
     /// True when state changed since the last draw and a repaint is needed.
@@ -373,8 +419,18 @@ impl App {
         if !text.starts_with('/') || text.contains(char::is_whitespace) || text.len() > 64 {
             return Vec::new();
         }
+        const MANAGED: &[&str] = &[
+            "/attach",
+            "/exit",
+            "/help",
+            "/new",
+            "/quit",
+            "/sessions",
+            "/tasks",
+        ];
         SLASH_COMMANDS
             .iter()
+            .filter(|command| !self.managed_mode() || MANAGED.contains(&command.name))
             .filter(|command| command.name.starts_with(&text))
             .collect()
     }
@@ -451,11 +507,11 @@ impl App {
                     view.pane = self.view.pane.clone();
                     view.pane_revision = self.view.pane_revision.clone();
                 }
-                let previous = self.view.session.as_ref().map(|session| session.id.clone());
-                let next = view.session.as_ref().map(|session| session.id.clone());
+                let previous = view_context(&self.view);
+                let next = view_context(&view);
                 if previous != next {
-                    // The draft belongs to the session it was typed in: stash it
-                    // and restore the target session's own draft.
+                    // The draft belongs to the conversation or session it was typed in:
+                    // stash it and restore the target context's own draft.
                     if let Some(previous) = previous {
                         let text = self.composer.text();
                         let attachments = std::mem::take(&mut self.attachments);
@@ -482,15 +538,26 @@ impl App {
                 self.view = *view;
                 // The badge timer follows the run lifecycle, not session
                 // identity — a remote-owned run still counts as working.
-                if matches!(self.view.state, State::Working) || self.view.remote_active {
-                    self.working_since.get_or_insert_with(Instant::now);
+                if self.has_live_work() {
+                    if self.working_since.is_none() {
+                        let elapsed = self
+                            .view
+                            .tasks
+                            .iter()
+                            .filter(|task| task.state == State::Working)
+                            .map(|task| display_now_ms().saturating_sub(task.updated_at_ms))
+                            .max()
+                            .unwrap_or(0);
+                        self.working_since =
+                            Instant::now().checked_sub(Duration::from_millis(elapsed));
+                    }
                 } else {
                     self.working_since = None;
                 }
                 if !self.pending_echoes.is_empty() {
-                    let current = self.view.session.as_ref().map(|session| session.id.clone());
-                    // Unbound echoes adopt the session the kernel bound the
-                    // submit to; echoes for other sessions stay pending.
+                    let current = view_context(&self.view);
+                    // Unbound echoes adopt the context the kernel bound the
+                    // submit to; echoes for other contexts stay pending.
                     for echo in &mut self.pending_echoes {
                         if echo.session.is_none() {
                             echo.session = current.clone();
@@ -509,7 +576,7 @@ impl App {
                             .any(|(index, message)| {
                                 !consumed[index]
                                     && message.role == xcb_core::session::Role::User
-                                    && message.text == echo.text
+                                    && (message.id == echo.id || message.text == echo.text)
                                     && {
                                         consumed[index] = true;
                                         true
@@ -563,14 +630,13 @@ impl App {
             }
             Update::Attachment(attachment) => {
                 self.pending_image = false;
-                // An image that lands after a session switch belongs to the
-                // session that requested it, not the one now on screen.
-                match self.pending_image_session.take().filter(|session| {
-                    self.view
-                        .session
-                        .as_ref()
-                        .is_some_and(|current| current.id != *session)
-                }) {
+                // An image that lands after a context switch belongs to the
+                // conversation/session that requested it, not the one now on screen.
+                match self
+                    .pending_image_session
+                    .take()
+                    .filter(|context| view_context(&self.view).as_ref() != Some(context))
+                {
                     Some(session) => self.stash_attachment(&session, attachment),
                     None => {
                         if self.attachments.len() < 8 {
@@ -631,6 +697,7 @@ impl App {
                 self.send(output, Intent::Quit);
                 return false;
             }
+            "/new" if self.managed_mode() => self.composer.set_text("new task: "),
             "/new" => self.send(output, Intent::NewSession),
             "/default" => self.send(output, Intent::SetDefault),
             "/model" | "/models" if arguments.is_empty() => self.picker(
@@ -687,8 +754,30 @@ impl App {
                     })
                     .collect(),
             ),
+            "/tasks" => self.picker(
+                "Managed tasks",
+                self.view
+                    .tasks
+                    .iter()
+                    .map(|task| PickItem {
+                        label: format!("{} · {} · {}", task.title, task.state.label(), task.detail),
+                        action: PickAction::Task(task.id.clone()),
+                    })
+                    .collect(),
+            ),
+            "/sessions" if self.managed_mode() => self.picker(
+                "Control conversations",
+                self.view
+                    .conversations
+                    .iter()
+                    .map(|conversation| PickItem {
+                        label: format!("{} · {}", conversation.title, conversation.workspace),
+                        action: PickAction::Conversation(conversation.id.clone()),
+                    })
+                    .collect(),
+            ),
             "/sessions" => self.picker(
-                "Sessions",
+                "Direct provider sessions",
                 self.view
                     .sessions
                     .iter()
@@ -737,8 +826,7 @@ impl App {
             },
             "/attach" if !arguments.is_empty() => {
                 self.pending_image = true;
-                self.pending_image_session =
-                    self.view.session.as_ref().map(|session| session.id.clone());
+                self.pending_image_session = view_context(&self.view);
                 self.send(
                     output,
                     Intent::AttachPath(arguments.trim_matches('"').trim_matches('\'').into()),
@@ -853,7 +941,7 @@ impl App {
                         // Standard interrupt ordering: a live turn is cancelled
                         // first, then a draft clears, then an idle empty
                         // composer quits.
-                        if matches!(self.view.state, State::Working) || self.view.remote_active {
+                        if self.has_live_work() {
                             self.send(output, Intent::Cancel);
                             self.notice = if self.view.remote_active {
                                 "This turn is running in another terminal; cancel it there."
@@ -883,7 +971,11 @@ impl App {
                         return true;
                     }
                     KeyCode::Char('p') => {
-                        self.slash("/model", output);
+                        if self.managed_mode() {
+                            self.slash("/tasks", output);
+                        } else {
+                            self.slash("/model", output);
+                        }
                         return true;
                     }
                     KeyCode::Char('l') => {
@@ -945,12 +1037,19 @@ impl App {
                 }
                 if !text.trim().is_empty() || !self.attachments.is_empty() {
                     let attachments = std::mem::take(&mut self.attachments);
+                    let id = Id::new(format!("m_{}", uuid::Uuid::new_v4().simple()))
+                        .expect("generated message id");
                     let echo = PendingEcho {
-                        session: self.view.session.as_ref().map(|session| session.id.clone()),
+                        id: id.clone(),
+                        session: view_context(&self.view),
                         attachments: attachments.len(),
                         text: text.clone(),
                     };
-                    match output.try_send(Intent::Submit { text, attachments }) {
+                    match output.try_send(Intent::Submit {
+                        id,
+                        text,
+                        attachments,
+                    }) {
                         Ok(()) => {
                             self.pending_echoes.push_back(echo);
                             while self.pending_echoes.len() > 8 {
@@ -962,10 +1061,12 @@ impl App {
                             std::sync::mpsc::TrySendError::Full(Intent::Submit {
                                 text,
                                 attachments,
+                                ..
                             })
                             | std::sync::mpsc::TrySendError::Disconnected(Intent::Submit {
                                 text,
                                 attachments,
+                                ..
                             }),
                         ) => {
                             self.composer.set_text(&text);
@@ -978,7 +1079,7 @@ impl App {
             }
             ComposerAction::Cancel => {
                 // Esc interrupts a live turn; idle it is a quiet no-op.
-                if matches!(self.view.state, State::Working) || self.view.remote_active {
+                if self.has_live_work() {
                     self.send(output, Intent::Cancel);
                     self.notice = if self.view.remote_active {
                         "This turn is running in another terminal; cancel it there."
@@ -1032,8 +1133,7 @@ impl App {
                 return;
             }
             self.pending_image = true;
-            self.pending_image_session =
-                self.view.session.as_ref().map(|session| session.id.clone());
+            self.pending_image_session = view_context(&self.view);
             self.send(
                 output,
                 Intent::AttachRgba {
@@ -1056,7 +1156,7 @@ impl App {
             && key.code == KeyCode::Char('c')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
-            if matches!(self.view.state, State::Working) || self.view.remote_active {
+            if self.has_live_work() {
                 self.send(output, Intent::Cancel);
                 self.notice = if self.view.remote_active {
                     "This turn is running in another terminal; cancel it there."
@@ -1243,7 +1343,22 @@ impl App {
                 PickAction::Pane(id) => self.send(output, Intent::Pane(id)),
                 PickAction::Model(id) => self.send(output, Intent::Model(id)),
                 PickAction::Account(id) => self.send(output, Intent::Account(id)),
+                PickAction::Conversation(id) => self.send(output, Intent::Conversation(id)),
                 PickAction::Session(id) => self.send(output, Intent::Resume(id)),
+                PickAction::Task(id) => {
+                    if let Some(task) = self.view.tasks.iter().find(|task| task.id == id) {
+                        self.notice = format!(
+                            "{} · {} · {}{}",
+                            task.title,
+                            task.state.label(),
+                            task.detail,
+                            task.route
+                                .as_ref()
+                                .map(|route| format!(" · {route}"))
+                                .unwrap_or_default()
+                        );
+                    }
+                }
                 PickAction::Text(text) => self.composer.set_text(&text),
                 PickAction::EditPane => {
                     self.edit_pane(&self.view.pane.clone(), self.view.pane_revision.clone())

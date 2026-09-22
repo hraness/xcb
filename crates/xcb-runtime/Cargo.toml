@@ -10,6 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+algal = { git = "https://github.com/hraness/algal", rev = "2fff6e8a1370e3141836067e87b584752dc61a9d", version = "0.2.0" }
 aicharts-core = { git = "https://github.com/hraness/aicharts", rev = "091433796f7253386c3e3186c67c275fb273b704", version = "0.1.0" }
 base64 = "=0.22.1"
 gobstopper-core = { git = "https://github.com/hraness/gobstopper", rev = "d856594fb6cf9e23e4cef2d28eb6dc0cdf4b7030", version = "0.2.1" }
@@ -20,8 +21,8 @@ regex = "=1.12.2"
 rusqlite = { version = "=0.40.2", features = ["bundled", "limits"] }
 rustix = { version = "=1.1.4", features = ["fs", "process"] }
 rustls = { version = "=0.23.43", default-features = false, features = ["ring", "logging", "std", "tls12"] }
-serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = "=1.0.145"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
 sha2 = "=0.10.9"
 tempfile = "=3.23.0"
 thiserror = "=2.0.17"

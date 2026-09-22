@@ -777,6 +777,14 @@ impl Store {
         tx.commit()?;
         Ok(session)
     }
+    pub fn message_count(&self, id: &Id) -> Result<usize> {
+        let count: i64 = self.db()?.query_row(
+            "SELECT count(*) FROM messages WHERE session=?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )?;
+        usize::try_from(count).map_err(|_| xcb_core::Error::Invalid("message count").into())
+    }
     pub fn messages(&self, id: &Id, limit: usize) -> Result<Vec<Message>> {
         if !(1..=512).contains(&limit) {
             return Err(xcb_core::Error::Invalid("message page limit").into());
