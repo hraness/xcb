@@ -2,6 +2,7 @@
 //! authority is accepted here. Persistent records contain custody metadata only.
 use crate::{
     Error, Result,
+    application_diagnostic::{self as diagnostic, Category, Stage},
     application_qualification::{self as qualification, Admission, Expected},
     auth,
     claude_protocol::ClaudeProtocol,
@@ -870,6 +871,7 @@ fn preparation_failed(
     codex: bool,
     error: Error,
 ) -> GenerateFailure {
+    diagnostic::record_error(store, run, id, Stage::Prepare, &error);
     if matches!(error, Error::CleanupUnproven) {
         GenerateFailure::new(FailureCode::CustodyUnproven).bound(id)
     } else {
@@ -968,11 +970,21 @@ async fn execute<P: Protocol>(
         let models = protocol
             .initialize(&mut process, SYSTEM)
             .await
-            .map_err(|_| FailureCode::ProviderError)?;
+            .map_err(|error| {
+                diagnostic::record_error(&store, run, id, Stage::Initialize, &error);
+                FailureCode::ProviderError
+            })?;
         if !models
             .iter()
             .any(|choice| choice.id == model.id && choice.effort == model.effort)
         {
+            diagnostic::record_category(
+                &store,
+                run,
+                id,
+                Stage::Initialize,
+                Category::ModelUnavailable,
+            );
             return Err(FailureCode::Unavailable);
         }
         protocol
@@ -984,16 +996,19 @@ async fn execute<P: Protocol>(
                 },
             )
             .await
-            .map_err(|_| FailureCode::ProviderError)?;
+            .map_err(|error| {
+                diagnostic::record_error(&store, run, id, Stage::Start, &error);
+                FailureCode::ProviderError
+            })?;
         let mut admitted = false;
         let mut answer = Answer::default();
         let mut bytes = 0usize;
         let mut thinking_bytes = 0usize;
         for _ in 0..4096 {
-            let batch = protocol
-                .next(&mut process)
-                .await
-                .map_err(|_| FailureCode::ProviderError)?;
+            let batch = protocol.next(&mut process).await.map_err(|error| {
+                diagnostic::record_error(&store, run, id, Stage::Receive, &error);
+                FailureCode::ProviderError
+            })?;
             bytes = bytes
                 .checked_add(batch.bytes)
                 .filter(|bytes| *bytes <= MAX_TRANSCRIPT_BYTES)
@@ -1029,12 +1044,28 @@ async fn execute<P: Protocol>(
                         return if answer.partial.is_empty() && !answer.complete.is_empty() {
                             Ok(answer.complete)
                         } else {
+                            diagnostic::record_category(
+                                &store,
+                                run,
+                                id,
+                                Stage::Output,
+                                Category::IncompleteOutput,
+                            );
                             Err(FailureCode::ProviderError)
                         };
                     }
                     // Tool, subagent, attention, unexpected or unsuccessful
                     // terminal events never become application output.
-                    _ => return Err(FailureCode::ProviderError),
+                    _ => {
+                        diagnostic::record_category(
+                            &store,
+                            run,
+                            id,
+                            Stage::Output,
+                            Category::UnexpectedEvent,
+                        );
+                        return Err(FailureCode::ProviderError);
+                    }
                 }
             }
         }
@@ -1141,6 +1172,24 @@ mod tests {
         model: ModelChoice,
         events: VecDeque<Event>,
         joined: bool,
+        fault: Option<SyntheticFault>,
+    }
+    struct SyntheticFault {
+        stage: Stage,
+        error: Error,
+        block_diagnostic: bool,
+    }
+    impl SyntheticProtocol {
+        fn fail_at(&mut self, stage: Stage) -> Result<()> {
+            if self
+                .fault
+                .as_ref()
+                .is_some_and(|fault| fault.stage == stage)
+            {
+                return Err(self.fault.take().unwrap().error);
+            }
+            Ok(())
+        }
     }
     impl Protocol for SyntheticProtocol {
         async fn initialize(
@@ -1149,14 +1198,17 @@ mod tests {
             instructions: &str,
         ) -> Result<Vec<ModelChoice>> {
             assert_eq!(instructions, SYSTEM);
+            self.fail_at(Stage::Initialize)?;
             Ok(vec![self.model.clone()])
         }
         async fn start(&mut self, _: &mut StreamProcess, prompt: Prompt) -> Result<()> {
             assert!(prompt.images.is_empty());
             assert_eq!(prompt.text, "application-only secret fixture");
+            self.fail_at(Stage::Start)?;
             Ok(())
         }
         async fn next(&mut self, _: &mut StreamProcess) -> Result<Batch> {
+            self.fail_at(Stage::Receive)?;
             match self.events.pop_front() {
                 Some(event) => Ok(Batch {
                     bytes: 64,
@@ -1190,7 +1242,7 @@ mod tests {
         std::result::Result<GenerateResponse, GenerateFailure>,
         Vec<RunRecord>,
     ) {
-        synthetic_deadline(events, joined, cancelled, maximum, false).await
+        synthetic_deadline(events, joined, cancelled, maximum, false, None).await
     }
 
     async fn synthetic_deadline(
@@ -1199,6 +1251,7 @@ mod tests {
         cancelled: bool,
         maximum: usize,
         expired: bool,
+        fault: Option<SyntheticFault>,
     ) -> (
         std::result::Result<GenerateResponse, GenerateFailure>,
         Vec<RunRecord>,
@@ -1248,7 +1301,21 @@ mod tests {
             model: model.clone(),
             events: events.into(),
             joined,
+            fault: None,
         };
+        let diagnostic_expectation = fault
+            .as_ref()
+            .map(|fault| (fault.stage, fault.block_diagnostic));
+        if fault.as_ref().is_some_and(|fault| fault.block_diagnostic) {
+            crate::private::directory(
+                &store
+                    .account_root(&account.id)
+                    .unwrap()
+                    .join("application-diagnostic.json"),
+            )
+            .unwrap();
+        }
+        let protocol = SyntheticProtocol { fault, ..protocol };
         let (_sender, cancel) = watch::channel(cancelled);
         let deadline = if expired {
             Instant::now() - Duration::from_secs(1)
@@ -1269,6 +1336,32 @@ mod tests {
         .await;
         assert!(store.sessions(10).unwrap().is_empty());
         let unsettled = store.unsettled_runs().unwrap();
+        if let Some((stage, blocked)) = diagnostic_expectation {
+            let failure = result.as_ref().unwrap_err();
+            // Public v1 remains byte-for-field compatible, including custody.
+            let mut wanted = serde_json::json!({"version":1,"status":"failed","requestId":id,
+                "code":if joined {"provider_error"} else {"custody_unproven"}});
+            if joined {
+                wanted["joined"] = serde_json::json!(true);
+                wanted["effects"] = serde_json::json!("none");
+            }
+            assert_eq!(serde_json::to_value(failure).unwrap(), wanted);
+            let observed = diagnostic::read(&store, &account.id, &id);
+            if blocked {
+                assert!(observed.is_err());
+            } else {
+                let value = serde_json::to_value(observed.unwrap().unwrap()).unwrap();
+                assert_eq!(value["stage"], serde_json::to_value(stage).unwrap());
+                assert_eq!(value["category"], "quota_or_resource_limit");
+                assert_eq!(value["rpcCode"], -32011);
+                assert_eq!(value["operation"], "session_prompt");
+                assert!(!value.to_string().contains("secret fixture"));
+                assert!(
+                    value.get("joined").is_none(),
+                    "diagnostics are not custody evidence"
+                );
+            }
+        }
         // No prompt or answer appears in custody records, even on failure.
         assert!(
             !serde_json::to_string(&unsettled)
@@ -1327,6 +1420,7 @@ mod tests {
             false,
             1024,
             true,
+            None,
         )
         .await;
         let failure = outcome.unwrap_err();
@@ -1524,6 +1618,33 @@ mod tests {
         assert_eq!(failure.code, FailureCode::ProviderError);
         assert_eq!(failure.joined, Some(true));
         assert!(unsettled.is_empty());
+    }
+
+    #[tokio::test]
+    async fn provider_failures_retain_safe_stage_without_changing_public_errors_or_custody() {
+        for stage in [Stage::Initialize, Stage::Start, Stage::Receive] {
+            for (joined, block_diagnostic) in [(true, false), (true, true), (false, false)] {
+                let (outcome, unsettled) = synthetic_deadline(
+                    vec![],
+                    joined,
+                    false,
+                    1024,
+                    false,
+                    Some(SyntheticFault {
+                        stage,
+                        block_diagnostic,
+                        error: Error::DevinRpc {
+                            method: "session/prompt",
+                            code: -32011,
+                            category: "provider quota or resource limit reached",
+                        },
+                    }),
+                )
+                .await;
+                assert!(outcome.is_err());
+                assert_eq!(unsettled.is_empty(), joined);
+            }
+        }
     }
 
     #[tokio::test]

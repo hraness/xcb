@@ -53,6 +53,13 @@ enum Commands {
         #[arg(long)]
         capabilities: bool,
     },
+    /// Read bounded private failure metadata for one exact application request.
+    ApplicationDiagnostic {
+        #[arg(long)]
+        account: Id,
+        #[arg(long)]
+        request: Id,
+    },
     /// Run a fixed application qualification challenge using private gate evidence.
     QualifyApplication {
         #[arg(long)]
@@ -648,6 +655,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
     if let Some(Commands::Generate { capabilities }) = &cli.command {
         return application::dispatch(&root, *capabilities, cli.json).await;
     }
+    if let Some(Commands::ApplicationDiagnostic { account, request }) = &cli.command {
+        return application::diagnostic_dispatch(&root, account, request, cli.json);
+    }
     if let Some(Commands::QualifyApplication {
         account,
         model,
@@ -677,6 +687,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
     match cli.command {
         Some(
             Commands::Generate { .. }
+            | Commands::ApplicationDiagnostic { .. }
             | Commands::QualifyApplication { .. }
             | Commands::ManagedDaemon,
         ) => {
@@ -1980,6 +1991,36 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn application_diagnostic_requires_exact_selection_and_does_not_initialize_state() {
+        let base = [
+            "xcb",
+            "--json",
+            "application-diagnostic",
+            "--account",
+            "a_fixture",
+        ];
+        assert!(Cli::try_parse_from(base).is_err());
+        assert!(matches!(
+            Cli::try_parse_from(base.into_iter().chain(["--request", "application_fixture"])).unwrap().command,
+            Some(Commands::ApplicationDiagnostic { account, request })
+                if account.as_str() == "a_fixture" && request.as_str() == "application_fixture"
+        ));
+        let root = std::env::temp_dir().join(xcb_runtime::new_id("missing_diagnostic").as_str());
+        assert!(!root.exists());
+        assert_eq!(
+            application::diagnostic_dispatch(
+                &root,
+                &Id::new("a_fixture").unwrap(),
+                &Id::new("application_fixture").unwrap(),
+                true
+            )
+            .unwrap(),
+            1
+        );
+        assert!(!root.exists());
+    }
 
     #[test]
     fn qualification_generation_flag_is_optional_canonical_and_conflicts_with_inspection() {
