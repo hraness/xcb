@@ -4,7 +4,7 @@ import {
   socialImageSize as size,
 } from "@hraness/web-discovery/social-image";
 
-export const alt = "xcb — Subscription routing for coding agents.";
+export const alt = "xcb — One router for your AI coding subscriptions.";
 export { contentType, size };
 
 function XcbMark() {
@@ -27,6 +27,6 @@ export default function OpengraphImage() {
       foreground: "#1C1A18",
       muted: "#6A655E",
     },
-    title: "Your subscriptions. Routed.",
+    title: "All your AI subscriptions. One router.",
   });
 }

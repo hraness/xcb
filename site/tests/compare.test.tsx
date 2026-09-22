@@ -1,62 +1,58 @@
-import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import Compare from "../app/compare/page";
-import { ComparisonPage } from "../app/compare/comparison-page";
-import { comparisonPath, comparisons, devinStatus } from "../app/compare/comparisons";
-import { hubDescription, hubGroups } from "../app/compare/hub";
+import Compare, { metadata } from "../app/compare/page";
 
-const sitemap = readFileSync(resolve(import.meta.dir, "../public/sitemap.xml"), "utf8");
-const internalTerms = /\b(?:admission|admitted|qualification|qualified|custody|settled|settlement|receipt|bounded)\b/iu;
+test("comparison has an addressable accessible table and active navigation", () => {
+  const html = renderToStaticMarkup(<Compare />);
+  const headings: string[] = [];
+  const rows: string[] = [];
+  const columns: string[] = [];
+  let currentCompare = false;
+  let scrollRegion = false;
+  const reviewedDates: string[] = [];
+  new HTMLRewriter()
+    .on("h1", { element(element) { headings.push(element.getAttribute("id") ?? ""); } })
+    .on('tbody th[scope="row"]', { element() { rows.push("row"); } })
+    .on('thead th[scope="col"]', { element() { columns.push("column"); } })
+    .on('a[href="/compare"][aria-current="page"]', { element() { currentCompare = true; } })
+    .on('[role="region"][tabindex="0"][aria-labelledby="comparison-caption"]', { element() { scrollRegion = true; } })
+    .on("time", { element(element) { reviewedDates.push(element.getAttribute("datetime") ?? ""); } })
+    .transform(html);
+  expect(headings).toEqual(["compare-title"]);
+  expect(rows).toHaveLength(10);
+  expect(columns).toHaveLength(3);
+  expect(currentCompare).toBe(true);
+  expect(scrollRegion).toBe(true);
+  expect(html).toContain('<caption id="comparison-caption">');
+  expect(html).toContain('href="#main"');
+  expect(reviewedDates).toEqual(["2026-09-22"]);
+});
 
-describe("the comparison pages", () => {
-  test("cover the tools people weigh against xcb, each with its own page in the sitemap", () => {
-    const slugs = comparisons.map(({ slug }) => slug);
-    for (const slug of ["herdr", "pi", "claude-code", "conductor", "claude-code-router", "opencode", "openrouter"]) {
-      expect(slugs).toContain(slug);
-      expect(sitemap).toContain(`<loc>https://xcb.sh/compare/${slug}</loc>`);
-    }
-    expect(new Set(slugs).size).toBe(slugs.length);
-  });
+test("comparison attaches official evidence and retains current support boundaries", () => {
+  const html = renderToStaticMarkup(<Compare />);
+  for (const source of [
+    "https://code.claude.com/docs/en/overview",
+    "https://github.com/openai/codex",
+    "https://opencode.ai/docs/providers",
+    "https://opencode.ai/docs/agents/",
+    "https://docs.devin.ai/enterprise/deployment/overview",
+    "https://docs.devin.ai/use-cases/gallery/batch-3-agents-best-solution",
+  ]) expect(html).toContain(`href="${source}"`);
+  expect(html).toContain("Native xcb is a source preview");
+  expect(html).toContain("tested account hit quota before coding acceptance");
+  expect(html).toContain("offline Linux with prepared public dependencies");
+  expect(html).toContain("not a general fleet of agents planning and merging parallel work");
+  expect(html).toContain("an unknown model name cannot activate a provider");
+  expect(html).toContain("Model requests still go to the selected provider");
+  expect(html).not.toContain("npm install");
+  expect(html).not.toMatch(/\ba_[a-f0-9]{32}\b/u);
+});
 
-  for (const entry of comparisons) {
-    test(`${entry.slug}: one h1, a dated verdict, both picks, a table, and dated sources`, () => {
-      const html = renderToStaticMarkup(<ComparisonPage entry={entry} />);
-      expect(html.match(/<h1\b/gu)).toHaveLength(1);
-      expect(html).toContain(`dateTime="${entry.updated}"`);
-      expect(html).toContain(`Pick ${entry.tool} when`);
-      expect(html).toContain("Pick xcb when");
-      expect(entry.rows.length).toBeGreaterThanOrEqual(5);
-      expect(entry.rows.length).toBeLessThanOrEqual(8);
-      expect(html.match(/<tr>/gu)?.length).toBe(entry.glance.length + 1);
-      expect(html).toContain("Read the full comparison");
-      expect(html).toContain("data-comparison-status=");
-      expect(entry.sources.length).toBeGreaterThan(0);
-      for (const source of entry.sources) {
-        expect(html).toContain(`href="${source.href}"`);
-        expect(html).toContain(`dateTime="${source.checkedOn}"`);
-      }
-      expect(entry.description.length).toBeGreaterThanOrEqual(110);
-      expect(entry.description.length).toBeLessThanOrEqual(160);
-      expect(entry.title.length).toBeLessThanOrEqual(70);
-      // Public copy: no internal vocabulary, no em dashes, no outdated status.
-      const text = html.replace(/<[^>]+>/gu, " ");
-      expect(text).not.toMatch(internalTerms);
-      expect(text).not.toContain("—");
-      expect(text).not.toContain("source preview");
-      expect(text).not.toContain("npm install -g @hraness/xcb");
-      expect(html).toContain('href="/install"');
-    });
-  }
-
-  test("the hub links every comparison page and states Devin's status once", () => {
-    const html = renderToStaticMarkup(<Compare />);
-    expect(html.match(/<h1\b/gu)).toHaveLength(1);
-    for (const entry of comparisons) expect(html).toContain(`href="${comparisonPath(entry.slug)}"`);
-    for (const group of hubGroups) expect(html).toContain(`id="${group.id}"`);
-    expect(html.split(devinStatus.replaceAll("’", "’")).length - 1).toBe(1);
-    expect(hubDescription.length).toBeLessThanOrEqual(160);
-    expect(html).not.toContain("—");
-  });
+test("comparison metadata and Ask AI target its canonical public URL", () => {
+  expect(metadata.alternates).toEqual({ canonical: "/compare" });
+  expect(metadata.openGraph).toMatchObject({ url: "/compare", siteName: "xcb", type: "website" });
+  expect(metadata.twitter).toMatchObject({ card: "summary_large_image" });
+  const html = renderToStaticMarkup(<Compare />);
+  expect(html).toContain(encodeURIComponent("https://xcb.sh/compare"));
+  expect(html.match(/<footer\b/gu)).toBeNull();
 });
