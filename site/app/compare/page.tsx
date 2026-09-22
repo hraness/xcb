@@ -38,7 +38,7 @@ export default function Compare() {
             headingId="approaches-title"
             summary="Start with the workflow you want. These products overlap, and you may use more than one."
           >
-            <p className="xcb-compare-reviewed">Reviewed <time dateTime="2026-09-20">September 20, 2026</time>. Product descriptions link to official documentation. This is a comparison of focus, not a performance ranking.</p>
+            <p className="xcb-compare-reviewed">Reviewed <time dateTime="2026-09-22">September 22, 2026</time>. Product descriptions link to official documentation. This is a comparison of focus, not a performance ranking.</p>
             <p className="xcb-compare-scroll-hint" id="comparison-scroll-hint">On a small screen, scroll the table sideways to compare each approach.</p>
             <div className="xcb-comparison-scroll" role="region" aria-labelledby="comparison-caption" aria-describedby="comparison-scroll-hint" tabIndex={0}>
               <table className="xcb-comparison-table">
@@ -53,8 +53,33 @@ export default function Compare() {
                     <td><p>You work across supported provider accounts and want a common workflow. Native xcb is a source preview with specific platform and command limits.</p><a href="/docs/workspace">Workspace limits</a></td>
                   </tr>
                   <tr>
-                    <th scope="row"><span className="xcb-comparison-name">Claude Code &amp; Codex CLI</span><span className="xcb-comparison-kind">Provider coding tools</span></th>
-                    <td><p>Work directly in a provider’s coding experience. Claude Code includes file editing, commands, integrations, and agent delegation. Codex CLI runs locally and supports ChatGPT sign-in.</p><div className="xcb-comparison-sources"><a href="https://code.claude.com/docs/en/overview">Claude Code docs</a><a href="https://github.com/openai/codex">Codex source &amp; docs</a></div></td>
+                    <th scope="row"><span className="xcb-comparison-name">Superset</span><span className="xcb-comparison-kind">Agent workspace</span></th>
+                    <td><p>Bring Claude Code, Codex, OpenCode, and other coding agents into one workspace. Run tasks in parallel, isolate changes, and review the results together.</p><div className="xcb-comparison-sources"><a href="https://superset.sh">Superset</a><a href="https://github.com/superset-sh/superset">Source</a></div></td>
+                    <td><p>You want parallel agent runs with isolated changes in one workspace. xcb focuses on named accounts, local sessions, and usage rather than fleet-style parallel review.</p></td>
+                  </tr>
+                  <tr>
+                    <th scope="row"><span className="xcb-comparison-name">Conductor</span><span className="xcb-comparison-kind">Cloud agent sandbox</span></th>
+                    <td><p>Run a team of coding agents in isolated cloud sandboxes, each with its own copy of the repository.</p><div className="xcb-comparison-sources"><a href="https://docs.conductor.build">Conductor docs</a></div></td>
+                    <td><p>You want managed cloud sandboxes for parallel agent work. xcb keeps sessions and account state on your machine instead of provisioning remote environments.</p></td>
+                  </tr>
+                  <tr>
+                    <th scope="row"><span className="xcb-comparison-name">Paseo</span><span className="xcb-comparison-kind">Self-hosted agent daemon</span></th>
+                    <td><p>Run Claude Code, Codex, Copilot, OpenCode, and Pi agents on your own machine with your full development environment, then connect from a phone, desktop, or browser.</p><div className="xcb-comparison-sources"><a href="https://paseo.sh">Paseo</a></div></td>
+                    <td><p>You want to reach agents on your machine from other devices. xcb is the terminal workspace itself; remote access is not its current focus.</p></td>
+                  </tr>
+                  <tr>
+                    <th scope="row"><span className="xcb-comparison-name">OpenChamber</span><span className="xcb-comparison-kind">Agentic desktop environment</span></th>
+                    <td><p>A desktop and web development environment built on the OpenCode agent, with its own windowed interface for agent work.</p><div className="xcb-comparison-sources"><a href="https://openchamber.dev">OpenChamber</a><a href="https://github.com/openchamber/openchamber">Source</a></div></td>
+                    <td><p>You want a graphical agent environment on top of OpenCode. xcb stays in the terminal and wraps the provider runtimes you already use.</p></td>
+                  </tr>
+                  <tr>
+                    <th scope="row"><span className="xcb-comparison-name">Happy Coder</span><span className="xcb-comparison-kind">Mobile agent control</span></th>
+                    <td><p>Control Claude Code, Codex, and other coding agents running on your computers from iOS, Android, or the web.</p><div className="xcb-comparison-sources"><a href="https://happy.engineering">Happy</a><a href="https://github.com/slopus/happy-cli">Source</a></div></td>
+                    <td><p>You want to steer existing agent sessions from a phone. xcb runs in a local terminal rather than a mobile companion.</p></td>
+                  </tr>
+                  <tr>
+                    <th scope="row"><span className="xcb-comparison-name">Claude Code &amp; Codex</span><span className="xcb-comparison-kind">Provider coding tools</span></th>
+                    <td><p>Work directly in a provider’s coding experience. Claude Code includes file editing, commands, integrations, and agent delegation. Codex offers its CLI, IDE extension, and cloud app surfaces for delegated tasks.</p><div className="xcb-comparison-sources"><a href="https://code.claude.com/docs/en/overview">Claude Code docs</a><a href="https://github.com/openai/codex">Codex source &amp; docs</a><a href="https://developers.openai.com/codex/app">Codex app</a></div></td>
                     <td><p>You want that provider’s full native experience. xcb wraps admitted runtimes with its own tools and terminal; it does not reproduce every provider feature.</p></td>
                   </tr>
                   <tr>

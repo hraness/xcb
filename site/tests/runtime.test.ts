@@ -122,7 +122,7 @@ describe("built xcb site", () => {
 
       // Follow every local link across the actual built public pages. Broken
       // doc routes or fragments must fail before publishing the marketing site.
-      const paths = ["/", "/compare", "/docs", "/docs/getting-started", "/docs/providers", "/docs/workspace", "/docs/customization", "/docs/application-api", "/docs/reference"];
+      const paths = ["/", "/compare", "/download", "/docs", "/docs/getting-started", "/docs/providers", "/docs/workspace", "/docs/customization", "/docs/application-api", "/docs/reference"];
       const documents = new Map<string, string>();
       for (const path of paths) {
         const response = await fetch(`${server.origin}${path}`, { redirect: "manual" });

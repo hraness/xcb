@@ -19,13 +19,13 @@ test("comparison has an addressable accessible table and active navigation", () 
     .on("time", { element(element) { reviewedDates.push(element.getAttribute("datetime") ?? ""); } })
     .transform(html);
   expect(headings).toEqual(["compare-title"]);
-  expect(rows).toHaveLength(4);
+  expect(rows).toHaveLength(9);
   expect(columns).toHaveLength(3);
   expect(currentCompare).toBe(true);
   expect(scrollRegion).toBe(true);
   expect(html).toContain('<caption id="comparison-caption">');
   expect(html).toContain('href="#main"');
-  expect(reviewedDates).toEqual(["2026-09-20"]);
+  expect(reviewedDates).toEqual(["2026-09-22"]);
 });
 
 test("comparison attaches official evidence and retains current support boundaries", () => {
