@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use tokio::{sync::watch, time::Instant};
 use xcb_core::{
-    Id, Provider, models::ModelChoice, policy::EffectState, policy::Terminal, session::State,
+    Id, Provider,
+    models::ModelChoice,
+    policy::{EffectState, Failure, Terminal, TurnFacts},
+    session::State,
 };
 
 pub const MAX_INPUT_BYTES: usize = 1024 * 1024;
@@ -437,6 +440,9 @@ pub async fn generate(
     if !account.enabled {
         return Err(failure(FailureCode::Unavailable));
     }
+    store
+        .require_authenticated_account(&account.id)
+        .map_err(|_| failure(FailureCode::Unavailable))?;
     let observed = store
         .models()
         .map_err(|_| failure(FailureCode::Unavailable))?;
@@ -491,6 +497,7 @@ async fn run_reserved(
     pin: Pin,
     cancel: watch::Receiver<bool>,
 ) -> std::result::Result<GenerateResponse, GenerateFailure> {
+    admit_prompting_probe(&store, &run, &id)?;
     match pin.provider {
         Provider::Claude => {
             let credential = match auth::token(&store, &request.account) {
@@ -575,6 +582,9 @@ pub async fn qualify_with_expected_generation(
     if !account.enabled || *cancel.borrow() {
         return Err(fail(FailureCode::Unavailable));
     }
+    store
+        .require_authenticated_account(&account.id)
+        .map_err(|_| fail(FailureCode::Unavailable))?;
     let observed = store.models().map_err(|_| fail(FailureCode::Unavailable))?;
     let model = observed
         .iter()
@@ -608,6 +618,7 @@ pub async fn qualify_with_expected_generation(
     let run = store
         .prepare_probe(&account_id, Some(model.clone()), now_ms())
         .map_err(|_| fail(FailureCode::Busy))?;
+    admit_prompting_probe(&store, &run, &new_id("application"))?;
     let generation = qualification_generation(&store, &run, expected_generation)?;
     let binding = qualification::Binding {
         runtime_version: env!("CARGO_PKG_VERSION").into(),
@@ -893,6 +904,16 @@ fn settle_unstarted(store: &Store, run: &RunRecord, id: &Id, codex: bool) -> Gen
     }
 }
 
+fn admit_prompting_probe(
+    store: &Store,
+    run: &RunRecord,
+    id: &Id,
+) -> std::result::Result<(), GenerateFailure> {
+    store
+        .require_authenticated_run(run)
+        .map_err(|_| settle_unstarted(store, run, id, false))
+}
+
 #[derive(Default)]
 struct Answer {
     complete: String,
@@ -967,6 +988,8 @@ async fn execute<P: Protocol>(
         }
     };
     let spawned = store.mark_spawned(run, process.pid());
+    let mut provider_failure = None;
+    let mut failed_terminal = false;
     let execution = async {
         spawned.map_err(|_| FailureCode::ProviderError)?;
         let models = protocol
@@ -1034,7 +1057,13 @@ async fn execute<P: Protocol>(
                     Event::Assistant(text) if admitted => {
                         answer.complete(text, request.max_output_bytes)?
                     }
-                    Event::OutputTokens(_) | Event::Quota { .. } if admitted => (),
+                    // Diagnostics carry no application authority or output.
+                    // Never persist or parse their strings for health state.
+                    Event::Diagnostic(_) => (),
+                    Event::Quota { failure, .. } => {
+                        provider_failure = failure.or(provider_failure);
+                    }
+                    Event::OutputTokens(_) if admitted => (),
                     Event::Result {
                         terminal: Terminal::Completed,
                         text,
@@ -1055,6 +1084,19 @@ async fn execute<P: Protocol>(
                             );
                             Err(FailureCode::ProviderError)
                         };
+                    }
+                    Event::Result { terminal, .. } => {
+                        failed_terminal = terminal == Terminal::Failed;
+                        let category = match provider_failure {
+                            Some(Failure::Authentication) => Category::Authentication,
+                            Some(Failure::AccountQuota | Failure::ModelQuota) => {
+                                Category::QuotaOrResourceLimit
+                            }
+                            Some(Failure::Transport) => Category::Transport,
+                            _ => Category::ProviderRejected,
+                        };
+                        diagnostic::record_category(&store, run, id, Stage::Output, category);
+                        return Err(FailureCode::ProviderError);
                     }
                     // Tool, subagent, attention, unexpected or unsuccessful
                     // terminal events never become application output.
@@ -1093,12 +1135,19 @@ async fn execute<P: Protocol>(
     {
         return Err(failure(FailureCode::CustodyUnproven));
     }
-    let state = if result.is_ok() {
-        State::Idle
-    } else {
-        State::Failed
+    let facts = TurnFacts {
+        terminal: if result.is_ok() {
+            Terminal::Completed
+        } else {
+            Terminal::Failed
+        },
+        joined,
+        effects: EffectState::None,
+        pending_attention: false,
+        failure: (failed_terminal && provider_failure == Some(Failure::Authentication))
+            .then_some(Failure::Authentication),
     };
-    if store.settle(run, state, now_ms()).is_err() {
+    if store.settle_application(run, &facts, now_ms()).is_err() {
         return Err(failure(FailureCode::CustodyUnproven));
     }
     launch.artifacts.release_after_join(true, EffectState::None);
@@ -1258,6 +1307,30 @@ mod tests {
         std::result::Result<GenerateResponse, GenerateFailure>,
         Vec<RunRecord>,
     ) {
+        synthetic_observed(events, joined, cancelled, maximum, expired, fault)
+            .await
+            .0
+    }
+
+    struct SyntheticObservation {
+        authentication_required: bool,
+        diagnostic: Option<serde_json::Value>,
+    }
+
+    async fn synthetic_observed(
+        events: Vec<Event>,
+        joined: bool,
+        cancelled: bool,
+        maximum: usize,
+        expired: bool,
+        fault: Option<SyntheticFault>,
+    ) -> (
+        (
+            std::result::Result<GenerateResponse, GenerateFailure>,
+            Vec<RunRecord>,
+        ),
+        SyntheticObservation,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let store =
             Arc::new(Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap());
@@ -1370,7 +1443,26 @@ mod tests {
                 .unwrap()
                 .contains("secret fixture")
         );
-        (result, unsettled)
+        let persisted = serde_json::to_string(&store.run(&run.id).unwrap()).unwrap();
+        assert!(!persisted.contains("secret fixture"));
+        let diagnostic = diagnostic::read(&store, &account.id, &id)
+            .ok()
+            .flatten()
+            .map(|value| serde_json::to_value(value).unwrap());
+        if let Some(value) = &diagnostic {
+            assert!(!value.to_string().contains("secret fixture"));
+        }
+        let authentication_required = Store::open_read_only(store.root())
+            .unwrap()
+            .authentication_required(&account.id)
+            .unwrap();
+        (
+            (result, unsettled),
+            SyntheticObservation {
+                authentication_required,
+                diagnostic,
+            },
+        )
     }
 
     fn ready() -> Event {
@@ -1382,6 +1474,285 @@ mod tests {
             text: text.into(),
             models: vec![],
         }
+    }
+
+    fn authentication_failure() -> Event {
+        Event::Quota {
+            window: None,
+            used_percent: None,
+            resets_at_ms: None,
+            failure: Some(Failure::Authentication),
+        }
+    }
+
+    fn informational_diagnostic() -> Event {
+        Event::Diagnostic(runner::Diagnostic::from_error(&Error::Protocol(
+            "diagnostic-only secret fixture",
+        )))
+    }
+
+    #[tokio::test]
+    async fn blocked_application_and_qualification_never_prepare_a_provider() {
+        for provider in Provider::ALL {
+            let temp = tempfile::tempdir().unwrap();
+            let store =
+                Arc::new(Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap());
+            let account = crate::authentication_tests::account(&store, provider);
+            let model = crate::authentication_tests::model(provider);
+            store
+                .set_models(provider, std::slice::from_ref(&model))
+                .unwrap();
+            store.require_authenticated_account(&account).unwrap();
+            // A completed failing turn can intervene after an earlier preflight.
+            crate::authentication_tests::fail_authentication(&store, &account);
+            let generation = qualification::read_generation(store.root(), &account).unwrap();
+            let request = GenerateRequest {
+                version: 1,
+                account: account.clone(),
+                model: model.key(),
+                prompt: "application-only secret fixture".into(),
+                timeout_ms: 1000,
+                max_output_bytes: 1024,
+            };
+            let (_sender, cancel) = watch::channel(false);
+            let failure = generate(store.clone(), request.clone(), cancel.clone())
+                .await
+                .unwrap_err();
+            assert_eq!(failure.code, FailureCode::Unavailable);
+            assert_eq!(failure.joined, Some(true));
+            let failure = qualify_with_expected_generation(
+                store.clone(),
+                account.clone(),
+                model.key(),
+                &temp.path().join("missing-evidence"),
+                None,
+                cancel.clone(),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(failure.code, FailureCode::Unavailable);
+            assert_eq!(failure.joined, Some(true));
+            // Reconnect probes remain possible, but cannot authorize prompting.
+            let run = store
+                .prepare_probe(&account, Some(model.clone()), now_ms())
+                .unwrap();
+            assert!(store.require_authenticated_run(&run).is_err());
+            let pin = Pin {
+                provider,
+                executable: temp.path().join("must-never-launch"),
+                sha256: "0".repeat(64),
+                version: "synthetic".into(),
+                host_sha256: "0".repeat(64),
+                observed_at_ms: now_ms(),
+            };
+            let id = new_id("application");
+            let failure = run_reserved(
+                store.clone(),
+                request,
+                Instant::now() + Duration::from_secs(1),
+                id.clone(),
+                run.clone(),
+                model,
+                pin,
+                cancel,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(failure.code, FailureCode::Unavailable);
+            assert_eq!(failure.joined, Some(true));
+            let settled = store.run(&run.id).unwrap().unwrap();
+            assert_eq!(settled.phase, "settled");
+            assert!(settled.pid.is_none());
+            assert!(store.unsettled_runs().unwrap().is_empty());
+            assert!(diagnostic::read(&store, &account, &id).unwrap().is_none());
+            assert_eq!(
+                qualification::read_generation(store.root(), &account).unwrap(),
+                generation
+            );
+            assert!(store.authentication_required(&account).unwrap());
+        }
+    }
+
+    #[test]
+    fn application_health_settlement_requires_join_and_rolls_back_with_lease_release() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Synthetic", 1, None)
+            .unwrap();
+        let run = store.prepare_probe(&account.id, None, now_ms()).unwrap();
+        let mut facts = TurnFacts {
+            terminal: Terminal::Failed,
+            joined: false,
+            effects: EffectState::None,
+            pending_attention: false,
+            failure: Some(Failure::Authentication),
+        };
+        assert!(store.settle_application(&run, &facts, now_ms()).is_err());
+        assert!(!store.authentication_required(&account.id).unwrap());
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        facts.joined = true;
+        let db = rusqlite::Connection::open(store.root().join("xcb.sqlite")).unwrap();
+        db.execute_batch("CREATE TRIGGER reject_release BEFORE DELETE ON leases BEGIN SELECT RAISE(ABORT,'synthetic release fault'); END;").unwrap();
+        assert!(store.settle_application(&run, &facts, now_ms()).is_err());
+        assert!(!store.authentication_required(&account.id).unwrap());
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        db.execute_batch("DROP TRIGGER reject_release;").unwrap();
+        store.settle_application(&run, &facts, now_ms()).unwrap();
+        assert!(store.authentication_required(&account.id).unwrap());
+        assert!(store.unsettled_runs().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn application_authentication_events_mark_only_joined_failed_turns() {
+        for (joined, admitted) in [(false, true), (true, false), (true, true)] {
+            let mut events = vec![
+                authentication_failure(),
+                informational_diagnostic(),
+                Event::Result {
+                    terminal: Terminal::Failed,
+                    text: "failure-only secret fixture".into(),
+                    models: vec![],
+                },
+            ];
+            if admitted {
+                events.insert(0, ready());
+            }
+            let ((outcome, unsettled), observation) =
+                synthetic_observed(events, joined, false, 1024, false, None).await;
+            let failure = outcome.unwrap_err();
+            assert_eq!(
+                failure.code,
+                if joined {
+                    FailureCode::ProviderError
+                } else {
+                    FailureCode::CustodyUnproven
+                }
+            );
+            assert_eq!(failure.joined, joined.then_some(true));
+            assert_eq!(failure.effects, joined.then_some("none"));
+            assert_eq!(unsettled.is_empty(), joined);
+            assert_eq!(observation.authentication_required, joined);
+            assert_eq!(
+                observation.diagnostic.unwrap()["category"],
+                "authentication"
+            );
+        }
+        let ((outcome, unsettled), observation) = synthetic_observed(
+            vec![
+                ready(),
+                authentication_failure(),
+                informational_diagnostic(),
+                result("generated fixture"),
+            ],
+            true,
+            false,
+            1024,
+            false,
+            None,
+        )
+        .await;
+        assert_eq!(outcome.unwrap().text, "generated fixture");
+        assert!(unsettled.is_empty());
+        assert!(!observation.authentication_required);
+        assert!(observation.diagnostic.is_none());
+        let ((outcome, unsettled), observation) = synthetic_observed(
+            vec![ready(), authentication_failure()],
+            true,
+            false,
+            1024,
+            false,
+            None,
+        )
+        .await;
+        assert_eq!(outcome.unwrap_err().code, FailureCode::Deadline);
+        assert!(unsettled.is_empty());
+        assert!(!observation.authentication_required);
+    }
+
+    #[tokio::test]
+    async fn application_latest_typed_failure_supersedes_transient_authentication() {
+        for (failure, category) in [
+            (Failure::AccountQuota, "quota_or_resource_limit"),
+            (Failure::Transport, "transport"),
+            (Failure::Unknown, "provider_rejected"),
+        ] {
+            let ((outcome, unsettled), observation) = synthetic_observed(
+                vec![
+                    ready(),
+                    authentication_failure(),
+                    Event::Quota {
+                        window: None,
+                        used_percent: None,
+                        resets_at_ms: None,
+                        failure: Some(failure),
+                    },
+                    Event::Quota {
+                        window: None,
+                        used_percent: None,
+                        resets_at_ms: None,
+                        failure: None,
+                    },
+                    Event::Result {
+                        terminal: Terminal::Failed,
+                        text: "failure-only secret fixture".into(),
+                        models: vec![],
+                    },
+                ],
+                true,
+                false,
+                1024,
+                false,
+                None,
+            )
+            .await;
+            assert_eq!(outcome.unwrap_err().code, FailureCode::ProviderError);
+            assert!(unsettled.is_empty());
+            assert!(!observation.authentication_required);
+            assert_eq!(observation.diagnostic.unwrap()["category"], category);
+        }
+    }
+
+    #[tokio::test]
+    async fn application_informational_diagnostics_do_not_fail_or_persist() {
+        let ((outcome, unsettled), observation) = synthetic_observed(
+            vec![
+                informational_diagnostic(),
+                ready(),
+                informational_diagnostic(),
+                result("generated fixture"),
+            ],
+            true,
+            false,
+            1024,
+            false,
+            None,
+        )
+        .await;
+        assert_eq!(outcome.unwrap().text, "generated fixture");
+        assert!(unsettled.is_empty());
+        assert!(!observation.authentication_required);
+        assert!(observation.diagnostic.is_none());
+        let ((outcome, unsettled), observation) = synthetic_observed(
+            vec![
+                informational_diagnostic(),
+                result("unadmitted secret fixture"),
+            ],
+            true,
+            false,
+            1024,
+            false,
+            None,
+        )
+        .await;
+        assert_eq!(outcome.unwrap_err().code, FailureCode::ProviderError);
+        assert!(unsettled.is_empty());
+        assert!(!observation.authentication_required);
+        assert_eq!(
+            observation.diagnostic.unwrap()["category"],
+            "provider_rejected"
+        );
     }
 
     #[tokio::test]

@@ -883,6 +883,18 @@ impl Store {
         Ok(())
     }
 
+    /// Prompting probes recheck health under their exclusive account lease.
+    /// Reconnect and metadata probes remain available without this admission.
+    pub(crate) fn require_authenticated_run(&self, run: &RunRecord) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (current, _) = self.owned_run_from(&tx, run)?;
+        if authentication_required_from(&tx, &current.account)? {
+            return Err(Error::Unavailable(AUTHENTICATION_REQUIRED));
+        }
+        Ok(())
+    }
+
     /// Only successful explicit credential replacement or supervised reauth
     /// calls this, after publication while still holding exclusive custody.
     /// Metadata presence, generation rotation, and routine refresh do not.
@@ -1178,7 +1190,7 @@ impl Store {
     }
 
     pub(crate) fn settle(&self, run: &RunRecord, state: State, now: u64) -> Result<()> {
-        self.settle_inner(run, state, now, None)
+        self.settle_inner(run, state, now, None, None)
     }
 
     pub(crate) fn settle_outcome(
@@ -1189,7 +1201,33 @@ impl Store {
         now: u64,
     ) -> Result<()> {
         validate_outcome(outcome)?;
-        self.settle_inner(run, outcome.state, now, Some((input, outcome)))
+        self.settle_inner(run, outcome.state, now, Some((input, outcome)), None)
+    }
+
+    /// Application inference persists no prompt, output, or diagnostic payload.
+    /// Only joined sessionless terminal facts can affect account health.
+    pub(crate) fn settle_application(
+        &self,
+        run: &RunRecord,
+        facts: &xcb_core::policy::TurnFacts,
+        now: u64,
+    ) -> Result<()> {
+        use xcb_core::policy::{EffectState, Terminal};
+        if run.session.is_some()
+            || !facts.joined
+            || facts.effects != EffectState::None
+            || facts.pending_attention
+            || !matches!(facts.terminal, Terminal::Completed | Terminal::Failed)
+            || (facts.terminal == Terminal::Completed && facts.failure.is_some())
+        {
+            return Err(Error::Conflict("application settlement is unproven"));
+        }
+        let state = if facts.terminal == Terminal::Completed {
+            State::Idle
+        } else {
+            State::Failed
+        };
+        self.settle_inner(run, state, now, None, Some(facts))
     }
 
     fn settle_inner(
@@ -1198,6 +1236,7 @@ impl Store {
         state: State,
         now: u64,
         outcome: Option<(&Id, &crate::runner::Outcome)>,
+        application: Option<&xcb_core::policy::TurnFacts>,
     ) -> Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1207,10 +1246,9 @@ impl Store {
                 "command guest stop is unproven; reconcile command custody before settling",
             ));
         }
-        if let Some((_, outcome)) = outcome {
+        if let Some(facts) = outcome.map(|(_, outcome)| &outcome.facts).or(application) {
             use xcb_core::policy::{Failure, Terminal};
-            if outcome.facts.terminal == Terminal::Failed
-                && outcome.facts.failure == Some(Failure::Authentication)
+            if facts.terminal == Terminal::Failed && facts.failure == Some(Failure::Authentication)
             {
                 let generation = crate::application_qualification::read_generation(
                     &self.root,
@@ -1221,10 +1259,10 @@ impl Store {
                     ON CONFLICT(account) DO UPDATE SET generation=excluded.generation,run=excluded.run",
                     params![current.account.as_str(), generation, current.id.as_str()],
                 )?;
-            } else if outcome.facts.terminal == Terminal::Completed
-                && outcome.facts.failure.is_none()
-                && !outcome.facts.pending_attention
-                && outcome.state == State::Idle
+            } else if facts.terminal == Terminal::Completed
+                && facts.failure.is_none()
+                && !facts.pending_attention
+                && state == State::Idle
             {
                 tx.execute(
                     "DELETE FROM account_auth_failures WHERE account=?1",
