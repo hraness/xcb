@@ -1763,51 +1763,36 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 let (run, mut run_digest) = store
                     .recovery_candidate(&run_id)?
                     .ok_or(Error::Unavailable("run not found"))?;
-                // A run that took the account lease but never recorded a
-                // process group. `prepare_run` leases before the provider is
-                // spawned, so a kill in that window leaves a lease with
-                // nothing to signal and nothing to prove absent. Until now
-                // every command refused it and the account stayed unusable
-                // forever. The record still cannot prove a provider process
-                // is absent; this is the operator saying so.
+                // Prepared state also covers a child spawned before its PID
+                // was persisted. Neither --yes nor owner absence proves that
+                // child stopped, so this path only explains retained custody.
                 if run.phase == "prepared" && run.pid.is_none() {
-                    if !yes {
-                        if cli.json {
-                            print_json(json!({
-                                "version": 1,
-                                "dryRun": true,
-                                "run": run.id,
-                                "phase": run.phase,
-                                "pid": serde_json::Value::Null,
-                                "discardsWithoutProcessProof": true,
-                            }))?;
-                        } else {
-                            println!(
-                                "Run {} holds an account lease but never recorded a process group,",
-                                run.id
-                            );
-                            println!(
-                                "  so there is nothing to signal and nothing to prove stopped."
-                            );
-                            println!(
-                                "  It was killed between taking the lease and starting the provider."
-                            );
-                            println!(
-                                "Confirm no provider process from this run is alive, then re-run with --yes."
-                            );
-                        }
-                        return Ok(0);
+                    if yes {
+                        return Err(Error::Conflict(
+                            "run has no recorded process group; account custody retained because provider stop cannot be proven",
+                        ));
                     }
-                    let discarded = store.discard_unspawned_run(&run.id, &run_digest, now_ms())?;
                     if cli.json {
-                        print_json(
-                            json!({"version":1,"run":discarded.id,"phase":discarded.phase,"leaseReleased":true}),
-                        )?;
+                        print_json(json!({
+                            "version": 1,
+                            "dryRun": true,
+                            "run": run.id,
+                            "phase": run.phase,
+                            "pid": serde_json::Value::Null,
+                            "leaseReleased": false,
+                            "custodyRetained": true,
+                            "recoverable": false,
+                            "reason": "prepared state does not prove no provider child exists",
+                        }))?;
                     } else {
                         println!(
-                            "Discarded unspawned run {} · account lease released",
-                            discarded.id
+                            "Run {} has no recorded process group; account custody is retained.",
+                            run.id
                         );
+                        println!(
+                            "  A provider may have started before its PID was saved. Its stop cannot be proven from this record."
+                        );
+                        println!("  --yes cannot override missing process-stop evidence.");
                     }
                     return Ok(0);
                 }
