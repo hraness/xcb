@@ -53,6 +53,11 @@ export default function Compare() {
                     <td><p>You work across supported provider accounts and want work routed among them with proven custody. Native xcb is a source preview with specific platform and command limits.</p><a href="/docs/workspace">Workspace limits</a></td>
                   </tr>
                   <tr>
+                    <th scope="row"><span className="xcb-comparison-name">Request routers</span><span className="xcb-comparison-kind">Subscription proxies</span></th>
+                    <td><p>Forward API requests from one client across providers and subscription logins — Claude Code Router, Claudish, subswitch, and similar proxies sit at the HTTP layer.</p><div className="xcb-comparison-sources"><a href="https://github.com/musistudio/claude-code-router">Claude Code Router</a><a href="https://claudish.com">Claudish</a><a href="https://github.com/dean0x/subswitch">subswitch</a></div></td>
+                    <td><p>You want one client&apos;s requests rerouted across providers. xcb routes a whole task to an eligible account and owns its custody until the turn settles — it is not a request proxy and does not rewrite API traffic.</p></td>
+                  </tr>
+                  <tr>
                     <th scope="row"><span className="xcb-comparison-name">Superset</span><span className="xcb-comparison-kind">Agent workspace</span></th>
                     <td><p>Bring Claude Code, Codex, OpenCode, and other coding agents into one workspace. Run tasks in parallel, isolate changes, and review the results together.</p><div className="xcb-comparison-sources"><a href="https://superset.sh">Superset</a><a href="https://github.com/superset-sh/superset">Source</a></div></td>
                     <td><p>You want parallel agent runs with isolated changes in one workspace. xcb focuses on named accounts, local sessions, and usage rather than fleet-style parallel review.</p></td>
