@@ -45,6 +45,228 @@ fn mcp(id: u64, name: &str, args: Value) -> Request {
     }
 }
 
+fn accept_frame(p: &mut DevinProtocol, value: Value) -> Result<(Vec<Event>, Vec<Value>)> {
+    let value = p.envelope(&serde_json::to_vec(&value)?)?;
+    p.accept(value)
+}
+
+fn transition_state(p: &DevinProtocol) -> Value {
+    json!({
+        "options": {"cwd": p.options.cwd, "model": p.options.model,
+            "tools": p.options.tools, "metadataOnly": p.options.metadata_only},
+        "bridge": p.bridge.is_some(), "session": p.session,
+        "nextId": p.next_id, "promptId": p.prompt_id, "instructions": p.instructions,
+        "ready": p.ready, "announced": p.announced, "completed": p.completed,
+        "text": p.text, "outputTokens": p.output_tokens,
+        "calls": p.calls.iter().map(|(id, c)| json!({"id": id, "name": c.name,
+            "arguments": c.arguments, "approved": c.approved, "bridged": c.bridged,
+            "replied": c.replied, "finished": c.finished})).collect::<Vec<_>>(),
+        "pending": p.pending.iter().map(|(id, p)| json!({"id": id, "rpcId": p.rpc_id,
+            "replyClosed": p.reply.is_closed()})).collect::<Vec<_>>(),
+        "callbackIds": p.callback_ids, "mcpIds": p.mcp_ids, "brokerNames": p.broker_names,
+        "mcpInitialized": p.mcp_initialized, "mcpProposedVersion": p.mcp_proposed_version,
+        "mcpMetadataSeen": p.mcp_metadata_seen, "listed": p.listed
+    })
+}
+
+#[test]
+fn custom_notifications_are_discarded_without_changing_turn_or_tool_state() {
+    for tools in [false, true] {
+        let mut p = protocol();
+        p.instructions = "host instructions".into();
+        p.text = "existing output".into();
+        p.output_tokens = 3;
+        let mut pending_receive = None;
+        if tools {
+            p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
+                .unwrap();
+            p.accept(permission("approved", "call-1")).unwrap();
+            let (reply, receive) = oneshot::channel();
+            let mut request = mcp(1, "workspace_read", json!({"path":"a"}));
+            request.reply = reply;
+            p.mcp(request).unwrap();
+            pending_receive = Some(receive);
+        }
+        p.options.tools = tools;
+        let before = transition_state(&p);
+        for method in [
+            "_vendor.example/status",
+            "_vendor.example/tool_call",
+            "_cognition.ai/sessionChanged",
+            "_cognition.ai/agent_stopped",
+        ] {
+            let frames = p.frames;
+            let (events, replies) = accept_frame(
+                &mut p,
+                json!({
+                    "jsonrpc":"2.0", "method":method, "params":{
+                        "sessionId":"substituted-session", "model":"other-model",
+                        "status":"completed", "stopReason":"end_turn", "outputTokens":999,
+                        "toolCallId":"call-1", "outcome":"selected", "optionId":"allow_once",
+                        "update":{"sessionUpdate":"tool_call", "toolCallId":"injected"}
+                    }
+                }),
+            )
+            .unwrap();
+            assert!(events.is_empty() && replies.is_empty());
+            assert_eq!(p.frames, frames + 1);
+            assert_eq!(transition_state(&p), before);
+            if let Some(receive) = &mut pending_receive {
+                assert!(matches!(
+                    receive.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+            }
+        }
+    }
+}
+
+#[test]
+fn custom_request_ids_still_require_rejection_and_attention() {
+    for id in [json!(0), json!("request-1")] {
+        let mut p = protocol();
+        let (events, replies) = accept_frame(
+            &mut p,
+            json!({
+                "jsonrpc":"2.0", "id":id, "method":"_vendor.example/execute",
+                "params":{"command":"untrusted"}
+            }),
+        )
+        .unwrap();
+        assert!(matches!(events.as_slice(), [Event::Attention]));
+        assert_eq!(
+            replies,
+            vec![json!({"jsonrpc":"2.0", "id":id,
+            "error":{"code":-32601,"message":"host capability unavailable"}})]
+        );
+        assert!(p.calls.is_empty() && p.pending.is_empty());
+        assert!(!p.completed);
+    }
+    for id in [Value::Null, json!(true), json!("bad\nidentity")] {
+        assert!(
+            accept_frame(
+                &mut protocol(),
+                json!({
+                    "jsonrpc":"2.0", "id":id, "method":"_vendor.example/execute"
+                })
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn extension_compatibility_retains_core_update_and_effect_guards() {
+    assert!(
+        accept_frame(
+            &mut protocol(),
+            json!({
+                "jsonrpc":"2.0", "method":"vendor.example/status", "params":{}
+            })
+        )
+        .is_err()
+    );
+    for update in [
+        json!({"sessionUpdate":"_vendor.example/unknown"}),
+        json!({"sessionUpdate":"config_option_update", "configOptions":[
+            {"id":"model","currentValue":"other-model"},
+            {"id":"mode","currentValue":"accept-edits"}]}),
+        json!({"sessionUpdate":"current_mode_update", "currentModeId":"other-mode"}),
+    ] {
+        assert!(
+            accept_frame(
+                &mut protocol(),
+                json!({
+                    "jsonrpc":"2.0", "method":"session/update",
+                    "params":{"sessionId":"fixture-session","update":update}
+                })
+            )
+            .is_err()
+        );
+    }
+    let mut p = protocol();
+    p.options.tools = false;
+    let mut native = declaration("native", "workspace_read", json!({}));
+    native["params"]["update"]["_meta"] = json!({"cognition.ai/inferenceToolName":"notebook_read"});
+    accept_frame(&mut p, native).unwrap();
+    accept_frame(
+        &mut p,
+        json!({"jsonrpc":"2.0","method":"_vendor.example/approval",
+        "params":{"toolCallId":"native","outcome":"selected"}}),
+    )
+    .unwrap();
+    let (events, replies) = accept_frame(&mut p, permission("deny", "native")).unwrap();
+    assert!(matches!(events.as_slice(), [Event::Attention]));
+    assert_eq!(replies[0]["result"]["outcome"]["outcome"], "cancelled");
+    assert!(
+        accept_frame(
+            &mut p,
+            json!({"jsonrpc":"2.0","method":"session/update",
+        "params":{"sessionId":"fixture-session","update":{"sessionUpdate":"tool_call_update",
+            "toolCallId":"native","status":"completed"}}})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn custom_notifications_retain_closed_envelope_identity_and_frame_bounds() {
+    for value in [
+        json!({"jsonrpc":"2.0","method":"_vendor/status","extra":true}),
+        json!({"jsonrpc":"2.0","method":"_vendor/status","result":{}}),
+        json!({"jsonrpc":"1.0","method":"_vendor/status"}),
+        json!({"jsonrpc":"2.0","method":"_vendor/status\n"}),
+        json!({"jsonrpc":"2.0","method":format!("_{}", "x".repeat(160))}),
+    ] {
+        assert!(accept_frame(&mut protocol(), value).is_err());
+    }
+    let mut p = protocol();
+    p.frames = MAX_FRAMES;
+    assert!(accept_frame(&mut p, json!({"jsonrpc":"2.0","method":"_vendor/status"})).is_err());
+    assert!(
+        accept_frame(
+            &mut protocol(),
+            json!({"jsonrpc":"2.0","method":"_vendor/status",
+        "params":{"data":"x".repeat(MAX_WIRE_BYTES)}})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn prompt_prefix_matches_the_enabled_tool_surface() {
+    for tools in [false, true] {
+        let mut p = protocol();
+        p.options.tools = tools;
+        p.instructions = "Host instructions.".into();
+        let wire = p
+            .prompt_wire(
+                Prompt {
+                    text: "Application prompt.".into(),
+                    images: vec![crate::protocol::ImageInput {
+                        media_type: "image/png".into(),
+                        base64: "AAAA".into(),
+                    }],
+                },
+                8,
+            )
+            .unwrap();
+        let expected = if tools {
+            "Host instructions.\n\nUse only the xcb MCP server for workspace access. Native tools have no workspace authority. List the xcb tools before calling them.\n\nApplication prompt."
+        } else {
+            "Host instructions.\n\nApplication prompt."
+        };
+        assert_eq!(
+            wire,
+            json!({"jsonrpc":"2.0","id":8,"method":"session/prompt",
+            "params":{"sessionId":"fixture-session","prompt":[
+                {"type":"text","text":expected},
+                {"type":"image","mimeType":"image/png","data":"AAAA"}
+            ]}})
+        );
+    }
+}
+
 #[test]
 fn only_an_exact_preceding_broker_declaration_receives_one_approval() {
     let mut p = protocol();
