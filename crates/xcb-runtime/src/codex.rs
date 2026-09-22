@@ -874,18 +874,28 @@ impl CodexProtocol {
             "thread/settings/updated" => self.settings_update(p)?,
             "thread/status/changed" => {
                 self.thread_scope(p)?;
-                let status_type = p["status"]["type"].as_str().unwrap_or("");
-                require(
-                    ["idle", "active"].contains(&status_type),
-                    "Codex unexpected thread status",
-                )?;
-                require(
-                    status_type != "active"
-                        || p["status"]
-                            .get("activeFlags")
-                            .is_none_or(|v| v == &json!([])),
-                    "Codex active permission flags",
-                )?;
+                closed(p, &["threadId", "status"])?;
+                let status = &p["status"];
+                // Exact-build ThreadStatusChangedNotification schema includes
+                // four tags. These observations never admit a turn, complete
+                // one, or authorize native permission/user-input requests.
+                match status["type"].as_str() {
+                    Some("notLoaded" | "idle") => closed(status, &["type"])?,
+                    Some("systemError") => {
+                        closed(status, &["type"])?;
+                        events.push(Event::Diagnostic(crate::runner::Diagnostic::from_error(
+                            &Error::Unavailable("Codex thread reported a system error"),
+                        )));
+                    }
+                    Some("active") => {
+                        closed(status, &["type", "activeFlags"])?;
+                        require(
+                            status["activeFlags"] == json!([]),
+                            "Codex active permission flags",
+                        )?;
+                    }
+                    _ => return Err(Error::Protocol("Codex unexpected thread status")),
+                }
             }
             "item/started" | "item/completed" => {
                 self.scope(p)?;

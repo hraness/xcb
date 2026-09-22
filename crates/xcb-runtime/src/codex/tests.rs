@@ -131,6 +131,68 @@ fn readiness_requires_the_matching_rpc_and_rejects_early_execution() {
 }
 
 #[test]
+fn pinned_thread_statuses_are_observations_not_turn_admission_or_completion() {
+    // Exported by the qualified 0.155.0-alpha.2.6 executable:
+    // v2/ThreadStatusChangedNotification.json SHA256
+    // 26f3c60c1b73f7fa2d31c74429cdc36f8746c76c33e3d314b3fb61d3661f05f6.
+    for status in [
+        json!({"type":"notLoaded"}),
+        json!({"type":"idle"}),
+        json!({"type":"systemError"}),
+        json!({"type":"active","activeFlags":[]}),
+    ] {
+        let mut c = codec();
+        c.thread_id = Some("thread1".into());
+        c.turn_rpc = Some(7);
+        let notification = json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":status}});
+        let (events, replies) = c.accept(notification.clone()).unwrap();
+        assert!(replies.is_empty());
+        assert!(!c.ready && !c.completed && c.turn_id.is_none());
+        assert_eq!(c.turn_rpc, Some(7));
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event, Event::Diagnostic(_)))
+        );
+        if status["type"] == "systemError" {
+            assert!(
+                matches!(&events[..], [Event::Diagnostic(detail)] if detail.as_str() == "unavailable: Codex thread reported a system error")
+            );
+        } else {
+            assert!(events.is_empty());
+        }
+        assert!(c.accept(notice("item/started", call_item())).is_err());
+        c.accept(json!({"id":7,"result":{"turn":{"id":"turn1"}}}))
+            .unwrap();
+        c.accept(notification).unwrap();
+        assert!(c.ready && !c.completed);
+        assert_eq!(c.turn_id.as_deref(), Some("turn1"));
+    }
+}
+
+#[test]
+fn thread_statuses_reject_foreign_identity_unknown_shapes_and_permission_flags() {
+    for status in [
+        json!({"type":"futureStatus"}),
+        json!({"type":"idle","activeFlags":[]}),
+        json!({"type":"notLoaded","extra":true}),
+        json!({"type":"systemError","message":"SYNTHETIC_SECRET"}),
+        json!({"type":"active"}),
+        json!({"type":"active","activeFlags":null}),
+        json!({"type":"active","activeFlags":["waitingOnApproval"]}),
+        json!({"type":"active","activeFlags":["waitingOnUserInput"]}),
+        json!({"type":"active","activeFlags":["futureFlag"]}),
+        json!("idle"),
+    ] {
+        assert!(started().accept(json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":status}})).is_err());
+    }
+    for thread in [Value::Null, json!("foreign")] {
+        assert!(started().accept(json!({"method":"thread/status/changed","params":{"threadId":thread,"status":{"type":"notLoaded"}}})).is_err());
+    }
+    assert!(started().accept(json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":{"type":"idle"},"extra":true}})).is_err());
+}
+
+#[test]
 fn turn_start_errors_are_sanitized_only_after_matching_the_expected_rpc() {
     let mut c = codec();
     c.thread_id = Some("thread1".into());
