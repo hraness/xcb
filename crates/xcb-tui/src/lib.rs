@@ -12,6 +12,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui_textarea::TextArea;
 use std::{
     cell::Cell,
     collections::VecDeque,
@@ -19,7 +20,6 @@ use std::{
     sync::mpsc::{Receiver, SyncSender, TryRecvError},
     time::{Duration, Instant},
 };
-use tui_textarea::TextArea;
 use xcb_core::{
     Id,
     panes::Pane,

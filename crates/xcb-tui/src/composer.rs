@@ -1,6 +1,6 @@
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui_textarea::TextArea;
 use std::collections::VecDeque;
-use tui_textarea::TextArea;
 
 const MAX_INPUT: usize = 256 * 1024;
 
@@ -31,8 +31,9 @@ impl Composer {
             if text.ends_with('\n') {
                 self.textarea = TextArea::from(text.split('\n').map(str::to_owned));
             }
-            self.textarea.move_cursor(tui_textarea::CursorMove::Bottom);
-            self.textarea.move_cursor(tui_textarea::CursorMove::End);
+            self.textarea
+                .move_cursor(ratatui_textarea::CursorMove::Bottom);
+            self.textarea.move_cursor(ratatui_textarea::CursorMove::End);
         }
     }
     pub fn handle(&mut self, event: Event) -> ComposerAction {
