@@ -44,26 +44,30 @@ xcb update status
 xcb upgrade
 xcb update disable`}</Code>
       <p>No native xcb release is published yet, so checks fail closed and leave a source install untouched. After an upgrade, restart open terminals and rerun <code>xcb doctor</code>; provider and application qualification is tied to the exact version and digest of the installed executable.</p>
+      <p>A current managed supervisor detects replacement of its executable, stops starting new turns, and exits after its active workers settle. Queued tasks and tasks waiting for input remain saved. Wait for that exit before refreshing provider pins and reopening the conversation. XCB reports a different running supervisor build explicitly; a legacy supervisor without an identity record must be identified and stopped after its workers settle. Never delete its lock or trust a saved PID alone.</p>
+      <p>Older source builds may reject newer managed record fields. Restart old clients and supervisors when upgrading and preserve managed state if rolling back the binary. An installation does not establish fresh live acceptance across all three providers.</p>
       <h2 id="connect">2. Connect Claude</h2>
-      <p>Install an admitted Claude Code binary: major version 2, version 2.1.268 or newer. Then create an account and complete the browser sign-in. XCB does not silently import an existing provider login.</p>
-      <Code>{`xcb accounts add claude personal --plan Max
+      <p>Install an admitted Claude Code binary: major version 2, version 2.1.268 or newer. Then create an account and complete the browser sign-in. XCB does not silently import an existing provider login. Replace <code>&lt;account-id&gt;</code> with the generated ID printed by account creation or import; <code>xcb accounts</code> also lists it.</p>
+      <Code>{`xcb accounts add claude --plan Max
 xcb doctor --provider claude
-xcb accounts login personal
-xcb accounts refresh personal
+xcb accounts login <account-id>
+xcb accounts refresh <account-id>
 xcb models`}</Code>
       <p><code>--plan Max</code> is a display label, not subscription verification. If XCB discovers the wrong executable, select it explicitly with <code>xcb doctor --provider claude --executable /absolute/path/to/claude</code>.</p>
       <p>Using Codex or Devin? Follow the <a href="/docs/providers">provider-specific setup</a> and its exact runtime requirements.</p>
-      <h2 id="first-session">3. Choose a model and open your project</h2>
-      <p>Copy a full model key from <code>xcb models</code>; use an observed key rather than guessing a model name. Replace the placeholder below before running it.</p>
-      <Code>{`xcb accounts default personal
-xcb models default <full-model-key>
-xcb --cwd /absolute/path/to/your/project`}</Code>
+      <h2 id="first-session">3. Open your project</h2>
+      <p>Managed tasks select among admitted, available accounts and observed models. Start a task with <code>Use Claude</code>, <code>Use Codex</code>, or <code>Use Devin</code> to require one provider.</p>
+      <Code>{`xcb --cwd /absolute/path/to/your/project`}</Code>
+      <p>Plain <code>xcb</code> creates a persistent control conversation. Closing it detaches while tasks keep running. Use <code>/tasks</code> to inspect work and <code>/sessions</code> to switch control conversations. Prompts create new work, or answer a task waiting for input; <code>new task: …</code> explicitly starts separate work.</p>
       <p>Ask XCB to explain a file or make a small change. Use <code>/help</code> inside the terminal for interactive commands. To run tests or builds, first <a href="/docs/workspace">set up the isolated command runner</a>.</p>
       <h2 id="daily-commands">Come back to your work</h2>
-      <Code>{`xcb sessions
-xcb resume                 # latest native session
+      <Code>{`xcb conversations
+xcb chat --resume <conversation-id>
+xcb tasks
+xcb sessions               # direct provider sessions
+xcb resume                 # latest direct provider session
 xcb resume <session-id>
-xcb --cwd /absolute/path/to/your/project run --account personal -p "Explain this repository"
+xcb --cwd /absolute/path/to/your/project run --account <account-id> -p "Explain this repository"
 xcb accounts
 xcb config`}</Code>
       <p><code>resume</code> reopens the saved session and its workspace in the interactive terminal. It is not a headless continuation command. A JSON run includes the session ID for later use with <code>xcb resume</code>.</p>
@@ -77,7 +81,7 @@ xcb config`}</Code>
 function Providers() {
   return (
     <>
-      <p>XCB names your accounts, stores their credentials outside the project, and lets you select the account and model for a turn. Connecting an account, observing its models, and proving an execution route are separate steps.</p>
+      <p>XCB names your accounts, stores their credentials outside the project, and lets you select the account and model for a turn. Replace <code>&lt;account-id&gt;</code> in the setup commands with the generated ID printed by creation or import; names come from observed provider identities, not custom labels. Connecting an account, observing its models, and proving an execution route are separate steps.</p>
       <h2 id="provider-status">Provider status</h2>
       <div className="xcb-docs-table-wrap" role="region" aria-labelledby="provider-status-caption" tabIndex={0}><table>
         <caption id="provider-status-caption">Native CLI evidence and current limits</caption>
@@ -85,44 +89,44 @@ function Providers() {
         <tbody>
           <tr><th scope="row">Claude</th><td>Admitted Claude Code 2.1.268 or newer, major 2.</td><td>Installed coding workflow passed on macOS ARM64 with the tested account. Linux remains a candidate after its host checks.</td></tr>
           <tr><th scope="row">Codex</th><td>Exact admitted 0.155.0-alpha.2.6 build on macOS.</td><td>Authenticated file operations and installed coding workflow passed with the tested account.</td></tr>
-          <tr><th scope="row">Devin</th><td>Exact admitted 3000.10.31 build on macOS.</td><td>Authenticated model discovery passed. Provider quota blocked the tested coding turn; its reset is unknown.</td></tr>
+          <tr><th scope="row">Devin</th><td>Exact admitted 3000.11.1 and 3000.10.31 builds on macOS.</td><td>Both credential-free boundary fixtures passed; authenticated model discovery passed on 3000.10.31. Provider quota blocked the tested coding turn; its reset is unknown.</td></tr>
         </tbody>
       </table></div>
       <p>Codex and Devin admission checks both executable bytes and version. A visible model or <code>metadata pin only</code> from <code>doctor</code> does not prove successful coding on your host. The separate TypeScript CLI keeps Codex and Devin task execution disabled pending qualification.</p>
       <h2 id="claude">Claude</h2>
-      <Code>{`xcb accounts add claude personal --plan Max
+      <Code>{`xcb accounts add claude --plan Max
 xcb doctor --provider claude
-xcb accounts login personal
-xcb accounts refresh personal
+xcb accounts login <account-id>
+xcb accounts refresh <account-id>
 xcb models`}</Code>
       <p>Complete the browser sign-in. Refresh obtains supported model and usage metadata. The plan name is only a label.</p>
       <h2 id="codex">Codex</h2>
       <p>XCB supervises the official CLI’s ChatGPT device sign-in in a private profile.</p>
       <Code>{`xcb doctor --provider codex
-xcb accounts add codex codex-personal --plan ChatGPT
-xcb accounts login codex-personal
-xcb accounts refresh codex-personal
+xcb accounts add codex --plan ChatGPT
+xcb accounts login <account-id>
+xcb accounts refresh <account-id>
 xcb models`}</Code>
       <p>Alternatively, explicitly import one existing ChatGPT credential:</p>
-      <Code>{`xcb accounts import-codex --source /absolute/path/to/auth.json --label codex-imported
-xcb accounts refresh codex-imported`}</Code>
+      <Code>{`xcb accounts import-codex --source /absolute/path/to/auth.json
+xcb accounts refresh <account-id>`}</Code>
       <p>The source file stays in place. XCB does not copy provider configuration, plugins, sessions, or transcripts. This route does not accept API-key credentials.</p>
       <h2 id="devin">Devin</h2>
       <p>Sign in through Devin’s CLI first, then select its credential file explicitly.</p>
       <Code>{`devin auth login
 xcb doctor --provider devin
-xcb accounts import-devin --source /absolute/path/to/credentials.toml --label devin-personal
-xcb accounts refresh devin-personal
+xcb accounts import-devin --source /absolute/path/to/credentials.toml
+xcb accounts refresh <account-id>
 xcb models`}</Code>
-      <p>Import preserves the original credentials and sessions. To refresh just the catalog, use <code>xcb models refresh devin --account devin-personal</code>. Native XCB currently supports fixed ACP model choices; compatibility catalog entries for Adaptive or Fusion do not establish native support. A successful <code>devin auth status</code> and populated catalog confirm provider access, not a qualified XCB coding turn; the recorded live attempt reached provider quota before inference.</p>
+      <p>Import preserves the original credentials and sessions. To refresh just the catalog, use <code>xcb models refresh devin --account &lt;account-id&gt;</code>. Native XCB currently supports fixed ACP model choices; compatibility catalog entries for Adaptive or Fusion do not establish native support. A successful <code>devin auth status</code> and populated catalog confirm provider access, not a qualified XCB coding turn; the recorded live attempt reached provider quota before inference.</p>
       <h2 id="selection">Select an account and model</h2>
-      <p>Copy the matching full key from <code>xcb models</code>. Defaults apply to new interactive sessions; a saved session keeps its account binding.</p>
+      <p>Copy the matching full key from <code>xcb models</code>. Defaults apply to new direct sessions; a saved session keeps its account binding. Managed tasks route automatically among eligible accounts and models.</p>
       <Code>{`xcb accounts default <account>
 xcb models default <full-model-key>
 xcb run --account <account> --model <full-model-key> -p "Explain this repository"
 xcb accounts disable <account>
 xcb accounts enable <account>`}</Code>
-      <p>One account can own one active provider turn. Separate accounts can work concurrently, while the isolated command backend runs one command at a time. A disabled account remains stored with its history.</p>
+      <p>One account can own one active provider turn. Managed tasks in separate workspaces can use separate accounts concurrently. Tasks sharing a workspace run one at a time, and the isolated command backend runs one command at a time. A disabled account remains stored with its history.</p>
       <h2 id="quota">Understand quota information</h2>
       <p>Known Claude account-wide exhaustion stays blocked until the provider’s reported reset. Automatic selection skips those accounts, and an explicit selection explains the block. <code>xcb accounts</code> shows a retry estimate; a reset permits another attempt but does not promise service availability.</p>
       <p>Unknown and stale usage stays unknown. XCB does not infer an account-wide block from arbitrary Codex buckets or Devin exhaustion errors. For exact scopes and credential binding, read the <a href="https://github.com/hraness/xcb/blob/main/docs/quota-routing.md">quota routing contract</a>.</p>
@@ -157,7 +161,7 @@ function Workspace() {
       </ul>
       <p>Read the <a href="https://github.com/hraness/xcb/blob/main/docs/command-runner.md">full command-runner contract</a> for snapshot, output, publication, and cache limits.</p>
       <h2 id="cancel-and-recover">Cancel and recover</h2>
-      <p>Cancel in the terminal that owns the turn. For a headless run, Ctrl-C or SIGTERM requests cleanup. XCB must prove the owned processes have stopped before releasing the account; another terminal can view a session without owning its cancellation.</p>
+      <p>In managed chat, say <code>cancel &lt;task-id&gt;</code> from any control conversation and inspect <code>/tasks</code> for settlement. For a direct session, cancel in the terminal that owns the turn. For a headless run, Ctrl-C or SIGTERM requests cleanup. XCB must prove the owned processes have stopped before releasing the account; another terminal can view a session without owning its cancellation.</p>
       <Code>{`xcb recover
 xcb recover <run-id> --yes`}</Code>
       <p>Inspect the retained run before using <code>--yes</code>. Recovery requires the original host owner to be gone and independently checks pending command receipts. It never publishes staged edits. Do not delete lock files or infer recovery from an elapsed timeout or missing PID.</p>
@@ -180,9 +184,9 @@ function Customization() {
 xcb panes
 xcb plugins`}</Code>
       <h2 id="sessions">Move between sessions</h2>
-      <p>Inside the terminal, use <code>/sessions</code> to open a saved session or <code>/new</code> to start another. <code>/accounts</code> and <code>/model</code> open the account and model pickers. Finish the current turn before changing its account or model.</p>
+      <p>In managed chat, <code>/sessions</code> switches control conversations, <code>/tasks</code> inspects the shared task swarm, and <code>/new</code> starts a new task prompt. To reopen a saved direct provider session, use <code>xcb resume</code>. In that direct terminal, <code>/sessions</code> selects provider sessions, <code>/new</code> starts another, and <code>/accounts</code> and <code>/model</code> open account and model pickers. Finish the current turn before changing its account or model.</p>
       <h2 id="panes">Arrange your terminal</h2>
-      <p>Open the pane picker with <code>/pane</code>, switch to the built-in focused view with <code>/pane focus</code>, or edit the current declaration with <code>/pane edit</code>. To describe a new view, use <code>/pane generate &lt;description&gt;</code>, replacing the placeholder with what you want to see. Generation uses the selected account and model; if that session is busy, it waits for the account’s next idle boundary.</p>
+      <p>In a direct provider terminal, open the pane picker with <code>/pane</code>, switch to the built-in focused view with <code>/pane focus</code>, or edit the current declaration with <code>/pane edit</code>. To describe a new view, use <code>/pane generate &lt;description&gt;</code>, replacing the placeholder with what you want to see. Generation uses the selected account and model; if that session is busy, it waits for the account’s next idle boundary.</p>
       <p>Panes describe what the terminal displays. They are bounded presentation data, not executable plugins, and cannot grant a provider new tools or permissions.</p>
       <Code>{`xcb panes show focus
 xcb panes check /absolute/path/to/pane.json

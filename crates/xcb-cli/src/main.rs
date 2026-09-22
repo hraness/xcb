@@ -43,6 +43,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Open a persistent control conversation; workers continue after detach.
     Chat {
         #[arg(long)]
         resume: Option<Id>,
@@ -87,14 +88,22 @@ enum Commands {
         #[command(subcommand)]
         command: Option<ModelCommand>,
     },
+    /// Inspect conditional public offers; observations do not verify account entitlement.
+    Offers {
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// List direct provider sessions (use conversations for managed chat).
     Sessions {
         #[command(subcommand)]
         command: Option<SessionCommand>,
     },
+    /// Inspect durable managed tasks and their messages.
     Tasks {
         #[command(subcommand)]
         command: Option<TaskCommand>,
     },
+    /// List persistent managed control conversations.
     Conversations,
     Panes {
         #[command(subcommand)]
@@ -135,10 +144,8 @@ enum Commands {
         run: Option<Id>,
         #[arg(long)]
         yes: bool,
-        /// Remove launch directories that predate the owner lock. Nothing can
-        /// prove they are unowned, so this is the operator asserting that no
-        /// xcb is running. Directories that DO carry an owner lock are never
-        /// touched by this flag; doctor collects those on its own evidence.
+        /// Inventory disposable launch snapshots; --yes removes only snapshots
+        /// with durable settlement evidence. Unproven artifacts remain held.
         #[arg(long = "launch-artifacts")]
         launch_artifacts: bool,
     },
@@ -242,6 +249,19 @@ enum ModelCommand {
     Default {
         key: String,
     },
+    /// Inspect relative model profiles, including models without an eligible account.
+    Tiers {
+        #[arg(long, default_value = "general coding task")]
+        task: String,
+    },
+    /// Preview managed routing for --cwd without reserving an account.
+    /// Uses the configured judge when enabled; selection may change before execution.
+    Route {
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        provider: Option<Provider>,
+    },
 }
 #[derive(Subcommand)]
 enum SessionCommand {
@@ -260,7 +280,19 @@ enum SessionCommand {
 }
 #[derive(Subcommand)]
 enum TaskCommand {
-    Show { id: Id },
+    /// Replay local ALGAL transition receipts and verify their chain and task record.
+    Verify {
+        id: Id,
+    },
+    Show {
+        id: Id,
+    },
+    /// Read up to 64 messages; pass the last sequence as --after for the next page.
+    Messages {
+        id: Id,
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(..=i64::MAX as u64))]
+        after: u64,
+    },
 }
 #[derive(Subcommand)]
 enum PaneCommand {
@@ -977,12 +1009,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 Some(judge::JudgeKeySource::Vault) => "vault",
                 None => "none",
             };
-            // Launch directories each hold a private copy of the provider
-            // executable. A killed or crashed turn skips the Drop that would
-            // remove one, so doctor — the command this CLI already tells the
-            // operator to re-run — is where the ones whose owner is provably
-            // gone get collected.
-            let sweep = runner::reclaim_launch_artifacts(&root, false)?;
+            // Reclaim only snapshots already marked disposable after safe
+            // settlement; parent exit alone cannot release provider custody.
+            let sweep = runner::reclaim_launch_artifacts(&root, true)?;
             let (judge_model, judge_endpoint) =
                 xcb_runtime::jev::effective_target(&config.extensions.judge)?;
             let judge_status = json!({
@@ -1003,7 +1032,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     "remedy": if sweep.unprovable.is_empty() {
                         serde_json::Value::Null
                     } else {
-                        json!("written before launch directories carried an owner lock, so nothing here can prove they are unowned; with no xcb running, `xcb recover --launch-artifacts --yes` removes them")
+                        json!("retained because independent provider-join and settled-effect evidence is missing; --yes does not override custody")
                     },
                 });
                 if cfg!(target_os = "linux") {
@@ -1045,7 +1074,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 );
                 if sweep.reclaimed > 0 {
                     println!(
-                        "launch artifacts: reclaimed {} abandoned {} ({})",
+                        "launch artifacts: reclaimed {} settled {} ({})",
                         sweep.reclaimed,
                         if sweep.reclaimed == 1 {
                             "directory"
@@ -1057,7 +1086,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 }
                 if !sweep.unprovable.is_empty() {
                     println!(
-                        "launch artifacts: {} older {} ({}) predate the owner lock, so nothing can prove they are unowned.",
+                        "launch artifacts: {} {} ({}) retained without independent settlement evidence.",
                         sweep.unprovable.len(),
                         if sweep.unprovable.len() == 1 {
                             "directory"
@@ -1067,7 +1096,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         human_bytes(sweep.unprovable_bytes),
                     );
                     println!(
-                        "  With no xcb running, remove them with: xcb recover --launch-artifacts --yes"
+                        "  Parent exit or --yes cannot release custody; inspect the recorded run before recovery."
                     );
                 }
                 for run in store.unsettled_runs()? {
@@ -1093,6 +1122,72 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     }
                     let models = runner::probe(&store, &pin, account.as_ref()).await?;
                     store.set_models(provider, &models)?;
+                }
+                Some(ModelCommand::Route { task, provider }) => {
+                    let workspace = cli.cwd.canonicalize()?;
+                    let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
+                    let (preference, required) =
+                        managed.initial_route_preferences(&workspace, &task)?;
+                    let (preferred_provider, required_provider) =
+                        preview_provider_preferences(preference, required, provider)?;
+                    let excluded_routes = std::collections::BTreeSet::new();
+                    let excluded_accounts = std::collections::BTreeSet::new();
+                    let decision = xcb_runtime::routing::smart_route(
+                        &store,
+                        &Config::load(store.root())?.0,
+                        xcb_runtime::routing::RouteRequest {
+                            task: &task,
+                            required_provider,
+                            preferred_provider,
+                            excluded_routes: &excluded_routes,
+                            excluded_accounts: &excluded_accounts,
+                            account: None,
+                        },
+                    )
+                    .await?;
+                    if cli.json {
+                        print_json(decision)?;
+                    } else {
+                        println!(
+                            "{} · {}  {}",
+                            decision.model.key(),
+                            decision.account,
+                            xcb_core::display_text(&decision.reason, 4096)
+                        );
+                    }
+                    return Ok(0);
+                }
+                Some(ModelCommand::Tiers { task }) => {
+                    let offers = xcb_runtime::offers::load(store.root())?;
+                    let rows = xcb_runtime::routing::profile_models(
+                        &store.models()?,
+                        &offers,
+                        xcb_runtime::now_ms(),
+                        &task,
+                    );
+                    if cli.json {
+                        print_json(rows)?;
+                    } else {
+                        for row in rows {
+                            let offer = row
+                                .profile
+                                .free_offer
+                                .as_ref()
+                                .map(|_| " · conditional offer (entitlement unverified)")
+                                .unwrap_or("");
+                            println!(
+                                "P{}  q{:>3} c{:>3} l{:>3}  {:<56} {}{}",
+                                row.profile.pareto_layer,
+                                row.profile.quality,
+                                row.profile.relative_cost,
+                                row.profile.relative_latency,
+                                row.key,
+                                row.label,
+                                offer,
+                            );
+                        }
+                    }
+                    return Ok(0);
                 }
                 Some(ModelCommand::Default { key }) => {
                     let choice = store
@@ -1125,6 +1220,39 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             } else {
                 for choice in choices {
                     println!("{:<56} {} · {:?}", choice.key(), choice.label, choice.mode);
+                }
+            }
+            Ok(0)
+        }
+        Some(Commands::Offers { refresh }) => {
+            let state = if refresh {
+                xcb_runtime::offers::refresh(store.root())?
+            } else {
+                xcb_runtime::offers::load(store.root())?
+            };
+            if cli.json {
+                print_json(state)?;
+            } else {
+                println!(
+                    "offers checked {} · {} · {} observation{}",
+                    state.checked_at_ms,
+                    if state.fresh(xcb_runtime::now_ms()) {
+                        "fresh"
+                    } else {
+                        "stale"
+                    },
+                    state.offers.len(),
+                    if state.offers.len() == 1 { "" } else { "s" }
+                );
+                for offer in state.offers {
+                    println!(
+                        "{} {}* · {:?} · through {} · {}",
+                        offer.provider,
+                        offer.model_prefix,
+                        offer.kind,
+                        offer.valid_until_ms,
+                        offer.terms,
+                    );
                 }
             }
             Ok(0)
@@ -1249,10 +1377,35 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         }
                     }
                 }
+                Some(TaskCommand::Verify { id }) => {
+                    print_json(managed.verify_task(&id).await?)?;
+                }
                 Some(TaskCommand::Show { id }) => {
                     let task = xcb_runtime::managed::inspect(&managed, &id)?
                         .ok_or(Error::Unavailable("managed task not found"))?;
                     print_json(task)?;
+                }
+                Some(TaskCommand::Messages { id, after }) => {
+                    managed
+                        .task(&id)?
+                        .ok_or(Error::Unavailable("managed task not found"))?;
+                    let messages = managed.mailbox(&id, after, 64)?;
+                    if cli.json {
+                        print_json(messages)?;
+                    } else if messages.is_empty() {
+                        println!("No XCB messages for {id} after sequence {after}.");
+                    } else {
+                        for message in messages {
+                            println!(
+                                "#{} {} {} → {} · {}",
+                                message.sequence,
+                                message.source_provider,
+                                message.source_task,
+                                message.target_task,
+                                xcb_core::display_text(&message.body, xcb_core::MAX_TEXT_BYTES),
+                            );
+                        }
+                    }
                 }
             }
             Ok(0)
@@ -1563,63 +1716,42 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         "--launch-artifacts recovers disposable files, not a run; pass one or the other",
                     ));
                 }
-                let found = runner::reclaim_launch_artifacts(&root, false)?;
-                if !yes {
-                    if cli.json {
-                        print_json(json!({
-                            "version": 1,
-                            "dryRun": true,
-                            "reclaimable": found.unprovable.len(),
-                            "reclaimableBytes": found.unprovable_bytes,
-                            "alreadyReclaimed": found.reclaimed,
-                            "alreadyReclaimedBytes": found.reclaimed_bytes,
-                            "liveHeld": found.live,
-                        }))?;
-                    } else {
-                        println!(
-                            "{} launch {} ({}) predate the owner lock.",
-                            found.unprovable.len(),
-                            if found.unprovable.len() == 1 {
-                                "directory"
-                            } else {
-                                "directories"
-                            },
-                            human_bytes(found.unprovable_bytes),
-                        );
-                        if found.live > 0 {
-                            println!(
-                                "{} other {} owned by a live turn and will not be touched.",
-                                found.live,
-                                if found.live == 1 {
-                                    "directory is"
-                                } else {
-                                    "directories are"
-                                },
-                            );
-                        }
-                        println!("Confirm no xcb is running, then re-run with --yes.");
-                    }
-                    return Ok(0);
-                }
-                let swept = runner::reclaim_launch_artifacts(&root, true)?;
+                let sweep = runner::reclaim_launch_artifacts(&root, yes)?;
                 if cli.json {
                     print_json(json!({
                         "version": 1,
-                        "reclaimed": swept.reclaimed,
-                        "reclaimedBytes": swept.reclaimed_bytes,
-                        "liveHeld": swept.live,
+                        "dryRun": !yes,
+                        "reclaimable": sweep.reclaimable,
+                        "reclaimableBytes": sweep.reclaimable_bytes,
+                        "reclaimed": sweep.reclaimed,
+                        "reclaimedBytes": sweep.reclaimed_bytes,
+                        "liveHeld": sweep.live,
+                        "unreclaimable": sweep.unprovable.len(),
+                        "unreclaimableBytes": sweep.unprovable_bytes,
                     }))?;
                 } else {
                     println!(
-                        "Reclaimed {} launch {} ({}).",
-                        swept.reclaimed,
-                        if swept.reclaimed == 1 {
-                            "directory"
+                        "{} {} settled launch snapshots ({}).",
+                        if yes { "Reclaimed" } else { "Can reclaim" },
+                        if yes {
+                            sweep.reclaimed
                         } else {
-                            "directories"
+                            sweep.reclaimable
                         },
-                        human_bytes(swept.reclaimed_bytes),
+                        human_bytes(if yes {
+                            sweep.reclaimed_bytes
+                        } else {
+                            sweep.reclaimable_bytes
+                        }),
                     );
+                    println!(
+                        "Retained {} live and {} unproven launch snapshots; --yes does not override custody.",
+                        sweep.live,
+                        sweep.unprovable.len(),
+                    );
+                    if !yes && sweep.reclaimable > 0 {
+                        println!("Re-run with --yes to remove the proven disposable snapshots.");
+                    }
                 }
                 return Ok(0);
             }
@@ -1702,6 +1834,21 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+fn preview_provider_preferences(
+    preference: Option<Provider>,
+    required: bool,
+    provider_override: Option<Provider>,
+) -> Result<(Option<Provider>, Option<Provider>)> {
+    if required && provider_override.is_some() && provider_override != preference {
+        return Err(Error::Conflict(
+            "--provider conflicts with the task's explicit provider directive",
+        ));
+    }
+    let preferred = provider_override.or(preference);
+    let required = provider_override.or(required.then_some(preference).flatten());
+    Ok((preferred, required))
 }
 
 async fn managed_chat(
@@ -2167,9 +2314,85 @@ mod tests {
             cli.command,
             Some(Commands::Tasks { command: None })
         ));
+        let cli = Cli::try_parse_from(["xcb", "tasks", "verify", "t_example"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Tasks { command: Some(TaskCommand::Verify { id }) }) if id.as_str() == "t_example")
+        );
         let cli = Cli::try_parse_from(["xcb", "tasks", "show", "t_example"]).unwrap();
         assert!(
             matches!(cli.command, Some(Commands::Tasks { command: Some(TaskCommand::Show { id }) }) if id.as_str() == "t_example")
+        );
+        let cli =
+            Cli::try_parse_from(["xcb", "tasks", "messages", "t_example", "--after", "4"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Tasks {
+                command: Some(TaskCommand::Messages { id, after: 4 })
+            }) if id.as_str() == "t_example"
+        ));
+        let cli = Cli::try_parse_from(["xcb", "offers", "--refresh"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Offers { refresh: true })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "models", "tiers", "--task", "fix a race"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Models {
+                command: Some(ModelCommand::Tiers { task })
+            }) if task == "fix a race"
+        ));
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "models",
+            "route",
+            "--task",
+            "fix a race",
+            "--provider",
+            "codex",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Models {
+                command: Some(ModelCommand::Route { task, provider: Some(Provider::Codex) })
+            }) if task == "fix a race"
+        ));
+    }
+
+    #[test]
+    fn route_preview_honors_learned_and_explicit_provider_preferences() {
+        assert_eq!(
+            preview_provider_preferences(Some(Provider::Claude), false, None).unwrap(),
+            (Some(Provider::Claude), None)
+        );
+        assert_eq!(
+            preview_provider_preferences(Some(Provider::Claude), false, Some(Provider::Codex))
+                .unwrap(),
+            (Some(Provider::Codex), Some(Provider::Codex))
+        );
+        assert_eq!(
+            preview_provider_preferences(Some(Provider::Claude), true, None).unwrap(),
+            (Some(Provider::Claude), Some(Provider::Claude))
+        );
+        assert!(
+            preview_provider_preferences(Some(Provider::Claude), true, Some(Provider::Codex))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn mailbox_cursor_rejects_values_outside_the_storage_range() {
+        assert!(
+            Cli::try_parse_from([
+                "xcb",
+                "tasks",
+                "messages",
+                "t_example",
+                "--after",
+                "9223372036854775808"
+            ])
+            .is_err()
         );
     }
 

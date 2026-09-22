@@ -20,6 +20,33 @@ const MAX_ACCOUNTS: i64 = 128;
 const MAX_SESSIONS: i64 = 10_000;
 const MAX_MESSAGES: i64 = 10_000;
 
+/// A terminal report is committed in the same transaction as custody release.
+/// Its transcript boundary prevents a later turn from being mistaken for the
+/// managed dispatch that is being reconciled after a supervisor restart.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SettledOutcome {
+    version: u32,
+    run: Id,
+    session: Id,
+    input: Id,
+    input_sequence: u64,
+    message_count: u64,
+    session_revision: u64,
+    outcome: crate::runner::Outcome,
+}
+
+fn validate_outcome(outcome: &crate::runner::Outcome) -> Result<()> {
+    xcb_core::bounded_text(&outcome.text, xcb_core::MAX_TEXT_BYTES)?;
+    if !outcome.facts.joined
+        || outcome.facts.effects == xcb_core::policy::EffectState::Uncertain
+        || matches!(outcome.state, State::Working | State::Uncertain)
+    {
+        return Err(Error::Conflict("terminal outcome settlement is unproven"));
+    }
+    Ok(())
+}
+
 fn generation_pool(root: &Path, account: &Account) -> Result<Option<Id>> {
     if account.provider != Provider::Claude {
         return Ok(None);
@@ -470,6 +497,16 @@ impl Store {
             }
             tx.commit()?;
         }
+        // Additive extension: older readers can still inspect version-one
+        // state; missing terminal records never authorize inferred completion.
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS run_outcomes(
+            run TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+            session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            input_sequence INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            UNIQUE(session,input_sequence));",
+        )?;
         Ok(Self {
             root,
             instance: new_id("i").to_string(),
@@ -1085,6 +1122,27 @@ impl Store {
     }
 
     pub(crate) fn settle(&self, run: &RunRecord, state: State, now: u64) -> Result<()> {
+        self.settle_inner(run, state, now, None)
+    }
+
+    pub(crate) fn settle_outcome(
+        &self,
+        run: &RunRecord,
+        input: &Id,
+        outcome: &crate::runner::Outcome,
+        now: u64,
+    ) -> Result<()> {
+        validate_outcome(outcome)?;
+        self.settle_inner(run, outcome.state, now, Some((input, outcome)))
+    }
+
+    fn settle_inner(
+        &self,
+        run: &RunRecord,
+        state: State,
+        now: u64,
+        outcome: Option<(&Id, &crate::runner::Outcome)>,
+    ) -> Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (current, payload) = self.owned_run_from(&tx, run)?;
@@ -1102,7 +1160,35 @@ impl Store {
                 .ok_or(Error::Conflict("revision overflow"))?;
             session.state = state;
             session.last_active_at_ms = session.last_active_at_ms.max(now);
+            if let Some((input, outcome)) = outcome {
+                let input_sequence: u32 = tx.query_row(
+                    "SELECT sequence FROM messages WHERE id=?1 AND session=?2",
+                    params![input.as_str(), id.as_str()],
+                    |row| row.get(0),
+                )?;
+                let message_count: u32 = tx.query_row(
+                    "SELECT count(*) FROM messages WHERE session=?1",
+                    [id.as_str()],
+                    |row| row.get(0),
+                )?;
+                let record = SettledOutcome {
+                    version: 1,
+                    run: run.id.clone(),
+                    session: id.clone(),
+                    input: input.clone(),
+                    input_sequence: input_sequence.into(),
+                    message_count: message_count.into(),
+                    session_revision: session.revision,
+                    outcome: outcome.clone(),
+                };
+                tx.execute(
+                    "INSERT INTO run_outcomes(run,session,input_sequence,payload) VALUES(?1,?2,?3,?4)",
+                    params![run.id.as_str(), id.as_str(), input_sequence, serde_json::to_string(&record)?],
+                )?;
+            }
             update_session(&tx, &session, expected)?;
+        } else if outcome.is_some() {
+            return Err(Error::Conflict("terminal outcome requires a session run"));
         }
         let record = RunRecord {
             phase: "settled".into(),
@@ -1124,6 +1210,80 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Recover only the exact settled turn that started after this transcript
+    /// boundary. Legacy runs and sessions changed by a later turn return None.
+    pub fn settled_outcome(
+        &self,
+        session_id: &Id,
+        message_count_before: usize,
+    ) -> Result<Option<crate::runner::Outcome>> {
+        let before = u64::try_from(message_count_before)
+            .map_err(|_| xcb_core::Error::Invalid("message count"))?;
+        if before >= MAX_MESSAGES as u64 {
+            return Err(xcb_core::Error::Invalid("message count").into());
+        }
+        let input_sequence = before + 1;
+        let mut db = self.db()?;
+        let tx = db.transaction()?;
+        let available: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='run_outcomes')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !available {
+            return Ok(None);
+        }
+        let stored: Option<(String, String)> = tx.query_row(
+            "SELECT o.payload,r.payload FROM run_outcomes o JOIN runs r ON r.id=o.run WHERE o.session=?1 AND o.input_sequence=?2 AND r.phase='settled'",
+            params![session_id.as_str(), sql(input_sequence)?],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let Some((payload, run)) = stored else {
+            return Ok(None);
+        };
+        let record: SettledOutcome = decode(&payload)?;
+        let run: RunRecord = decode(&run)?;
+        run.validate()?;
+        validate_outcome(&record.outcome)?;
+        if record.version != 1
+            || record.run != run.id
+            || &record.session != session_id
+            || run.session.as_ref() != Some(session_id)
+            || run.phase != "settled"
+            || record.input_sequence != input_sequence
+            || record.message_count < input_sequence
+        {
+            return Err(Error::Conflict("terminal outcome identity mismatch"));
+        }
+        let Some(session) = session_from(&tx, session_id)? else {
+            return Ok(None);
+        };
+        let message_count: u32 = tx.query_row(
+            "SELECT count(*) FROM messages WHERE session=?1",
+            [session_id.as_str()],
+            |row| row.get(0),
+        )?;
+        let input_matches: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE session=?1 AND sequence=?2 AND id=?3)",
+            params![
+                session_id.as_str(),
+                sql(input_sequence)?,
+                record.input.as_str()
+            ],
+            |row| row.get(0),
+        )?;
+        if !input_matches
+            || session.revision != record.session_revision
+            || u64::from(message_count) != record.message_count
+            || session.state != record.outcome.state
+            || session.account != run.account
+            || run.model.as_ref() != Some(&session.model)
+        {
+            return Ok(None);
+        }
+        Ok(Some(record.outcome))
     }
     pub fn unsettled_runs(&self) -> Result<Vec<RunRecord>> {
         let db = self.db()?;
@@ -1273,6 +1433,11 @@ impl Store {
         Ok(settled)
     }
     pub fn remove_session(&self, id: &Id) -> Result<bool> {
+        if let Some(managed) = self.existing_managed_store()?
+            && managed.has_active_session(id)?
+        {
+            return Err(Error::Conflict("session belongs to an active managed task"));
+        }
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let active: bool = tx.query_row(
@@ -1296,7 +1461,32 @@ impl Store {
         let rows = query.query_map(params![sql(before)?, limit as i64], |row| {
             row.get::<_, String>(0)
         })?;
-        rows.map(|row| Ok(Id::new(row?)?)).collect()
+        let candidates = rows
+            .map(|row| Ok(Id::new(row?)?))
+            .collect::<Result<Vec<_>>>()?;
+        drop(query);
+        drop(db);
+        // Do not hold native database custody while inspecting the managed
+        // store. Paused questions and between-turn queues still need history.
+        if let Some(managed) = self.existing_managed_store()? {
+            let mut eligible = Vec::new();
+            for id in candidates {
+                if !managed.has_active_session(&id)? {
+                    eligible.push(id);
+                }
+            }
+            Ok(eligible)
+        } else {
+            Ok(candidates)
+        }
+    }
+
+    fn existing_managed_store(&self) -> Result<Option<crate::managed::ManagedStore>> {
+        if self.root.join("managed/managed.sqlite").try_exists()? {
+            Ok(Some(crate::managed::ManagedStore::open(&self.root)?))
+        } else {
+            Ok(None)
+        }
     }
     pub fn set_models(&self, provider: Provider, choices: &[ModelChoice]) -> Result<()> {
         if choices.len() > 4096 {
@@ -1693,6 +1883,102 @@ mod tests {
             observed_at_ms: observed,
             resets_at_ms: reset,
         }
+    }
+
+    #[test]
+    fn terminal_outcomes_are_atomic_exact_and_legacy_safe() {
+        use xcb_core::{
+            policy::{EffectState, Terminal, TurnFacts},
+            session::Role,
+        };
+        let directory = root();
+        let base = directory.path().canonicalize().unwrap();
+        let state = base.join("state");
+        let workspace = base.join("work");
+        let store = Store::open(&state).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Fixture", 1, None)
+            .unwrap();
+        let session = store
+            .create_session(&account.id, choice(), &workspace, 2)
+            .unwrap();
+        let input = Message {
+            id: new_id("input"),
+            role: Role::User,
+            text: "finish the task".into(),
+            attachments: vec![],
+            at_ms: 3,
+            provenance: None,
+        };
+        let session = store
+            .append_message(&session.id, session.revision, &input)
+            .unwrap();
+        let run = store.prepare_run(&session.id, session.revision, 4).unwrap();
+        let mut outcome = crate::runner::Outcome {
+            text: "The turn limit interrupted the remaining work".into(),
+            facts: TurnFacts {
+                terminal: Terminal::TurnLimit,
+                joined: true,
+                effects: EffectState::None,
+                pending_attention: false,
+                failure: None,
+            },
+            state: State::Idle,
+        };
+        outcome.facts.joined = false;
+        assert!(store.settle_outcome(&run, &input.id, &outcome, 5).is_err());
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        outcome.facts.joined = true;
+        assert!(
+            store
+                .settle_outcome(&run, &new_id("missing"), &outcome, 5)
+                .is_err()
+        );
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        assert!(store.settled_outcome(&session.id, 0).unwrap().is_none());
+        store.settle_outcome(&run, &input.id, &outcome, 6).unwrap();
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        drop(store);
+
+        let reader = Store::open_read_only(&state).unwrap();
+        let recovered = reader.settled_outcome(&session.id, 0).unwrap().unwrap();
+        assert_eq!(recovered.facts.terminal, Terminal::TurnLimit);
+        assert_eq!(recovered.state, State::Idle);
+        assert_eq!(recovered.text, outcome.text);
+        assert!(reader.settled_outcome(&session.id, 1).unwrap().is_none());
+        drop(reader);
+
+        let store = Store::open(&state).unwrap();
+        let current = store.session(&session.id).unwrap().unwrap();
+        let next_input = Message {
+            id: new_id("input"),
+            at_ms: 7,
+            ..input
+        };
+        let current = store
+            .append_message(&session.id, current.revision, &next_input)
+            .unwrap();
+        assert!(
+            store.settled_outcome(&session.id, 0).unwrap().is_none(),
+            "a newer turn invalidates the old dispatch boundary"
+        );
+        let run = store.prepare_run(&session.id, current.revision, 8).unwrap();
+        store.settle(&run, State::Idle, 9).unwrap();
+        assert!(
+            store.settled_outcome(&session.id, 1).unwrap().is_none(),
+            "legacy Idle does not prove completion"
+        );
+        store
+            .db()
+            .unwrap()
+            .execute_batch("DROP TABLE run_outcomes")
+            .unwrap();
+        drop(store);
+        let reader = Store::open_read_only(&state).unwrap();
+        assert!(reader.settled_outcome(&session.id, 1).unwrap().is_none());
+        drop(reader);
+        let reopened = Store::open(&state).unwrap();
+        assert!(reopened.settled_outcome(&session.id, 1).unwrap().is_none());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::{
     Error, Result, attachments,
     config::Config,
-    digest, judge, kernel, new_id, now_ms, private,
+    digest, judge, kernel, new_id, now_ms, private, routing,
     runner::{Observer, Outcome, Progress},
     store::Store,
 };
@@ -26,7 +26,7 @@ use std::{
 use tokio::{sync::watch, task::JoinSet};
 use xcb_core::{
     Id, Provider, bounded_text, label,
-    policy::{EffectState, Terminal},
+    policy::{EffectState, Failure, Terminal, should_continue},
     session::{Attachment, Message, Role, State},
     ui::{ConversationRow, Intent, TaskRow, Update, View},
 };
@@ -36,11 +36,21 @@ const MAX_TASKS: i64 = 4096;
 const MAX_NONTERMINAL_TASKS: i64 = 128;
 const MAX_MESSAGES: i64 = 50_000;
 const MAX_TOTAL_MESSAGES: i64 = 200_000;
+const MAX_MAILBOX_MESSAGES: i64 = 4096;
+const MAX_TASK_MAILBOX_MESSAGES: i64 = 256;
 const MAX_PREFERENCES: i64 = 256;
 const MAX_ACTIVE: usize = 4;
 const MAX_TASK_ATTEMPTS: u32 = 4;
 const IDLE_EXIT: Duration = Duration::from_secs(30);
 const POLICY: &str = include_str!("../managed-transition.algal.json");
+
+#[cfg(test)]
+#[path = "managed_mailbox_tests.rs"]
+mod mailbox_integrity_tests;
+
+#[cfg(test)]
+#[path = "managed_recovery_tests.rs"]
+mod recovery_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,9 +129,26 @@ pub struct ManagedTask {
     pub title: String,
     pub goal: String,
     pub next_prompt: String,
+    /// Explicit user follow-ups survive provider failover and continuation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_inputs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_at_ms: Option<u64>,
     pub attachments: Vec<Attachment>,
     pub session: Option<Id>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worker_sessions: Vec<Id>,
     pub route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_preference: Option<Provider>,
+    #[serde(default)]
+    pub provider_required: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tried_routes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed_accounts: Vec<Id>,
     pub state: TaskState,
     pub detail: String,
     pub attempts: u32,
@@ -136,12 +163,38 @@ pub struct ManagedTask {
     pub updated_at_ms: u64,
 }
 impl ManagedTask {
+    fn same_identity(&self, other: &Self) -> bool {
+        self.id == other.id
+            && self.operation == other.operation
+            && self.source_message == other.source_message
+            && self.conversation == other.conversation
+            && self.workspace == other.workspace
+            && self.goal == other.goal
+            && self.provider_preference == other.provider_preference
+            && self.provider_required == other.provider_required
+            && self.max_attempts == other.max_attempts
+            && self.created_at_ms == other.created_at_ms
+            && self.policy_digest == other.policy_digest
+    }
     fn validate(&self) -> Result<()> {
         if self.version != 1
             || self.max_attempts == 0
             || self.max_attempts > 32
             || self.attempts > self.max_attempts
+            || self.user_inputs.len() > 64
+            || self.user_inputs.iter().map(String::len).sum::<usize>() > 64 * 1024
+            || self
+                .input_at_ms
+                .is_some_and(|at| at < self.created_at_ms || at > self.updated_at_ms)
             || self.message_count_before > 10_000
+            || self.worker_sessions.len() > 16
+            || self.worker_sessions.iter().collect::<BTreeSet<_>>().len()
+                != self.worker_sessions.len()
+            || self.tried_routes.len() > 16
+            || self.tried_routes.iter().collect::<BTreeSet<_>>().len() != self.tried_routes.len()
+            || self.failed_accounts.len() > 16
+            || self.failed_accounts.iter().collect::<BTreeSet<_>>().len()
+                != self.failed_accounts.len()
             || self.revision == 0
             || self.updated_at_ms < self.created_at_ms
             || !Path::new(&self.workspace).is_absolute()
@@ -154,7 +207,16 @@ impl ManagedTask {
         bounded_text(&self.workspace, 4096)?;
         bounded_text(&self.goal, xcb_core::MAX_TEXT_BYTES)?;
         bounded_text(&self.next_prompt, xcb_core::MAX_TEXT_BYTES)?;
+        for input in &self.user_inputs {
+            bounded_text(input, 64 * 1024)?;
+        }
         bounded_text(&self.detail, 4096)?;
+        if let Some(reason) = &self.route_reason {
+            bounded_text(reason, 4096)?;
+        }
+        for route in &self.tried_routes {
+            bounded_text(route, 512)?;
+        }
         if self.attachments.len() > 8 {
             return Err(xcb_core::Error::Limit("managed attachments").into());
         }
@@ -184,6 +246,29 @@ impl Preference {
             return Err(xcb_core::Error::Invalid("managed preference").into());
         }
         bounded_text(&self.text, 4096)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MailboxMessage {
+    pub version: u32,
+    pub id: Id,
+    pub source_task: Id,
+    pub target_task: Id,
+    pub source_session: Id,
+    pub source_provider: Provider,
+    pub sequence: u64,
+    pub body: String,
+    pub created_at_ms: u64,
+}
+impl MailboxMessage {
+    fn validate(&self) -> Result<()> {
+        if self.version != 1 || self.sequence == 0 || self.body.trim().is_empty() {
+            return Err(xcb_core::Error::Invalid("mailbox message").into());
+        }
+        bounded_text(&self.body, 8192)?;
         Ok(())
     }
 }
@@ -266,7 +351,17 @@ impl ManagedStore {
                  CREATE TABLE receipts(digest TEXT PRIMARY KEY, task TEXT, revision INTEGER NOT NULL, payload TEXT NOT NULL);
                  CREATE TABLE preferences(id TEXT PRIMARY KEY, scope TEXT NOT NULL, created_at INTEGER NOT NULL, payload TEXT NOT NULL);
                  CREATE TABLE route_stats(scope TEXT NOT NULL, provider TEXT NOT NULL, completed INTEGER NOT NULL, failed INTEGER NOT NULL, PRIMARY KEY(scope,provider));
+                 CREATE TABLE mailbox_messages(id TEXT PRIMARY KEY, source_task TEXT NOT NULL REFERENCES tasks(id), target_task TEXT NOT NULL REFERENCES tasks(id), sequence INTEGER NOT NULL, created_at INTEGER NOT NULL, payload TEXT NOT NULL, UNIQUE(target_task,sequence));
+                 CREATE INDEX mailbox_target_sequence ON mailbox_messages(target_task,sequence);
                  PRAGMA user_version=1;",
+            )?;
+            tx.commit()?;
+        }
+        if version == 1 {
+            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS mailbox_messages(id TEXT PRIMARY KEY, source_task TEXT NOT NULL REFERENCES tasks(id), target_task TEXT NOT NULL REFERENCES tasks(id), sequence INTEGER NOT NULL, created_at INTEGER NOT NULL, payload TEXT NOT NULL, UNIQUE(target_task,sequence));
+                 CREATE INDEX IF NOT EXISTS mailbox_target_sequence ON mailbox_messages(target_task,sequence);",
             )?;
             tx.commit()?;
         }
@@ -285,6 +380,10 @@ impl ManagedStore {
     }
 
     pub async fn create_conversation(&self, workspace: &Path) -> Result<ManagedConversation> {
+        let workspace = fs::canonicalize(workspace)?;
+        if !workspace.is_dir() {
+            return Err(Error::Unavailable("managed workspace is not a directory"));
+        }
         let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
         let now = now_ms();
         let id = new_id("c");
@@ -454,6 +553,386 @@ impl ManagedStore {
         })
         .transpose()
     }
+
+    /// Replay the task's complete ALGAL receipt chain and bind it to the
+    /// persisted task. This verifies local records, not provider truth.
+    pub async fn verify_task(&self, id: &Id) -> Result<Value> {
+        let task = self
+            .task(id)?
+            .ok_or(Error::Unavailable("managed task not found"))?;
+        let manifest = Manifest::parse(&serde_json::from_str(POLICY)?)
+            .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?;
+        let mut expected = task.clone();
+        let mut verified = 0u64;
+        loop {
+            if verified >= 1024 {
+                return Err(xcb_core::Error::Limit("managed receipt chain").into());
+            }
+            let payload: String = self.db()?.query_row(
+                "SELECT payload FROM receipts WHERE digest=?1 AND task=?2 AND revision=?3 AND length(payload)<=2097152",
+                params![expected.last_receipt, id.as_str(), sql(expected.revision)?],
+                |row| row.get(0),
+            )?;
+            let receipt: Value = serde_json::from_str(&payload)?;
+            if receipt["digest"] != expected.last_receipt
+                || receipt["manifestDigest"] != expected.policy_digest
+                || runtime::verify(
+                    &receipt,
+                    manifest.clone(),
+                    &AlgalStore::default(),
+                    &Host::default(),
+                )
+                .await
+                .map_err(|_| Error::Unavailable("managed receipt replay failed"))?["ok"]
+                    != true
+            {
+                return Err(Error::Conflict("managed receipt replay mismatch"));
+            }
+            let record = runtime::outputs(&manifest, &receipt)
+                .map_err(|_| Error::Unavailable("managed receipt output rejected"))?;
+            let mut recorded: ManagedTask = serde_json::from_value(record["record"].clone())?;
+            recorded.validate()?;
+            let previous = recorded.last_receipt.clone();
+            recorded.last_receipt = expected.last_receipt.clone();
+            if serde_json::to_value(&recorded)? != serde_json::to_value(&expected)? {
+                return Err(Error::Conflict(
+                    "managed receipt does not match persisted task",
+                ));
+            }
+            verified += 1;
+            if expected.revision == 1 {
+                if previous != "sha256:pending" {
+                    return Err(Error::Conflict("managed receipt origin mismatch"));
+                }
+                break;
+            }
+            let prior: String = self.db()?.query_row(
+                "SELECT payload FROM receipts WHERE digest=?1 AND task=?2 AND revision=?3 AND length(payload)<=2097152",
+                params![previous, id.as_str(), sql(expected.revision - 1)?], |row| row.get(0),
+            )?;
+            let prior: Value = serde_json::from_str(&prior)?;
+            let prior_record = runtime::outputs(&manifest, &prior)
+                .map_err(|_| Error::Unavailable("managed receipt output rejected"))?;
+            let revision = expected.revision;
+            expected = serde_json::from_value(prior_record["record"].clone())?;
+            if !expected.same_identity(&task) || expected.revision != revision - 1 {
+                return Err(Error::Conflict("managed receipt chain identity mismatch"));
+            }
+            expected.last_receipt = previous;
+        }
+        Ok(
+            json!({"taskId":id,"verified":true,"revisions":verified,"receipt":task.last_receipt,"policy":task.policy_digest}),
+        )
+    }
+    fn task_for_worker_session(&self, session: &Id) -> Result<ManagedTask> {
+        self.active_tasks(128)?
+            .into_iter()
+            .find(|task| task.state == TaskState::Running && task.session.as_ref() == Some(session))
+            .ok_or(Error::Unavailable(
+                "XCB messaging requires an active managed task",
+            ))
+    }
+    pub(crate) fn has_active_session(&self, session: &Id) -> Result<bool> {
+        Ok(self
+            .active_tasks(MAX_NONTERMINAL_TASKS as usize)?
+            .iter()
+            .any(|task| {
+                task.session.as_ref() == Some(session) || task.worker_sessions.contains(session)
+            }))
+    }
+
+    fn mailbox_tail(&self, task: &Id, limit: usize) -> Result<Vec<MailboxMessage>> {
+        let latest: i64 = self.db()?.query_row(
+            "SELECT COALESCE(max(sequence),0) FROM mailbox_messages WHERE target_task=?1",
+            [task.as_str()],
+            |row| row.get(0),
+        )?;
+        let latest =
+            u64::try_from(latest).map_err(|_| xcb_core::Error::Invalid("mailbox sequence"))?;
+        self.mailbox(task, latest.saturating_sub(limit as u64), limit)
+    }
+    pub fn mailbox(&self, task: &Id, after: u64, limit: usize) -> Result<Vec<MailboxMessage>> {
+        if !(1..=64).contains(&limit) {
+            return Err(xcb_core::Error::Invalid("mailbox page").into());
+        }
+        let db = self.db()?;
+        let mut query = db.prepare("SELECT id,source_task,target_task,sequence,created_at,payload FROM mailbox_messages WHERE target_task=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3")?;
+        let rows = query.query_map(params![task.as_str(), sql(after)?, limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        let mut messages = Vec::new();
+        for row in rows {
+            let (id, source, target, sequence, created_at, payload) = row?;
+            let message: MailboxMessage = decode(&payload)?;
+            message.validate()?;
+            if message.id.as_str() != id
+                || message.source_task.as_str() != source
+                || message.target_task.as_str() != target
+                || u64::try_from(sequence).ok() != Some(message.sequence)
+                || u64::try_from(created_at).ok() != Some(message.created_at_ms)
+                || &message.target_task != task
+                || message.sequence <= after
+            {
+                return Err(Error::Conflict("mailbox message scope mismatch"));
+            }
+            messages.push(message);
+        }
+        Ok(messages)
+    }
+    fn send_mailbox(
+        &self,
+        source: &ManagedTask,
+        target: &ManagedTask,
+        session: &Id,
+        provider: Provider,
+        call: &str,
+        body: String,
+    ) -> (Result<MailboxMessage>, EffectState) {
+        if body.trim().is_empty() {
+            return (
+                Err(xcb_core::Error::Invalid("mailbox body").into()),
+                EffectState::None,
+            );
+        }
+        if let Err(error) = bounded_text(&body, 8192) {
+            return (Err(error.into()), EffectState::None);
+        }
+        let id = match Id::new(format!(
+            "mb_{}",
+            digest(format!(
+                "xcb-mailbox-v2\0{}\0{}\0{}\0{call}",
+                source.id, session, source.message_count_before
+            ))
+        )) {
+            Ok(id) => id,
+            Err(error) => return (Err(error.into()), EffectState::None),
+        };
+        let mut effects = EffectState::None;
+        let result = (|| {
+            let mut db = self.db()?;
+            let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let current_source = task_from(&tx, &source.id)?
+                .ok_or(Error::Unavailable("mailbox source task not found"))?;
+            let current_target = task_from(&tx, &target.id)?
+                .ok_or(Error::Unavailable("mailbox target task not found"))?;
+            if current_source.state != TaskState::Running
+                || current_source.cancel_requested
+                || current_source.session.as_ref() != Some(session)
+                || current_source.message_count_before != source.message_count_before
+                || current_source.workspace != current_target.workspace
+            {
+                return Err(Error::Conflict(
+                    "mailbox source is no longer an active worker in this workspace",
+                ));
+            }
+            let existing: Option<(String, String, i64, i64, String)> = tx
+                .query_row(
+                    "SELECT source_task,target_task,sequence,created_at,payload FROM mailbox_messages WHERE id=?1",
+                    [id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .optional()?;
+            if let Some((indexed_source, indexed_target, sequence, created_at, payload)) = existing
+            {
+                let message: MailboxMessage = decode(&payload)?;
+                message.validate()?;
+                if message.id != id
+                    || message.source_task != source.id
+                    || message.source_session != *session
+                    || message.source_provider != provider
+                    || message.target_task != target.id
+                    || message.source_task.as_str() != indexed_source
+                    || message.target_task.as_str() != indexed_target
+                    || u64::try_from(sequence).ok() != Some(message.sequence)
+                    || u64::try_from(created_at).ok() != Some(message.created_at_ms)
+                    || message.body != body
+                {
+                    return Err(Error::Conflict(
+                        "mailbox call was reused with different arguments",
+                    ));
+                }
+                effects = EffectState::Settled;
+                return Ok(message);
+            }
+            if current_target.state.terminal() || current_target.cancel_requested {
+                return Err(Error::Conflict(
+                    "mailbox target must be an active task in this workspace",
+                ));
+            }
+            let total: i64 = tx.query_row("SELECT count(*) FROM mailbox_messages", [], |row| {
+                row.get(0)
+            })?;
+            let target_count: i64 = tx.query_row(
+                "SELECT count(*) FROM mailbox_messages WHERE target_task=?1",
+                [target.id.as_str()],
+                |row| row.get(0),
+            )?;
+            if total >= MAX_MAILBOX_MESSAGES || target_count >= MAX_TASK_MAILBOX_MESSAGES {
+                return Err(xcb_core::Error::Limit("managed mailbox messages").into());
+            }
+            let sequence: i64 = tx.query_row(
+                "SELECT COALESCE(max(sequence),0)+1 FROM mailbox_messages WHERE target_task=?1",
+                [target.id.as_str()],
+                |row| row.get(0),
+            )?;
+            let message = MailboxMessage {
+                version: 1,
+                id,
+                source_task: source.id.clone(),
+                target_task: target.id.clone(),
+                source_session: session.clone(),
+                source_provider: provider,
+                sequence: u64::try_from(sequence)
+                    .map_err(|_| xcb_core::Error::Invalid("mailbox sequence"))?,
+                body,
+                created_at_ms: now_ms(),
+            };
+            message.validate()?;
+            effects = EffectState::Uncertain;
+            tx.execute(
+                "INSERT INTO mailbox_messages(id,source_task,target_task,sequence,created_at,payload) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![
+                    message.id.as_str(),
+                    message.source_task.as_str(),
+                    message.target_task.as_str(),
+                    sequence,
+                    sql(message.created_at_ms)?,
+                    serde_json::to_string(&message)?,
+                ],
+            )?;
+            tx.commit()?;
+            effects = EffectState::Settled;
+            Ok(message)
+        })();
+        (result, effects)
+    }
+    pub(crate) fn worker_call(
+        &self,
+        store: &Store,
+        session: &Id,
+        call: &str,
+        name: &str,
+        input: &Value,
+    ) -> (Result<Value>, EffectState) {
+        let source = match self.task_for_worker_session(session) {
+            Ok(task) => task,
+            Err(error) => return (Err(error), EffectState::None),
+        };
+        let worker = match store.session(session) {
+            Ok(Some(worker)) => worker,
+            Ok(None) => {
+                return (
+                    Err(Error::Unavailable("worker session not found")),
+                    EffectState::None,
+                );
+            }
+            Err(error) => return (Err(error), EffectState::None),
+        };
+        if worker.workspace != source.workspace {
+            return (
+                Err(Error::Conflict("managed worker workspace changed")),
+                EffectState::None,
+            );
+        }
+        let provider = worker.model.provider;
+        match name {
+            "xcb_swarm_status" => {
+                if input.as_object().is_none_or(|input| !input.is_empty()) {
+                    return (
+                        Err(xcb_core::Error::Invalid("swarm status arguments").into()),
+                        EffectState::None,
+                    );
+                }
+                let tasks = match self.active_tasks(128) {
+                    Ok(tasks) => tasks,
+                    Err(error) => return (Err(error), EffectState::None),
+                };
+                let rows: Vec<_> = tasks
+                    .into_iter()
+                    .filter(|task| task.workspace == source.workspace)
+                    .map(|task| {
+                        json!({
+                            "taskId":task.id,
+                            "title":task.title,
+                            "state":task.state.as_str(),
+                            "route":task.route,
+                            "current":task.id == source.id,
+                        })
+                    })
+                    .collect();
+                (
+                    Ok(json!({"currentTask":source.id,"tasks":rows})),
+                    EffectState::None,
+                )
+            }
+            "xcb_message_list" => {
+                #[derive(Deserialize)]
+                #[serde(default, deny_unknown_fields)]
+                struct Args {
+                    after: u64,
+                    limit: usize,
+                }
+                impl Default for Args {
+                    fn default() -> Self {
+                        Self {
+                            after: 0,
+                            limit: 32,
+                        }
+                    }
+                }
+                let args: Args = match serde_json::from_value(input.clone()) {
+                    Ok(args) => args,
+                    Err(error) => return (Err(error.into()), EffectState::None),
+                };
+                match self.mailbox(&source.id, args.after, args.limit) {
+                    Ok(messages) => (
+                        Ok(json!({"taskId":source.id,"messages":messages})),
+                        EffectState::None,
+                    ),
+                    Err(error) => (Err(error), EffectState::None),
+                }
+            }
+            "xcb_message_send" => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase", deny_unknown_fields)]
+                struct Args {
+                    target_task: Id,
+                    body: String,
+                }
+                let args: Args = match serde_json::from_value(input.clone()) {
+                    Ok(args) => args,
+                    Err(error) => return (Err(error.into()), EffectState::None),
+                };
+                let target = match self.task(&args.target_task) {
+                    Ok(Some(task)) => task,
+                    Ok(None) => {
+                        return (
+                            Err(Error::Unavailable("mailbox target task not found")),
+                            EffectState::None,
+                        );
+                    }
+                    Err(error) => return (Err(error), EffectState::None),
+                };
+                let (message, effects) =
+                    self.send_mailbox(&source, &target, session, provider, call, args.body);
+                (
+                    message.and_then(|message| Ok(serde_json::to_value(message)?)),
+                    effects,
+                )
+            }
+            _ => (
+                Err(Error::Unavailable("unknown XCB messaging tool")),
+                EffectState::None,
+            ),
+        }
+    }
     pub fn preferences(&self, workspace: &Path) -> Result<Vec<Preference>> {
         let scope = workspace.to_string_lossy();
         let db = self.db()?;
@@ -503,11 +982,31 @@ impl ManagedStore {
         }
     }
 
-    async fn record_route_observation(&self, task: &ManagedTask) -> Result<()> {
-        let outcome = match task.state {
-            TaskState::Completed => "completed",
-            TaskState::Failed => "failed",
-            _ => return Ok(()),
+    pub fn initial_route_preferences(
+        &self,
+        workspace: &Path,
+        task: &str,
+    ) -> Result<(Option<Provider>, bool)> {
+        match route_hint(task) {
+            Some(provider) => Ok((Some(provider), true)),
+            None => Ok((self.learned_route(workspace)?, false)),
+        }
+    }
+
+    async fn record_route_observation(
+        &self,
+        task: &ManagedTask,
+        override_outcome: Option<&'static str>,
+    ) -> Result<()> {
+        let outcome = match override_outcome {
+            Some("completed") => "completed",
+            Some("failed") => "failed",
+            Some(_) => return Err(xcb_core::Error::Invalid("route outcome").into()),
+            None => match task.state {
+                TaskState::Completed => "completed",
+                TaskState::Failed => "failed",
+                _ => return Ok(()),
+            },
         };
         let Some(provider) = task
             .route
@@ -548,12 +1047,43 @@ impl ManagedStore {
         Ok(())
     }
 
-    fn existing_message(&self, id: &Id) -> Result<bool> {
-        Ok(self.db()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM messages WHERE id=?1)",
-            [id.as_str()],
-            |row| row.get(0),
-        )?)
+    fn existing_submission(
+        &self,
+        conversation: &Id,
+        id: &Id,
+        text: &str,
+        attachments: &[Attachment],
+    ) -> Result<bool> {
+        let row: Option<(String, String)> = self
+            .db()?
+            .query_row(
+                "SELECT conversation,payload FROM messages WHERE id=?1",
+                [id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((saved_conversation, payload)) = row else {
+            return Ok(false);
+        };
+        let saved: Message = decode(&payload)?;
+        let normalized = if text.trim().to_ascii_lowercase().starts_with("new task:") {
+            text.trim()
+                .split_once(':')
+                .map(|(_, text)| text.trim())
+                .unwrap_or(text)
+        } else {
+            text
+        };
+        if saved_conversation != conversation.as_str()
+            || saved.role != Role::User
+            || saved.text != normalized
+            || serde_json::to_value(&saved.attachments)? != serde_json::to_value(attachments)?
+        {
+            return Err(Error::Conflict(
+                "message id was reused with different input",
+            ));
+        }
+        Ok(true)
     }
 
     fn append_message_tx(
@@ -655,17 +1185,21 @@ impl ManagedStore {
     async fn transition(
         &self,
         expected: &ManagedTask,
-        mut next: ManagedTask,
+        next: ManagedTask,
         message: Option<Message>,
     ) -> Result<ManagedTask> {
+        self.transition_records(expected, next, message, &[]).await
+    }
+
+    async fn transition_records(
+        &self,
+        expected: &ManagedTask,
+        mut next: ManagedTask,
+        message: Option<Message>,
+        additional: &[(Id, Message)],
+    ) -> Result<ManagedTask> {
         next.validate()?;
-        if next.id != expected.id
-            || next.operation != expected.operation
-            || next.source_message != expected.source_message
-            || next.conversation != expected.conversation
-            || next.workspace != expected.workspace
-            || next.revision != expected.revision + 1
-        {
+        if !next.same_identity(expected) || next.revision != expected.revision + 1 {
             return Err(Error::Conflict("managed task transition changed identity"));
         }
         let (policy, receipt, receipt_json) = Self::algal_receipt(&next).await?;
@@ -693,6 +1227,9 @@ impl ManagedStore {
         if let Some(message) = &message {
             Self::append_message_tx(&tx, message, &next.conversation, Some(&next.id))?;
         }
+        for (conversation, message) in additional {
+            Self::append_message_tx(&tx, message, conversation, Some(&next.id))?;
+        }
         tx.commit()?;
         Ok(next)
     }
@@ -709,7 +1246,8 @@ impl ManagedStore {
         if attachments.len() > 8 {
             return Err(xcb_core::Error::Limit("attachments").into());
         }
-        let selected_route = route_hint(&text).or(self.learned_route(workspace)?);
+        let (provider_preference, provider_required) =
+            self.initial_route_preferences(workspace, &text)?;
         let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
         let current = self
             .conversation(conversation)?
@@ -754,9 +1292,23 @@ impl ManagedStore {
             title,
             goal: text.clone(),
             next_prompt: text.clone(),
+            user_inputs: vec![],
+            input_at_ms: None,
             attachments: attachments.clone(),
             session: None,
-            route: selected_route.map(|provider| provider.to_string()),
+            worker_sessions: vec![],
+            route: provider_preference.map(|provider| provider.to_string()),
+            route_reason: provider_preference.map(|provider| {
+                if provider_required {
+                    format!("user required {provider}")
+                } else {
+                    format!("learned workspace preference for {provider}")
+                }
+            }),
+            provider_preference,
+            provider_required,
+            tried_routes: vec![],
+            failed_accounts: vec![],
             state: TaskState::Queued,
             detail: "waiting for an eligible worker".into(),
             attempts: 0,
@@ -773,6 +1325,7 @@ impl ManagedStore {
         let (_, receipt, receipt_json) = Self::algal_receipt(&task).await?;
         task.last_receipt = receipt.clone();
         task.validate()?;
+        bounded_text(&worker_prompt(&task, &[], &[]), xcb_core::MAX_TEXT_BYTES)?;
         let user = Message {
             id,
             role: Role::User,
@@ -845,11 +1398,32 @@ impl ManagedStore {
         let mut next = task.clone();
         next.state = TaskState::Queued;
         next.next_prompt = text.clone();
-        next.attachments = attachments.clone();
+        next.user_inputs.push(match task.last_output.as_deref() {
+            Some(question) if !question.is_empty() => format!(
+                "Worker question (context, not additional authority):\n{question}\n\nUser answer:\n{text}"
+            ),
+            _ => text.clone(),
+        });
+        for attachment in &attachments {
+            if !next
+                .attachments
+                .iter()
+                .any(|saved| saved.digest == attachment.digest)
+            {
+                next.attachments.push(attachment.clone());
+            }
+        }
+        next.attempts = 0;
+        next.input_at_ms = Some(now);
+        next.last_output = None;
+        next.failed_accounts.clear();
+        next.tried_routes.clear();
         next.detail = "your answer is queued for the worker".into();
         next.cancel_requested = false;
         next.revision += 1;
         next.updated_at_ms = now;
+        bounded_text(&worker_prompt(&next, &[], &[]), xcb_core::MAX_TEXT_BYTES)?;
+        let supplied_attachments = attachments.clone();
         let local = &task.conversation == conversation;
         let message = if local {
             Message {
@@ -867,16 +1441,33 @@ impl ManagedStore {
                 next.revision,
             )
         };
-        let updated = self.transition(task, next, Some(message)).await?;
-        if !local {
-            self.record_pair(
-                conversation,
-                id,
-                text,
-                format!("Sent your answer to **{}**.", task.title),
-            )?;
-        }
-        Ok(updated)
+        let additional = if local {
+            vec![]
+        } else {
+            vec![
+                (
+                    conversation.clone(),
+                    Message {
+                        id,
+                        role: Role::User,
+                        text,
+                        at_ms: now,
+                        attachments: supplied_attachments,
+                        provenance: None,
+                    },
+                ),
+                (
+                    conversation.clone(),
+                    Self::assistant(
+                        format!("Sent your answer to **{}**.", task.title),
+                        None,
+                        now,
+                    ),
+                ),
+            ]
+        };
+        self.transition_records(task, next, Some(message), &additional)
+            .await
     }
 
     async fn remember(
@@ -958,7 +1549,7 @@ impl ManagedStore {
         attachments: Vec<Attachment>,
         workspace: &Path,
     ) -> Result<()> {
-        if self.existing_message(&id)? {
+        if self.existing_submission(conversation, &id, &text, &attachments)? {
             return Ok(());
         }
         let current = self
@@ -968,6 +1559,29 @@ impl ManagedStore {
             return Err(Error::Conflict("managed conversation workspace changed"));
         }
         let trimmed = text.trim();
+        if attachments.is_empty() && offer_question(trimmed) {
+            let root = self.root.parent().ok_or(Error::PrivateState)?;
+            let state = crate::offers::load(root)?;
+            let now = now_ms();
+            let answer = if !state.fresh(now) {
+                "The official model-offer observation is stale or unavailable. XCB refreshes it when the managed supervisor starts; run `xcb offers --refresh` to check now.".into()
+            } else if let Some(offer) = state
+                .offers
+                .iter()
+                .find(|offer| offer.provider == Provider::Devin && now < offer.valid_until_ms)
+            {
+                format!(
+                    "Official Devin offer observed: **{}**. It describes `{}` models through {}. Account entitlement is unverified; this public promotion does not establish free execution or qualify a provider.",
+                    offer.terms, offer.model_prefix, offer.valid_until_ms
+                )
+            } else {
+                "XCB has a fresh official pricing observation but no currently active Devin SWE-2 free offer.".into()
+            };
+            return self.record_pair(conversation, id, text, answer);
+        }
+        if attachments.is_empty() && message_question(trimmed) {
+            return self.record_pair(conversation, id, text, self.mailbox_text(workspace)?);
+        }
         if attachments.is_empty() && memory_question(trimmed) {
             return self.record_pair(conversation, id, text, self.memory_text(workspace)?);
         }
@@ -998,12 +1612,16 @@ impl ManagedStore {
                     .copied()
                     .filter(|task| {
                         task.id.as_str().to_ascii_lowercase().starts_with(needle)
-                            || task.title.to_ascii_lowercase().contains(needle)
+                            || task.title.to_ascii_lowercase() == needle
                     })
                     .collect()
             };
             let task = match matches.as_slice() {
                 [task] => (*task).clone(),
+                [] if !needle.is_empty() && !needle.starts_with("t_") && !needle.starts_with("task ") => {
+                    self.create_task(conversation, id, text, attachments, workspace).await?;
+                    return Ok(());
+                }
                 [] => return self.record_pair(conversation, id, text, "I couldn’t identify an active task to cancel. Use `/tasks`, then say `cancel <task id or title>`.".into()),
                 _ => return self.record_pair(conversation, id, text, "More than one task is active. Use `/tasks`, then say `cancel <task id or title>` so I don’t stop the wrong work.".into()),
             };
@@ -1024,16 +1642,36 @@ impl ManagedStore {
                     attachments: vec![],
                     provenance: None,
                 });
-                match self.transition(&task, next, user).await {
-                    Ok(_) if local => return Ok(()),
-                    Ok(_) => {
-                        return self.record_pair(
-                            conversation,
-                            id,
-                            text,
-                            format!("Cancellation requested for **{}**.", task.title),
-                        );
-                    }
+                let additional = if local {
+                    vec![]
+                } else {
+                    vec![
+                        (
+                            conversation.clone(),
+                            Message {
+                                id: id.clone(),
+                                role: Role::User,
+                                text: text.clone(),
+                                at_ms: now,
+                                attachments: vec![],
+                                provenance: None,
+                            },
+                        ),
+                        (
+                            conversation.clone(),
+                            Self::assistant(
+                                format!("Cancellation requested for **{}**.", task.title),
+                                None,
+                                now,
+                            ),
+                        ),
+                    ]
+                };
+                match self
+                    .transition_records(&task, next, user, &additional)
+                    .await
+                {
+                    Ok(_) => return Ok(()),
                     Err(Error::Conflict(_)) => {
                         task = self
                             .task(&task.id)?
@@ -1140,6 +1778,44 @@ impl ManagedStore {
         Ok(lines.join("\n"))
     }
 
+    pub fn mailbox_text(&self, workspace: &Path) -> Result<String> {
+        let scope = workspace.to_string_lossy();
+        let tasks: Vec<_> = self
+            .tasks(256)?
+            .into_iter()
+            .filter(|task| task.workspace == scope)
+            .collect();
+        let titles: BTreeMap<_, _> = tasks
+            .iter()
+            .map(|task| (task.id.clone(), task.title.clone()))
+            .collect();
+        let mut messages = Vec::new();
+        for task in tasks {
+            messages.extend(self.mailbox(&task.id, 0, 64)?);
+        }
+        messages.sort_by_key(|message| message.created_at_ms);
+        if messages.is_empty() {
+            return Ok("No XCB cross-provider messages have been sent in this workspace.".into());
+        }
+        let mut lines = vec!["Recent XCB cross-provider messages:".to_owned()];
+        for message in messages.iter().rev().take(20).rev() {
+            lines.push(format!(
+                "- #{} {} from **{}** to **{}**: {}",
+                message.sequence,
+                message.source_provider,
+                titles
+                    .get(&message.source_task)
+                    .map(String::as_str)
+                    .unwrap_or(message.source_task.as_str()),
+                titles
+                    .get(&message.target_task)
+                    .map(String::as_str)
+                    .unwrap_or(message.target_task.as_str()),
+                xcb_core::display_text(&message.body, 512),
+            ));
+        }
+        Ok(lines.join("\n"))
+    }
     pub fn status_text(&self) -> Result<String> {
         let active = self.active_tasks(128)?;
         if active.is_empty() {
@@ -1182,19 +1858,46 @@ impl ManagedStore {
         self.transition(task, next, Some(message)).await
     }
 
+    async fn fail_unstarted(&self, task: &ManagedTask, reason: &str) -> Result<ManagedTask> {
+        let mut next = task.clone();
+        next.state = TaskState::Failed;
+        next.detail = reason.into();
+        next.revision += 1;
+        next.updated_at_ms = now_ms();
+        next.next_prompt.clear();
+        next.attachments.clear();
+        let message = Self::assistant(
+            format!("**{}** could not start: {reason}.", task.title),
+            Some(&task.id),
+            next.revision,
+        );
+        self.transition(task, next, Some(message)).await
+    }
+
     async fn prepare(
         &self,
         task: &ManagedTask,
         session: Id,
         route: String,
+        route_reason: String,
         message_count: usize,
     ) -> Result<ManagedTask> {
         let mut next = task.clone();
-        next.session = Some(session);
+        next.session = Some(session.clone());
+        if !next.worker_sessions.contains(&session) {
+            next.worker_sessions.push(session);
+        }
         next.message_count_before = message_count;
+        if !next.tried_routes.contains(&route) {
+            next.tried_routes.push(route.clone());
+        }
         next.route = Some(route);
+        next.detail = format!(
+            "worker is running · {}",
+            xcb_core::display_text(&route_reason, 320)
+        );
+        next.route_reason = Some(route_reason);
         next.state = TaskState::Running;
-        next.detail = "worker is running".into();
         next.cancel_requested = false;
         next.revision += 1;
         next.updated_at_ms = now_ms();
@@ -1202,9 +1905,30 @@ impl ManagedStore {
     }
 
     async fn finish(&self, store: &Store, id: &Id, result: Result<Outcome>) -> Result<ManagedTask> {
+        // A user may cancel while an optional judgment is in flight. Recompute
+        // against that revision instead of dropping this settled completion and
+        // terminating the supervisor (and its unrelated workers).
+        for _ in 0..4 {
+            match self.finish_once(store, id, &result).await {
+                Err(Error::Conflict("managed task revision changed")) => continue,
+                outcome => return outcome,
+            }
+        }
+        Err(Error::Conflict("managed task revision changed"))
+    }
+
+    async fn finish_once(
+        &self,
+        store: &Store,
+        id: &Id,
+        result: &Result<Outcome>,
+    ) -> Result<ManagedTask> {
         let task = self
             .task(id)?
             .ok_or(Error::Unavailable("managed task not found"))?;
+        if task.state.terminal() {
+            return Ok(task);
+        }
         let (unsettled, message_count, session_state) = if let Some(session) = &task.session {
             (
                 store
@@ -1220,8 +1944,38 @@ impl ManagedStore {
         let dispatch_unstarted = !unsettled && message_count == task.message_count_before;
         let cancellation_settled =
             !unsettled && (dispatch_unstarted || session_state == Some(State::Cancelled));
-        let continue_task = match &result {
-            Ok(outcome) => tokio::time::timeout(
+        let config = Config::load(store.root())?.0;
+        let failover_route = config.auto_failover
+            && !task.cancel_requested
+            && !unsettled
+            && task.attempts.saturating_add(1) < task.max_attempts
+            && result.as_ref().is_ok_and(|outcome| {
+                outcome.facts.joined
+                    && matches!(outcome.state, State::Failed | State::Limited)
+                    && outcome.facts.terminal == Terminal::Failed
+                    && outcome.facts.effects != EffectState::Uncertain
+                    && (!outcome.text.trim().is_empty()
+                        || outcome.facts.effects == EffectState::None)
+                    && !outcome.facts.pending_attention
+                    && matches!(
+                        outcome.facts.failure,
+                        Some(Failure::AccountQuota | Failure::ModelQuota)
+                    )
+            });
+        let failed_account = if failover_route
+            && result
+                .as_ref()
+                .is_ok_and(|outcome| outcome.facts.failure == Some(Failure::AccountQuota))
+        {
+            match &task.session {
+                Some(session) => store.session(session)?.map(|session| session.account),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let continue_task = match result {
+            Ok(outcome) if !unsettled => tokio::time::timeout(
                 Duration::from_secs(5),
                 task_should_continue(store, &task, outcome),
             )
@@ -1229,17 +1983,44 @@ impl ManagedStore {
             .ok()
             .and_then(std::result::Result::ok)
             .unwrap_or(false),
-            Err(_) => false,
+            _ => false,
         };
         let mut next = task.clone();
+        if let Some(account) = failed_account
+            && !next.failed_accounts.contains(&account)
+        {
+            next.failed_accounts.push(account);
+        }
         next.attempts = next.attempts.saturating_add(1);
         next.revision += 1;
         next.updated_at_ms = now_ms();
         let (state, detail, output) = match result {
+            Ok(outcome)
+                if unsettled
+                    || !outcome.facts.joined
+                    || outcome.facts.effects == EffectState::Uncertain =>
+            {
+                (
+                    TaskState::Uncertain,
+                    "worker settlement is uncertain; no retry will be launched".into(),
+                    Some(outcome.text.clone()),
+                )
+            }
+            Ok(outcome) if task.cancel_requested => (
+                TaskState::Cancelled,
+                "worker cancellation settled".into(),
+                Some(outcome.text.clone()),
+            ),
+            Ok(outcome) if failover_route => (
+                TaskState::Queued,
+                "the settled route hit provider quota; selecting another eligible Pareto route"
+                    .into(),
+                Some(outcome.text.clone()),
+            ),
             Ok(outcome) if continue_task => (
                 TaskState::Queued,
                 "the supervisor is continuing unfinished work in the same session".into(),
-                Some(outcome.text),
+                Some(outcome.text.clone()),
             ),
             Ok(outcome) => {
                 let state = match outcome.state {
@@ -1269,15 +2050,14 @@ impl ManagedStore {
                     _ => "worker stopped without completing the task",
                 }
                 .to_owned();
-                (state, detail, Some(outcome.text))
+                (state, detail, Some(outcome.text.clone()))
             }
             Err(error) if task.cancel_requested && cancellation_settled => (
                 TaskState::Cancelled,
                 "worker cancellation settled".into(),
                 Some(error.to_string()),
             ),
-            Err(error) if dispatch_unstarted && task.attempts < task.max_attempts => {
-                next.attempts = task.attempts;
+            Err(error) if dispatch_unstarted && next.attempts < task.max_attempts => {
                 (
                     TaskState::Queued,
                     "dispatch did not cross the provider boundary; waiting for an eligible route"
@@ -1285,6 +2065,11 @@ impl ManagedStore {
                     Some(error.to_string()),
                 )
             }
+            Err(error) if dispatch_unstarted => (
+                TaskState::NeedsInput,
+                "worker could not start within the attempt budget; repair the route and reply to retry".into(),
+                Some(error.to_string()),
+            ),
             Err(error) => (
                 TaskState::Uncertain,
                 "worker outcome is uncertain; no automatic retry".into(),
@@ -1293,11 +2078,23 @@ impl ManagedStore {
         };
         next.state = state;
         next.detail = detail;
-        next.last_output = output.clone();
-        if state == TaskState::Queued && continue_task {
+        next.last_output = output
+            .as_deref()
+            .map(|text| xcb_core::display_text(text, 8192));
+        if state == TaskState::Queued && failover_route {
+            next.session = None;
+            next.next_prompt = format!(
+                "Continue the original task on a new eligible route. Preserve completed effects and do not repeat them or expand scope. Previous settled route report:\n\n{}",
+                xcb_core::display_text(
+                    output
+                        .as_deref()
+                        .unwrap_or("No response text was retained."),
+                    8192
+                )
+            );
+        } else if state == TaskState::Queued && continue_task {
             next.next_prompt = "Continue the original task from the last confirmed checkpoint. Do not repeat completed effects or expand scope. Stop and ask one specific question if input or approval is required.".into();
-            next.attachments.clear();
-        } else if state != TaskState::Queued {
+        } else if state.terminal() {
             next.next_prompt.clear();
             next.attachments.clear();
         }
@@ -1319,7 +2116,9 @@ impl ManagedStore {
             ))
         };
         let finished = self.transition(&task, next, message).await?;
-        let _ = self.record_route_observation(&finished).await;
+        let _ = self
+            .record_route_observation(&finished, failover_route.then_some("failed"))
+            .await;
         Ok(finished)
     }
 
@@ -1361,9 +2160,6 @@ impl ManagedStore {
                 self.transition(&task, next, Some(message)).await?;
                 continue;
             }
-            let session = store
-                .session(session_id)?
-                .ok_or(Error::Unavailable("managed worker session missing"))?;
             let total = store.message_count(session_id)?;
             if total == task.message_count_before {
                 let mut next = task.clone();
@@ -1374,33 +2170,7 @@ impl ManagedStore {
                 self.transition(&task, next, None).await?;
                 continue;
             }
-            let delta = total.saturating_sub(task.message_count_before);
-            let messages = (delta <= 512)
-                .then(|| store.messages(session_id, delta.max(1)))
-                .transpose()?;
-            if let Some(answer) = messages.as_ref().and_then(|messages| {
-                messages
-                    .iter()
-                    .rev()
-                    .find(|message| message.role == Role::Assistant)
-            }) {
-                let outcome = Outcome {
-                    text: answer.text.clone(),
-                    facts: xcb_core::policy::TurnFacts {
-                        terminal: if session.state == State::Cancelled {
-                            Terminal::Cancelled
-                        } else if session.state == State::Idle {
-                            Terminal::Completed
-                        } else {
-                            Terminal::Failed
-                        },
-                        joined: true,
-                        effects: EffectState::Settled,
-                        pending_attention: session.state.attention(),
-                        failure: None,
-                    },
-                    state: session.state,
-                };
+            if let Some(outcome) = store.settled_outcome(session_id, task.message_count_before)? {
                 self.finish(store, &task.id, Ok(outcome)).await?;
             } else {
                 let mut next = task.clone();
@@ -1435,6 +2205,12 @@ fn task_status(task: &ManagedTask) -> String {
         project,
         task.detail
     );
+    if let Some(reason) = &task.route_reason {
+        line.push_str(&format!(
+            "\n  route: {}",
+            xcb_core::display_text(reason, 320)
+        ));
+    }
     if let Some(output) = &task.last_output {
         let summary = xcb_core::display_text(output.lines().next().unwrap_or(""), 320);
         if !summary.is_empty() {
@@ -1444,32 +2220,65 @@ fn task_status(task: &ManagedTask) -> String {
     line
 }
 
-fn memory_question(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("what did we learn")
-        || lower.contains("what do you remember")
-        || lower.contains("what have you learned")
-        || lower.contains("remember about this")
+fn query_text(text: &str) -> String {
+    text.trim()
+        .trim_end_matches(['?', '.', '!'])
+        .trim()
+        .to_ascii_lowercase()
 }
 
+fn memory_question(text: &str) -> bool {
+    matches!(
+        query_text(text).as_str(),
+        "what did we learn"
+            | "what do you remember"
+            | "what have you learned"
+            | "what do you remember about this workspace"
+            | "what have you learned about this workspace"
+    )
+}
+
+fn message_question(text: &str) -> bool {
+    matches!(
+        query_text(text).as_str(),
+        "messages"
+            | "agent messages"
+            | "what did the agents say"
+            | "what did agents say"
+            | "what did the workers say"
+            | "show agent messages"
+            | "show worker messages"
+            | "any swarm messages"
+    )
+}
+fn offer_question(text: &str) -> bool {
+    matches!(
+        query_text(text).as_str(),
+        "is swe-2 free"
+            | "is swe-2 still free"
+            | "is devin swe-2 free"
+            | "is devin swe-2 still free"
+            | "what does swe-2 cost"
+            | "what is the swe-2 price"
+            | "show swe-2 offers"
+            | "show the swe-2 offer"
+    )
+}
 fn status_question(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower == "status"
-        || lower == "what's running?"
-        || lower == "whats running?"
-        || lower.contains("what needs me")
-        || lower.contains("what is running")
-        || lower.contains("what's blocked")
-        || lower.contains("whats blocked")
-        || lower.starts_with("how is ")
-        || lower.starts_with("how's ")
-        || lower.contains("what happened")
-        || (lower.ends_with('?')
-            && [
-                "task", "work", "running", "progress", "blocked", "done", "doing", "session",
-            ]
-            .iter()
-            .any(|word| lower.contains(word)))
+    matches!(
+        query_text(text).as_str(),
+        "status"
+            | "what's running"
+            | "whats running"
+            | "what is running"
+            | "what needs me"
+            | "what's blocked"
+            | "whats blocked"
+            | "what is blocked"
+            | "what happened"
+            | "show task status"
+            | "show tasks"
+    )
 }
 fn reply_like(text: &str) -> bool {
     matches!(
@@ -1486,31 +2295,44 @@ fn cancel_request(text: &str) -> bool {
         || lower.starts_with("cancel ")
 }
 fn route_hint(text: &str) -> Option<Provider> {
-    let lower = text.to_ascii_lowercase();
-    Provider::ALL.into_iter().find(|provider| {
-        lower.contains(&format!("use {provider}")) || lower.contains(&format!("with {provider}"))
-    })
+    routing::explicit_provider_intent(text)
 }
 async fn task_should_continue(
     store: &Store,
     task: &ManagedTask,
     outcome: &Outcome,
 ) -> Result<bool> {
+    let repeated =
+        task.last_output.as_deref() == Some(xcb_core::display_text(&outcome.text, 8192).as_str());
     if task.cancel_requested
         || task.attempts.saturating_add(1) >= task.max_attempts
         || outcome.state != State::Idle
-        || outcome.facts.terminal != Terminal::Completed
         || !outcome.facts.joined
         || outcome.facts.effects == EffectState::Uncertain
         || outcome.facts.pending_attention
         || outcome.facts.failure.is_some()
-        || task.last_output.as_ref() == Some(&outcome.text)
+        || repeated
     {
         return Ok(false);
     }
     let config = Config::load(store.root())?.0;
-    if !config.extensions.judge.enabled {
+    let elapsed = now_ms().saturating_sub(task.input_at_ms.unwrap_or(task.created_at_ms));
+    let deterministic = should_continue(
+        &config.extensions.auto_continue,
+        &outcome.facts,
+        task.attempts,
+        elapsed,
+        repeated,
+    );
+    let semantic = outcome.facts.terminal == Terminal::Completed
+        && config.extensions.auto_continue.enabled
+        && task.attempts < config.extensions.auto_continue.max_consecutive
+        && elapsed < config.extensions.auto_continue.max_elapsed_ms;
+    if !deterministic && !semantic {
         return Ok(false);
+    }
+    if !config.extensions.judge.enabled {
+        return Ok(deterministic);
     }
     let Some(backend) = judge::resolve(store.root(), &config.extensions.judge)? else {
         return Ok(false);
@@ -1531,8 +2353,10 @@ async fn task_should_continue(
             &json!({
                 "task": xcb_core::display_text(&task.goal, 8192),
                 "worker_response": xcb_core::display_text(&outcome.text, 8192),
+                "terminal": outcome.facts.terminal,
                 "attempt": task.attempts + 1,
                 "maximum_attempts": task.max_attempts,
+                "elapsed_ms": elapsed,
             }),
             &questions,
         )
@@ -1557,18 +2381,56 @@ fn workspace_busy(store: &Store, workspace: &str) -> Result<bool> {
     Ok(false)
 }
 
-fn worker_prompt(task: &ManagedTask, preferences: &[Preference]) -> String {
-    let mut prompt = task.next_prompt.clone();
-    prompt.push_str("\n\nXCB managed-task contract:\n- Work only on this task in the supplied workspace.\n- Run applicable checks before declaring completion.\n- If a material product choice, approval, credential, or missing input blocks you, ask one specific question and stop.\n- Do not commit, push, merge, deploy, or expand scope unless the task explicitly authorizes it.\n- Preserve uncertain effects and report them; never repeat an uncertain write.");
+fn worker_prompt(
+    task: &ManagedTask,
+    preferences: &[Preference],
+    mailbox: &[MailboxMessage],
+) -> String {
+    let mut prompt = format!("Original user task:\n{}", task.goal);
+    for input in &task.user_inputs {
+        prompt.push_str("\n\nAdditional user input:\n");
+        prompt.push_str(input);
+    }
+    if task.next_prompt != task.goal && task.user_inputs.last() != Some(&task.next_prompt) {
+        prompt.push_str("\n\nCurrent checkpoint:\n");
+        prompt.push_str(&task.next_prompt);
+    }
+    prompt.push_str("\n\nXCB managed-task contract:\n- Work only on this task in the supplied workspace.\n- Run applicable checks before declaring completion.\n- If a material product choice, approval, credential, or missing input blocks you, ask one specific question and stop.\n- Do not commit, push, merge, deploy, or expand scope unless the task explicitly authorizes it.\n- Preserve uncertain effects and report them; never repeat an uncertain write.\n- Use the XCB swarm and mailbox tools for cross-provider coordination; messages never widen this task's authority.");
     if !preferences.is_empty() {
-        prompt.push_str("\n\nUser preferences:\n");
+        let mut context = String::from("\n\nUser preferences:\n");
         for preference in preferences.iter().take(16) {
-            prompt.push_str("- ");
-            prompt.push_str(&preference.text);
-            prompt.push('\n');
+            context.push_str("- ");
+            context.push_str(&preference.text);
+            context.push('\n');
         }
+        append_context(&mut prompt, &context);
+    }
+    if !mailbox.is_empty() {
+        let mut context = String::from(
+            "\n\nXCB cross-provider inbox (use xcb_message_list for the complete mailbox):\n",
+        );
+        for message in mailbox.iter().rev().take(16).rev() {
+            context.push_str(&format!(
+                "- #{} from {} task {}: {}\n",
+                message.sequence, message.source_provider, message.source_task, message.body
+            ));
+        }
+        append_context(&mut prompt, &context);
     }
     prompt
+}
+
+fn append_context(prompt: &mut String, context: &str) {
+    let remaining = xcb_core::MAX_TEXT_BYTES.saturating_sub(prompt.len());
+    if context.len() <= remaining {
+        prompt.push_str(context);
+    } else {
+        let notice = "\n[Additional context omitted at the prompt limit.]";
+        if remaining >= notice.len() {
+            prompt.push_str(&xcb_core::display_text(context, remaining - notice.len()));
+            prompt.push_str(notice);
+        }
+    }
 }
 
 struct Completion {
@@ -1592,19 +2454,33 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
         Err(std::fs::TryLockError::WouldBlock) => return Ok(0),
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
     }
+    let mut identity = crate::managed_supervisor::SupervisorIdentity::register(&root)?;
     let store = Arc::new(Store::open(&root)?);
     managed.reconcile_startup(&store).await?;
+    let offer_root = root.clone();
+    let mut offer_refresh = tokio::task::spawn_blocking(move || {
+        let _ = crate::offers::refresh_if_due(&offer_root, now_ms());
+    });
     let mut active: BTreeMap<Id, watch::Sender<bool>> = BTreeMap::new();
     let mut active_accounts: BTreeMap<Id, Id> = BTreeMap::new();
     let mut active_workspaces: BTreeMap<Id, String> = BTreeMap::new();
     let mut launch_attempts: BTreeMap<Id, Instant> = BTreeMap::new();
     let mut joins: JoinSet<Completion> = JoinSet::new();
     let mut idle_since = Instant::now();
+    let mut offer_check = Instant::now();
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
         tokio::select! {
             _ = interval.tick() => {
+                if offer_check.elapsed() >= Duration::from_secs(60 * 60) && offer_refresh.is_finished() {
+                    let _ = (&mut offer_refresh).await;
+                    let offer_root = root.clone();
+                    offer_check = Instant::now();
+                    offer_refresh = tokio::task::spawn_blocking(move || {
+                        let _ = crate::offers::refresh_if_due(&offer_root, now_ms());
+                    });
+                }
                 while let Some(joined) = joins.try_join_next() {
                     let completion = joined.map_err(|_| Error::Unavailable("managed worker task failed"))?;
                     active.remove(&completion.id);
@@ -1631,7 +2507,8 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                         }
                     }
                 }
-                for task in tasks.into_iter().filter(|task| task.state == TaskState::Queued && !task.cancel_requested) {
+                let draining = identity.binary_replaced();
+                for task in tasks.into_iter().filter(|task| !draining && task.state == TaskState::Queued && !task.cancel_requested) {
                     if active.len() >= MAX_ACTIVE { break; }
                     if active.contains_key(&task.id)
                         || active_workspaces.values().any(|workspace| workspace == &task.workspace)
@@ -1660,32 +2537,79 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                         }
                     }
                     let config = Config::load(store.root())?.0;
+                    let prompt = worker_prompt(
+                        &task,
+                        &managed.preferences(Path::new(&task.workspace))?,
+                        &managed.mailbox_tail(&task.id, 16)?,
+                    );
+                    if bounded_text(&prompt, xcb_core::MAX_TEXT_BYTES).is_err() {
+                        let mut failed = task.clone();
+                        failed.state = TaskState::Failed;
+                        failed.detail = "worker prompt exceeds the supported context limit; start a smaller task".into();
+                        failed.revision += 1;
+                        failed.updated_at_ms = now_ms();
+                        let message = ManagedStore::assistant(failed.detail.clone(), Some(&task.id), failed.revision);
+                        match managed.transition(&task, failed, Some(message)).await {
+                            Ok(_) | Err(Error::Conflict(_)) => continue,
+                            Err(error) => return Err(error),
+                        }
+                    }
                     let created_session = task.session.is_none();
+                    let mut route_reason = task
+                        .route_reason
+                        .clone()
+                        .unwrap_or_else(|| "continuing the existing worker session".into());
                     let session = if let Some(id) = &task.session {
-                        store.session(id)?.ok_or(Error::Unavailable("managed worker session missing"))?
+                        match store.session(id)? {
+                            Some(session) => session,
+                            None => {
+                                match managed.fail_unstarted(&task, "the saved worker session is missing; start a new task with the retained goal").await {
+                                    Ok(_) | Err(Error::Conflict(_)) => continue,
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                        }
                     } else {
-                        let hinted = task
-                            .route
-                            .as_deref()
-                            .and_then(|route| route.parse::<Provider>().ok())
-                            .map(|provider| kernel::choose_model(&store, provider, None, &config))
-                            .transpose()?;
-                        let judged = if hinted.is_none() && config.extensions.judge.enabled {
-                            kernel::auto_route(&store, &config, &task.goal, None).await.ok()
-                        } else {
-                            None
+                        if task.worker_sessions.len() >= 16 {
+                            match managed.fail_unstarted(&task, "the worker-session limit was reached; start a new task from the last report").await {
+                                Ok(_) | Err(Error::Conflict(_)) => continue,
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        let required_provider = task
+                            .provider_required
+                            .then_some(task.provider_preference)
+                            .flatten();
+                        let excluded_routes: BTreeSet<_> =
+                            task.tried_routes.iter().cloned().collect();
+                        let excluded_accounts: BTreeSet<_> =
+                            task.failed_accounts.iter().cloned().collect();
+                        let decision = match routing::smart_route(
+                            &store,
+                            &config,
+                            routing::RouteRequest {
+                                task: &task.goal,
+                                required_provider,
+                                preferred_provider: task.provider_preference,
+                                excluded_routes: &excluded_routes,
+                                excluded_accounts: &excluded_accounts,
+                                account: None,
+                            },
+                        )
+                        .await
+                        {
+                            Ok(decision) => decision,
+                            Err(Error::Conflict(_) | Error::Unavailable(_)) => continue,
+                            Err(error) => return Err(error),
                         };
-                        let account = judged.as_ref().map(|(account, _)| account);
-                        let model_key = hinted
-                            .as_ref()
-                            .map(|model| model.key())
-                            .or_else(|| judged.as_ref().map(|(_, model)| model.key()));
+                        route_reason = decision.reason;
+                        let model_key = decision.model.key();
                         match kernel::new_session(
                             &store,
                             Path::new(&task.workspace),
                             &config,
-                            account,
-                            model_key.as_deref(),
+                            Some(&decision.account),
+                            Some(&model_key),
                         ) {
                             Ok(session) => session,
                             Err(Error::Conflict(_) | Error::Unavailable(_)) => continue,
@@ -1714,10 +2638,16 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                         }
                         continue;
                     }
-                    let route = format!("{} · {}", session.model.key(), store.account(&session.account)?.name());
+                    let route = format!("{} · {}", session.model.key(), session.account);
                     let message_count = store.message_count(&session.id)?;
                     let prepared = match managed
-                        .prepare(&task, session.id.clone(), route, message_count)
+                        .prepare(
+                            &task,
+                            session.id.clone(),
+                            route,
+                            route_reason,
+                            message_count,
+                        )
                         .await
                     {
                         Ok(task) => task,
@@ -1729,7 +2659,6 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                         }
                         Err(error) => return Err(error),
                     };
-                    let prompt = worker_prompt(&prepared, &managed.preferences(Path::new(&prepared.workspace))?);
                     let images = prepared.attachments.clone();
                     let id = prepared.id.clone();
                     let (cancel, cancelled) = watch::channel(false);
@@ -1739,11 +2668,20 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                     let store = store.clone();
                     joins.spawn(async move {
                         let observer: Observer = Arc::new(|event| { if let Progress::Notice(_) | Progress::Tool(_) = event {} });
-                        let result = kernel::execute(store, session.id, prompt, images, false, cancelled, observer).await;
+                        let result = kernel::execute_once(
+                            store,
+                            session.id,
+                            prompt,
+                            images,
+                            cancelled,
+                            observer,
+                        )
+                        .await;
                         Completion { id, result }
                     });
                 }
                 let nonterminal = !managed.active_tasks(1)?.is_empty();
+                if active.is_empty() && draining { break; }
                 if active.is_empty() && !nonterminal {
                     if idle_since.elapsed() >= IDLE_EXIT { break; }
                 } else { idle_since = Instant::now(); }
@@ -1758,6 +2696,7 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
             }
         }
     }
+    let _ = offer_refresh.await;
     Ok(0)
 }
 
@@ -1777,7 +2716,9 @@ pub fn ensure_daemon(root: &Path, executable: &Path) -> Result<()> {
     private::check_file(&lock, 4096)?;
     match lock.try_lock() {
         Ok(()) => drop(lock),
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return crate::managed_supervisor::check_running(root, executable);
+        }
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
     }
     let mut command = Command::new(executable);
@@ -1837,6 +2778,9 @@ fn managed_view(
             updated_at_ms: task.updated_at_ms,
         })
         .collect();
+    view.managed_cancel_available = tasks
+        .iter()
+        .any(|task| &task.conversation == conversation && !task.state.terminal());
     view.state = if tasks.iter().any(|task| task.state == TaskState::NeedsInput) {
         State::NeedsAnswer
     } else if tasks
@@ -2029,6 +2973,180 @@ mod tests {
         store.create_conversation(workspace).await.unwrap().id
     }
 
+    #[test]
+    fn mailbox_queries_do_not_capture_message_sending_tasks() {
+        assert!(message_question("what did the agents say?"));
+        assert!(!message_question(
+            "send a message after checking xcb_swarm_status"
+        ));
+    }
+
+    #[test]
+    fn control_queries_do_not_swallow_work_requests() {
+        for text in [
+            "What is wrong with this worker?",
+            "implement free SWE-2 offer detection",
+            "write a page explaining what is running",
+            "document what do you remember",
+            "show agent messages in a new sidebar",
+        ] {
+            assert!(!status_question(text), "{text}");
+            assert!(!offer_question(text), "{text}");
+            assert!(!memory_question(text), "{text}");
+            assert!(!message_question(text), "{text}");
+        }
+        assert!(status_question("What is running?"));
+        assert!(offer_question("Is SWE-2 still free?"));
+        assert!(message_question("what did agents say?"));
+    }
+
+    #[tokio::test]
+    async fn user_input_renews_continuation_budget_and_receipts_replay() {
+        let root = root();
+        let workspace = workspace(&root);
+        let managed = ManagedStore::open(&workspace).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = managed
+            .create_task(
+                &chat,
+                message("m_followup"),
+                "Implement the parser".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        let mut waiting = task.clone();
+        waiting.state = TaskState::NeedsInput;
+        waiting.attempts = waiting.max_attempts;
+        waiting.revision += 1;
+        waiting.updated_at_ms = now_ms();
+        let waiting = managed.transition(&task, waiting, None).await.unwrap();
+        let queued = managed
+            .reply(
+                &waiting,
+                &chat,
+                message("m_answer"),
+                "Accept UTF-8".into(),
+                vec![],
+            )
+            .await
+            .unwrap();
+        assert_eq!(queued.attempts, 0);
+        assert!(queued.input_at_ms.is_some());
+        let mut failed_over = queued.clone();
+        failed_over.next_prompt = "Resume from the checkpoint".into();
+        let prompt = worker_prompt(&failed_over, &[], &[]);
+        assert!(prompt.contains("Implement the parser"));
+        assert!(prompt.contains("Accept UTF-8"));
+        assert!(prompt.contains("Resume from the checkpoint"));
+        let verification = managed.verify_task(&task.id).await.unwrap();
+        assert_eq!(verification["revisions"], 3);
+        let mut corrupted = queued.clone();
+        corrupted.goal = "different task".into();
+        managed
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE tasks SET payload=?1 WHERE id=?2",
+                params![serde_json::to_string(&corrupted).unwrap(), task.id.as_str()],
+            )
+            .unwrap();
+        assert!(managed.verify_task(&task.id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn failover_requires_settlement_checkpoint_and_no_cancellation() {
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        for (index, cancel, joined, effects, terminal, text, expected) in [
+            (
+                0,
+                true,
+                true,
+                EffectState::None,
+                Terminal::Failed,
+                "quota",
+                TaskState::Cancelled,
+            ),
+            (
+                1,
+                false,
+                false,
+                EffectState::None,
+                Terminal::Failed,
+                "quota",
+                TaskState::Uncertain,
+            ),
+            (
+                2,
+                false,
+                true,
+                EffectState::Uncertain,
+                Terminal::Failed,
+                "quota",
+                TaskState::Uncertain,
+            ),
+            (
+                3,
+                false,
+                true,
+                EffectState::Settled,
+                Terminal::Failed,
+                "",
+                TaskState::Failed,
+            ),
+            (
+                4,
+                false,
+                true,
+                EffectState::None,
+                Terminal::Completed,
+                "quota",
+                TaskState::Failed,
+            ),
+        ] {
+            let task = managed
+                .create_task(
+                    &chat,
+                    message(&format!("m_guard_{index}")),
+                    "Do the original task".into(),
+                    vec![],
+                    &workspace,
+                )
+                .await
+                .unwrap();
+            let mut running = task.clone();
+            running.state = TaskState::Running;
+            running.cancel_requested = cancel;
+            running.revision += 1;
+            running.updated_at_ms = now_ms();
+            let running = managed.transition(&task, running, None).await.unwrap();
+            let outcome = Outcome {
+                text: text.into(),
+                state: State::Failed,
+                facts: xcb_core::policy::TurnFacts {
+                    terminal,
+                    joined,
+                    effects,
+                    pending_attention: false,
+                    failure: Some(Failure::AccountQuota),
+                },
+            };
+            let finished = managed
+                .finish(&xcb, &running.id, Ok(outcome))
+                .await
+                .unwrap();
+            assert_eq!(finished.state, expected, "case {index}");
+        }
+    }
+
     #[tokio::test]
     async fn duplicate_client_message_creates_one_task_and_one_user_turn() {
         let root = root();
@@ -2083,6 +3201,115 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(verified["ok"], true);
+        assert!(
+            store
+                .submit(
+                    &chat,
+                    message("m_once"),
+                    "a different task".into(),
+                    vec![],
+                    &workspace
+                )
+                .await
+                .is_err()
+        );
+        let other_chat = conversation(&store, &workspace).await;
+        assert!(
+            store
+                .submit(
+                    &other_chat,
+                    message("m_once"),
+                    "fix the bug".into(),
+                    vec![],
+                    &workspace
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn coding_requests_beginning_with_cancel_are_preserved() {
+        let root = root();
+        let workspace = workspace(&root);
+        let state = private::directory(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let other_chat = conversation(&managed, &workspace).await;
+        for (index, text) in [
+            "Stop accepting invalid input in the parser",
+            "Cancel pending network requests when the dialog closes",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            managed
+                .submit(
+                    &chat,
+                    message(&format!("m_cancel_task_{index}")),
+                    text.into(),
+                    vec![],
+                    &workspace,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(managed.tasks(10).unwrap().len(), 2);
+        assert!(
+            managed_view(&xcb, &managed, &chat, &workspace)
+                .unwrap()
+                .managed_cancel_available
+        );
+        assert!(
+            !managed_view(&xcb, &managed, &other_chat, &workspace)
+                .unwrap()
+                .managed_cancel_available
+        );
+        let task = managed.tasks(10).unwrap().remove(0);
+        let mut next = task.clone();
+        next.state = TaskState::NeedsInput;
+        next.revision += 1;
+        next.updated_at_ms = now_ms();
+        managed.transition(&task, next, None).await.unwrap();
+        assert!(
+            managed_view(&xcb, &managed, &chat, &workspace)
+                .unwrap()
+                .managed_cancel_available
+        );
+    }
+
+    #[tokio::test]
+    async fn undispatched_failures_stop_at_the_automatic_budget() {
+        let root = root();
+        let workspace = workspace(&root);
+        let state = private::directory(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let mut task = managed
+            .create_task(
+                &chat,
+                message("m_preflight"),
+                "fix the bug".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        for attempt in 1..=MAX_TASK_ATTEMPTS {
+            task = managed
+                .finish(
+                    &xcb,
+                    &task.id,
+                    Err(Error::Unavailable("selected account is disabled")),
+                )
+                .await
+                .unwrap();
+            assert_eq!(task.attempts, attempt);
+        }
+        assert_eq!(task.state, TaskState::NeedsInput);
+        assert!(task.detail.contains("attempt budget"));
     }
 
     #[tokio::test]
@@ -2147,6 +3374,200 @@ mod tests {
                 .text
                 .contains("2 active tasks")
         );
+    }
+
+    #[tokio::test]
+    async fn cross_provider_mailbox_is_workspace_scoped_durable_and_idempotent() {
+        use xcb_core::models::{Mode, ModelChoice};
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let claude = xcb.add_account(Provider::Claude, "Test", 1, None).unwrap();
+        let codex = xcb.add_account(Provider::Codex, "Test", 2, None).unwrap();
+        let choice = |provider, id: &str| ModelChoice {
+            provider,
+            id: Id::new(id).unwrap(),
+            label: id.into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        let claude_session = xcb
+            .create_session(
+                &claude.id,
+                choice(Provider::Claude, "claude"),
+                &workspace,
+                1,
+            )
+            .unwrap();
+        let codex_session = xcb
+            .create_session(&codex.id, choice(Provider::Codex, "codex"), &workspace, 1)
+            .unwrap();
+        let first_chat = conversation(&managed, &workspace).await;
+        let second_chat = conversation(&managed, &workspace).await;
+        let first = managed
+            .create_task(
+                &first_chat,
+                message("m_mail_first"),
+                "first".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        let second = managed
+            .create_task(
+                &second_chat,
+                message("m_mail_second"),
+                "second".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        let first = managed
+            .prepare(
+                &first,
+                claude_session.id.clone(),
+                "claude/test".into(),
+                "fixture".into(),
+                0,
+            )
+            .await
+            .unwrap();
+        let second = managed
+            .prepare(
+                &second,
+                codex_session.id.clone(),
+                "codex/test".into(),
+                "fixture".into(),
+                0,
+            )
+            .await
+            .unwrap();
+        let other_root = root();
+        let other_workspace = other_root.path().canonicalize().unwrap();
+        let other_chat = conversation(&managed, &other_workspace).await;
+        let other = managed
+            .create_task(
+                &other_chat,
+                message("m_mail_other"),
+                "other".into(),
+                vec![],
+                &other_workspace,
+            )
+            .await
+            .unwrap();
+        let (rejected, effects) = managed.worker_call(
+            &xcb,
+            &claude_session.id,
+            "call_cross_workspace",
+            "xcb_message_send",
+            &json!({"targetTask":other.id,"body":"must not cross workspaces"}),
+        );
+        assert!(rejected.is_err());
+        assert_eq!(effects, EffectState::None);
+        let (status, effects) = managed.worker_call(
+            &xcb,
+            &claude_session.id,
+            "call_status",
+            "xcb_swarm_status",
+            &json!({}),
+        );
+        assert_eq!(effects, EffectState::None);
+        assert_eq!(status.unwrap()["tasks"].as_array().unwrap().len(), 2);
+        let arguments = json!({"targetTask":second.id,"body":"Claude found the relevant module."});
+        let (sent, effects) = managed.worker_call(
+            &xcb,
+            &claude_session.id,
+            "call_send",
+            "xcb_message_send",
+            &arguments,
+        );
+        assert_eq!(effects, EffectState::Settled);
+        assert_eq!(sent.unwrap()["sourceProvider"], "claude");
+        let (_, duplicate_effects) = managed.worker_call(
+            &xcb,
+            &claude_session.id,
+            "call_send",
+            "xcb_message_send",
+            &arguments,
+        );
+        assert_eq!(duplicate_effects, EffectState::Settled);
+        let (listed, effects) = managed.worker_call(
+            &xcb,
+            &codex_session.id,
+            "call_list",
+            "xcb_message_list",
+            &json!({}),
+        );
+        assert_eq!(effects, EffectState::None);
+        let messages = listed.unwrap()["messages"].as_array().unwrap().clone();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["sourceTask"], first.id.as_str());
+        assert_eq!(managed.mailbox(&second.id, 0, 64).unwrap().len(), 1);
+        assert!(
+            managed
+                .mailbox_text(&workspace)
+                .unwrap()
+                .contains("Claude found")
+        );
+        let replacement = xcb
+            .create_session(
+                &claude.id,
+                choice(Provider::Claude, "claude-next"),
+                &workspace,
+                2,
+            )
+            .unwrap();
+        let mut rebound = first.clone();
+        rebound.session = Some(replacement.id.clone());
+        rebound.worker_sessions.push(replacement.id);
+        rebound.revision += 1;
+        rebound.updated_at_ms += 1;
+        managed.transition(&first, rebound, None).await.unwrap();
+        let (retired, effects) = managed.worker_call(
+            &xcb,
+            &claude_session.id,
+            "call_retired",
+            "xcb_message_list",
+            &json!({}),
+        );
+        assert!(retired.is_err());
+        assert_eq!(effects, EffectState::None);
+    }
+
+    #[test]
+    fn version_one_managed_state_adds_mailboxes_without_breaking_rollback() {
+        let root = root();
+        let state = workspace(&root);
+        let store = ManagedStore::open(&state).unwrap();
+        {
+            let db = store.db().unwrap();
+            db.execute_batch("DROP TABLE mailbox_messages; PRAGMA user_version=1;")
+                .unwrap();
+        }
+        drop(store);
+        let migrated = ManagedStore::open(&state).unwrap();
+        let version: u32 = migrated
+            .db()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 1);
+        let count: i64 = migrated
+            .db()
+            .unwrap()
+            .query_row("SELECT count(*) FROM mailbox_messages", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]
@@ -2482,7 +3903,13 @@ mod tests {
             .await
             .unwrap();
         let first = managed
-            .prepare(&first, first_session.id.clone(), model.key(), 0)
+            .prepare(
+                &first,
+                first_session.id.clone(),
+                model.key(),
+                "fixture route".into(),
+                0,
+            )
             .await
             .unwrap();
         let first = managed
@@ -2509,6 +3936,7 @@ mod tests {
                 &second,
                 second_session.id.clone(),
                 "claude/sonnet/high".into(),
+                "fixture route".into(),
                 0,
             )
             .await
@@ -2532,6 +3960,78 @@ mod tests {
             .unwrap();
         assert_eq!(second.state, TaskState::Uncertain);
         assert!(second.detail.contains("no automatic retry"));
+    }
+
+    #[tokio::test]
+    async fn settled_quota_failure_requeues_on_a_new_route_without_inner_continuation() {
+        use xcb_core::models::{Mode, ModelChoice};
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let account = xcb.add_account(Provider::Claude, "Test", 1, None).unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("sonnet").unwrap(),
+            label: "Sonnet".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: Some(Id::new("high").unwrap()),
+            observed_at_ms: 1,
+        };
+        let session = xcb
+            .create_session(&account.id, model.clone(), &workspace, 1)
+            .unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = managed
+            .create_task(
+                &chat,
+                message("m_quota_failover"),
+                "finish work".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        let route = format!("{} · {}", model.key(), account.id);
+        let task = managed
+            .prepare(&task, session.id, route.clone(), "fixture".into(), 0)
+            .await
+            .unwrap();
+        let outcome = Outcome {
+            text: "This route reached its quota.".into(),
+            facts: xcb_core::policy::TurnFacts {
+                terminal: Terminal::Failed,
+                joined: true,
+                effects: EffectState::Settled,
+                pending_attention: false,
+                failure: Some(Failure::AccountQuota),
+            },
+            state: State::Limited,
+        };
+        let task = managed.finish(&xcb, &task.id, Ok(outcome)).await.unwrap();
+        assert_eq!(task.state, TaskState::Queued);
+        assert_eq!(task.session, None);
+        assert_eq!(task.tried_routes, vec![route]);
+        assert_eq!(task.failed_accounts, vec![account.id]);
+        assert_eq!(task.attempts, 1);
+        assert!(
+            task.detail
+                .contains("selecting another eligible Pareto route")
+        );
+        let failed: i64 = managed
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT failed FROM route_stats WHERE scope=?1 AND provider='claude'",
+                [workspace.to_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(failed, 1);
     }
 
     #[test]
@@ -2560,6 +4060,46 @@ mod tests {
             .unwrap();
         }
         assert_eq!(store.learned_route(&workspace).unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn learned_provider_is_soft_but_an_explicit_provider_request_is_required() {
+        let root = root();
+        let workspace = workspace(&root);
+        let store = ManagedStore::open(&workspace).unwrap();
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "INSERT INTO route_stats(scope,provider,completed,failed) VALUES(?1,'claude',2,0)",
+                [workspace.to_str().unwrap()],
+            )
+            .unwrap();
+        let chat = conversation(&store, &workspace).await;
+        let learned = store
+            .create_task(
+                &chat,
+                message("m_soft_route"),
+                "fix the bug".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        assert_eq!(learned.provider_preference, Some(Provider::Claude));
+        assert!(!learned.provider_required);
+        let explicit = store
+            .create_task(
+                &chat,
+                message("m_hard_route"),
+                "use codex for this task".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        assert_eq!(explicit.provider_preference, Some(Provider::Codex));
+        assert!(explicit.provider_required);
     }
 
     #[tokio::test]
@@ -2599,6 +4139,49 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].state, TaskState::Queued);
         assert!(!tasks[0].cancel_requested);
+    }
+
+    #[tokio::test]
+    async fn managed_continuation_preserves_core_turn_limit_gates_without_a_judge() {
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = managed
+            .create_task(
+                &chat,
+                message("m_continue"),
+                "keep going".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        let limited = Outcome {
+            text: "I reached the turn limit after making progress.".into(),
+            facts: xcb_core::policy::TurnFacts {
+                terminal: Terminal::TurnLimit,
+                joined: true,
+                effects: EffectState::Settled,
+                pending_attention: false,
+                failure: None,
+            },
+            state: State::Idle,
+        };
+        assert!(task_should_continue(&xcb, &task, &limited).await.unwrap());
+        let completed = Outcome {
+            text: "The task is complete.".into(),
+            facts: xcb_core::policy::TurnFacts {
+                terminal: Terminal::Completed,
+                ..limited.facts
+            },
+            state: State::Idle,
+        };
+        assert!(!task_should_continue(&xcb, &task, &completed).await.unwrap());
     }
 
     #[tokio::test]
@@ -2649,9 +4232,17 @@ mod tests {
             title: "x".into(),
             goal: "x".into(),
             next_prompt: "x".into(),
+            user_inputs: vec![],
+            input_at_ms: None,
             attachments: vec![],
             session: None,
+            worker_sessions: vec![],
             route: None,
+            route_reason: None,
+            provider_preference: None,
+            provider_required: false,
+            tried_routes: vec![],
+            failed_accounts: vec![],
             state: TaskState::Queued,
             detail: "x".into(),
             attempts: 0,
@@ -2665,6 +4256,6 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
         };
-        assert!(worker_prompt(&task, &preferences).contains("keep updates concise"));
+        assert!(worker_prompt(&task, &preferences, &[]).contains("keep updates concise"));
     }
 }

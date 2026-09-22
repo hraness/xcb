@@ -207,6 +207,7 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (view.state as u8).hash(&mut hasher);
     view.remote_active.hash(&mut hasher);
+    view.managed_cancel_available.hash(&mut hasher);
     view.reduced_motion.hash(&mut hasher);
     view.runway_coverage.hash(&mut hasher);
     view.tokens_per_second.map(f64::to_bits).hash(&mut hasher);
@@ -368,6 +369,13 @@ impl App {
                 .iter()
                 .any(|task| task.state == State::Working)
     }
+    fn can_cancel_work(&self) -> bool {
+        if self.managed_mode() {
+            self.view.managed_cancel_available
+        } else {
+            self.has_live_work()
+        }
+    }
     /// Absolute top line index rendered last frame; used to anchor PageUp.
     pub fn scroll_top(&self) -> u32 {
         self.scroll_top.get()
@@ -510,6 +518,11 @@ impl App {
                 let previous = view_context(&self.view);
                 let next = view_context(&view);
                 if previous != next {
+                    // Before the first context arrives, input already belongs to
+                    // the context being opened. A delayed initial view must not
+                    // erase part of a command or an attachment typed meanwhile.
+                    let preserve_unbound_input = previous.is_none()
+                        && (!self.composer.text().is_empty() || !self.attachments.is_empty());
                     // The draft belongs to the conversation or session it was typed in:
                     // stash it and restore the target context's own draft.
                     if let Some(previous) = previous {
@@ -519,9 +532,11 @@ impl App {
                             self.save_draft(previous, SessionDraft { text, attachments });
                         }
                     }
-                    let draft = next.and_then(|id| self.take_draft(&id)).unwrap_or_default();
-                    self.composer.set_text(&draft.text);
-                    self.attachments = draft.attachments;
+                    if !preserve_unbound_input {
+                        let draft = next.and_then(|id| self.take_draft(&id)).unwrap_or_default();
+                        self.composer.set_text(&draft.text);
+                        self.attachments = draft.attachments;
+                    }
                     self.stream.clear();
                     self.thinking.clear();
                     self.scroll.set(0);
@@ -678,9 +693,36 @@ impl App {
             error: None,
         });
     }
-    fn send(&mut self, output: &SyncSender<Intent>, intent: Intent) {
+    fn try_send(&mut self, output: &SyncSender<Intent>, intent: Intent) -> bool {
         if output.try_send(intent).is_err() {
             self.notice = "The command queue is full or closed. Nothing was submitted.".into();
+            false
+        } else {
+            true
+        }
+    }
+    fn send(&mut self, output: &SyncSender<Intent>, intent: Intent) {
+        self.try_send(output, intent);
+    }
+    fn request_cancel(&mut self, output: &SyncSender<Intent>) {
+        if self.try_send(output, Intent::Cancel) {
+            self.notice = if self.managed_mode() {
+                "Cancellation requested for this conversation; check the task status for settlement."
+            } else if self.view.remote_active {
+                "This turn is running in another terminal; cancel it there."
+            } else {
+                "Stopping the current turn and queued follow-ups."
+            }
+            .into();
+        }
+    }
+    fn request_attachment(&mut self, output: &SyncSender<Intent>, intent: Intent) {
+        if self.pending_image {
+            self.notice =
+                "Wait for the current image to finish loading before adding another.".into();
+        } else if self.try_send(output, intent) {
+            self.pending_image = true;
+            self.pending_image_session = view_context(&self.view);
         }
     }
     fn slash(&mut self, input: &str, output: &SyncSender<Intent>) -> bool {
@@ -760,7 +802,13 @@ impl App {
                     .tasks
                     .iter()
                     .map(|task| PickItem {
-                        label: format!("{} · {} · {}", task.title, task.state.label(), task.detail),
+                        label: format!(
+                            "{} · {} · {} · {}",
+                            task.id,
+                            task.title,
+                            task.state.label(),
+                            task.detail
+                        ),
                         action: PickAction::Task(task.id.clone()),
                     })
                     .collect(),
@@ -825,9 +873,7 @@ impl App {
                 }
             },
             "/attach" if !arguments.is_empty() => {
-                self.pending_image = true;
-                self.pending_image_session = view_context(&self.view);
-                self.send(
+                self.request_attachment(
                     output,
                     Intent::AttachPath(arguments.trim_matches('"').trim_matches('\'').into()),
                 );
@@ -941,14 +987,8 @@ impl App {
                         // Standard interrupt ordering: a live turn is cancelled
                         // first, then a draft clears, then an idle empty
                         // composer quits.
-                        if self.has_live_work() {
-                            self.send(output, Intent::Cancel);
-                            self.notice = if self.view.remote_active {
-                                "This turn is running in another terminal; cancel it there."
-                            } else {
-                                "Stopping the current turn and queued follow-ups."
-                            }
-                            .into();
+                        if self.can_cancel_work() {
+                            self.request_cancel(output);
                         } else if !self.composer.text().is_empty() {
                             self.composer.set_text("");
                             self.notice = "Draft cleared. Press Ctrl-C again to quit.".into();
@@ -1079,14 +1119,8 @@ impl App {
             }
             ComposerAction::Cancel => {
                 // Esc interrupts a live turn; idle it is a quiet no-op.
-                if self.has_live_work() {
-                    self.send(output, Intent::Cancel);
-                    self.notice = if self.view.remote_active {
-                        "This turn is running in another terminal; cancel it there."
-                    } else {
-                        "Stopping the current turn and queued follow-ups."
-                    }
-                    .into();
+                if self.can_cancel_work() {
+                    self.request_cancel(output);
                 }
             }
             ComposerAction::Quit => {
@@ -1132,9 +1166,7 @@ impl App {
                 self.notice = "Image limit reached (8 images, 16 megapixels each).".into();
                 return;
             }
-            self.pending_image = true;
-            self.pending_image_session = view_context(&self.view);
-            self.send(
+            self.request_attachment(
                 output,
                 Intent::AttachRgba {
                     width: image.width,
@@ -1156,14 +1188,8 @@ impl App {
             && key.code == KeyCode::Char('c')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
-            if self.has_live_work() {
-                self.send(output, Intent::Cancel);
-                self.notice = if self.view.remote_active {
-                    "This turn is running in another terminal; cancel it there."
-                } else {
-                    "Stopping the current turn and queued follow-ups."
-                }
-                .into();
+            if self.can_cancel_work() {
+                self.request_cancel(output);
                 return true;
             }
             self.send(output, Intent::Quit);
@@ -1348,7 +1374,8 @@ impl App {
                 PickAction::Task(id) => {
                     if let Some(task) = self.view.tasks.iter().find(|task| task.id == id) {
                         self.notice = format!(
-                            "{} · {} · {}{}",
+                            "{} · {} · {} · {}{}",
+                            task.id,
                             task.title,
                             task.state.label(),
                             task.detail,

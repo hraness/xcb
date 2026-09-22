@@ -527,6 +527,9 @@ fn broker_guidance_keeps_native_sandbox_read_only_and_zero_tool_launches_empty()
                 names,
                 [
                     "workspace_exec",
+                    "xcb_swarm_status",
+                    "xcb_message_list",
+                    "xcb_message_send",
                     "workspace_list",
                     "workspace_read",
                     "workspace_search",

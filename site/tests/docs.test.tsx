@@ -91,9 +91,11 @@ describe("organized documentation", () => {
     expect(html).toContain("./scripts/install-native.sh");
     expect(html).toContain("No native XCB release");
     expect(html).toContain("npm package is published yet");
-    expect(html).toContain("xcb accounts login personal");
-    expect(html).toContain("xcb accounts refresh personal");
-    expect(html).toContain("xcb models default &lt;full-model-key&gt;");
+    expect(html).toContain("xcb accounts login &lt;account-id&gt;");
+    expect(html).toContain("xcb accounts refresh &lt;account-id&gt;");
+    expect(html).toContain("xcb chat --resume &lt;conversation-id&gt;");
+    expect(html).toContain("xcb accounts add claude --plan Max");
+    expect(html).not.toContain("--label");
     expect(html).toContain("xcb --cwd /absolute/path/to/your/project");
     expect(html).toContain("It is not a headless continuation command");
     expect(html).not.toMatch(/(?:npm|bun) (?:install|add) -g @hraness\/xcb/u);
@@ -106,6 +108,7 @@ describe("organized documentation", () => {
       .toEqual(["provider-status-caption"]);
     expect(provider).toContain('<caption id="provider-status-caption">Native CLI evidence and current limits</caption>');
     expect(provider).toContain("3000.10.31");
+    expect(provider).toContain("3000.11.1");
     expect(provider).toContain("Provider quota blocked the tested coding turn");
     expect(provider).toContain("xcb accounts import-codex --source");
     expect(provider).toContain("xcb accounts import-devin --source");

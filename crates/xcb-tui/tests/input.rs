@@ -228,6 +228,77 @@ fn view_for(session: &str) -> xcb_core::ui::View {
 }
 
 #[test]
+fn initial_context_preserves_a_partially_typed_quit_command() {
+    let managed = xcb_core::ui::View {
+        conversation: Some(xcb_core::Id::new("c_resumed").unwrap()),
+        extensions: vec![("algal supervisor".into(), "on".into())],
+        ..Default::default()
+    };
+    for view in [view_for("s_resumed"), managed] {
+        let mut app = App::default();
+        let (tx, rx) = sync_channel(4);
+        for character in "/q".chars() {
+            assert!(app.handle(
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+                &tx,
+            ));
+        }
+        assert!(app.apply(xcb_core::ui::Update::View(Box::new(view))));
+        for character in "uit".chars() {
+            assert!(app.handle(
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+                &tx,
+            ));
+        }
+        assert!(!app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &tx,
+        ));
+        assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Quit)));
+        assert!(rx.try_recv().is_err(), "no partial command becomes a task");
+    }
+}
+
+#[test]
+fn initial_context_preserves_early_text_and_attachment_submission() {
+    let managed = xcb_core::ui::View {
+        conversation: Some(xcb_core::Id::new("c_new").unwrap()),
+        extensions: vec![("algal supervisor".into(), "on".into())],
+        ..Default::default()
+    };
+    for view in [view_for("s_new"), managed] {
+        let mut app = App::default();
+        let (tx, rx) = sync_channel(4);
+        assert!(app.handle(Event::Paste("Review this image".into()), &tx));
+        let image = Attachment {
+            digest: "a".repeat(64),
+            media_type: "image/png".into(),
+            bytes: 1024,
+            width: 32,
+            height: 32,
+        };
+        assert!(app.apply(xcb_core::ui::Update::Attachment(image.clone())));
+        assert!(app.apply(xcb_core::ui::Update::View(Box::new(view))));
+        assert_eq!(app.composer.text(), "Review this image");
+        assert_eq!(app.attachments.len(), 1);
+        assert!(app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &tx,
+        ));
+        match rx.try_recv().unwrap() {
+            xcb_core::ui::Intent::Submit {
+                text, attachments, ..
+            } => {
+                assert_eq!(text, "Review this image");
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].digest, image.digest);
+            }
+            _ => panic!("the complete original input must be submitted"),
+        }
+    }
+}
+
+#[test]
 fn drafts_and_attachments_are_scoped_per_session() {
     let mut app = App::default();
     let image = |digest: &str| Attachment {
@@ -939,4 +1010,94 @@ fn submitted_prompts_echo_instantly_then_reconcile_with_the_view() {
     }));
     assert_eq!(app.pending_echoes().count(), 0);
     assert_eq!(app.composer.text(), "nope");
+}
+
+#[test]
+fn rejected_cancel_never_claims_that_cancellation_was_sent() {
+    for modal in [false, true] {
+        let (tx, rx) = sync_channel(1);
+        tx.send(xcb_core::ui::Intent::Refresh).unwrap();
+        let mut app = App::default();
+        app.view.state = xcb_core::session::State::Working;
+        if modal {
+            app.modal = Some(Modal::Help);
+        }
+        app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            &tx,
+        );
+        assert_eq!(
+            app.notice,
+            "The command queue is full or closed. Nothing was submitted."
+        );
+        assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Refresh)));
+        assert!(rx.try_recv().is_err());
+    }
+}
+
+#[test]
+fn rejected_attachment_does_not_block_the_next_prompt() {
+    let (tx, rx) = sync_channel(1);
+    tx.send(xcb_core::ui::Intent::Refresh).unwrap();
+    let mut app = App::default();
+    app.composer.set_text("/attach /tmp/image.png");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(app.notice.contains("Nothing was submitted"));
+    rx.try_recv().unwrap();
+    app.composer.set_text("Continue the task");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(
+        matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Submit { text, .. }) if text == "Continue the task")
+    );
+}
+
+#[test]
+fn managed_cancellation_reports_a_request_not_confirmed_settlement() {
+    let (tx, rx) = sync_channel(1);
+    let mut app = App::default();
+    app.view.state = xcb_core::session::State::Working;
+    app.view.managed_cancel_available = true;
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
+    assert_eq!(
+        app.notice,
+        "Cancellation requested for this conversation; check the task status for settlement."
+    );
+}
+
+#[test]
+fn work_in_another_conversation_does_not_intercept_ctrl_c() {
+    let (tx, rx) = sync_channel(2);
+    let mut app = App::default();
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    app.view.state = xcb_core::session::State::Working;
+    app.view.managed_cancel_available = false;
+    app.composer.set_text("my draft");
+    let ctrl_c = || Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(app.composer.text().is_empty());
+    assert!(rx.try_recv().is_err());
+    assert!(!app.handle(ctrl_c(), &tx));
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Quit)));
+}
+
+#[test]
+fn managed_task_waiting_for_input_can_be_cancelled_without_losing_the_draft() {
+    let (tx, rx) = sync_channel(2);
+    let mut app = App::default();
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    app.view.state = xcb_core::session::State::NeedsAnswer;
+    app.view.managed_cancel_available = true;
+    app.composer.set_text("keep this draft");
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
+    assert_eq!(app.composer.text(), "keep this draft");
+    app.modal = Some(Modal::Help);
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &tx
+    ));
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
+    assert_eq!(app.composer.text(), "keep this draft");
 }

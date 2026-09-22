@@ -636,3 +636,24 @@ fn empty_global_conversation_has_quiet_dispatcher_chrome() {
     assert!(contents.contains("Message · / for commands"));
     assert!(!contents.contains("usage: unmeasured"));
 }
+
+#[test]
+fn managed_work_does_not_advertise_direct_session_followups() {
+    let mut app = app();
+    app.view.session = None;
+    app.view.state = State::Working;
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(contents.contains("Describe new work or ask for status"));
+    assert!(!contents.contains("Type a follow-up"));
+}

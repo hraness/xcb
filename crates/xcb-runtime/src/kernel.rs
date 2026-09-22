@@ -410,15 +410,6 @@ fn model_account(
 }
 
 fn workspace_lease(store: &Store, session: &Session) -> Result<File> {
-    for run in store.unsettled_runs()? {
-        if let Some(id) = run.session
-            && store
-                .session(&id)?
-                .is_some_and(|active| active.workspace == session.workspace)
-        {
-            return Err(Error::Conflict("workspace has an unsettled writer"));
-        }
-    }
     let directory = private::directory(&store.root().join("workspace-runs"))?;
     let path = directory.join(format!("{}.lock", digest(session.workspace.as_bytes())));
     let file = OpenOptions::new()
@@ -430,12 +421,26 @@ fn workspace_lease(store: &Store, session: &Session) -> Result<File> {
         .open(path)?;
     private::check_file(&file, 4096)?;
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => (),
         Err(std::fs::TryLockError::WouldBlock) => {
-            Err(Error::Conflict("workspace has an active writer"))
+            return Err(Error::Conflict("workspace has an active writer"));
         }
-        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
     }
+    // Inspect durable custody only after excluding competing launchers. An
+    // earlier owner may have released this lock with an unsettled run between
+    // a pre-lock check and acquisition; the filesystem lock alone is no proof
+    // that its provider and effects have stopped.
+    for run in store.unsettled_runs()? {
+        if let Some(id) = run.session
+            && store
+                .session(&id)?
+                .is_some_and(|active| active.workspace == session.workspace)
+        {
+            return Err(Error::Conflict("workspace has an unsettled writer"));
+        }
+    }
+    Ok(file)
 }
 
 fn ready(store: &Store, session: &Session) -> Result<()> {
@@ -489,6 +494,21 @@ async fn fire_hooks(
     }
 }
 
+#[derive(Clone, Copy)]
+enum ExecutionMode {
+    Direct,
+    Managed,
+    Pane,
+}
+impl ExecutionMode {
+    fn pane_generation(self) -> bool {
+        matches!(self, Self::Pane)
+    }
+    fn supervise(self) -> bool {
+        matches!(self, Self::Direct)
+    }
+}
+
 pub async fn execute(
     store: Arc<Store>,
     session_id: Id,
@@ -498,6 +518,52 @@ pub async fn execute(
     cancel: watch::Receiver<bool>,
     observer: Observer,
 ) -> Result<Outcome> {
+    execute_mode(
+        store,
+        session_id,
+        text,
+        attachments,
+        if pane_generation {
+            ExecutionMode::Pane
+        } else {
+            ExecutionMode::Direct
+        },
+        cancel,
+        observer,
+    )
+    .await
+}
+
+pub async fn execute_once(
+    store: Arc<Store>,
+    session_id: Id,
+    text: String,
+    attachments: Vec<xcb_core::session::Attachment>,
+    cancel: watch::Receiver<bool>,
+    observer: Observer,
+) -> Result<Outcome> {
+    execute_mode(
+        store,
+        session_id,
+        text,
+        attachments,
+        ExecutionMode::Managed,
+        cancel,
+        observer,
+    )
+    .await
+}
+
+async fn execute_mode(
+    store: Arc<Store>,
+    session_id: Id,
+    text: String,
+    attachments: Vec<xcb_core::session::Attachment>,
+    mode: ExecutionMode,
+    cancel: watch::Receiver<bool>,
+    observer: Observer,
+) -> Result<Outcome> {
+    let pane_generation = mode.pane_generation();
     let config = Config::load(store.root())?.0;
     let session = store
         .session(&session_id)?
@@ -517,7 +583,7 @@ pub async fn execute(
         session_id.clone(),
         text,
         attachments,
-        pane_generation,
+        mode,
         cancel,
         observer.clone(),
     )
@@ -555,10 +621,12 @@ async fn execute_inner(
     session_id: Id,
     text: String,
     attachments: Vec<xcb_core::session::Attachment>,
-    pane_generation: bool,
-    cancel: watch::Receiver<bool>,
+    mode: ExecutionMode,
+    mut cancel: watch::Receiver<bool>,
     observer: Observer,
 ) -> Result<Outcome> {
+    let pane_generation = mode.pane_generation();
+    let supervise = mode.supervise();
     let started = now_ms();
     let mut consecutive = 0u32;
     let mut previous_output = None;
@@ -624,7 +692,7 @@ async fn execute_inner(
         )
         .await;
         let outcome = result?;
-        if pane_generation || *cancel.borrow() {
+        if !supervise || pane_generation || *cancel.borrow() {
             return Ok(outcome);
         }
         let current = store
@@ -645,7 +713,10 @@ async fn execute_inner(
             repeat,
         );
         let continue_turn = if deterministic_continue && current_config.extensions.judge.enabled {
-            match configured_judge_continuation(
+            let judgment = tokio::select! {
+                biased;
+                _ = cancellation_requested(&mut cancel) => return Ok(outcome),
+                judgment = configured_judge_continuation(
                 store.root(),
                 &current_config.extensions.judge,
                 ContinuationInput {
@@ -657,9 +728,9 @@ async fn execute_inner(
                     elapsed_ms,
                     repeated: repeat,
                 },
-            )
-            .await
-            {
+                ) => judgment,
+            };
+            match judgment {
                 Ok(decision) => {
                     observer(Progress::Notice(
                         if decision {
@@ -681,6 +752,12 @@ async fn execute_inner(
         } else {
             deterministic_continue
         };
+        if *cancel.borrow()
+            || now_ms().saturating_sub(started)
+                >= current_config.extensions.auto_continue.max_elapsed_ms
+        {
+            return Ok(outcome);
+        }
         if continue_turn {
             consecutive += 1;
             previous_output = Some(output_digest);
@@ -694,8 +771,13 @@ async fn execute_inner(
             continue;
         }
         if current_config.auto_failover
-            && now_ms().saturating_sub(started)
-                < current_config.extensions.auto_continue.max_elapsed_ms
+            && outcome.facts.terminal == Terminal::Failed
+            && matches!(
+                outcome.facts.failure,
+                Some(
+                    xcb_core::policy::Failure::AccountQuota | xcb_core::policy::Failure::ModelQuota
+                )
+            )
         {
             let view = summary::snapshot(&store, Some(&session_id), &current_config, now_ms())?;
             let source = RouteCandidate {
@@ -735,6 +817,12 @@ async fn execute_inner(
                     });
                 }
             }
+            let checkpointed = !outcome.text.is_empty()
+                || outcome.facts.effects == xcb_core::policy::EffectState::None;
+            let eligible = eligible_failover_routes(&source, &candidates, &tried, &outcome);
+            if eligible.is_empty() {
+                return Ok(outcome);
+            }
             // Ask the judge to rank the routes `next_route` could pick; on any
             // failure — no key, unreadable vault, bad endpoint — the
             // deterministic order stands and the run keeps its contract.
@@ -748,80 +836,71 @@ async fn execute_inner(
                         None
                     }
                 };
-            if let Some(judge) = failover_judge {
-                let eligible: Vec<usize> = candidates
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, candidate)| {
-                        let key = format!("{}/{}", candidate.account, candidate.model.key());
-                        candidate.admitted
-                            && candidate.quota_fresh
-                            && candidate.available
-                            && !tried.contains(&key)
-                            && !(candidate.account == source.account
-                                && candidate.model == source.model)
-                    })
-                    .map(|(index, _)| index)
-                    .take(16)
-                    .collect();
-                if eligible.len() > 1 {
-                    let mut criteria = std::collections::BTreeMap::new();
-                    for (rank, index) in eligible.iter().enumerate() {
-                        let candidate = &candidates[*index];
-                        criteria.insert(
-                            format!("route_{rank}"),
-                            Some(format!(
-                                "{} · {} · {}",
-                                candidate.model.provider, candidate.model.label, candidate.account
-                            )),
-                        );
-                    }
-                    let state = serde_json::json!({
-                        "context": "A coding task lost its current route to a provider usage limit. Choose the best remaining route for the task; all listed routes are admitted and have quota.",
-                        "task": xcb_core::display_text(&original_task, 8192),
-                        "failure": format!("{:?}", outcome.facts.failure),
-                    });
-                    let mut questions = judge::JudgeQuestions::new();
-                    questions.insert(
-                        "route".to_owned(),
-                        judge::JudgeQuestion::Choice {
-                            instructions: "Pick the route most likely to complete the task well."
-                                .to_owned(),
-                            criteria,
-                        },
+            if let Some(judge) = failover_judge
+                && eligible.len() > 1
+            {
+                let mut criteria = std::collections::BTreeMap::new();
+                for (rank, index) in eligible.iter().enumerate() {
+                    let candidate = &candidates[*index];
+                    criteria.insert(
+                        format!("route_{rank}"),
+                        Some(format!(
+                            "{} · {} · {}",
+                            candidate.model.provider, candidate.model.label, candidate.account
+                        )),
                     );
-                    match judge.ask(&state, &questions).await {
-                        Ok(answers) => {
-                            if let Some((pick, _)) = answers
-                                .answers
-                                .get("route")
-                                .and_then(|answer| answer.choice())
-                                && let Some(index) = pick
-                                    .strip_prefix("route_")
-                                    .and_then(|rest| rest.parse::<usize>().ok())
-                                    .and_then(|rank| eligible.get(rank))
-                            {
-                                let chosen = candidates.remove(*index);
-                                observer(Progress::Notice(
-                                    "Judge selected an admitted failover route".to_owned(),
-                                ));
-                                candidates.insert(0, chosen);
-                            }
+                }
+                let state = serde_json::json!({
+                    "context": "A coding task lost its current route to a provider usage limit. Choose the best remaining route for the task; all listed routes are admitted and have quota.",
+                    "task": xcb_core::display_text(&original_task, 8192),
+                    "failure": format!("{:?}", outcome.facts.failure),
+                });
+                let mut questions = judge::JudgeQuestions::new();
+                questions.insert(
+                    "route".to_owned(),
+                    judge::JudgeQuestion::Choice {
+                        instructions: "Pick the route most likely to complete the task well."
+                            .to_owned(),
+                        criteria,
+                    },
+                );
+                let judgment = tokio::select! {
+                    biased;
+                    _ = cancellation_requested(&mut cancel) => return Ok(outcome),
+                    judgment = judge.ask(&state, &questions) => judgment,
+                };
+                match judgment {
+                    Ok(answers) => {
+                        if let Some((pick, _)) = answers
+                            .answers
+                            .get("route")
+                            .and_then(|answer| answer.choice())
+                            && let Some(index) = pick
+                                .strip_prefix("route_")
+                                .and_then(|rest| rest.parse::<usize>().ok())
+                                .and_then(|rank| eligible.get(rank))
+                        {
+                            let chosen = candidates.remove(*index);
+                            observer(Progress::Notice(
+                                "Judge selected an admitted failover route".to_owned(),
+                            ));
+                            candidates.insert(0, chosen);
                         }
-                        Err(error) => observer(Progress::Notice(format!(
-                            "Judge routing unavailable ({error}); deterministic order"
-                        ))),
                     }
+                    Err(error) => observer(Progress::Notice(format!(
+                        "Judge routing unavailable ({error}); deterministic order"
+                    ))),
                 }
             }
-            if let Some(target) = next_route(
-                &source,
-                &candidates,
-                &tried,
-                &outcome.facts,
-                !outcome.text.is_empty()
-                    || outcome.facts.effects == xcb_core::policy::EffectState::None,
-            ) {
+            if *cancel.borrow()
+                || now_ms().saturating_sub(started)
+                    >= current_config.extensions.auto_continue.max_elapsed_ms
+            {
+                return Ok(outcome);
+            }
+            if let Some(target) =
+                next_route(&source, &candidates, &tried, &outcome.facts, checkpointed)
+            {
                 store.rebind(
                     &session_id,
                     current.revision,
@@ -840,6 +919,37 @@ async fn execute_inner(
         }
         return Ok(outcome);
     }
+}
+
+async fn cancellation_requested(cancel: &mut watch::Receiver<bool>) {
+    // Sender loss also ends supervision, just as it ends an active runner.
+    let _ = cancel.wait_for(|cancelled| *cancelled).await;
+}
+
+fn eligible_failover_routes(
+    source: &RouteCandidate,
+    candidates: &[RouteCandidate],
+    tried: &BTreeSet<String>,
+    outcome: &Outcome,
+) -> Vec<usize> {
+    let checkpointed =
+        !outcome.text.is_empty() || outcome.facts.effects == xcb_core::policy::EffectState::None;
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| {
+            next_route(
+                source,
+                std::slice::from_ref(*candidate),
+                tried,
+                &outcome.facts,
+                checkpointed,
+            )
+            .is_some()
+        })
+        .map(|(index, _)| index)
+        .take(16)
+        .collect()
 }
 
 #[derive(Default)]
@@ -1276,13 +1386,96 @@ mod tests {
         ));
         drop(lease);
         drop(workspace_lease(&store, &second_session).unwrap());
-        store
+        let run = store
             .prepare_run(&first_session.id, first_session.revision, 2)
             .unwrap();
         assert!(matches!(
             workspace_lease(&store, &second_session),
             Err(Error::Conflict("workspace has an unsettled writer"))
         ));
+        store.settle(&run, State::Idle, 3).unwrap();
+        drop(workspace_lease(&store, &second_session).unwrap());
+    }
+
+    #[tokio::test]
+    async fn supervision_cancellation_waits_for_true_or_sender_loss() {
+        let (sender, mut receiver) = watch::channel(false);
+        sender.send(false).unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                cancellation_requested(&mut receiver)
+            )
+            .await
+            .is_err()
+        );
+        sender.send(true).unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            cancellation_requested(&mut receiver),
+        )
+        .await
+        .unwrap();
+        let (sender, mut receiver) = watch::channel(false);
+        drop(sender);
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            cancellation_requested(&mut receiver),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn failover_judge_sees_only_safe_routes_and_checkpoints() {
+        use xcb_core::policy::{EffectState, Failure, TurnFacts};
+        let candidate = |index| {
+            let (account, model, _) = route_candidate(index);
+            RouteCandidate {
+                account,
+                model,
+                admitted: true,
+                quota_fresh: true,
+                available: true,
+            }
+        };
+        let source = candidate(0);
+        let mut same_account = candidate(1);
+        same_account.account = source.account.clone();
+        let candidates = vec![same_account, candidate(2)];
+        let tried = BTreeSet::new();
+        let mut outcome = Outcome {
+            text: "Saved the migration; remaining tests need to run".into(),
+            state: State::Failed,
+            facts: TurnFacts {
+                terminal: Terminal::Failed,
+                joined: true,
+                effects: EffectState::Settled,
+                pending_attention: false,
+                failure: Some(Failure::AccountQuota),
+            },
+        };
+        assert_eq!(
+            eligible_failover_routes(&source, &candidates, &tried, &outcome),
+            vec![1]
+        );
+        outcome.facts.failure = Some(Failure::ModelQuota);
+        assert_eq!(
+            eligible_failover_routes(&source, &candidates, &tried, &outcome),
+            vec![0, 1]
+        );
+        outcome.text.clear();
+        assert!(eligible_failover_routes(&source, &candidates, &tried, &outcome).is_empty());
+        outcome.facts.effects = EffectState::None;
+        assert_eq!(
+            eligible_failover_routes(&source, &candidates, &tried, &outcome),
+            vec![0, 1]
+        );
+        outcome.facts.pending_attention = true;
+        assert!(eligible_failover_routes(&source, &candidates, &tried, &outcome).is_empty());
+        outcome.facts.pending_attention = false;
+        outcome.facts.terminal = Terminal::Completed;
+        assert!(eligible_failover_routes(&source, &candidates, &tried, &outcome).is_empty());
     }
 
     #[test]
