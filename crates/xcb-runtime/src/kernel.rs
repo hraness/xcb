@@ -1,7 +1,7 @@
 use crate::{
     Error, Result, attachments, auth,
     config::Config,
-    digest, exports, hooks, judge, new_id, now_ms, panes,
+    digest, exports, hooks, judge, new_id, now_ms, panes, private,
     process::Pin,
     runner::{self, Observer, Outcome, Progress, RunInput},
     store::Store,
@@ -9,6 +9,8 @@ use crate::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    fs::{File, OpenOptions},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -407,6 +409,35 @@ fn model_account(
     ))
 }
 
+fn workspace_lease(store: &Store, session: &Session) -> Result<File> {
+    for run in store.unsettled_runs()? {
+        if let Some(id) = run.session
+            && store
+                .session(&id)?
+                .is_some_and(|active| active.workspace == session.workspace)
+        {
+            return Err(Error::Conflict("workspace has an unsettled writer"));
+        }
+    }
+    let directory = private::directory(&store.root().join("workspace-runs"))?;
+    let path = directory.join(format!("{}.lock", digest(session.workspace.as_bytes())));
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    private::check_file(&file, 4096)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            Err(Error::Conflict("workspace has an active writer"))
+        }
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 fn ready(store: &Store, session: &Session) -> Result<()> {
     if !store.account(&session.account)?.enabled {
         return Err(Error::Unavailable("selected account is disabled"));
@@ -471,6 +502,7 @@ pub async fn execute(
     let session = store
         .session(&session_id)?
         .ok_or(Error::Unavailable("session not found"))?;
+    let _workspace = workspace_lease(&store, &session)?;
     fire_hooks(
         &store,
         &config,
@@ -1057,7 +1089,7 @@ pub async fn serve(
                     let handled: Result<()> = (|| {
                         match intent {
                             Intent::Refresh => { match Config::load(store.root()) { Ok((fresh, _)) => config = fresh, Err(error) => queue(&outbox, Update::Notice(format!("Configuration reload rejected: {error}"))) } }
-                            Intent::Submit { text, attachments } => {
+                            Intent::Submit { text, attachments, .. } => {
                                 let prepared: Result<Id> = (|| {
                                     if current.is_none() { current = Some(new_session(&store, &workspace, &config, None, None)?.id); }
                                     let id = current.clone().expect("selected session");
@@ -1082,6 +1114,7 @@ pub async fn serve(
                                     queue(&outbox, Update::Notice("This turn is running in another terminal; cancel it there.".into()));
                                 }
                             }
+                            Intent::Conversation(_) => return Err(Error::Unavailable("managed conversations are available from plain xcb chat")),
                             Intent::Resume(id) => { if store.session(&id)?.is_none() { return Err(Error::Unavailable("session not found")); } current = Some(id); }
                             Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None)?.id),
                             Intent::Account(account) => {
@@ -1216,6 +1249,41 @@ fn pane_prompt(request: &str) -> Result<String> {
 mod tests {
     use super::*;
     use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn workspace_lease_excludes_concurrent_and_unsettled_writers_across_accounts() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let workspace = crate::private::directory(&base.join("work")).unwrap();
+        let first = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let second = store
+            .add_account(Provider::Claude, "Test", 2, None)
+            .unwrap();
+        let model = route_candidate(0).1;
+        let first_session = store
+            .create_session(&first.id, model.clone(), &workspace, 1)
+            .unwrap();
+        let second_session = store
+            .create_session(&second.id, model, &workspace, 1)
+            .unwrap();
+        let lease = workspace_lease(&store, &first_session).unwrap();
+        assert!(matches!(
+            workspace_lease(&store, &second_session),
+            Err(Error::Conflict("workspace has an active writer"))
+        ));
+        drop(lease);
+        drop(workspace_lease(&store, &second_session).unwrap());
+        store
+            .prepare_run(&first_session.id, first_session.revision, 2)
+            .unwrap();
+        assert!(matches!(
+            workspace_lease(&store, &second_session),
+            Err(Error::Conflict("workspace has an unsettled writer"))
+        ));
+    }
 
     #[test]
     fn quota_availability_preserves_affinity_and_never_reselects_blocked_onboarding_default() {
@@ -1480,6 +1548,7 @@ mod tests {
             };
             commands
                 .send(Intent::Submit {
+                    id: Id::new("m_retained").unwrap(),
                     text: "retained task".into(),
                     attachments: vec![image.clone()],
                 })

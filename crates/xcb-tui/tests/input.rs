@@ -259,6 +259,31 @@ fn drafts_and_attachments_are_scoped_per_session() {
 }
 
 #[test]
+fn drafts_are_scoped_across_concurrent_control_conversations() {
+    let mut app = App::default();
+    let view = |id: &str| xcb_core::ui::View {
+        conversation: Some(xcb_core::Id::new(id).unwrap()),
+        conversations: vec![xcb_core::ui::ConversationRow {
+            id: xcb_core::Id::new(id).unwrap(),
+            title: id.into(),
+            workspace: "/project".into(),
+            updated_at_ms: 1,
+        }],
+        extensions: vec![("algal supervisor".into(), "on".into())],
+        ..Default::default()
+    };
+    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view("c_one")))));
+    app.composer.set_text("first chat draft");
+    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view("c_two")))));
+    assert_eq!(app.composer.text(), "");
+    app.composer.set_text("second chat draft");
+    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view("c_one")))));
+    assert_eq!(app.composer.text(), "first chat draft");
+    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view("c_two")))));
+    assert_eq!(app.composer.text(), "second chat draft");
+}
+
+#[test]
 fn an_attachment_in_flight_lands_in_the_session_that_requested_it() {
     let mut app = App::default();
     let (tx, _rx) = sync_channel(1);
@@ -735,9 +760,88 @@ fn single_letter_aliases_dispatch_the_full_command() {
         &tx
     ));
     match &app.modal {
-        Some(Modal::Picker { title, .. }) => assert_eq!(title, "Sessions"),
+        Some(Modal::Picker { title, .. }) => assert_eq!(title, "Direct provider sessions"),
         _ => panic!("session picker"),
     }
+
+    app.modal = None;
+    app.view.tasks = vec![xcb_core::ui::TaskRow {
+        id: xcb_core::Id::new("t_one").unwrap(),
+        title: "Fix login".into(),
+        state: xcb_core::session::State::Working,
+        detail: "worker is running".into(),
+        route: Some("claude/default/high".into()),
+        workspace: "/project".into(),
+        updated_at_ms: 1,
+    }];
+    app.composer.set_text("/t");
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &tx
+    ));
+    match &app.modal {
+        Some(Modal::Picker { title, .. }) => assert_eq!(title, "Managed tasks"),
+        _ => panic!("task picker"),
+    }
+}
+
+#[test]
+fn global_command_menu_only_shows_conversation_and_task_controls() {
+    let mut app = App::default();
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    app.composer.set_text("/");
+    let names: Vec<_> = app
+        .slash_matches()
+        .iter()
+        .map(|command| command.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "/attach",
+            "/exit",
+            "/help",
+            "/new",
+            "/quit",
+            "/sessions",
+            "/tasks",
+        ]
+    );
+    assert!(!names.contains(&"/model"));
+    assert!(!names.contains(&"/pane"));
+}
+
+#[test]
+fn managed_session_picker_switches_control_conversations() {
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    app.view.conversation = Some(xcb_core::Id::new("c_first").unwrap());
+    app.view.conversations = vec![
+        xcb_core::ui::ConversationRow {
+            id: xcb_core::Id::new("c_first").unwrap(),
+            title: "First".into(),
+            workspace: "/one".into(),
+            updated_at_ms: 2,
+        },
+        xcb_core::ui::ConversationRow {
+            id: xcb_core::Id::new("c_second").unwrap(),
+            title: "Second".into(),
+            workspace: "/two".into(),
+            updated_at_ms: 1,
+        },
+    ];
+    app.composer.set_text("/s");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    match &app.modal {
+        Some(Modal::Picker { title, .. }) => assert_eq!(title, "Control conversations"),
+        _ => panic!("conversation picker"),
+    }
+    picker_key(&mut app, &tx, KeyCode::Down);
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(
+        matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Conversation(id)) if id.as_str() == "c_second")
+    );
 }
 
 #[test]

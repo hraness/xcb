@@ -1,7 +1,8 @@
 use xcb_core::{
     Id, Provider,
     models::{Mode, ModelChoice},
-    session::{Message, MessageProvenance, Role},
+    policy::{EffectState, Terminal, TurnFacts},
+    session::{Message, MessageProvenance, Role, State, classify},
 };
 
 fn model() -> ModelChoice {
@@ -71,4 +72,18 @@ fn provenance_boundary_label_prefers_provider_model_run() {
     assert!(third.boundary_label(Some(&second)).contains("↷"));
     assert!(!third.boundary_label(Some(&second)).contains("work"));
     assert!(second.boundary_label(Some(&second)).is_empty());
+}
+
+#[test]
+fn explicit_input_requests_are_detected_even_when_diagnostics_follow_the_question() {
+    let facts = TurnFacts {
+        terminal: Terminal::Completed,
+        joined: true,
+        effects: EffectState::Settled,
+        pending_attention: false,
+        failure: None,
+    };
+    let response = "Question for you: Should I keep retrying the command runner? I do not want to guess, and the tool itself is not starting.";
+    assert_eq!(classify(response, &facts), State::NeedsAnswer);
+    assert_eq!(classify("The inspection is complete.", &facts), State::Idle);
 }

@@ -1,0 +1,53 @@
+{
+  "contract": "algal.organism.v1",
+  "key": "organism:xcb-managed-transition",
+  "name": "XCB managed transition",
+  "budgets": {
+    "maxSteps": 4,
+    "maxAgentCalls": 0,
+    "maxWork": 1000,
+    "maxContextBytes": 262144,
+    "maxOutputBytes": 262144,
+    "maxDepth": 1
+  },
+  "interface": {
+    "inputs": {
+      "record": {
+        "cell": "src",
+        "port": "record"
+      }
+    },
+    "outputs": {
+      "record": {
+        "cell": "accepted",
+        "port": "value"
+      }
+    }
+  },
+  "cells": [
+    {
+      "id": "src",
+      "kind": "input",
+      "outputs": {
+        "record": "json"
+      }
+    },
+    {
+      "id": "accepted",
+      "kind": "fn",
+      "fn": "echo.v1"
+    }
+  ],
+  "edges": [
+    {
+      "from": {
+        "cell": "src",
+        "port": "record"
+      },
+      "to": {
+        "cell": "accepted",
+        "port": "value"
+      }
+    }
+  ]
+}

@@ -105,7 +105,7 @@ and leaves the source-installed binary alone until the first verified
 replacement, restart open terminals and rerun `xcb doctor`; provider and
 application qualification is bound to the exact installed executable bytes.
 
-### First Claude session
+### First managed conversation
 
 Install an admitted Claude Code binary (major 2, version 2.1.268 or newer).
 xcb performs its own account sign-in below; it does
@@ -119,6 +119,12 @@ xcb accounts refresh personal
 xcb models
 xcb --cwd /absolute/path/to/your/project
 ```
+
+Plain `xcb` opens a new persistent control conversation. Prompts become durable
+managed tasks routed through admitted Codex, Claude, or Devin sessions; closing
+the terminal detaches without cancelling them. Open another terminal for an
+independent conversation over the same task swarm, use `/tasks` to inspect work,
+or `/sessions` to switch control conversations.
 
 `--plan` is a display label; it does not verify your subscription. Complete the
 browser sign-in when prompted. `accounts refresh` probes supported model and
@@ -228,9 +234,13 @@ Sign-in and a successful `doctor` alone do not qualify the application route.
 ### Everyday commands
 
 ```sh
+xcb --cwd /absolute/path/to/your/project       # new control conversation
+xcb conversations                                # resumable control conversations
+xcb chat --resume <conversation-id>
+xcb tasks                                        # global managed task swarm
 xcb --cwd /absolute/path/to/your/project run --account personal -p "Explain this repository"
-xcb sessions
-xcb resume                 # latest native session
+xcb sessions                                     # direct provider sessions
+xcb resume                                       # latest direct provider session
 xcb resume <session-id>
 xcb accounts
 xcb config
@@ -240,9 +250,10 @@ xcb doctor
 xcb completions zsh > /path/to/completions/_xcb
 ```
 
-Resume opens the saved native session and its workspace in the interactive
-terminal; it is not a headless continuation command. `/help` lists terminal
-commands. Sessions and credentials live in the private native state root
+`xcb chat --resume` reopens a control conversation; `xcb resume` opens a saved
+direct provider session and its workspace. Neither is a headless continuation
+command. `/help` lists terminal commands. Conversations, tasks, provider
+sessions, and credentials live in the private native state root
 `~/.local/share/xcb`; `--state /absolute/path` or `XCB_STATE` overrides it.
 The compatibility CLI uses `~/.xcb` instead. Do not point both implementations
 at the same state directory. `xcb --json run` includes the native session ID
@@ -255,12 +266,14 @@ effective configuration. Older configurations that omit it use the default.
 Cancellation remains available before the deadline, and automatic continuation
 has its own separate limits.
 
-Each account owns at most one active provider turn. Other terminals may view
-that session, but cancellation must be requested in the terminal that owns it.
-Different accounts can run concurrently; the isolated command backend admits
-one command at a time across those accounts. Ctrl-C and SIGTERM request bounded
-cleanup for a headless run. `xcb run` reports success only for a completed,
-joined, settled idle result.
+Control conversations are concurrent and share one durable task supervisor.
+Each account still owns at most one active provider turn, and one workspace can
+have only one admitted writer even when different accounts or terminals are
+available. Independent workspaces and accounts can run concurrently. Managed
+cancellation may be requested from the task’s originating conversation or by an
+explicit task ID/title elsewhere; direct provider-session cancellation remains
+owned by its terminal. Ctrl-C and SIGTERM request bounded cleanup for a headless
+run. `xcb run` reports success only for a completed, joined, settled idle result.
 
 Cancellation joins the owned process before releasing custody. If `doctor`
 reports an unsettled run, inspect `xcb recover` and the process state; an expired

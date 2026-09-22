@@ -577,3 +577,62 @@ fn the_working_badge_shows_elapsed_time_and_respects_reduced_motion() {
         .collect();
     assert!(contents.contains("● Working · 1m 30s"));
 }
+
+#[test]
+fn global_conversation_shows_managed_tasks_instead_of_provider_chrome() {
+    let mut app = app();
+    app.view.session = None;
+    app.view.state = State::NeedsAnswer;
+    app.view
+        .extensions
+        .insert(0, ("algal supervisor".into(), "on".into()));
+    app.view.tasks = vec![xcb_core::ui::TaskRow {
+        id: Id::new("t_login").unwrap(),
+        title: "Fix login redirect".into(),
+        state: State::NeedsAnswer,
+        detail: "the worker needs your input".into(),
+        route: Some("claude/default/high · user@example.com".into()),
+        workspace: "/project".into(),
+        updated_at_ms: 1,
+    }];
+    app.view.pane = Pane::focus();
+    let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(contents.contains("Tasks · /tasks"));
+    assert!(contents.contains("Fix login redirect"));
+    assert!(contents.contains("1 needs you"));
+    assert!(!contents.contains("Choose an account"));
+}
+
+#[test]
+fn empty_global_conversation_has_quiet_dispatcher_chrome() {
+    let mut app = app();
+    app.view.session = None;
+    app.view
+        .extensions
+        .insert(0, ("algal supervisor".into(), "on".into()));
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(contents.contains("global dispatcher"));
+    assert!(contents.contains("Describe work or ask about the running task swarm"));
+    assert!(contents.contains("Message · / for commands"));
+    assert!(!contents.contains("usage: unmeasured"));
+}

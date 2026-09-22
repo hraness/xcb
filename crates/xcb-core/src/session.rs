@@ -240,7 +240,19 @@ pub fn classify(text: &str, facts: &TurnFacts) -> State {
     {
         return State::NeedsApproval;
     }
-    if lower.trim_end().ends_with('?') {
+    if lower.trim_end().ends_with('?')
+        || [
+            "question for you",
+            "need your input",
+            "which do you prefer",
+            "what would you like",
+            "should i keep",
+            "should i proceed",
+            "would you like me",
+        ]
+        .iter()
+        .any(|cue| lower.contains(cue))
+    {
         return State::NeedsAnswer;
     }
     State::Idle
