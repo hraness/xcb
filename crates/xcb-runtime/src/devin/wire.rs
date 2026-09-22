@@ -280,10 +280,14 @@ impl DevinProtocol {
                 "Devin conversation is too large; compact retained context or start a new session",
             ));
         }
-        let text = format!(
-            "{}\n\nUse only the xcb MCP server for workspace access. Native tools have no workspace authority. List the xcb tools before calling them.\n\n{}",
-            self.instructions, prompt.text
-        );
+        let text = if self.options.tools {
+            format!(
+                "{}\n\nUse only the xcb MCP server for workspace access. Native tools have no workspace authority. List the xcb tools before calling them.\n\n{}",
+                self.instructions, prompt.text
+            )
+        } else {
+            format!("{}\n\n{}", self.instructions, prompt.text)
+        };
         let mut content = vec![json!({"type":"text","text":text})];
         for image in prompt.images {
             if !matches!(
@@ -670,15 +674,11 @@ impl DevinProtocol {
                 Some("available_commands_update" | "session_info_update" | "plan") => (),
                 _ => return Err(Error::Protocol("Devin unknown session update")),
             }
-        } else if !matches!(
-            method.as_str(),
-            "_cognition.ai/mcp/serversChanged"
-                | "_cognition.ai/output"
-                | "_cognition.ai/turn_stats"
-                | "_cognition.ai/agent_stopped"
-                | "_cognition.ai/sessionChanged"
-                | "_cognition.ai/cwdChanged"
-        ) {
+        // ACP reserves underscore-prefixed methods for extensions and says to
+        // ignore unrecognized notifications. Requests were handled above;
+        // these bounded, id-less frames grant no authority and change no state.
+        // https://agentclientprotocol.com/protocol/v1/extensibility
+        } else if !method.starts_with('_') {
             return Err(Error::Protocol("Devin unsupported notification"));
         }
         Ok((events, outgoing))

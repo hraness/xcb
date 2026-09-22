@@ -13,6 +13,17 @@ continuation or account fallback. Private run records preserve account/process
 custody, selected model and timing without storing application prompts or replies.
 Provider authentication remains in XCB; applications never pass credentials.
 
+For Devin ACP, the host instructions and application prompt are combined in one
+text content block, separated by a blank line; there is no separate system-role
+message. This tool-free route does not add the MCP workspace instructions used
+by tool-enabled Devin sessions. The native decoder follows
+[ACP extension semantics](https://agentclientprotocol.com/protocol/v1/extensibility):
+bounded, valid underscore-prefixed notifications without an `id` are discarded
+without events, replies or changes to session, model, tools or custody. Unknown
+requests still receive a method-not-found response and trigger attention;
+ordinary unknown notifications and invalid `session/update` messages still fail.
+This compatibility handling does not qualify or activate a provider.
+
 An installation reports `supported: false` until the application path has current
 qualification for the exact built executable, provider, account and model. A provider pin,
 configured account or successful metadata request does not establish that
