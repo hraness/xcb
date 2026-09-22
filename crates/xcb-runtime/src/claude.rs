@@ -6,7 +6,7 @@ use xcb_core::{
     usage::Counters,
 };
 
-pub const VERSION: &str = "2.1.268";
+pub const VERSION: &str = "2.1.278";
 
 #[derive(Debug)]
 pub enum Event {
