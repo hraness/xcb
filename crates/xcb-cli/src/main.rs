@@ -144,10 +144,8 @@ enum Commands {
         run: Option<Id>,
         #[arg(long)]
         yes: bool,
-        /// Remove launch directories that predate the owner lock. Nothing can
-        /// prove they are unowned, so this is the operator asserting that no
-        /// xcb is running. Directories that DO carry an owner lock are never
-        /// touched by this flag; doctor collects those on its own evidence.
+        /// Inventory disposable launch snapshots; --yes removes only snapshots
+        /// with durable settlement evidence. Unproven artifacts remain held.
         #[arg(long = "launch-artifacts")]
         launch_artifacts: bool,
     },
@@ -1011,12 +1009,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 Some(judge::JudgeKeySource::Vault) => "vault",
                 None => "none",
             };
-            // Launch directories each hold a private copy of the provider
-            // executable. A killed or crashed turn skips the Drop that would
-            // remove one, so doctor — the command this CLI already tells the
-            // operator to re-run — is where the ones whose owner is provably
-            // gone get collected.
-            let sweep = runner::reclaim_launch_artifacts(&root, false)?;
+            // Reclaim only snapshots already marked disposable after safe
+            // settlement; parent exit alone cannot release provider custody.
+            let sweep = runner::reclaim_launch_artifacts(&root, true)?;
             let (judge_model, judge_endpoint) =
                 xcb_runtime::jev::effective_target(&config.extensions.judge)?;
             let judge_status = json!({
@@ -1037,7 +1032,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     "remedy": if sweep.unprovable.is_empty() {
                         serde_json::Value::Null
                     } else {
-                        json!("written before launch directories carried an owner lock, so nothing here can prove they are unowned; with no xcb running, `xcb recover --launch-artifacts --yes` removes them")
+                        json!("retained because independent provider-join and settled-effect evidence is missing; --yes does not override custody")
                     },
                 });
                 if cfg!(target_os = "linux") {
@@ -1079,7 +1074,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 );
                 if sweep.reclaimed > 0 {
                     println!(
-                        "launch artifacts: reclaimed {} abandoned {} ({})",
+                        "launch artifacts: reclaimed {} settled {} ({})",
                         sweep.reclaimed,
                         if sweep.reclaimed == 1 {
                             "directory"
@@ -1091,7 +1086,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 }
                 if !sweep.unprovable.is_empty() {
                     println!(
-                        "launch artifacts: {} older {} ({}) predate the owner lock, so nothing can prove they are unowned.",
+                        "launch artifacts: {} {} ({}) retained without independent settlement evidence.",
                         sweep.unprovable.len(),
                         if sweep.unprovable.len() == 1 {
                             "directory"
@@ -1101,7 +1096,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         human_bytes(sweep.unprovable_bytes),
                     );
                     println!(
-                        "  With no xcb running, remove them with: xcb recover --launch-artifacts --yes"
+                        "  Parent exit or --yes cannot release custody; inspect the recorded run before recovery."
                     );
                 }
                 for run in store.unsettled_runs()? {
@@ -1721,63 +1716,42 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         "--launch-artifacts recovers disposable files, not a run; pass one or the other",
                     ));
                 }
-                let found = runner::reclaim_launch_artifacts(&root, false)?;
-                if !yes {
-                    if cli.json {
-                        print_json(json!({
-                            "version": 1,
-                            "dryRun": true,
-                            "reclaimable": found.unprovable.len(),
-                            "reclaimableBytes": found.unprovable_bytes,
-                            "alreadyReclaimed": found.reclaimed,
-                            "alreadyReclaimedBytes": found.reclaimed_bytes,
-                            "liveHeld": found.live,
-                        }))?;
-                    } else {
-                        println!(
-                            "{} launch {} ({}) predate the owner lock.",
-                            found.unprovable.len(),
-                            if found.unprovable.len() == 1 {
-                                "directory"
-                            } else {
-                                "directories"
-                            },
-                            human_bytes(found.unprovable_bytes),
-                        );
-                        if found.live > 0 {
-                            println!(
-                                "{} other {} owned by a live turn and will not be touched.",
-                                found.live,
-                                if found.live == 1 {
-                                    "directory is"
-                                } else {
-                                    "directories are"
-                                },
-                            );
-                        }
-                        println!("Confirm no xcb is running, then re-run with --yes.");
-                    }
-                    return Ok(0);
-                }
-                let swept = runner::reclaim_launch_artifacts(&root, true)?;
+                let sweep = runner::reclaim_launch_artifacts(&root, yes)?;
                 if cli.json {
                     print_json(json!({
                         "version": 1,
-                        "reclaimed": swept.reclaimed,
-                        "reclaimedBytes": swept.reclaimed_bytes,
-                        "liveHeld": swept.live,
+                        "dryRun": !yes,
+                        "reclaimable": sweep.reclaimable,
+                        "reclaimableBytes": sweep.reclaimable_bytes,
+                        "reclaimed": sweep.reclaimed,
+                        "reclaimedBytes": sweep.reclaimed_bytes,
+                        "liveHeld": sweep.live,
+                        "unreclaimable": sweep.unprovable.len(),
+                        "unreclaimableBytes": sweep.unprovable_bytes,
                     }))?;
                 } else {
                     println!(
-                        "Reclaimed {} launch {} ({}).",
-                        swept.reclaimed,
-                        if swept.reclaimed == 1 {
-                            "directory"
+                        "{} {} settled launch snapshots ({}).",
+                        if yes { "Reclaimed" } else { "Can reclaim" },
+                        if yes {
+                            sweep.reclaimed
                         } else {
-                            "directories"
+                            sweep.reclaimable
                         },
-                        human_bytes(swept.reclaimed_bytes),
+                        human_bytes(if yes {
+                            sweep.reclaimed_bytes
+                        } else {
+                            sweep.reclaimable_bytes
+                        }),
                     );
+                    println!(
+                        "Retained {} live and {} unproven launch snapshots; --yes does not override custody.",
+                        sweep.live,
+                        sweep.unprovable.len(),
+                    );
+                    if !yes && sweep.reclaimable > 0 {
+                        println!("Re-run with --yes to remove the proven disposable snapshots.");
+                    }
                 }
                 return Ok(0);
             }
