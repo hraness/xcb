@@ -513,7 +513,7 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
     let view = summary::snapshot(store, None, config, now_ms())?;
     if as_json {
         return print_json(
-            json!({"version":1,"accounts":view.accounts.iter().map(|account| json!({"id":account.id,"name":account.name,"email":account.email,"provider":account.provider,"subscription":account.subscription,"remainingPercent":account.remaining_percent,"resetsAtMs":account.resets_at_ms,"quotaBlockedUntilMs":account.quota_blocked_until_ms,"runway":account.runway,"busy":account.busy,"enabled":account.enabled})).collect::<Vec<_>>(),"estimatedPoolSeconds":view.total_runway_seconds,"measuredPools":view.runway_coverage.0,"totalPools":view.runway_coverage.1,"localOnly":true}),
+            json!({"version":1,"accounts":view.accounts.iter().map(|account| json!({"id":account.id,"name":account.name,"email":account.email,"provider":account.provider,"subscription":account.subscription,"remainingPercent":account.remaining_percent,"resetsAtMs":account.resets_at_ms,"quotaBlockedUntilMs":account.quota_blocked_until_ms,"runway":account.runway,"busy":account.busy,"enabled":account.enabled,"authenticationRequired":account.authentication_required})).collect::<Vec<_>>(),"estimatedPoolSeconds":view.total_runway_seconds,"measuredPools":view.runway_coverage.0,"totalPools":view.runway_coverage.1,"localOnly":true}),
         );
     }
     if view.accounts.is_empty() {
@@ -554,7 +554,7 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
         // provider email rendered as the account's display identity, which is
         // the documented purpose of this local status table.
         println!(
-            "{} {:<35} {:<9} {:<19} {:<22} {}{}{}{}",
+            "{} {:<35} {:<9} {:<19} {:<22} {}{}{}{}{}",
             if config.default_account.as_ref() == Some(&account.id) {
                 ">"
             } else {
@@ -567,6 +567,11 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
             runway,
             if account.busy { " · busy" } else { "" },
             if account.enabled { "" } else { " · disabled" },
+            if account.authentication_required {
+                " · reconnect required"
+            } else {
+                ""
+            },
             account
                 .quota_block_label(now)
                 .map(|label| format!(" · {label}"))

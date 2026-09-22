@@ -307,6 +307,8 @@ pub fn capabilities(store: &Store) -> Result<Capabilities> {
             Some("application_not_qualified")
         } else if !account.enabled {
             Some("account_disabled")
+        } else if store.authentication_required(&account.id)? {
+            Some("authentication_required")
         } else if busy {
             Some("account_busy")
         } else if !connected {

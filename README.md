@@ -165,6 +165,14 @@ unqualified provider or survive stale terms. Managed Claude, Codex and Devin wor
 `xcb_swarm_status`, `xcb_message_list` and `xcb_message_send` for durable,
 workspace-scoped cross-provider coordination.
 
+A settled authentication failure marks that account as requiring reconnection
+and excludes it from new task routes, including after restart. Other eligible
+accounts still respect the requested provider. Successful sign-in or an explicit
+import with changed credential material clears the block; catalog refresh and
+reimporting the same credentials do not. Older failure records have no credential
+generation binding, so an upgraded account may need one new bounded attempt to
+establish this block.
+
 `--plan` is a display label; it does not verify your subscription. Complete the
 browser sign-in when prompted. `accounts refresh` probes supported model and
 usage metadata. Unknown or stale usage percentages remain unknown. A proven

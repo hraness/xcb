@@ -85,7 +85,11 @@ fn publish_claude_token(
     } else {
         private::create(&plan.path, token.as_bytes())?;
     }
-    store.settle_tool(run, "xcb_claude_auth_store")
+    store.settle_tool(run, "xcb_claude_auth_store")?;
+    if plan.revision.as_deref() != Some(crate::digest(token).as_str()) {
+        store.clear_authentication_failure(run)?;
+    }
+    Ok(())
 }
 
 /// Store or rotate a Claude token only under the account's exclusive lease.
@@ -232,6 +236,9 @@ fn finish_claude_login(
         let bytes = output?;
         let value = captured_claude_token(&bytes)?;
         publish_claude_token(store, run, publication, &value, &mut publication_attempted)?;
+        // A successfully joined provider login is stronger evidence than a
+        // token-shaped import, even if it returned the same token material.
+        store.clear_authentication_failure(run)?;
         // The provider wrote this file inside our own launch profile; a
         // missing or unparseable one just leaves the fixed account name.
         let base = artifacts.path();
@@ -352,13 +359,23 @@ struct CodexAuthFile<'a> {
     last_refresh: Option<&'a str>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct CodexTokens<'a> {
     id_token: &'a str,
     access_token: &'a str,
     refresh_token: &'a str,
     account_id: Option<&'a str>,
+}
+
+fn same_codex_credentials(left: &[u8], right: &[u8]) -> bool {
+    match (
+        serde_json::from_slice::<CodexAuthFile<'_>>(left),
+        serde_json::from_slice::<CodexAuthFile<'_>>(right),
+    ) {
+        (Ok(left), Ok(right)) => left.tokens == right.tokens,
+        _ => false,
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -536,6 +553,14 @@ fn import_codex_bytes(store: &Store, id: &Id, bytes: &[u8]) -> Result<()> {
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
+        if let Some(previous) = &previous
+            && codex_identity(previous)?.digest != codex_identity(bytes)?.digest
+        {
+            return Err(Error::Conflict("Codex credential account identity changed"));
+        }
+        let changed = previous
+            .as_ref()
+            .is_none_or(|previous| !same_codex_credentials(previous, bytes));
         store.begin_tool(
             &run,
             "xcb_auth_import",
@@ -550,6 +575,9 @@ fn import_codex_bytes(store: &Store, id: &Id, bytes: &[u8]) -> Result<()> {
             private::create(&target, bytes)?;
         }
         store.settle_tool(&run, "xcb_auth_import")?;
+        if changed {
+            store.clear_authentication_failure(&run)?;
+        }
         // The credential's signed email claim becomes the display identity.
         if let Ok(identity) = codex_identity(bytes) {
             store.set_account_identity(id, identity.email, None)?;

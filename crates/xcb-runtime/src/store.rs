@@ -19,6 +19,23 @@ use xcb_core::{
 const MAX_ACCOUNTS: i64 = 128;
 const MAX_SESSIONS: i64 = 10_000;
 const MAX_MESSAGES: i64 = 10_000;
+pub(crate) const AUTHENTICATION_REQUIRED: &str =
+    "account authentication failed; reconnect this account before running tasks";
+
+fn authentication_required_from(db: &Connection, account: &Id) -> Result<bool> {
+    let available: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_auth_failures')",
+        [], |row| row.get(0),
+    )?;
+    if !available {
+        return Ok(false);
+    }
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM account_auth_failures WHERE account=?1)",
+        [account.as_str()],
+        |row| row.get(0),
+    )?)
+}
 
 /// A terminal report is committed in the same transaction as custody release.
 /// Its transcript boundary prevents a later turn from being mistaken for the
@@ -507,6 +524,14 @@ impl Store {
             payload TEXT NOT NULL,
             UNIQUE(session,input_sequence));",
         )?;
+        // Independent of session/run pruning. Generation changes alone cannot
+        // clear this record: login rotates before credentials are published.
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS account_auth_failures(
+            account TEXT PRIMARY KEY REFERENCES accounts(id),
+            generation TEXT,
+            run TEXT NOT NULL);",
+        )?;
         Ok(Self {
             root,
             instance: new_id("i").to_string(),
@@ -846,6 +871,33 @@ impl Store {
         }
         Ok(messages)
     }
+    pub fn authentication_required(&self, account: &Id) -> Result<bool> {
+        let db = self.db()?;
+        authentication_required_from(&db, account)
+    }
+
+    pub fn require_authenticated_account(&self, account: &Id) -> Result<()> {
+        if self.authentication_required(account)? {
+            return Err(Error::Unavailable(AUTHENTICATION_REQUIRED));
+        }
+        Ok(())
+    }
+
+    /// Only successful explicit credential replacement or supervised reauth
+    /// calls this, after publication while still holding exclusive custody.
+    /// Metadata presence, generation rotation, and routine refresh do not.
+    pub(crate) fn clear_authentication_failure(&self, run: &RunRecord) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (current, _) = self.owned_run_from(&tx, run)?;
+        tx.execute(
+            "DELETE FROM account_auth_failures WHERE account=?1",
+            [current.account.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn prepare_run(
         &self,
         session_id: &Id,
@@ -877,6 +929,9 @@ impl Store {
         let account: Account = decode(&account_json)?;
         if !account.enabled {
             return Err(Error::Conflict("account is disabled"));
+        }
+        if authentication_required_from(&tx, &account.id)? {
+            return Err(Error::Unavailable(AUTHENTICATION_REQUIRED));
         }
         if blocked_until_from(&tx, &self.root, &account, now)?.is_some() {
             return Err(Error::Unavailable(
@@ -1151,6 +1206,31 @@ impl Store {
             return Err(Error::Conflict(
                 "command guest stop is unproven; reconcile command custody before settling",
             ));
+        }
+        if let Some((_, outcome)) = outcome {
+            use xcb_core::policy::{Failure, Terminal};
+            if outcome.facts.terminal == Terminal::Failed
+                && outcome.facts.failure == Some(Failure::Authentication)
+            {
+                let generation = crate::application_qualification::read_generation(
+                    &self.root,
+                    &current.account,
+                )?;
+                tx.execute(
+                    "INSERT INTO account_auth_failures(account,generation,run) VALUES(?1,?2,?3)
+                    ON CONFLICT(account) DO UPDATE SET generation=excluded.generation,run=excluded.run",
+                    params![current.account.as_str(), generation, current.id.as_str()],
+                )?;
+            } else if outcome.facts.terminal == Terminal::Completed
+                && outcome.facts.failure.is_none()
+                && !outcome.facts.pending_attention
+                && outcome.state == State::Idle
+            {
+                tx.execute(
+                    "DELETE FROM account_auth_failures WHERE account=?1",
+                    [current.account.as_str()],
+                )?;
+            }
         }
         if let Some(id) = &current.session {
             let mut session =

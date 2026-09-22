@@ -243,6 +243,7 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         account.id.as_str().hash(&mut hasher);
         account.busy.hash(&mut hasher);
         account.enabled.hash(&mut hasher);
+        account.authentication_required.hash(&mut hasher);
         account
             .remaining_percent
             .map(f64::to_bits)
@@ -779,7 +780,7 @@ impl App {
                     .iter()
                     .map(|account| PickItem {
                         label: format!(
-                            "{} · {} · {} · {}{}{}",
+                            "{} · {} · {} · {}{}{}{}",
                             account.name,
                             account.provider,
                             account.subscription,
@@ -790,7 +791,12 @@ impl App {
                                     .map(|percent| format!("{percent:.0}% left"))
                                     .unwrap_or_else(|| "usage unmeasured".into())),
                             if account.busy { " · busy" } else { "" },
-                            if account.enabled { "" } else { " · disabled" }
+                            if account.enabled { "" } else { " · disabled" },
+                            if account.authentication_required {
+                                " · reconnect required"
+                            } else {
+                                ""
+                            }
                         ),
                         action: PickAction::Account(account.id.clone()),
                     })
@@ -1351,6 +1357,10 @@ impl App {
             // Account state can change in another terminal while this picker
             // is open. Check the latest view before dispatching the selection.
             match self.view.accounts.iter().find(|account| &account.id == id) {
+                Some(account) if account.authentication_required => {
+                    self.notice = "This account needs reconnection before it can run tasks.".into();
+                    return true;
+                }
                 Some(account) if !account.enabled => {
                     self.notice = "This account is disabled. Enable it before selecting it.".into();
                     return true;
@@ -1487,6 +1497,7 @@ mod quota_display_tests {
                 remaining_percent: None,
                 resets_at_ms: None,
                 quota_blocked_until_ms: Some(600_000),
+                authentication_required: false,
                 runway: Estimate::unknown("stale"),
                 busy: false,
                 enabled: true,
@@ -1501,5 +1512,8 @@ mod quota_display_tests {
         );
         view.accounts[0].quota_blocked_until_ms = None;
         assert_eq!(fingerprint_at(&view, 0), fingerprint_at(&view, u64::MAX));
+        let healthy = fingerprint_at(&view, 0);
+        view.accounts[0].authentication_required = true;
+        assert_ne!(healthy, fingerprint_at(&view, 0));
     }
 }

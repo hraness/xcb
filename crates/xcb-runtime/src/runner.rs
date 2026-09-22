@@ -1279,6 +1279,9 @@ pub async fn login_codex(store: &Store, account: &Id, pin: &Pin) -> Result<()> {
     };
     if has_credential {
         auth::persist_codex_auth(store, &run, &plan.credentials, joined)?;
+        if result.is_ok() {
+            store.clear_authentication_failure(&run)?;
+        }
     } else {
         // No persistent account credential was handed to the login process.
         // A stopped, unsuccessful device flow may be retried normally.
