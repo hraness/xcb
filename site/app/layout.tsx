@@ -17,9 +17,9 @@ import "./compare/compare.css";
  */
 const initialPalette = getDesignPaletteTheme("paper", "light");
 
-const title = "xcb — One terminal for your coding agents";
+const title = "xcb — Subscription routing for coding agents";
 const description =
-  "Bring your Claude, Codex, and Devin accounts into one local workspace. Choose models, resume sessions, and see usage. Open-source native preview, with setup guides and comparisons.";
+  "xcb routes coding-agent tasks across your own Claude, Codex, and Devin accounts — one bounded turn, proven custody. Agents call a closed JSON contract; applications embed the TypeScript SDK. Open-source native preview.";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://xcb.sh"),
