@@ -91,6 +91,9 @@ pub struct View {
     /// True when the focused session's live run is owned by another terminal
     /// instance; the session is actively working elsewhere, not unsettled.
     pub remote_active: bool,
+    /// Current control conversation has cancellable managed work, independently
+    /// of the global task swarm shown in `state` and `tasks`.
+    pub managed_cancel_available: bool,
     /// Set only while no session is bound.
     pub pending_route: Option<RoutePreview>,
     pub tokens_per_second: Option<f64>,
@@ -119,6 +122,7 @@ impl Default for View {
             pane_error: None,
             state: State::Idle,
             remote_active: false,
+            managed_cancel_available: false,
             pending_route: None,
             tokens_per_second: None,
             share_percent: None,

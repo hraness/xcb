@@ -37,6 +37,8 @@ pub enum Progress {
     Notice(String),
 }
 pub type Observer = Arc<dyn Fn(Progress) + Send + Sync>;
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Outcome {
     pub text: String,
     pub facts: TurnFacts,
@@ -1431,6 +1433,22 @@ fn settle_tool_effects(
     Ok(())
 }
 
+fn managed_tool_call(
+    store: &Store,
+    session: &Id,
+    call: &str,
+    name: &str,
+    arguments: &Value,
+) -> (Result<Value>, EffectState) {
+    match crate::managed::ManagedStore::open(store.root()) {
+        Ok(managed) => managed.worker_call(store, session, call, name, arguments),
+        // No worker effect occurred if its host mailbox could not be opened.
+        // Return a normal tool rejection so its already-written pending
+        // receipt is settled and does not strand otherwise proven custody.
+        Err(error) => (Err(error), EffectState::None),
+    }
+}
+
 pub struct RunInput {
     pub session: Session,
     pub message: Message,
@@ -1577,7 +1595,7 @@ async fn run_prepared<P: Protocol>(
             .last()
             .map(|point| point.output_tokens)
             .unwrap_or(0);
-        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
+        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace; direct sessions have no managed mailbox. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
         if !models.iter().any(|choice| {
             choice.id == session.model.id
                 && (session.model.effort.is_none() || choice.effort == session.model.effort)
@@ -1692,6 +1710,9 @@ async fn run_prepared<P: Protocol>(
                 return Err(Error::Protocol("total provider output limit"));
             }
             for event in batch.events {
+                if *cancel.borrow() {
+                    return Ok((Terminal::Cancelled, vec![]));
+                }
                 match event {
                     TurnEvent::Ready => {
                         if admitted {
@@ -1743,7 +1764,9 @@ async fn run_prepared<P: Protocol>(
                         resets_at_ms,
                         failure,
                     } if admitted => {
-                        quota_failure = failure;
+                        // A subsequent quota meter update is not evidence
+                        // that an explicit provider failure was rescinded.
+                        quota_failure = failure.or(quota_failure);
                         if let (Some(window), Some(used_percent), Some(resets_at_ms)) =
                             (window, used_percent, resets_at_ms)
                         {
@@ -1774,6 +1797,19 @@ async fn run_prepared<P: Protocol>(
                             &digest(serde_json::to_vec(&arguments)?),
                         )?;
                         observer(Progress::Tool(name.clone()));
+                        if *cancel.borrow() {
+                            // The tool was announced, but cancellation arrived
+                            // before its effect boundary. Settle its intent and
+                            // do not execute buffered work after cancellation.
+                            settle_tool_effects(
+                                &store,
+                                &run,
+                                &call_id,
+                                EffectState::None,
+                                &mut effects,
+                            )?;
+                            return Ok((Terminal::Cancelled, vec![]));
+                        }
                         let output = if name == "workspace_exec" {
                             match commands.start(
                                 store.clone(),
@@ -1804,6 +1840,22 @@ async fn run_prepared<P: Protocol>(
                                     Err(error)
                                 }
                             }
+                        } else if name.starts_with("xcb_") {
+                            let (output, call_effects) = managed_tool_call(
+                                &store,
+                                &session.id,
+                                &format!("{}:{call_id}", run.id),
+                                &name,
+                                &arguments,
+                            );
+                            settle_tool_effects(
+                                &store,
+                                &run,
+                                &call_id,
+                                call_effects,
+                                &mut effects,
+                            )?;
+                            output
                         } else {
                             let (output, call_effects) = workspace.call_observed(&name, &arguments);
                             settle_tool_effects(
@@ -1939,6 +1991,11 @@ async fn run_prepared<P: Protocol>(
     };
     let state = classify(&final_text, &facts);
     facts.pending_attention |= state.attention();
+    let outcome = Outcome {
+        text: final_text.clone(),
+        facts,
+        state,
+    };
     if joined {
         if !thinking.is_empty() {
             let current = store
@@ -2003,15 +2060,11 @@ async fn run_prepared<P: Protocol>(
             auth::persist_codex_auth(&store, &run, credentials, joined)?;
         }
         if effects != EffectState::Uncertain {
-            store.settle(&run, state, now_ms())?;
+            store.settle_outcome(&run, &input.message.id, &outcome, now_ms())?;
             launch.artifacts.release_after_join(joined, effects);
         }
     }
-    Ok(Outcome {
-        text: final_text,
-        facts,
-        state,
-    })
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -2391,6 +2444,8 @@ mod tests {
     struct FixtureProtocol {
         model: ModelChoice,
         before_ready: bool,
+        mailbox_failure: bool,
+        passive_after_quota: bool,
         step: u8,
         block_initialize: Option<tokio::sync::oneshot::Sender<()>>,
     }
@@ -2412,9 +2467,39 @@ mod tests {
                 if !self.before_ready {
                     events.push(TurnEvent::Ready);
                 }
-                events.push(TurnEvent::Tool {
-                    id: "fixture-call".into(), name: "workspace_write".into(),
-                    arguments: json!({"path":"created.txt","text":"confirmed write","expectedRevision":null}),
+                if self.passive_after_quota {
+                    events.extend([
+                        TurnEvent::Quota {
+                            window: None,
+                            used_percent: None,
+                            resets_at_ms: None,
+                            failure: Some(Failure::AccountQuota),
+                        },
+                        TurnEvent::Quota {
+                            window: None,
+                            used_percent: None,
+                            resets_at_ms: None,
+                            failure: None,
+                        },
+                        TurnEvent::Result {
+                            terminal: Terminal::Failed,
+                            text: "The account quota was exhausted".into(),
+                            models: vec![],
+                        },
+                    ]);
+                    return Ok(events);
+                }
+                events.push(if self.mailbox_failure {
+                    TurnEvent::Tool {
+                        id: "fixture-call".into(),
+                        name: "xcb_swarm_status".into(),
+                        arguments: json!({}),
+                    }
+                } else {
+                    TurnEvent::Tool {
+                        id: "fixture-call".into(), name: "workspace_write".into(),
+                        arguments: json!({"path":"created.txt","text":"confirmed write","expectedRevision":null}),
+                    }
                 });
                 Ok(events)
             } else {
@@ -2438,7 +2523,7 @@ mod tests {
             result: Value,
         ) -> Result<()> {
             assert_eq!(id, "fixture-call");
-            assert_eq!(result["isError"], false);
+            assert_eq!(result["isError"], self.mailbox_failure);
             process.send(&json!({"step":1})).await
         }
     }
@@ -2446,12 +2531,23 @@ mod tests {
     #[tokio::test]
     async fn shared_lifecycle_settles_tools_and_account_for_each_provider_protocol() {
         for provider in [Provider::Claude, Provider::Codex, Provider::Devin] {
-            for before_ready in [false, true] {
+            for (before_ready, mailbox_failure, cancel_tool, passive_after_quota) in [
+                (false, false, false, false),
+                (true, false, false, false),
+                (false, true, false, false),
+                (false, false, true, false),
+                (false, false, false, true),
+            ] {
                 let root = tempfile::tempdir().unwrap();
                 let base = root.path().canonicalize().unwrap();
                 let workspace = base.join("work");
                 std::fs::create_dir(&workspace).unwrap();
                 let store = Arc::new(Store::open(&base.join("state")).unwrap());
+                if mailbox_failure {
+                    // A host-side mailbox initialization error must become
+                    // a tool rejection, not leave a pending effect receipt.
+                    file(&store.root().join("managed"), 0o600);
+                }
                 let account = store
                     .add_account(provider, "Fixture", now_ms(), None)
                     .unwrap();
@@ -2475,6 +2571,9 @@ mod tests {
                     attachments: vec![],
                     provenance: None,
                 };
+                let session = store
+                    .append_message(&session.id, session.revision, &message)
+                    .unwrap();
                 let artifacts = LaunchArtifacts::create(store.root()).unwrap();
                 let launch_path = artifacts.directory.clone();
                 let launch = Launch {
@@ -2485,7 +2584,7 @@ mod tests {
                     prepared_run: None,
                     codex_credentials: None,
                 };
-                let (_cancel, cancellation) = watch::channel(false);
+                let (cancel, cancellation) = watch::channel(false);
                 let outcome = run_prepared(
                     store.clone(),
                     RunInput {
@@ -2495,11 +2594,17 @@ mod tests {
                         pane_generation: false,
                     },
                     cancellation,
-                    Arc::new(|_| ()),
+                    Arc::new(move |event| {
+                        if cancel_tool && matches!(event, Progress::Tool(_)) {
+                            cancel.send(true).unwrap();
+                        }
+                    }),
                     launch,
                     FixtureProtocol {
                         model,
                         before_ready,
+                        mailbox_failure,
+                        passive_after_quota,
                         step: 0,
                         block_initialize: None,
                     },
@@ -2510,15 +2615,42 @@ mod tests {
                 .unwrap();
                 assert!(outcome.facts.joined);
                 assert!(store.unsettled_runs().unwrap().is_empty());
+                let db = rusqlite::Connection::open(store.root().join("xcb.sqlite")).unwrap();
+                let pending: i64 = db
+                    .query_row(
+                        "SELECT count(*) FROM tool_effects WHERE settled=0",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(pending, 0, "every started tool intent must be settled");
                 assert!(!launch_path.exists());
-                assert_eq!(workspace.join("created.txt").exists(), !before_ready);
+                assert_eq!(
+                    workspace.join("created.txt").exists(),
+                    !before_ready && !mailbox_failure && !cancel_tool && !passive_after_quota
+                );
                 if before_ready {
                     assert_eq!(outcome.facts.terminal, Terminal::Failed);
+                    assert_eq!(outcome.facts.effects, EffectState::None);
+                } else if cancel_tool {
+                    assert_eq!(outcome.facts.terminal, Terminal::Cancelled);
+                    assert_eq!(outcome.facts.effects, EffectState::None);
+                } else if passive_after_quota {
+                    assert_eq!(outcome.facts.terminal, Terminal::Failed);
+                    assert_eq!(outcome.facts.failure, Some(Failure::AccountQuota));
+                    assert_eq!(outcome.state, State::Limited);
                     assert_eq!(outcome.facts.effects, EffectState::None);
                 } else {
                     assert_eq!(outcome.text, "Done");
                     assert_eq!(outcome.facts.terminal, Terminal::Completed);
-                    assert_eq!(outcome.facts.effects, EffectState::Settled);
+                    assert_eq!(
+                        outcome.facts.effects,
+                        if mailbox_failure {
+                            EffectState::None
+                        } else {
+                            EffectState::Settled
+                        }
+                    );
                 }
                 let run = store.prepare_probe(&account.id, None, now_ms()).unwrap();
                 store.settle(&run, State::Idle, now_ms()).unwrap();
@@ -2555,6 +2687,9 @@ mod tests {
             attachments: vec![],
             provenance: None,
         };
+        let session = store
+            .append_message(&session.id, session.revision, &message)
+            .unwrap();
         let artifacts = LaunchArtifacts::create(store.root()).unwrap();
         let launch_path = artifacts.directory.clone();
         let launch = Launch {
@@ -2587,6 +2722,8 @@ mod tests {
                 FixtureProtocol {
                     model,
                     before_ready: false,
+                    mailbox_failure: false,
+                    passive_after_quota: false,
                     step: 0,
                     block_initialize: Some(started),
                 },

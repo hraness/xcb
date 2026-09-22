@@ -19,6 +19,8 @@ pub mod jev;
 pub mod judge;
 pub mod kernel;
 pub mod managed;
+mod managed_supervisor;
+pub mod offers;
 pub mod panes;
 pub mod private;
 pub mod process;
@@ -26,6 +28,7 @@ mod protocol;
 #[cfg(any(test, target_os = "macos"))]
 mod public_ca;
 pub mod qualification;
+pub mod routing;
 pub mod runner;
 pub mod sandbox;
 pub mod store;

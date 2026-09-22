@@ -193,6 +193,14 @@ fn host_executable() -> Result<&'static HostExecutable> {
     .map_err(|_| Error::Unavailable("could not bind the running xcb executable"))
 }
 
+/// The verified image captured for this process, never newly adopted bytes
+/// installed over its executable path while it was running.
+pub(crate) fn host_identity() -> Result<(PathBuf, String)> {
+    let host = host_executable()?;
+    host.verify()?;
+    Ok((host.path.clone(), host.sha256.clone()))
+}
+
 /// Call at host startup, before accepting commands or waiting for input.
 /// Store::open also captures this identity for embedded runtime consumers.
 pub fn initialize_host() -> Result<()> {

@@ -105,17 +105,35 @@ and leaves the source-installed binary alone until the first verified
 replacement, restart open terminals and rerun `xcb doctor`; provider and
 application qualification is bound to the exact installed executable bytes.
 
+Managed supervisors record their exact executable identity. When that binary
+is replaced, a current supervisor stops starting new turns, retains custody of
+its active workers until they settle, then exits. Queued tasks and tasks waiting
+for input remain saved. Wait for that exit, restart the terminal, refresh provider
+pins with `xcb doctor`, and reopen the control conversation to continue.
+A different running build produces an explicit supervisor-version error.
+Legacy supervisors without an identity record need their exact process verified
+and stopped after active workers settle; a saved PID or a deleted lock file is
+not a safe replacement for that verification.
+
+Managed records can gain fields that older source builds reject. Restart old
+clients and supervisors before using updated managed state, and retain that state
+during an installation rollback. Replacing the binary does not migrate provider
+sessions or establish fresh live acceptance across all three providers.
+
 ### First managed conversation
 
 Install an admitted Claude Code binary (major 2, version 2.1.268 or newer).
 xcb performs its own account sign-in below; it does
-not silently import your existing provider login.
+not silently import your existing provider login. Replace `<account-id>` below
+with the generated ID printed by `accounts add` or `accounts import-*` (also
+listed by `xcb accounts`). Account names come from observed provider identities;
+custom labels are not accepted.
 
 ```sh
-xcb accounts add claude personal --plan Max
+xcb accounts add claude --plan Max
 xcb doctor --provider claude
-xcb accounts login personal
-xcb accounts refresh personal
+xcb accounts login <account-id>
+xcb accounts refresh <account-id>
 xcb models
 xcb --cwd /absolute/path/to/your/project
 ```
@@ -124,7 +142,28 @@ Plain `xcb` opens a new persistent control conversation. Prompts become durable
 managed tasks routed through admitted Codex, Claude, or Devin sessions; closing
 the terminal detaches without cancelling them. Open another terminal for an
 independent conversation over the same task swarm, use `/tasks` to inspect work,
-or `/sessions` to switch control conversations.
+or `/sessions` to switch control conversations. Ordinary prompts create new work;
+when one task in the conversation asks for input, the next reply answers it.
+Use `new task: …` to explicitly start separate work. Independent workspaces can
+run concurrently; tasks in the same workspace run one at a time. Say
+`cancel <task-id>` to request cancellation and inspect `/tasks` for settlement.
+
+The Rust supervisor owns scheduling and deterministic safety decisions. ALGAL
+records bounded transition receipts; it does not infer permissions, establish
+provider qualification, or replace the supervisor’s execution policy.
+`xcb tasks verify <task-id>` replays that task’s local receipt chain and checks
+it against the current record; it does not attest provider claims or real-world
+outcomes.
+
+Managed routing first filters for qualified, credentialed, idle, quota-usable
+accounts. It then ranks bounded model candidates by task fit, fresh remaining
+usage, relative quality/cost/latency and Pareto layer, while preserving explicit
+provider requests and soft workspace-learned preferences. Official temporary
+offers are cached as expiring observations. They do not prove account entitlement
+or reduce a route’s estimated cost without that evidence. They never activate an
+unqualified provider or survive stale terms. Managed Claude, Codex and Devin workers share
+`xcb_swarm_status`, `xcb_message_list` and `xcb_message_send` for durable,
+workspace-scoped cross-provider coordination.
 
 `--plan` is a display label; it does not verify your subscription. Complete the
 browser sign-in when prompted. `accounts refresh` probes supported model and
@@ -132,8 +171,10 @@ usage metadata. Unknown or stale usage percentages remain unknown. A proven
 Claude account-wide quota exhaustion stays blocked until its reported reset,
 even when its percentage has gone stale. The account list shows a retry estimate;
 see [quota routing](docs/quota-routing.md) for the scope and credential binding.
-To select a model, copy its full observed key from `xcb models` and run
-`xcb models default <key>`.
+For direct sessions, select a model by copying its full observed key from
+`xcb models` and running `xcb models default <key>`. Managed tasks choose among
+eligible routes; begin a task with `Use Claude`, `Use Codex`, or `Use Devin` to
+require that provider.
 
 If discovery finds the wrong binary, use
 `xcb doctor --provider claude --executable /absolute/path/to/claude`.
@@ -153,9 +194,9 @@ CLI's ChatGPT device sign-in in a private profile:
 
 ```sh
 xcb doctor --provider codex
-xcb accounts add codex codex-personal --plan ChatGPT
-xcb accounts login codex-personal
-xcb accounts refresh codex-personal
+xcb accounts add codex --plan ChatGPT
+xcb accounts login <account-id>
+xcb accounts refresh <account-id>
 xcb models
 ```
 
@@ -164,8 +205,8 @@ copy one existing ChatGPT credential into a new xcb account by selecting its
 private `auth.json` explicitly:
 
 ```sh
-xcb accounts import-codex --source /absolute/path/to/auth.json --label codex-imported
-xcb accounts refresh codex-imported
+xcb accounts import-codex --source /absolute/path/to/auth.json
+xcb accounts refresh <account-id>
 ```
 
 The source file is preserved. Import does not copy provider configuration,
@@ -184,21 +225,21 @@ reset as unknown. Sign in through the provider CLI, then explicitly select its
 ```sh
 devin auth login
 xcb doctor --provider devin
-xcb accounts import-devin --source /absolute/path/to/credentials.toml --label devin-personal
-xcb accounts refresh devin-personal
+xcb accounts import-devin --source /absolute/path/to/credentials.toml
+xcb accounts refresh <account-id>
 xcb models
 ```
 
 The source file and provider sessions are preserved. xcb copies only the
 credential for the supported provider endpoints. To update just the catalog,
-use `xcb models refresh devin --account devin-personal`; Devin discovery requires
+use `xcb models refresh devin --account <account-id>`; Devin discovery requires
 an explicitly connected account. Native Devin currently uses fixed ACP model
 choices. Adaptive and Fusion catalog representations in the compatibility
 package do not establish native support.
 
 For either provider, copy a full matching model key from `xcb models` and set it
-with `xcb models default <key>`. Select the account with
-`xcb accounts default <account>` for new interactive sessions, or pass
+with `xcb models default <key>` for direct sessions. Select the account with
+`xcb accounts default <account>` for new direct sessions, or pass
 `--account <account> --model <key>` to `xcb run`. Rerun `doctor` after a provider
 upgrade; a new version is not automatically admitted.
 
@@ -238,7 +279,12 @@ xcb --cwd /absolute/path/to/your/project       # new control conversation
 xcb conversations                                # resumable control conversations
 xcb chat --resume <conversation-id>
 xcb tasks                                        # global managed task swarm
-xcb --cwd /absolute/path/to/your/project run --account personal -p "Explain this repository"
+xcb tasks verify <task-id>                       # verify local transition receipts
+xcb tasks messages <task-id>                     # durable cross-provider mailbox
+xcb offers --refresh                             # refresh official expiring offers
+xcb models tiers --task "fix a race"             # inspect Pareto layers
+xcb models route --task "fix a race"             # preview the eligible smart route
+xcb --cwd /absolute/path/to/your/project run --account <account-id> -p "Explain this repository"
 xcb sessions                                     # direct provider sessions
 xcb resume                                       # latest direct provider session
 xcb resume <session-id>

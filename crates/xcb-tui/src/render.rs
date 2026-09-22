@@ -192,15 +192,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     app.composer
         .textarea
         .set_cursor_line_style(Style::default());
-    app.composer
-        .textarea
-        .set_placeholder_text(if app.view.remote_active {
+    app.composer.textarea.set_placeholder_text(
+        if app.managed_mode() && app.view.state == State::Working {
+            "Describe new work or ask for status · /tasks"
+        } else if app.view.remote_active {
             "Running in another terminal · your draft is kept here"
         } else if app.view.state == State::Working {
             "Type a follow-up while the agent works"
         } else {
             "Message · / for commands · Ctrl-V pastes"
-        });
+        },
+    );
     frame.render_widget(&app.composer.textarea, parts[4]);
     if let Some((matches, selected)) = app.slash_menu() {
         render_slash_menu(frame, &matches, selected, parts[4]);
@@ -907,7 +909,7 @@ fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, area: Rect, managed: b
                 [
                     "/tasks /t · /new /n · /attach <path> · /sessions /s",
                     "/help /h · /quit /q · /exit /e",
-                    "Say `remember: …` to keep a workspace preference",
+                    "`remember: …` saves a preference · ask `agent messages`",
                 ]
             } else {
                 [

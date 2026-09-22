@@ -43,6 +43,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Open a persistent control conversation; workers continue after detach.
     Chat {
         #[arg(long)]
         resume: Option<Id>,
@@ -87,14 +88,22 @@ enum Commands {
         #[command(subcommand)]
         command: Option<ModelCommand>,
     },
+    /// Inspect conditional public offers; observations do not verify account entitlement.
+    Offers {
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// List direct provider sessions (use conversations for managed chat).
     Sessions {
         #[command(subcommand)]
         command: Option<SessionCommand>,
     },
+    /// Inspect durable managed tasks and their messages.
     Tasks {
         #[command(subcommand)]
         command: Option<TaskCommand>,
     },
+    /// List persistent managed control conversations.
     Conversations,
     Panes {
         #[command(subcommand)]
@@ -236,6 +245,19 @@ enum ModelCommand {
     Default {
         key: String,
     },
+    /// Inspect relative model profiles, including models without an eligible account.
+    Tiers {
+        #[arg(long, default_value = "general coding task")]
+        task: String,
+    },
+    /// Preview managed routing for --cwd without reserving an account.
+    /// Uses the configured judge when enabled; selection may change before execution.
+    Route {
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        provider: Option<Provider>,
+    },
 }
 #[derive(Subcommand)]
 enum SessionCommand {
@@ -254,7 +276,19 @@ enum SessionCommand {
 }
 #[derive(Subcommand)]
 enum TaskCommand {
-    Show { id: Id },
+    /// Replay local ALGAL transition receipts and verify their chain and task record.
+    Verify {
+        id: Id,
+    },
+    Show {
+        id: Id,
+    },
+    /// Read up to 64 messages; pass the last sequence as --after for the next page.
+    Messages {
+        id: Id,
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(..=i64::MAX as u64))]
+        after: u64,
+    },
 }
 #[derive(Subcommand)]
 enum PaneCommand {
@@ -1025,6 +1059,72 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let models = runner::probe(&store, &pin, account.as_ref()).await?;
                     store.set_models(provider, &models)?;
                 }
+                Some(ModelCommand::Route { task, provider }) => {
+                    let workspace = cli.cwd.canonicalize()?;
+                    let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
+                    let (preference, required) =
+                        managed.initial_route_preferences(&workspace, &task)?;
+                    let (preferred_provider, required_provider) =
+                        preview_provider_preferences(preference, required, provider)?;
+                    let excluded_routes = std::collections::BTreeSet::new();
+                    let excluded_accounts = std::collections::BTreeSet::new();
+                    let decision = xcb_runtime::routing::smart_route(
+                        &store,
+                        &Config::load(store.root())?.0,
+                        xcb_runtime::routing::RouteRequest {
+                            task: &task,
+                            required_provider,
+                            preferred_provider,
+                            excluded_routes: &excluded_routes,
+                            excluded_accounts: &excluded_accounts,
+                            account: None,
+                        },
+                    )
+                    .await?;
+                    if cli.json {
+                        print_json(decision)?;
+                    } else {
+                        println!(
+                            "{} · {}  {}",
+                            decision.model.key(),
+                            decision.account,
+                            xcb_core::display_text(&decision.reason, 4096)
+                        );
+                    }
+                    return Ok(0);
+                }
+                Some(ModelCommand::Tiers { task }) => {
+                    let offers = xcb_runtime::offers::load(store.root())?;
+                    let rows = xcb_runtime::routing::profile_models(
+                        &store.models()?,
+                        &offers,
+                        xcb_runtime::now_ms(),
+                        &task,
+                    );
+                    if cli.json {
+                        print_json(rows)?;
+                    } else {
+                        for row in rows {
+                            let offer = row
+                                .profile
+                                .free_offer
+                                .as_ref()
+                                .map(|_| " · conditional offer (entitlement unverified)")
+                                .unwrap_or("");
+                            println!(
+                                "P{}  q{:>3} c{:>3} l{:>3}  {:<56} {}{}",
+                                row.profile.pareto_layer,
+                                row.profile.quality,
+                                row.profile.relative_cost,
+                                row.profile.relative_latency,
+                                row.key,
+                                row.label,
+                                offer,
+                            );
+                        }
+                    }
+                    return Ok(0);
+                }
                 Some(ModelCommand::Default { key }) => {
                     let choice = store
                         .models()?
@@ -1056,6 +1156,39 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             } else {
                 for choice in choices {
                     println!("{:<56} {} · {:?}", choice.key(), choice.label, choice.mode);
+                }
+            }
+            Ok(0)
+        }
+        Some(Commands::Offers { refresh }) => {
+            let state = if refresh {
+                xcb_runtime::offers::refresh(store.root())?
+            } else {
+                xcb_runtime::offers::load(store.root())?
+            };
+            if cli.json {
+                print_json(state)?;
+            } else {
+                println!(
+                    "offers checked {} · {} · {} observation{}",
+                    state.checked_at_ms,
+                    if state.fresh(xcb_runtime::now_ms()) {
+                        "fresh"
+                    } else {
+                        "stale"
+                    },
+                    state.offers.len(),
+                    if state.offers.len() == 1 { "" } else { "s" }
+                );
+                for offer in state.offers {
+                    println!(
+                        "{} {}* · {:?} · through {} · {}",
+                        offer.provider,
+                        offer.model_prefix,
+                        offer.kind,
+                        offer.valid_until_ms,
+                        offer.terms,
+                    );
                 }
             }
             Ok(0)
@@ -1180,10 +1313,35 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         }
                     }
                 }
+                Some(TaskCommand::Verify { id }) => {
+                    print_json(managed.verify_task(&id).await?)?;
+                }
                 Some(TaskCommand::Show { id }) => {
                     let task = xcb_runtime::managed::inspect(&managed, &id)?
                         .ok_or(Error::Unavailable("managed task not found"))?;
                     print_json(task)?;
+                }
+                Some(TaskCommand::Messages { id, after }) => {
+                    managed
+                        .task(&id)?
+                        .ok_or(Error::Unavailable("managed task not found"))?;
+                    let messages = managed.mailbox(&id, after, 64)?;
+                    if cli.json {
+                        print_json(messages)?;
+                    } else if messages.is_empty() {
+                        println!("No XCB messages for {id} after sequence {after}.");
+                    } else {
+                        for message in messages {
+                            println!(
+                                "#{} {} {} → {} · {}",
+                                message.sequence,
+                                message.source_provider,
+                                message.source_task,
+                                message.target_task,
+                                xcb_core::display_text(&message.body, xcb_core::MAX_TEXT_BYTES),
+                            );
+                        }
+                    }
                 }
             }
             Ok(0)
@@ -1563,6 +1721,21 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             Ok(0)
         }
     }
+}
+
+fn preview_provider_preferences(
+    preference: Option<Provider>,
+    required: bool,
+    provider_override: Option<Provider>,
+) -> Result<(Option<Provider>, Option<Provider>)> {
+    if required && provider_override.is_some() && provider_override != preference {
+        return Err(Error::Conflict(
+            "--provider conflicts with the task's explicit provider directive",
+        ));
+    }
+    let preferred = provider_override.or(preference);
+    let required = provider_override.or(required.then_some(preference).flatten());
+    Ok((preferred, required))
 }
 
 async fn managed_chat(
@@ -2028,9 +2201,85 @@ mod tests {
             cli.command,
             Some(Commands::Tasks { command: None })
         ));
+        let cli = Cli::try_parse_from(["xcb", "tasks", "verify", "t_example"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Tasks { command: Some(TaskCommand::Verify { id }) }) if id.as_str() == "t_example")
+        );
         let cli = Cli::try_parse_from(["xcb", "tasks", "show", "t_example"]).unwrap();
         assert!(
             matches!(cli.command, Some(Commands::Tasks { command: Some(TaskCommand::Show { id }) }) if id.as_str() == "t_example")
+        );
+        let cli =
+            Cli::try_parse_from(["xcb", "tasks", "messages", "t_example", "--after", "4"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Tasks {
+                command: Some(TaskCommand::Messages { id, after: 4 })
+            }) if id.as_str() == "t_example"
+        ));
+        let cli = Cli::try_parse_from(["xcb", "offers", "--refresh"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Offers { refresh: true })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "models", "tiers", "--task", "fix a race"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Models {
+                command: Some(ModelCommand::Tiers { task })
+            }) if task == "fix a race"
+        ));
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "models",
+            "route",
+            "--task",
+            "fix a race",
+            "--provider",
+            "codex",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Models {
+                command: Some(ModelCommand::Route { task, provider: Some(Provider::Codex) })
+            }) if task == "fix a race"
+        ));
+    }
+
+    #[test]
+    fn route_preview_honors_learned_and_explicit_provider_preferences() {
+        assert_eq!(
+            preview_provider_preferences(Some(Provider::Claude), false, None).unwrap(),
+            (Some(Provider::Claude), None)
+        );
+        assert_eq!(
+            preview_provider_preferences(Some(Provider::Claude), false, Some(Provider::Codex))
+                .unwrap(),
+            (Some(Provider::Codex), Some(Provider::Codex))
+        );
+        assert_eq!(
+            preview_provider_preferences(Some(Provider::Claude), true, None).unwrap(),
+            (Some(Provider::Claude), Some(Provider::Claude))
+        );
+        assert!(
+            preview_provider_preferences(Some(Provider::Claude), true, Some(Provider::Codex))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn mailbox_cursor_rejects_values_outside_the_storage_range() {
+        assert!(
+            Cli::try_parse_from([
+                "xcb",
+                "tasks",
+                "messages",
+                "t_example",
+                "--after",
+                "9223372036854775808"
+            ])
+            .is_err()
         );
     }
 
