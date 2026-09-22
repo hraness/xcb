@@ -101,7 +101,18 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
         .take(8192)
         .collect::<String>()
         .to_ascii_lowercase();
-    let category = if ["certificate", "tls", "ssl"]
+    let known_category = match error_tag(error) {
+        "usageLimitExceeded" => Some("provider usage limit exceeded"),
+        "unauthorized" => Some("authentication rejected; reconnect this account"),
+        "contextWindowExceeded" => Some("provider context window exceeded"),
+        "cyberPolicy" | "misalignmentPolicyViolation" | "sandboxError" => {
+            Some("provider policy rejected the operation")
+        }
+        _ => None,
+    };
+    let category = if let Some(category) = known_category {
+        category
+    } else if ["certificate", "tls", "ssl"]
         .iter()
         .any(|s| message.contains(s))
     {
@@ -122,6 +133,18 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
         .any(|s| message.contains(s))
     {
         "local provider access denied"
+    } else if (message.contains("model") || message.contains("reasoning effort"))
+        && [
+            "not supported",
+            "unsupported",
+            "not available",
+            "does not exist",
+            "invalid",
+        ]
+        .iter()
+        .any(|s| message.contains(s))
+    {
+        "provider rejected the selected model or reasoning effort"
     } else if [
         "connect",
         "network",
@@ -142,6 +165,17 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
         code: error["code"].as_i64().unwrap_or(-32603),
         category,
     }
+}
+
+fn error_tag(error: &Value) -> &str {
+    let code = &error["codexErrorInfo"];
+    code.as_str()
+        .or_else(|| {
+            code.as_object()
+                .filter(|fields| fields.len() == 1)
+                .and_then(|fields| fields.keys().next().map(String::as_str))
+        })
+        .unwrap_or("")
 }
 
 fn object(value: &Value) -> Result<&serde_json::Map<String, Value>> {
@@ -747,9 +781,12 @@ impl CodexProtocol {
                 .as_u64()
                 .ok_or(Error::Protocol("Codex turn RPC id"))?;
             require(
-                self.turn_rpc == Some(id) && value.get("error").is_none() && self.turn_id.is_none(),
+                self.turn_rpc == Some(id) && self.turn_id.is_none(),
                 "Codex unexpected turn response",
             )?;
+            if let Some(error) = value.get("error") {
+                return Err(rpc_failure("turn/start", error));
+            }
             let turn = identity(&value["result"]["turn"]["id"])?;
             require(
                 self.early_turn.as_ref().is_none_or(|early| early == &turn),
@@ -982,10 +1019,10 @@ impl CodexProtocol {
             "error" => {
                 self.scope(p)?;
                 require(p["willRetry"].is_boolean(), "Codex error retry flag")?;
-                let failure = match p["error"]["codexErrorInfo"].as_str() {
-                    Some("usageLimitExceeded") => Some(Failure::AccountQuota),
-                    Some("unauthorized") => Some(Failure::Authentication),
-                    Some("cyberPolicy" | "misalignmentPolicyViolation" | "sandboxError") => {
+                let failure = match error_tag(&p["error"]) {
+                    "usageLimitExceeded" => Some(Failure::AccountQuota),
+                    "unauthorized" => Some(Failure::Authentication),
+                    "cyberPolicy" | "misalignmentPolicyViolation" | "sandboxError" => {
                         Some(Failure::Policy)
                     }
                     _ => None,
@@ -997,6 +1034,11 @@ impl CodexProtocol {
                         resets_at_ms: None,
                         failure: Some(failure),
                     });
+                }
+                if p["willRetry"] == false {
+                    events.push(Event::Diagnostic(crate::runner::Diagnostic::from_error(
+                        &rpc_failure("turn/error", &p["error"]),
+                    )));
                 }
             }
             "turn/completed" => {
@@ -1027,17 +1069,13 @@ impl CodexProtocol {
                     }
                     Some("interrupted") => Terminal::Cancelled,
                     Some("failed") => {
-                        let code = &turn["error"]["codexErrorInfo"];
-                        let tag = code
-                            .as_str()
-                            .or_else(|| {
-                                code.as_object()
-                                    .and_then(|m| m.keys().next().map(String::as_str))
-                            })
-                            .unwrap_or("");
+                        let tag = error_tag(&turn["error"]);
                         let failure = match tag {
                             "usageLimitExceeded" => Some(Failure::AccountQuota),
                             "unauthorized" => Some(Failure::Authentication),
+                            "cyberPolicy" | "misalignmentPolicyViolation" | "sandboxError" => {
+                                Some(Failure::Policy)
+                            }
                             "contextWindowExceeded" => None,
                             _ => Some(Failure::Unknown),
                         };
@@ -1049,6 +1087,9 @@ impl CodexProtocol {
                                 failure: Some(failure),
                             });
                         }
+                        events.push(Event::Diagnostic(crate::runner::Diagnostic::from_error(
+                            &rpc_failure("turn/completed", &turn["error"]),
+                        )));
                         if tag == "contextWindowExceeded" {
                             Terminal::TokenLimit
                         } else {

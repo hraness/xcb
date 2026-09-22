@@ -49,6 +49,12 @@ reconciliation matches the exact input sequence, session revision and
 transcript boundary. An idle session alone cannot distinguish completion from
 a turn limit. Legacy runs lacking terminal evidence remain uncertain.
 
+Host execution errors and recognized provider errors retain a bounded,
+host-selected diagnostic with their native outcome. Managed task details show
+it after settlement or restart. Raw provider errors, stderr, credentials and
+operating-system paths are excluded.
+Diagnostics explain failures; they do not authorize retries or release custody.
+
 ## Concurrency and effects
 
 One detached supervisor owns a state root. Native execution also enforces

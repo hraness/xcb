@@ -375,7 +375,11 @@ fn print_json(value: impl serde::Serialize) -> Result<()> {
 }
 
 fn run_output(session: &Id, result: &runner::Outcome) -> serde_json::Value {
-    json!({"version":1,"session":session,"state":result.state,"outcome":result.facts,"text":result.text})
+    let mut output = json!({"version":1,"session":session,"state":result.state,"outcome":result.facts,"text":result.text});
+    if let Some(diagnostic) = &result.diagnostic {
+        output["diagnostic"] = json!(diagnostic);
+    }
+    output
 }
 
 fn run_exit_code(result: &runner::Outcome) -> i32 {
@@ -2125,7 +2129,8 @@ mod tests {
 
     #[test]
     fn json_run_output_includes_its_resumable_session_id() {
-        let result = runner::Outcome {
+        let mut result = runner::Outcome {
+            diagnostic: None,
             text: "Completed response".into(),
             facts: xcb_core::policy::TurnFacts {
                 terminal: Terminal::Completed,
@@ -2145,6 +2150,13 @@ mod tests {
             output["outcome"],
             serde_json::to_value(&result.facts).unwrap()
         );
+        result.diagnostic = Some(
+            serde_json::from_value(json!("provider protocol error: fixture failure")).unwrap(),
+        );
+        assert_eq!(
+            run_output(&session, &result)["diagnostic"],
+            "provider protocol error: fixture failure"
+        );
     }
 
     #[test]
@@ -2154,6 +2166,7 @@ mod tests {
             session::State,
         };
         let mut result = runner::Outcome {
+            diagnostic: None,
             text: "Provider said done".into(),
             facts: TurnFacts {
                 terminal: Terminal::Completed,

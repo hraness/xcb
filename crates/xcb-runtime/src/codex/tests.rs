@@ -131,6 +131,135 @@ fn readiness_requires_the_matching_rpc_and_rejects_early_execution() {
 }
 
 #[test]
+fn turn_start_errors_are_sanitized_only_after_matching_the_expected_rpc() {
+    let mut c = codec();
+    c.thread_id = Some("thread1".into());
+    c.turn_rpc = Some(7);
+    let error = json!({"code":-32000,"message":"401 Unauthorized Bearer SYNTHETIC_SECRET user@example.invalid","data":{"token":"SYNTHETIC_DATA_SECRET"}});
+    for id in [json!(8), json!("7"), Value::Null] {
+        assert!(matches!(
+            c.accept(json!({"id":id,"error":error})),
+            Err(Error::Protocol(_))
+        ));
+    }
+    let failure = c.accept(json!({"id":7,"error":error})).unwrap_err();
+    assert!(matches!(
+        failure,
+        Error::CodexRpc {
+            method: "turn/start",
+            code: -32000,
+            ..
+        }
+    ));
+    let displayed = failure.to_string();
+    assert!(displayed.contains("authentication rejected"));
+    assert!(!displayed.contains("SYNTHETIC"));
+    assert!(!displayed.contains("example.invalid"));
+    assert!(!c.ready && c.turn_id.is_none());
+    assert!(matches!(
+        started().accept(json!({"id":7,"error":error})),
+        Err(Error::Protocol(_))
+    ));
+}
+
+#[test]
+fn failed_turns_preserve_fixed_diagnostics_and_terminal_classification() {
+    for (tag, terminal, failure, category) in [
+        (
+            "usageLimitExceeded",
+            Terminal::Failed,
+            Some(Failure::AccountQuota),
+            "provider usage limit exceeded",
+        ),
+        (
+            "unauthorized",
+            Terminal::Failed,
+            Some(Failure::Authentication),
+            "authentication rejected",
+        ),
+        (
+            "contextWindowExceeded",
+            Terminal::TokenLimit,
+            None,
+            "provider context window exceeded",
+        ),
+        (
+            "sandboxError",
+            Terminal::Failed,
+            Some(Failure::Policy),
+            "provider policy rejected",
+        ),
+        (
+            "SYNTHETIC_UNKNOWN_SECRET",
+            Terminal::Failed,
+            Some(Failure::Unknown),
+            "provider rejected the operation",
+        ),
+    ] {
+        for code in [
+            json!(tag),
+            json!({tag: {"secret":"SYNTHETIC_NESTED_SECRET"}}),
+        ] {
+            let mut c = started();
+            let (events, replies) = c.accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"failed","error":{"codexErrorInfo":code,"message":"SYNTHETIC_SECRET user@example.invalid"}}}})).unwrap();
+            assert!(replies.is_empty());
+            let diagnostic = events
+                .iter()
+                .find_map(|event| match event {
+                    Event::Diagnostic(value) => Some(serde_json::to_value(value).unwrap()),
+                    _ => None,
+                })
+                .expect("failed turns retain a safe diagnostic");
+            let diagnostic = diagnostic.as_str().unwrap();
+            assert!(diagnostic.contains("turn/completed"));
+            assert!(diagnostic.contains(category));
+            assert!(!diagnostic.contains("SYNTHETIC"));
+            assert!(!diagnostic.contains("example.invalid"));
+            assert!(events.iter().any(|event| matches!(event, Event::Result { terminal: observed, .. } if *observed == terminal)));
+            assert_eq!(
+                events.iter().find_map(|event| match event {
+                    Event::Quota { failure, .. } => *failure,
+                    _ => None,
+                }),
+                failure
+            );
+            assert!(c.completed);
+        }
+    }
+}
+
+#[test]
+fn error_notices_require_scope_and_do_not_persist_a_retried_failure() {
+    let mut notification = json!({"method":"error","params":{"threadId":"thread1","turnId":"turn1","willRetry":false,"error":{"message":"model is not supported: SYNTHETIC_SECRET user@example.invalid"}}});
+    let (events, _) = started().accept(notification.clone()).unwrap();
+    let diagnostic = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Diagnostic(value) => Some(serde_json::to_value(value).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        diagnostic
+            .as_str()
+            .unwrap()
+            .contains("selected model or reasoning effort")
+    );
+    assert!(!diagnostic.as_str().unwrap().contains("SYNTHETIC"));
+    notification["params"]["willRetry"] = json!(true);
+    assert!(
+        !started()
+            .accept(notification.clone())
+            .unwrap()
+            .0
+            .iter()
+            .any(|event| matches!(event, Event::Diagnostic(_)))
+    );
+    notification["params"]["threadId"] = json!("foreign");
+    assert!(started().accept(notification).is_err());
+}
+
+#[test]
 fn usage_counts_caches_once_and_refuses_regression() {
     let value = json!({"totalTokens":150,"inputTokens":120,"cachedInputTokens":80,"cacheWriteInputTokens":10,"outputTokens":30,"reasoningOutputTokens":20});
     let (counters, total) = usage(&value).unwrap();

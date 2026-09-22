@@ -1445,6 +1445,7 @@ mod tests {
         let candidates = vec![same_account, candidate(2)];
         let tried = BTreeSet::new();
         let mut outcome = Outcome {
+            diagnostic: None,
             text: "Saved the migration; remaining tests need to run".into(),
             state: State::Failed,
             facts: TurnFacts {

@@ -806,6 +806,7 @@ impl Store {
                 .chars()
                 .take(80)
                 .collect();
+            session.title = xcb_core::display_text(&session.title, 160);
             if session.title.is_empty() {
                 session.title = "Image message".into();
             }
@@ -1915,6 +1916,7 @@ mod tests {
             .unwrap();
         let run = store.prepare_run(&session.id, session.revision, 4).unwrap();
         let mut outcome = crate::runner::Outcome {
+            diagnostic: None,
             text: "The turn limit interrupted the remaining work".into(),
             facts: TurnFacts {
                 terminal: Terminal::TurnLimit,
