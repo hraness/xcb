@@ -135,6 +135,12 @@ enum Commands {
         run: Option<Id>,
         #[arg(long)]
         yes: bool,
+        /// Remove launch directories that predate the owner lock. Nothing can
+        /// prove they are unowned, so this is the operator asserting that no
+        /// xcb is running. Directories that DO carry an owner lock are never
+        /// touched by this flag; doctor collects those on its own evidence.
+        #[arg(long = "launch-artifacts")]
+        launch_artifacts: bool,
     },
     #[command(name = "managed-daemon", hide = true)]
     ManagedDaemon,
@@ -313,6 +319,24 @@ fn stdin(max: usize) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+/// Sizes here are whole provider executables, so a plain byte count reads as
+/// noise. One decimal place is enough to tell 208 MB from 1.8 GB.
+fn human_bytes(bytes: u64) -> String {
+    const STEP: f64 = 1024.0;
+    let units = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= STEP && unit + 1 < units.len() {
+        value /= STEP;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", units[unit])
+    }
+}
+
 fn print_json(value: impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
@@ -953,6 +977,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 Some(judge::JudgeKeySource::Vault) => "vault",
                 None => "none",
             };
+            // Launch directories each hold a private copy of the provider
+            // executable. A killed or crashed turn skips the Drop that would
+            // remove one, so doctor — the command this CLI already tells the
+            // operator to re-run — is where the ones whose owner is provably
+            // gone get collected.
+            let sweep = runner::reclaim_launch_artifacts(&root, false)?;
             let (judge_model, judge_endpoint) =
                 xcb_runtime::jev::effective_target(&config.extensions.judge)?;
             let judge_status = json!({
@@ -964,6 +994,18 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             if cli.json {
                 let mut report = json!({"version":1,"providers":reports,"unsettledRuns":store.unsettled_runs()?});
                 report["judge"] = judge_status;
+                report["launchArtifacts"] = json!({
+                    "reclaimed": sweep.reclaimed,
+                    "reclaimedBytes": sweep.reclaimed_bytes,
+                    "liveHeld": sweep.live,
+                    "unreclaimable": sweep.unprovable.len(),
+                    "unreclaimableBytes": sweep.unprovable_bytes,
+                    "remedy": if sweep.unprovable.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        json!("written before launch directories carried an owner lock, so nothing here can prove they are unowned; with no xcb running, `xcb recover --launch-artifacts --yes` removes them")
+                    },
+                });
                 if cfg!(target_os = "linux") {
                     let status = xcb_runtime::sandbox::linux_sandbox(&root);
                     report["sandbox"] = json!({"backend":"bwrap","candidate":status.candidate,"admitted":status.admitted,"unprivilegedUsernsClone":status.unprivileged_userns_clone,"maxUserNamespaces":status.max_user_namespaces,"qualified":status.qualified});
@@ -1001,6 +1043,33 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         "disabled"
                     },
                 );
+                if sweep.reclaimed > 0 {
+                    println!(
+                        "launch artifacts: reclaimed {} abandoned {} ({})",
+                        sweep.reclaimed,
+                        if sweep.reclaimed == 1 {
+                            "directory"
+                        } else {
+                            "directories"
+                        },
+                        human_bytes(sweep.reclaimed_bytes),
+                    );
+                }
+                if !sweep.unprovable.is_empty() {
+                    println!(
+                        "launch artifacts: {} older {} ({}) predate the owner lock, so nothing can prove they are unowned.",
+                        sweep.unprovable.len(),
+                        if sweep.unprovable.len() == 1 {
+                            "directory"
+                        } else {
+                            "directories"
+                        },
+                        human_bytes(sweep.unprovable_bytes),
+                    );
+                    println!(
+                        "  With no xcb running, remove them with: xcb recover --launch-artifacts --yes"
+                    );
+                }
                 for run in store.unsettled_runs()? {
                     println!("Unsettled run {} · custody retained", run.id);
                 }
@@ -1483,7 +1552,77 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             print_json(config)?;
             Ok(0)
         }
-        Some(Commands::Recover { run, yes }) => {
+        Some(Commands::Recover {
+            run,
+            yes,
+            launch_artifacts,
+        }) => {
+            if launch_artifacts {
+                if run.is_some() {
+                    return Err(Error::Unavailable(
+                        "--launch-artifacts recovers disposable files, not a run; pass one or the other",
+                    ));
+                }
+                let found = runner::reclaim_launch_artifacts(&root, false)?;
+                if !yes {
+                    if cli.json {
+                        print_json(json!({
+                            "version": 1,
+                            "dryRun": true,
+                            "reclaimable": found.unprovable.len(),
+                            "reclaimableBytes": found.unprovable_bytes,
+                            "alreadyReclaimed": found.reclaimed,
+                            "alreadyReclaimedBytes": found.reclaimed_bytes,
+                            "liveHeld": found.live,
+                        }))?;
+                    } else {
+                        println!(
+                            "{} launch {} ({}) predate the owner lock.",
+                            found.unprovable.len(),
+                            if found.unprovable.len() == 1 {
+                                "directory"
+                            } else {
+                                "directories"
+                            },
+                            human_bytes(found.unprovable_bytes),
+                        );
+                        if found.live > 0 {
+                            println!(
+                                "{} other {} owned by a live turn and will not be touched.",
+                                found.live,
+                                if found.live == 1 {
+                                    "directory is"
+                                } else {
+                                    "directories are"
+                                },
+                            );
+                        }
+                        println!("Confirm no xcb is running, then re-run with --yes.");
+                    }
+                    return Ok(0);
+                }
+                let swept = runner::reclaim_launch_artifacts(&root, true)?;
+                if cli.json {
+                    print_json(json!({
+                        "version": 1,
+                        "reclaimed": swept.reclaimed,
+                        "reclaimedBytes": swept.reclaimed_bytes,
+                        "liveHeld": swept.live,
+                    }))?;
+                } else {
+                    println!(
+                        "Reclaimed {} launch {} ({}).",
+                        swept.reclaimed,
+                        if swept.reclaimed == 1 {
+                            "directory"
+                        } else {
+                            "directories"
+                        },
+                        human_bytes(swept.reclaimed_bytes),
+                    );
+                }
+                return Ok(0);
+            }
             if let Some(run_id) = run {
                 let (run, mut run_digest) = store
                     .recovery_candidate(&run_id)?
@@ -2041,7 +2180,8 @@ mod tests {
             cli.command,
             Some(Commands::Recover {
                 run: None,
-                yes: false
+                yes: false,
+                launch_artifacts: false
             })
         ));
 
@@ -2050,7 +2190,8 @@ mod tests {
             cli.command,
             Some(Commands::Recover {
                 run: Some(_),
-                yes: false
+                yes: false,
+                launch_artifacts: false
             })
         ));
 
@@ -2059,7 +2200,29 @@ mod tests {
             cli.command,
             Some(Commands::Recover {
                 run: Some(_),
-                yes: true
+                yes: true,
+                launch_artifacts: false
+            })
+        ));
+
+        // The disposable-file sweep is a separate subject from run recovery,
+        // and asking for both at once is rejected rather than guessed at.
+        let cli = Cli::try_parse_from(["xcb", "recover", "--launch-artifacts"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Recover {
+                run: None,
+                yes: false,
+                launch_artifacts: true
+            })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "recover", "--launch-artifacts", "--yes"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Recover {
+                run: None,
+                yes: true,
+                launch_artifacts: true
             })
         ));
     }
