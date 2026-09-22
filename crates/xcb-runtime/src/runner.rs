@@ -132,6 +132,17 @@ async fn spawn_process(
     }
 }
 
+/// The advisory lock every launch directory carries for as long as a live
+/// process owns it. `Drop` is the only thing that removes a launch directory,
+/// and `Drop` does not run when a process is killed, crashes or is torn down
+/// with its parent — so a directory outlives its owner, holding a private copy
+/// of the whole provider executable, and nothing ever reclaims it. Holding a
+/// lock on a file inside the directory turns "is anyone still using this?"
+/// into something a later process can answer rather than assume: a lock that
+/// can be taken proves the previous owner is gone, because the kernel released
+/// it when that process died.
+pub(crate) const LAUNCH_OWNER_LOCK: &str = "owner.lock";
+
 /// Launch snapshots are disposable only before spawn or after independent
 /// process-join evidence and settled effects. Cancellation/drop alone never
 /// grants cleanup permission.
@@ -139,15 +150,29 @@ pub(crate) struct LaunchArtifacts {
     directory: PathBuf,
     identity: (u64, u64),
     retained: bool,
+    /// Held, never read. Dropping it, or the process dying, releases the lock
+    /// and is what lets `reclaim_launch_artifacts` prove the directory is
+    /// unowned. Declared last so it is dropped after `Drop for LaunchArtifacts`
+    /// has had its chance to remove the directory.
+    #[expect(dead_code, reason = "held for the advisory lock, never read")]
+    owner: std::fs::File,
 }
 impl LaunchArtifacts {
     pub(crate) fn create(root: &Path) -> Result<Self> {
         let directory = private::directory(&root.join("runs").join(new_id("launch").as_str()))?;
         let metadata = std::fs::symlink_metadata(&directory)?;
+        let owner = open_owner_lock(&directory.join(LAUNCH_OWNER_LOCK))?;
+        // The directory name is a fresh identifier, so the lock cannot already
+        // be held. A refusal here means something else is writing into our
+        // private state, which is never routine.
+        owner
+            .try_lock()
+            .map_err(|_| Error::Conflict("launch directory is already owned"))?;
         Ok(Self {
             directory,
             identity: (metadata.dev(), metadata.ino()),
             retained: false,
+            owner,
         })
     }
     pub(crate) fn path(&self) -> &Path {
@@ -162,6 +187,129 @@ impl LaunchArtifacts {
         }
     }
 }
+/// Opens the owner lock without following a symlink and without blocking on a
+/// device. The same flags the store uses for its initialization lock.
+fn open_owner_lock(path: &Path) -> Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC)
+                .bits() as i32,
+        )
+        .open(path)?;
+    private::check_file(&file, 0)?;
+    private::same_file(path, &file)?;
+    Ok(file)
+}
+
+/// What a sweep of `runs/` found. Bytes are reported so an operator can see
+/// what is at stake before being asked to remove anything.
+#[derive(Debug, Default)]
+pub struct LaunchArtifactSweep {
+    /// Directories whose owner lock was free: the owning process is gone.
+    pub reclaimed: usize,
+    pub reclaimed_bytes: u64,
+    /// Directories whose owner lock is held right now. Left untouched.
+    pub live: usize,
+    /// Directories with no owner lock at all, written by a build from before
+    /// the lock existed. Nothing here can prove they are unowned, so they are
+    /// reported rather than removed unless the operator says otherwise.
+    pub unprovable: Vec<PathBuf>,
+    pub unprovable_bytes: u64,
+}
+
+fn directory_bytes(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => directory_bytes(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map(|data| data.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Reclaims launch directories whose owner is provably gone.
+///
+/// A launch directory holds a private copy of the whole provider executable —
+/// on this host, 208 MB each. `Drop` removes it on every path the process
+/// controls, but a kill, a crash or a parent teardown skips `Drop` entirely,
+/// and nothing has ever collected what that leaves behind.
+///
+/// The proof is the owner lock. Taking it means the kernel released it, which
+/// means the process that held it is gone; a directory whose lock is held is
+/// left alone, because a live turn owns it. A directory with no lock file was
+/// written by a build from before the lock existed and cannot be judged either
+/// way, so it is reported. `remove_unprovable` is the operator's explicit
+/// answer for those and is never set by routine maintenance.
+pub fn reclaim_launch_artifacts(
+    root: &Path,
+    remove_unprovable: bool,
+) -> Result<LaunchArtifactSweep> {
+    let runs = root.join("runs");
+    let mut sweep = LaunchArtifactSweep::default();
+    let entries = match std::fs::read_dir(&runs) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(sweep),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with("launch_"))
+        {
+            continue;
+        }
+        // Refuses a symlink or anything not owner-only, so a sweep never
+        // follows a planted name out of our private state.
+        if private::check_directory(&path).is_err() {
+            continue;
+        }
+        let lock_path = path.join(LAUNCH_OWNER_LOCK);
+        match std::fs::symlink_metadata(&lock_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let bytes = directory_bytes(&path);
+                if remove_unprovable {
+                    std::fs::remove_dir_all(&path)?;
+                    sweep.reclaimed += 1;
+                    sweep.reclaimed_bytes += bytes;
+                } else {
+                    sweep.unprovable.push(path);
+                    sweep.unprovable_bytes += bytes;
+                }
+            }
+            Err(_) => continue,
+            Ok(_) => {
+                let Ok(file) = open_owner_lock(&lock_path) else {
+                    continue;
+                };
+                if file.try_lock().is_ok() {
+                    let bytes = directory_bytes(&path);
+                    std::fs::remove_dir_all(&path)?;
+                    sweep.reclaimed += 1;
+                    sweep.reclaimed_bytes += bytes;
+                } else {
+                    sweep.live += 1;
+                }
+            }
+        }
+    }
+    sweep.unprovable.sort();
+    Ok(sweep)
+}
+
 impl Drop for LaunchArtifacts {
     fn drop(&mut self) {
         if self.retained || private::check_directory(&self.directory).is_err() {
@@ -2835,5 +2983,112 @@ mod tests {
             assert_eq!(store.unsettled_runs().unwrap().is_empty(), joined);
             assert_eq!(launch_path.exists(), !joined);
         }
+    }
+
+    /// The whole sweep rests on one property: a lock held by a live owner
+    /// cannot be taken by anyone else, and a lock whose owner is gone can.
+    /// If that ever stopped holding, the sweep would delete directories out
+    /// from under running turns, so it is asserted directly rather than
+    /// assumed from the platform.
+    #[test]
+    fn a_live_owner_keeps_its_launch_directory_through_a_sweep() {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let base = root.path().canonicalize().unwrap();
+        private::directory(&base.join("runs")).unwrap();
+
+        let live = LaunchArtifacts::create(&base).unwrap();
+        let live_path = live.directory.clone();
+        std::fs::write(live_path.join("provider"), b"a large snapshot").unwrap();
+
+        let sweep = reclaim_launch_artifacts(&base, false).unwrap();
+        assert_eq!(sweep.live, 1);
+        assert_eq!(sweep.reclaimed, 0);
+        assert!(live_path.exists(), "a live turn's directory was deleted");
+
+        // The owner goes away without removing anything, which is the shape a
+        // kill, a crash or a parent teardown leaves behind. `retain` is how
+        // this struct expresses "do not delete on drop", so dropping a
+        // retained one reproduces an abandoned directory exactly: files still
+        // on disk, lock no longer held.
+        let mut live = live;
+        live.retain_before_launch();
+        drop(live);
+        assert!(live_path.exists());
+
+        let sweep = reclaim_launch_artifacts(&base, false).unwrap();
+        assert_eq!(sweep.reclaimed, 1);
+        assert!(sweep.reclaimed_bytes >= b"a large snapshot".len() as u64);
+        assert_eq!(sweep.live, 0);
+        assert!(!live_path.exists());
+    }
+
+    /// A directory from a build that predated the owner lock. Nothing about it
+    /// can distinguish "abandoned" from "in use", so routine maintenance must
+    /// report it and leave it, and only an explicit operator answer removes it.
+    #[test]
+    fn a_directory_without_an_owner_lock_is_reported_not_removed() {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let base = root.path().canonicalize().unwrap();
+        private::directory(&base.join("runs")).unwrap();
+        let legacy = private::directory(&base.join("runs").join("launch_legacyfixture")).unwrap();
+        std::fs::write(legacy.join("provider"), b"0123456789").unwrap();
+
+        let sweep = reclaim_launch_artifacts(&base, false).unwrap();
+        assert_eq!(sweep.reclaimed, 0);
+        assert_eq!(sweep.live, 0);
+        assert_eq!(sweep.unprovable, vec![legacy.clone()]);
+        assert_eq!(sweep.unprovable_bytes, 10);
+        assert!(legacy.exists());
+
+        let sweep = reclaim_launch_artifacts(&base, true).unwrap();
+        assert_eq!(sweep.reclaimed, 1);
+        assert_eq!(sweep.reclaimed_bytes, 10);
+        assert!(sweep.unprovable.is_empty());
+        assert!(!legacy.exists());
+    }
+
+    /// The sweep reads a shared directory, so it must not be steerable by a
+    /// name someone else can create there.
+    #[test]
+    fn the_sweep_ignores_names_it_does_not_own() {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let runs = private::directory(&base.join("runs")).unwrap();
+        // Not a launch directory at all.
+        let unrelated = private::directory(&runs.join("keep_me")).unwrap();
+        // A launch-shaped name pointing somewhere else entirely.
+        let elsewhere = private::directory(&base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, runs.join("launch_symlink")).unwrap();
+        // A launch-shaped name that is a file, not a directory.
+        std::fs::write(runs.join("launch_regularfile"), b"x").unwrap();
+
+        let sweep = reclaim_launch_artifacts(&base, true).unwrap();
+        assert_eq!(sweep.reclaimed, 0);
+        assert!(sweep.unprovable.is_empty());
+        assert!(unrelated.exists());
+        assert!(elsewhere.exists());
+        assert!(runs.join("launch_symlink").symlink_metadata().is_ok());
+    }
+
+    /// Reclaiming is not permission to delete: a directory the owner is still
+    /// entitled to keep must survive, and the normal Drop path must still be
+    /// the thing that removes a finished one.
+    #[test]
+    fn a_retained_directory_survives_its_owner() {
+        let root = tempfile::tempdir_in("/tmp").unwrap();
+        let base = root.path().canonicalize().unwrap();
+        private::directory(&base.join("runs")).unwrap();
+        let mut artifacts = LaunchArtifacts::create(&base).unwrap();
+        let path = artifacts.directory.clone();
+        artifacts.retain_before_launch();
+        drop(artifacts);
+        assert!(path.exists(), "retained artifacts were dropped");
+
+        let mut released = LaunchArtifacts::create(&base).unwrap();
+        let released_path = released.directory.clone();
+        released.retain_before_launch();
+        released.release_after_join(true, EffectState::None);
+        drop(released);
+        assert!(!released_path.exists());
     }
 }

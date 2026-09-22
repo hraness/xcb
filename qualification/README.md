@@ -82,6 +82,30 @@ why discovery metadata and execution authority are different.
 
 ## Live Claude subscription smoke
 
+`2026-09-22-live-claude-subscription.json` supplements the 2026-09-17 receipt
+below rather than replacing it. It answers one question the earlier one cannot:
+whether the admitted-version floor holds live on a runtime newer than the one
+that receipt attests.
+
+It records one user-operated CLI turn on `main` at `ccefc0a`, from a release
+binary built from that commit with no source modified for the run. The installed
+runtime was **2.1.278**, admitted by the `MIN_VERSION` floor and major ceiling
+rather than by an exact pin. `claude/sonnet/low` returned the required text from
+a disposable empty workspace that held no entries afterwards; the reported effect
+state was `none`, and the provider process joined before the completion was
+persisted. The per-run boundary assertion — including the empty skills and
+plugins inventories — passed on that runtime.
+
+One difference from the 2026-09-17 receipt is recorded rather than inherited:
+run artifacts are **not** removed after the provider joins. Each launch retains
+a private per-run copy of the provider executable (0500) and its generated
+Seatbelt policy (0600) under the state directory (0700). Nine launch directories
+were present on this host, each holding its own copy of the 217 MB executable.
+
+What it does not establish is on the receipt itself: it qualifies this runtime,
+not every future release inside major 2. The per-run boundary assertion remains
+the enforcement; the floor only decides which binaries `doctor` will offer.
+
 `2026-09-17-live-claude-subscription.json` records one user-operated CLI turn
 against the real Claude subscription service. The exact admitted 2.1.268 runtime
 returned the required text from `claude-sonnet-4-5`; the completed transcript was
