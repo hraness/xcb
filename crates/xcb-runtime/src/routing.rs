@@ -377,6 +377,21 @@ pub async fn smart_route(
     config: &Config,
     request: RouteRequest<'_>,
 ) -> Result<RouteDecision> {
+    let admitted: BTreeSet<_> = Provider::ALL
+        .into_iter()
+        .filter(|provider| {
+            Pin::load(store.root(), *provider).is_ok_and(|pin| runner::provider_admitted(&pin))
+        })
+        .collect();
+    route_with_admitted(store, config, request, &admitted).await
+}
+
+async fn route_with_admitted(
+    store: &Store,
+    config: &Config,
+    request: RouteRequest<'_>,
+    admitted: &BTreeSet<Provider>,
+) -> Result<RouteDecision> {
     let RouteRequest {
         task,
         required_provider,
@@ -389,12 +404,6 @@ pub async fn smart_route(
     let offers = crate::offers::load(store.root()).unwrap_or_default();
     let models = store.models()?;
     let view = summary::snapshot(store, None, config, now)?;
-    let admitted: BTreeSet<_> = Provider::ALL
-        .into_iter()
-        .filter(|provider| {
-            Pin::load(store.root(), *provider).is_ok_and(|pin| runner::provider_admitted(&pin))
-        })
-        .collect();
     let accounts: Vec<_> = view
         .accounts
         .iter()
@@ -403,6 +412,7 @@ pub async fn smart_route(
                 && required_provider.is_none_or(|provider| provider == account.provider)
                 && !account.busy
                 && account.enabled
+                && !account.authentication_required
                 && account.quota_blocked_until_ms.is_none()
                 && account
                     .remaining_percent
@@ -568,6 +578,67 @@ pub async fn smart_route(
 mod tests {
     use super::*;
     use xcb_core::models::Mode;
+
+    #[tokio::test]
+    async fn authentication_health_selects_other_account_without_crossing_provider_constraint() {
+        use crate::authentication_tests::{account, fail_authentication, model};
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let first = account(&store, Provider::Codex);
+        let second = account(&store, Provider::Codex);
+        account(&store, Provider::Claude);
+        store
+            .set_models(Provider::Codex, &[model(Provider::Codex)])
+            .unwrap();
+        store
+            .set_models(Provider::Claude, &[model(Provider::Claude)])
+            .unwrap();
+        let mut config = Config::default();
+        config.extensions.judge.enabled = false;
+        config.default_account = Some(first.clone());
+        fail_authentication(&store, &first);
+        let none = BTreeSet::new();
+        let excluded_accounts = BTreeSet::new();
+        let request = || RouteRequest {
+            task: "Use Codex. Fix a test",
+            required_provider: Some(Provider::Codex),
+            preferred_provider: None,
+            excluded_routes: &none,
+            excluded_accounts: &excluded_accounts,
+            account: None,
+        };
+        let admitted = [Provider::Codex, Provider::Claude].into();
+        let route = route_with_admitted(&store, &config, request(), &admitted)
+            .await
+            .unwrap();
+        assert_eq!(route.account, second);
+        assert_eq!(route.model.provider, Provider::Codex);
+        let work = store.root().parent().unwrap().join("synthetic-work");
+        let selected =
+            crate::kernel::new_session(&store, &work, &config, None, Some("codex/gpt-5.6-sol"))
+                .unwrap();
+        assert_eq!(selected.account, second);
+        assert!(
+            crate::kernel::new_session(
+                &store,
+                &work,
+                &config,
+                Some(&first),
+                Some("codex/gpt-5.6-sol")
+            )
+            .is_err()
+        );
+        fail_authentication(&store, &second);
+        assert!(
+            route_with_admitted(&store, &config, request(), &admitted)
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::kernel::new_session(&store, &work, &config, None, Some("codex/gpt-5.6-sol"))
+                .is_err()
+        );
+    }
 
     fn model(
         provider: Provider,

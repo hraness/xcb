@@ -14,6 +14,10 @@ struct Fixture {
 }
 
 async fn prepared() -> Fixture {
+    prepared_with_goal("finish the migration and its checks".into()).await
+}
+
+async fn prepared_with_goal(goal: String) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let base = root.path().canonicalize().unwrap();
     let state = base.join("state");
@@ -37,13 +41,7 @@ async fn prepared() -> Fixture {
         .unwrap();
     let conversation = managed.create_conversation(&workspace).await.unwrap();
     let task = managed
-        .create_task(
-            &conversation.id,
-            new_id("input"),
-            "finish the migration and its checks".into(),
-            vec![],
-            &workspace,
-        )
+        .create_task(&conversation.id, new_id("input"), goal, vec![], &workspace)
         .await
         .unwrap();
     let task = managed
@@ -62,6 +60,199 @@ async fn prepared() -> Fixture {
         store,
         task,
         session,
+    }
+}
+
+struct DiagnosticProtocol {
+    model: ModelChoice,
+    result_event: bool,
+    stale_catalog: bool,
+}
+
+impl crate::protocol::Protocol for DiagnosticProtocol {
+    async fn initialize(
+        &mut self,
+        _: &mut crate::process::StreamProcess,
+        _: &str,
+    ) -> Result<Vec<ModelChoice>> {
+        let mut model = self.model.clone();
+        if self.stale_catalog {
+            model.id = Id::new("fresh-model").unwrap();
+        }
+        Ok(vec![model])
+    }
+
+    async fn start(
+        &mut self,
+        process: &mut crate::process::StreamProcess,
+        _: crate::protocol::Prompt,
+    ) -> Result<()> {
+        assert!(
+            !self.stale_catalog,
+            "stale selection must never reach start"
+        );
+        if self.result_event {
+            process.send(&json!({"fixture":true})).await
+        } else {
+            Err(Error::Protocol("fixture initialization rejected"))
+        }
+    }
+
+    async fn receive(
+        &mut self,
+        _: &mut crate::process::StreamProcess,
+        _: &[u8],
+    ) -> Result<Vec<crate::protocol::Event>> {
+        Ok(vec![
+            crate::protocol::Event::Ready,
+            crate::protocol::Event::Diagnostic(
+                serde_json::from_value(json!("d".repeat(512))).unwrap(),
+            ),
+            crate::protocol::Event::Result {
+                terminal: Terminal::Failed,
+                text: "x".repeat(xcb_core::MAX_TEXT_BYTES),
+                models: vec![],
+            },
+        ])
+    }
+
+    async fn reply(
+        &mut self,
+        _: &mut crate::process::StreamProcess,
+        _: &str,
+        _: Value,
+    ) -> Result<()> {
+        unreachable!("diagnostic fixture has no tools")
+    }
+}
+
+#[tokio::test]
+async fn runner_diagnostic_survives_restart_and_bounded_managed_message() {
+    for (result_event, stale_catalog) in [(false, false), (true, false), (false, true)] {
+        let Fixture {
+            _root,
+            managed,
+            store,
+            task,
+            session,
+        } = prepared_with_goal("🦀".repeat(120)).await;
+        let store = Arc::new(store);
+        store
+            .set_models(session.model.provider, std::slice::from_ref(&session.model))
+            .unwrap();
+        let message = Message {
+            id: new_id("input"),
+            role: Role::User,
+            text: task.goal.clone(),
+            attachments: vec![],
+            at_ms: now_ms(),
+            provenance: None,
+        };
+        let session = store
+            .append_message(&session.id, session.revision, &message)
+            .unwrap();
+        assert_eq!(session.title.len(), 160);
+        assert_eq!(store.messages(&session.id, 10).unwrap()[0].text, task.goal);
+        let state_root = store.root().to_path_buf();
+        let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = notices.clone();
+        let (_cancel, cancellation) = tokio::sync::watch::channel(false);
+        let outcome = crate::runner::run_prepared(
+            store.clone(),
+            crate::runner::RunInput {
+                session: session.clone(),
+                message,
+                config: Config::default(),
+                pane_generation: false,
+            },
+            cancellation,
+            Arc::new(move |event| {
+                if let Progress::Notice(text) = event {
+                    observed.lock().unwrap().push(text);
+                }
+            }),
+            crate::runner::Launch {
+                command: tokio::process::Command::new("/bin/cat"),
+                cwd: PathBuf::from(&task.workspace),
+                bridge: None,
+                artifacts: crate::runner::LaunchArtifacts::create(store.root()).unwrap(),
+                prepared_run: None,
+                codex_credentials: None,
+            },
+            DiagnosticProtocol {
+                model: session.model,
+                result_event,
+                stale_catalog,
+            },
+            crate::broker::Workspace::open_with_coordination(
+                Path::new(&task.workspace),
+                &_root.path().join("coordination"),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.state, State::Failed);
+        assert_eq!(outcome.facts.failure, Some(Failure::Unknown));
+        assert!(outcome.facts.joined);
+        assert_eq!(outcome.facts.effects, EffectState::None);
+        let diagnostic = outcome.diagnostic.as_ref().unwrap();
+        if stale_catalog {
+            assert_eq!(
+                store
+                    .models()
+                    .unwrap()
+                    .iter()
+                    .map(|model| model.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["fresh-model"]
+            );
+            assert!(
+                diagnostic
+                    .as_str()
+                    .contains("not in the fresh provider catalog")
+            );
+        }
+        assert!(
+            notices
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|text| text == diagnostic.as_str())
+        );
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert_eq!(
+            store
+                .settled_outcome(&session.id, 0)
+                .unwrap()
+                .unwrap()
+                .diagnostic,
+            outcome.diagnostic
+        );
+        drop(managed);
+        drop(store);
+
+        let managed = ManagedStore::open(&state_root).unwrap();
+        let store = Store::open(&state_root).unwrap();
+        managed.reconcile_startup(&store).await.unwrap();
+        let recovered = managed.task(&task.id).unwrap().unwrap();
+        assert_eq!(recovered.state, TaskState::Failed);
+        assert_eq!(recovered.attempts, 1);
+        assert!(recovered.detail.ends_with(diagnostic.as_str()));
+        assert_eq!(
+            managed.verify_task(&task.id).await.unwrap()["verified"],
+            true
+        );
+        let messages = managed.messages(&task.conversation, 10).unwrap();
+        let response = messages.last().unwrap();
+        assert!(response.text.starts_with(&format!("**{}** · ", task.title)));
+        assert!(response.text.contains(diagnostic.as_str()));
+        response.validate().unwrap();
+        if result_event {
+            assert_eq!(task.title.len(), 160);
+            assert_eq!(task.goal, "🦀".repeat(120));
+            assert_eq!(response.text.len(), xcb_core::MAX_TEXT_BYTES);
+        }
     }
 }
 
@@ -90,6 +281,7 @@ async fn restart_recovers_exact_turn_limit_and_rejects_legacy_idle_inference() {
             .prepare_run(&session.id, session.revision, now_ms())
             .unwrap();
         let outcome = Outcome {
+            diagnostic: None,
             text: "Migration written; the turn limit interrupted the remaining checks".into(),
             facts: TurnFacts {
                 terminal: Terminal::TurnLimit,

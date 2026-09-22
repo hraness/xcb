@@ -35,6 +35,8 @@ pub(crate) enum Event {
     },
     /// A request was denied; only a human can supply new permission.
     Attention,
+    /// Only host-selected, bounded diagnostic categories cross this boundary.
+    Diagnostic(crate::runner::Diagnostic),
     Quota {
         window: Option<String>,
         used_percent: Option<f64>,

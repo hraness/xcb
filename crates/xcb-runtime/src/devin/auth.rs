@@ -78,6 +78,9 @@ pub fn store_token(store: &Store, account: &Id, bytes: &[u8]) -> Result<()> {
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
+        let changed = previous
+            .as_ref()
+            .is_none_or(|previous| previous.as_slice() != token.as_bytes());
         store.begin_tool(
             &run,
             "xcb_devin_auth_store",
@@ -92,6 +95,9 @@ pub fn store_token(store: &Store, account: &Id, bytes: &[u8]) -> Result<()> {
             private::create(&target, token.as_bytes())?;
         }
         store.settle_tool(&run, "xcb_devin_auth_store")?;
+        if changed {
+            store.clear_authentication_failure(&run)?;
+        }
         Ok(())
     })();
     if result.is_ok() || !publication_attempted {

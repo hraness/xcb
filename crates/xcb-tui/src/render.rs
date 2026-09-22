@@ -689,11 +689,16 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
                     .map(|seconds| format!(" · ~{:.1}h", seconds / 3600.0))
                     .unwrap_or_default();
                 lines.push(Line::from(format!(
-                    "{} {} · {} · {remaining}{time}{}",
+                    "{} {} · {} · {remaining}{time}{}{}",
                     if account.busy { "*" } else { " " },
                     clean(&account.name),
                     account.provider,
-                    if account.enabled { "" } else { " · disabled" }
+                    if account.enabled { "" } else { " · disabled" },
+                    if account.authentication_required {
+                        " · reconnect required"
+                    } else {
+                        ""
+                    }
                 )));
             }
             if let Some(seconds) = app.view.total_runway_seconds {

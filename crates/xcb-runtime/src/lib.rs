@@ -96,3 +96,6 @@ pub fn new_id(prefix: &str) -> Id {
 pub fn digest(bytes: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(bytes.as_ref()))
 }
+
+#[cfg(test)]
+mod authentication_tests;

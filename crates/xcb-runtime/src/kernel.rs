@@ -94,6 +94,7 @@ pub async fn auto_route(
             if view_account.provider != model.provider
                 || view_account.busy
                 || !view_account.enabled
+                || view_account.authentication_required
                 || view_account.quota_blocked_until_ms.is_some()
                 || account.is_some_and(|id| id != &view_account.id)
                 || candidates.len() >= 16
@@ -281,18 +282,19 @@ pub fn new_session(
     };
     let accounts = store.accounts()?;
     let now = now_ms();
-    let mut quota_blocked = BTreeSet::new();
+    let mut unavailable_accounts = BTreeSet::new();
     for candidate in &accounts {
         if candidate.enabled
             && requested_provider.is_none_or(|provider| candidate.provider == provider)
-            && store.quota_blocked_until(&candidate.id, now)?.is_some()
+            && (store.quota_blocked_until(&candidate.id, now)?.is_some()
+                || store.authentication_required(&candidate.id)?)
         {
-            quota_blocked.insert(candidate.id.clone());
+            unavailable_accounts.insert(candidate.id.clone());
         }
     }
     let compatible = |candidate: &&crate::store::Account| {
         candidate.enabled
-            && !quota_blocked.contains(&candidate.id)
+            && !unavailable_accounts.contains(&candidate.id)
             && requested_provider.is_none_or(|provider| candidate.provider == provider)
     };
     let id = match account {
@@ -302,6 +304,7 @@ pub fn new_session(
                 return Err(Error::Unavailable("selected account is disabled"));
             }
             store.require_quota_available(id, now)?;
+            store.require_authenticated_account(id)?;
             id.clone()
         }
         None => usable_account(store, requested_provider, None, config)?
@@ -388,6 +391,7 @@ fn usable_account(
     for account in accounts {
         if provider.is_none_or(|provider| account.provider == provider)
             && account.enabled
+            && !store.authentication_required(&account.id)?
             && !held.contains(&account.id)
             && store.quota_blocked_until(&account.id, now_ms())?.is_none()
             && auth::has_credentials(store, &account.id)?
@@ -448,6 +452,7 @@ fn ready(store: &Store, session: &Session) -> Result<()> {
         return Err(Error::Unavailable("selected account is disabled"));
     }
     store.require_quota_available(&session.account, now_ms())?;
+    store.require_authenticated_account(&session.account)?;
     let pin = Pin::load(store.root(), session.model.provider)?;
     if !runner::provider_admitted(&pin) {
         return Err(Error::Unavailable(
@@ -800,6 +805,7 @@ async fn execute_inner(
                     if account.provider != model.provider
                         || account.busy
                         || !account.enabled
+                        || account.authentication_required
                         || account.quota_blocked_until_ms.is_some()
                         || candidates.len() >= 256
                     {
@@ -1230,6 +1236,7 @@ pub async fn serve(
                             Intent::Account(account) => {
                                 if current.as_ref().is_some_and(|id| active.contains_key(id)) { return Err(Error::Conflict("stop or finish the turn before changing accounts")); }
                                 store.require_quota_available(&account, now_ms())?;
+                                store.require_authenticated_account(&account)?;
                                 let provider = store.account(&account)?.provider;
                                 let model = choose_model(&store, provider, None, &config)?;
                                 if let Some(id) = &current { let session = store.session(id)?.ok_or(Error::Unavailable("session not found"))?; store.rebind(id, session.revision, &account, model)?; }
@@ -1445,6 +1452,7 @@ mod tests {
         let candidates = vec![same_account, candidate(2)];
         let tried = BTreeSet::new();
         let mut outcome = Outcome {
+            diagnostic: None,
             text: "Saved the migration; remaining tests need to run".into(),
             state: State::Failed,
             facts: TurnFacts {

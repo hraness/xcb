@@ -22,6 +22,7 @@ pub struct AccountRow {
     pub runway: Estimate,
     pub busy: bool,
     pub enabled: bool,
+    pub authentication_required: bool,
 }
 
 impl AccountRow {
