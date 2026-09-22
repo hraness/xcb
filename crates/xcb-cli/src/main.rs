@@ -1763,6 +1763,54 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 let (run, mut run_digest) = store
                     .recovery_candidate(&run_id)?
                     .ok_or(Error::Unavailable("run not found"))?;
+                // A run that took the account lease but never recorded a
+                // process group. `prepare_run` leases before the provider is
+                // spawned, so a kill in that window leaves a lease with
+                // nothing to signal and nothing to prove absent. Until now
+                // every command refused it and the account stayed unusable
+                // forever. The record still cannot prove a provider process
+                // is absent; this is the operator saying so.
+                if run.phase == "prepared" && run.pid.is_none() {
+                    if !yes {
+                        if cli.json {
+                            print_json(json!({
+                                "version": 1,
+                                "dryRun": true,
+                                "run": run.id,
+                                "phase": run.phase,
+                                "pid": serde_json::Value::Null,
+                                "discardsWithoutProcessProof": true,
+                            }))?;
+                        } else {
+                            println!(
+                                "Run {} holds an account lease but never recorded a process group,",
+                                run.id
+                            );
+                            println!(
+                                "  so there is nothing to signal and nothing to prove stopped."
+                            );
+                            println!(
+                                "  It was killed between taking the lease and starting the provider."
+                            );
+                            println!(
+                                "Confirm no provider process from this run is alive, then re-run with --yes."
+                            );
+                        }
+                        return Ok(0);
+                    }
+                    let discarded = store.discard_unspawned_run(&run.id, &run_digest, now_ms())?;
+                    if cli.json {
+                        print_json(
+                            json!({"version":1,"run":discarded.id,"phase":discarded.phase,"leaseReleased":true}),
+                        )?;
+                    } else {
+                        println!(
+                            "Discarded unspawned run {} · account lease released",
+                            discarded.id
+                        );
+                    }
+                    return Ok(0);
+                }
                 let pid = run.pid.ok_or(Error::Conflict(
                     "run has no process group; recovery requires a running phase with a recorded pid",
                 ))?;
