@@ -1,6 +1,6 @@
 # Native Devin boundary fixture
 
-This credential-free macOS fixture exercises Devin 3000.10.31, the native xcb
+This credential-free macOS fixture exercises Devin 3000.11.1, the native xcb
 stdio MCP helper, the real Rust ACP codec, and the production Seatbelt profile.
 Only the network clause changes: the fixture replaces provider TCP 443 and DNS
 with one loopback-only fake control plane. It never reads existing Devin account
@@ -31,6 +31,16 @@ diagnosis; it contains only synthetic fixtures and reproducible binary copies.
 The output receipt contains hashes and bounded observations, not local account
 paths, credentials, raw requests, or transcripts.
 
+For a new executable, `--candidate-inventory /absolute/path/to/inventory.json`
+binds an explicit candidate version, SHA-256 and complete expected tool schemas
+inside this fixture only. Production admission remains unchanged. An inventory
+mismatch fails the fixture and retains a bounded `observed-inventory.json` in
+the private scenario directory for review; it never accepts the new schemas
+automatically. After reviewing any changes and passing all scenarios, add the
+exact version/hash pair to production admission, rebuild the helper and fixture,
+and repeat without the candidate override before recording release evidence.
+Do not run `doctor` or change account state as part of this synthetic procedure.
+
 The fixture injects native notebook reads against synthetic account and consumer
 files, workspace and stdin symlinks, ordinary reads, shell execution, workspace
 and config writes, and web fetches. A positive scenario requires a brokered
@@ -58,6 +68,14 @@ provider service reliability, or real-model task quality. Those require separate
 live acceptance before making daily-driver claims.
 
 ## Recorded boundary result
+
+The [2026-09-22 receipt](devin-native-3000.11.1-macos-arm64.json) passed all
+five scenarios for exact build 3000.11.1. Its complete observed native tool
+inventory matches the previously reviewed 3000.10.31 schemas. Candidate checks
+passed before admission changed; the recorded receipt then reran the default
+admitted path with freshly built helper and fixture binaries. Production keeps
+both reviewed version/hash pairs, with no cross-version digest substitutions.
+This is credential-free boundary evidence, not live coding acceptance.
 
 The [2026-09-20 receipt](devin-native-3000.10.31-macos-arm64.json) passed all
 five scenarios on macOS arm64. It binds the provider, native helper, fixture,

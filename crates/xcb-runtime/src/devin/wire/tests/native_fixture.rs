@@ -13,6 +13,10 @@ struct Spec {
     provider: PathBuf,
     helper: PathBuf,
     helper_sha256: String,
+    /// Explicit test-only candidate binding. Production runtime admission
+    /// remains unchanged until reviewed synthetic evidence passes.
+    #[serde(default)]
+    candidate_sha256: Option<String>,
     port: u16,
     scenario: Scenario,
 }
@@ -39,9 +43,19 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
     let spec: Spec =
         serde_json::from_slice(&private::read(Path::new(&spec_path), 8192).unwrap()).unwrap();
     assert_ne!(spec.port, 0);
+    let expected_provider = spec
+        .candidate_sha256
+        .as_deref()
+        .unwrap_or(super::super::super::config::BINARY_SHA256);
+    assert!(
+        expected_provider.len() == 64
+            && expected_provider
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    );
     assert_eq!(
         crate::process::executable_digest(&spec.provider).unwrap(),
-        super::super::super::config::BINARY_SHA256
+        expected_provider
     );
     assert_eq!(
         crate::process::executable_digest(&spec.helper).unwrap(),
@@ -183,7 +197,7 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         .filter(|call| !codec.broker_names.contains(&call.name))
         .map(|call| json!({"name":call.name,"finished":call.finished,"approved":call.approved}))
         .collect();
-    let evidence = json!({"status":status,"process_joined":joined,"bridge_joined":bridge_joined,"provider_sha256":super::super::super::config::BINARY_SHA256,"helper_sha256":spec.helper_sha256,"production_policy_sha256":crate::digest(&production),"fixture_policy_sha256":crate::digest(&policy),"calls":recorded,"native_calls":native_calls,"denials":denials,"image_prompt":true,"mcp_proposed_version":codec.mcp_proposed_version,"mcp_metadata_seen":codec.mcp_metadata_seen});
+    let evidence = json!({"status":status,"process_joined":joined,"bridge_joined":bridge_joined,"provider_sha256":expected_provider,"helper_sha256":spec.helper_sha256,"production_policy_sha256":crate::digest(&production),"fixture_policy_sha256":crate::digest(&policy),"calls":recorded,"native_calls":native_calls,"denials":denials,"image_prompt":true,"mcp_proposed_version":codec.mcp_proposed_version,"mcp_metadata_seen":codec.mcp_metadata_seen});
     private::create(
         &directory.join("native-evidence.json"),
         &serde_json::to_vec_pretty(&evidence).unwrap(),

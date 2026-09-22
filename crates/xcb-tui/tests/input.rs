@@ -228,6 +228,77 @@ fn view_for(session: &str) -> xcb_core::ui::View {
 }
 
 #[test]
+fn initial_context_preserves_a_partially_typed_quit_command() {
+    let managed = xcb_core::ui::View {
+        conversation: Some(xcb_core::Id::new("c_resumed").unwrap()),
+        extensions: vec![("algal supervisor".into(), "on".into())],
+        ..Default::default()
+    };
+    for view in [view_for("s_resumed"), managed] {
+        let mut app = App::default();
+        let (tx, rx) = sync_channel(4);
+        for character in "/q".chars() {
+            assert!(app.handle(
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+                &tx,
+            ));
+        }
+        assert!(app.apply(xcb_core::ui::Update::View(Box::new(view))));
+        for character in "uit".chars() {
+            assert!(app.handle(
+                Event::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+                &tx,
+            ));
+        }
+        assert!(!app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &tx,
+        ));
+        assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Quit)));
+        assert!(rx.try_recv().is_err(), "no partial command becomes a task");
+    }
+}
+
+#[test]
+fn initial_context_preserves_early_text_and_attachment_submission() {
+    let managed = xcb_core::ui::View {
+        conversation: Some(xcb_core::Id::new("c_new").unwrap()),
+        extensions: vec![("algal supervisor".into(), "on".into())],
+        ..Default::default()
+    };
+    for view in [view_for("s_new"), managed] {
+        let mut app = App::default();
+        let (tx, rx) = sync_channel(4);
+        assert!(app.handle(Event::Paste("Review this image".into()), &tx));
+        let image = Attachment {
+            digest: "a".repeat(64),
+            media_type: "image/png".into(),
+            bytes: 1024,
+            width: 32,
+            height: 32,
+        };
+        assert!(app.apply(xcb_core::ui::Update::Attachment(image.clone())));
+        assert!(app.apply(xcb_core::ui::Update::View(Box::new(view))));
+        assert_eq!(app.composer.text(), "Review this image");
+        assert_eq!(app.attachments.len(), 1);
+        assert!(app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &tx,
+        ));
+        match rx.try_recv().unwrap() {
+            xcb_core::ui::Intent::Submit {
+                text, attachments, ..
+            } => {
+                assert_eq!(text, "Review this image");
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].digest, image.digest);
+            }
+            _ => panic!("the complete original input must be submitted"),
+        }
+    }
+}
+
+#[test]
 fn drafts_and_attachments_are_scoped_per_session() {
     let mut app = App::default();
     let image = |digest: &str| Attachment {

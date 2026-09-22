@@ -518,6 +518,11 @@ impl App {
                 let previous = view_context(&self.view);
                 let next = view_context(&view);
                 if previous != next {
+                    // Before the first context arrives, input already belongs to
+                    // the context being opened. A delayed initial view must not
+                    // erase part of a command or an attachment typed meanwhile.
+                    let preserve_unbound_input = previous.is_none()
+                        && (!self.composer.text().is_empty() || !self.attachments.is_empty());
                     // The draft belongs to the conversation or session it was typed in:
                     // stash it and restore the target context's own draft.
                     if let Some(previous) = previous {
@@ -527,9 +532,11 @@ impl App {
                             self.save_draft(previous, SessionDraft { text, attachments });
                         }
                     }
-                    let draft = next.and_then(|id| self.take_draft(&id)).unwrap_or_default();
-                    self.composer.set_text(&draft.text);
-                    self.attachments = draft.attachments;
+                    if !preserve_unbound_input {
+                        let draft = next.and_then(|id| self.take_draft(&id)).unwrap_or_default();
+                        self.composer.set_text(&draft.text);
+                        self.attachments = draft.attachments;
+                    }
                     self.stream.clear();
                     self.thinking.clear();
                     self.scroll.set(0);

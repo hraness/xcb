@@ -89,7 +89,7 @@ function Providers() {
         <tbody>
           <tr><th scope="row">Claude</th><td>Admitted Claude Code 2.1.268 or newer, major 2.</td><td>Installed coding workflow passed on macOS ARM64 with the tested account. Linux remains a candidate after its host checks.</td></tr>
           <tr><th scope="row">Codex</th><td>Exact admitted 0.155.0-alpha.2.6 build on macOS.</td><td>Authenticated file operations and installed coding workflow passed with the tested account.</td></tr>
-          <tr><th scope="row">Devin</th><td>Exact admitted 3000.10.31 build on macOS.</td><td>Authenticated model discovery passed. Provider quota blocked the tested coding turn; its reset is unknown.</td></tr>
+          <tr><th scope="row">Devin</th><td>Exact admitted 3000.11.1 and 3000.10.31 builds on macOS.</td><td>Both credential-free boundary fixtures passed; authenticated model discovery passed on 3000.10.31. Provider quota blocked the tested coding turn; its reset is unknown.</td></tr>
         </tbody>
       </table></div>
       <p>Codex and Devin admission checks both executable bytes and version. A visible model or <code>metadata pin only</code> from <code>doctor</code> does not prove successful coding on your host. The separate TypeScript CLI keeps Codex and Devin task execution disabled pending qualification.</p>

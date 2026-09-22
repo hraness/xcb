@@ -35,7 +35,7 @@ for setup, supported boundaries, and current limits.
 | --- | --- | --- |
 | Claude | Installed coding workflow verified on macOS ARM64 with the tested account; Linux remains an execution candidate after sign-in, binary admission, and confinement checks | Execution candidate, subject to its own admission and confinement checks |
 | Codex | Native app-server on macOS for exact build **0.155.0-alpha.2.6**; authenticated broker and installed coding workflow acceptance passed on macOS ARM64 with the tested account | Discovery only; managed task execution gated on host qualification |
-| Devin | Native ACP candidate on macOS for exact build **3000.10.31**; authenticated model discovery passed; tested account hit provider quota before a coding turn | ACP implementation exists; task execution disabled pending exact-runtime qualification |
+| Devin | Native ACP candidate on macOS for exact builds **3000.11.1** and **3000.10.31**; both passed credential-free boundary checks; authenticated model discovery passed on 3000.10.31, where the tested account hit provider quota before coding | ACP implementation exists; task execution disabled pending exact-runtime qualification |
 
 A successful `doctor` or a visible model does not prove a working coding session.
 The current Devin CLI can be authenticated and can return its model catalog, but
@@ -216,8 +216,9 @@ process has joined.
 
 ### Connect Devin on macOS
 
-Use the exact admitted **3000.10.31** build. Authenticated ACP model discovery
-passed; the tested account returned quota/resource exhaustion on a real turn,
+Use the exact admitted **3000.11.1** build; **3000.10.31** remains admitted.
+Both passed credential-free native boundary checks. Authenticated ACP model
+discovery passed on 3000.10.31; the tested account returned quota/resource exhaustion on a real turn,
 so successful coding acceptance remains pending. xcb preserves an unknown quota
 reset as unknown. Sign in through the provider CLI, then explicitly select its
 `credentials.toml` to create a private xcb account:

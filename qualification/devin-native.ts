@@ -8,13 +8,18 @@ import { dirname, isAbsolute, join } from 'node:path';
 const argv = process.argv.slice(2);
 const options = new Map<string, string>();
 for (let i = 0; i < argv.length; i += 2) {
-  if (!['--runtime', '--helper', '--test-binary', '--output'].includes(argv[i]!) || !argv[i + 1] || options.has(argv[i]!)) throw Error('Expected unique --runtime, --helper, --test-binary, --output paths');
+  if (!['--runtime', '--helper', '--test-binary', '--output', '--candidate-inventory'].includes(argv[i]!) || !argv[i + 1] || options.has(argv[i]!)) throw Error('Expected unique --runtime, --helper, --test-binary, --output paths and optional --candidate-inventory');
   options.set(argv[i]!, argv[i + 1]!);
 }
-if (options.size !== 4 || [...options.values()].some(p => !isAbsolute(p))) throw Error('All four paths must be absolute');
+if (!['--runtime', '--helper', '--test-binary', '--output'].every(key => options.has(key)) || [...options.values()].some(p => !isAbsolute(p))) throw Error('All four required paths and any candidate inventory must be absolute');
 const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 const harnessDigest = hash(await readFile(import.meta.path));
-const expected = JSON.parse(await readFile(new URL('./devin-3000.10.31-inventory.json', import.meta.url), 'utf8'));
+const candidate = options.has('--candidate-inventory');
+const inventoryPath = options.get('--candidate-inventory') ?? new URL('./devin-3000.11.1-inventory.json', import.meta.url);
+if ((await stat(inventoryPath)).size > 1024 * 1024) throw Error('Inventory exceeds bound');
+const inventoryBytes = await readFile(inventoryPath);
+const expected = JSON.parse(inventoryBytes.toString('utf8'));
+if (!/^\d+\.\d+\.\d+$/.test(expected.version) || !/^[0-9a-f]{64}$/.test(expected.provider_sha256) || !Array.isArray(expected.tools) || expected.tools.length < 1 || expected.tools.length > 64) throw Error('Invalid exact runtime inventory');
 const directory = await mkdtemp(join(await realpath(tmpdir()), 'xdb-'));
 await chmod(directory, 0o700);
 async function snapshot(source: string, name: string) {
@@ -99,7 +104,13 @@ async function fixture(scenario: Scenario, index: number) {
           if (++toolFreeRequests > 8) throw Error('Too many tool-free model requests');
           return response(concat(field(1, 'synthetic-title'), field(3, 'Synthetic fixture'), new Uint8Array([40, 1])));
         }
-        if (canonical(observed) !== canonical(expected.tools)) throw Error('Effective native tool inventory changed');
+        if (canonical(observed) !== canonical(expected.tools)) {
+          // Candidate discovery never admits a changed inventory. Preserve
+          // bounded synthetic observations for review, then fail the fixture.
+          const diagnostic = JSON.stringify({ version: expected.version, provider_sha256: provider.digest, tools: observed }, null, 2);
+          if (Buffer.byteLength(diagnostic) <= 1024 * 1024) await writeFile(join(run, 'observed-inventory.json'), diagnostic + '\n', { mode: 0o600, flag: 'wx' }).catch(() => {});
+          throw Error('Effective native tool inventory changed');
+        }
         inventoryHashes.add(hash(canonical(observed)));
         const call = calls[step++];
         if (step > calls.length + 1) throw Error('Unexpected extra inference request');
@@ -109,7 +120,7 @@ async function fixture(scenario: Scenario, index: number) {
     } catch (error) { captureError = error instanceof Error ? error.message : 'capture failed'; return new Response(null, { status: 500 }); }
   } });
   negative.webfetch.args.url = `http://127.0.0.1:${server.port}/should-not-fetch`;
-  const spec = { directory: run, provider: provider.path, helper: helper.path, helper_sha256: helper.digest, port: server.port, scenario };
+  const spec = { directory: run, provider: provider.path, helper: helper.path, helper_sha256: helper.digest, port: server.port, scenario, ...(candidate ? { candidate_sha256: expected.provider_sha256 } : {}) };
   const specPath = join(run, 'spec.json');
   await writeFile(specPath, JSON.stringify(spec), { mode: 0o600 });
   const child = spawn(test.path, ['--ignored', '--exact', 'devin::wire::tests::native_fixture::installed_runtime_uses_native_broker_under_production_profile', '--nocapture'], { env: { PATH: '/usr/bin:/bin', XCB_DEVIN_FIXTURE_SPEC: specPath }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -137,8 +148,8 @@ for (const [index, scenario] of (['broker', 'exec', 'write', 'config_write', 'we
   scenarios.push(result);
   if (!result.process_joined || !result.bridge_joined) break;
 }
-const passed = scenarios.length === 5 && scenarios.every(s => s.passed) && harnessDigest === hash(await readFile(import.meta.path));
-const receipt = { schema: 2, passed, observed_at: new Date().toISOString(), host: { platform: process.platform, arch: arch(), release: release() }, credential_free: true, live_provider_qualification: false, runtime_version: expected.version, provider_sha256: provider.digest, helper_sha256: helper.digest, fixture_binary_sha256: test.digest, harness_sha256: harnessDigest, scenarios };
+const passed = scenarios.length === 5 && scenarios.every(s => s.passed) && harnessDigest === hash(await readFile(import.meta.path)) && hash(inventoryBytes) === hash(await readFile(inventoryPath));
+const receipt = { schema: 2, passed, observed_at: new Date().toISOString(), host: { platform: process.platform, arch: arch(), release: release() }, credential_free: true, live_provider_qualification: false, candidate, runtime_version: expected.version, provider_sha256: provider.digest, inventory_sha256: hash(inventoryBytes), helper_sha256: helper.digest, fixture_binary_sha256: test.digest, harness_sha256: harnessDigest, scenarios };
 await mkdir(dirname(options.get('--output')!), { recursive: true, mode: 0o700 });
 await writeFile(options.get('--output')!, JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600 });
 console.log(JSON.stringify({ passed, provider_sha256: provider.digest, helper_sha256: helper.digest, scenarios: scenarios.map(s => ({ scenario: s.scenario, passed: s.passed, calls: s.calls?.length, steps: s.checks.steps })) }));
