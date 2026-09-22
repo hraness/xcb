@@ -4,7 +4,6 @@ use crate::{
     digest, judge, kernel, new_id, now_ms, private,
     runner::{Observer, Outcome, Progress},
     store::Store,
-    summary,
 };
 use algal::{
     contract::Manifest, effects::Host, graph::Transports, runtime, store::Store as AlgalStore,
@@ -1801,7 +1800,10 @@ fn managed_view(
     workspace: &Path,
 ) -> Result<View> {
     let config = Config::load(store.root())?.0;
-    let mut view = summary::snapshot(store, None, &config, now_ms())?;
+    let mut view = View {
+        reduced_motion: config.reduced_motion,
+        ..View::default()
+    };
     view.conversation = Some(conversation.clone());
     view.conversations = managed
         .conversations(64)?
