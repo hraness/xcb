@@ -4,7 +4,7 @@ import {
   socialImageSize as size,
 } from "@hraness/web-discovery/social-image";
 
-export const alt = "xcb — One terminal for your coding agents.";
+export const alt = "xcb — Subscription routing for coding agents.";
 export { contentType, size };
 
 function XcbMark() {
@@ -17,7 +17,7 @@ function XcbMark() {
 
 export default function OpengraphImage() {
   return createSocialImageResponse({
-    description: "Your accounts, models, sessions, and usage. One local workspace.",
+    description: "One bounded turn across your own coding-agent accounts.",
     domain: "xcb.sh",
     eyebrow: "xcb / Excalibur",
     mark: <XcbMark />,
@@ -27,6 +27,6 @@ export default function OpengraphImage() {
       foreground: "#1C1A18",
       muted: "#6A655E",
     },
-    title: "One terminal. Your coding agents.",
+    title: "Your subscriptions. Routed.",
   });
 }

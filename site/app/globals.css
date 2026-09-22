@@ -333,6 +333,13 @@ a { text-underline-offset: 0.2em; }
 .xcb-fit-grid, .xcb-readiness { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2rem; }
 .xcb-fit-grid > div { border-top: 1px solid var(--line); padding-top: 1.3rem; }
 .xcb-fit-grid { margin-bottom: 1.6rem; }
+.xcb-interface-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2rem; }
+.xcb-interface-grid > div { border-top: 1px solid var(--line); padding-top: 1.3rem; }
+.xcb-interface-grid h3 { margin: 0 0 .5rem; font: 500 1.05rem/1.4 var(--font-text); }
+.xcb-interface-grid p { margin: 0 0 1.1rem; color: var(--muted); line-height: 1.65; }
+.xcb-badge { display: inline-block; width: fit-content; font: .68rem var(--font-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: .3rem .8rem; }
+.xcb-terminal-code { padding-block-end: 1.25rem; }
+.xcb-code { margin: 0; font: .76rem/1.75 var(--font-mono); white-space: pre; overflow-x: auto; color: var(--hraness-marketing-terminal-ink); min-height: 17rem; }
 .xcb-readiness { font-size: .91rem; }
 .xcb-readiness a { display: inline-block; margin-top: 1rem; text-decoration: underline; font-size: .85rem; }
 .xcb-status-dot { display: block; width: .45rem; height: .45rem; border-radius: 50%; background: light-dark(#386345, #a7c397); margin: 0 0 1rem; }
@@ -349,7 +356,7 @@ section[id], h2[id], h3[id] { scroll-margin-top: 6.5rem; }
   .xcb-header-wrap { position: static; }
   .xcb-opening .xcb-marketing-hero { padding-block: 1.7rem 3.5rem; gap: 2rem; }
   .xcb-opening .hraness-marketing-hero__heading { font-size: clamp(2.8rem, 9vw, 4rem); }
-  .xcb-fit-grid, .xcb-readiness { grid-template-columns: 1fr; gap: 1.8rem; }
+  .xcb-fit-grid, .xcb-readiness, .xcb-interface-grid { grid-template-columns: 1fr; gap: 1.8rem; }
   .xcb-readiness > div { border-top: 1px solid var(--line); padding-top: 1.25rem; }
   .xcb-terminal-body { padding: 1rem 1rem 0; min-height: 20rem; }
   .xcb-preview-hint, .xcb-terminal-local, .xcb-step-result { display: none; }

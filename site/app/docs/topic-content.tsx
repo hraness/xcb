@@ -250,8 +250,56 @@ function ApplicationApi() {
   );
 }
 
+function RouteTasks() {
+  return (
+    <>
+      <Note><code>xcb --json route</code> is the machine contract for another program — typically a coding agent — to hand XCB one task and get back one settled, routed turn. For bounded tool-free text generation instead, see the <a href="/docs/application-api">application API</a>.</Note>
+      <h2 id="contract">The route contract</h2>
+      <p>Write one UTF-8 JSON document to stdin, close stdin, and read a bounded JSON document from stdout. Unknown fields are rejected; every field except <code>version</code>, <code>workspace</code>, and <code>task</code> is optional.</p>
+      <Code>{`$ xcb --json route
+{
+  "version": 1,
+  "workspace": "/absolute/path/to/project",
+  "task": "Fix the failing parser test and show the diff",
+  "provider": "claude",            // optional pin
+  "account": "<account-id>",       // optional pin
+  "model": "claude/sonnet/low",    // optional pin, exact observed key
+  "timeoutMs": 1800000,            // optional caller deadline
+  "dryRun": false                  // true selects a route without running
+}`}</Code>
+      <p><code>provider</code>, <code>account</code>, and <code>model</code> are eligibility constraints, not fallbacks. A <code>provider</code> that disagrees with the pinned account&apos;s provider is rejected. With no pins, XCB selects among admitted runtimes, credentialed enabled accounts that are idle and outside known quota windows, and observed fresh model entries — ranked by task class and relative quality, cost, and latency Pareto tiers, with an optional judge ordering only already-eligible routes.</p>
+      <p>A completed call returns <code>status: &quot;completed&quot;</code> only for a completed, joined, settled turn with no pending attention, and includes the selected <code>route</code>, the saved <code>session</code> id (reopen with <code>xcb resume</code>), the recorded <code>outcome</code> facts, and bounded <code>text</code>.</p>
+      <h2 id="failures">Failure codes</h2>
+      <p>Failures exit nonzero with a closed object: <code>invalid_request</code>, <code>unavailable</code> (no eligible route, unknown account or model), <code>busy</code> (account custody held by live work), <code>deadline</code> (the caller&apos;s <code>timeoutMs</code> expired), <code>cancelled</code>, <code>provider_error</code> (including quota failures — <code>outcome.failure</code> carries the exact detail), <code>custody_unproven</code> (process exit could not be proven; do not retry blindly), and <code>needs_input</code> (the provider stopped with a question — <code>text</code> carries it, and the saved session can be resumed by a person).</p>
+      <p>When a request provably launched no provider process, the failure carries <code>joined: true</code> and <code>effects: &quot;none&quot;</code>. SIGINT and SIGTERM request the same bounded cancellation and settlement path as <code>timeoutMs</code>; killing XCB does not prove the provider stopped.</p>
+      <h2 id="sdk">Embedding with the SDK</h2>
+      <p>The TypeScript compatibility source exports <code>createSubscriptionRouter</code>, which bundles an account lease store and qualified task adapters into one object. It is a source build — no <code>@hraness/xcb</code> package is published — and there is no bundled live adapter; the host supplies adapters and qualification evidence.</p>
+      <Code>{`import { openAccountDatabase, SqliteAccountLeases, createSubscriptionRouter } from "@hraness/xcb";
+
+const db = await openAccountDatabase("/private/path/to/router.sqlite");
+const router = createSubscriptionRouter({
+  leases: new SqliteAccountLeases(db),
+  adapters: [claudeTaskAdapter],
+});
+
+const result = await router.run({
+  provider: "claude",
+  accountId: "a_…",
+  profile: { id: profile.id, version: profile.version, digest: profile.digest },
+  model: { id: "claude-sonnet-5", reasoningEffort: "low", serviceTier: null },
+  purpose: "respond",
+  prompt: "Summarize the diff in this workspace.",
+  limits: { maxRunMs: 60_000, maxCleanupMs: 10_000, maxOutputBytes: 65_536 },
+}, broker);`}</Code>
+      <p><code>router.routes()</code> lists the adapter-registered routes a caller can dispatch to — registration is not eligibility. <code>router.run(request, broker)</code> accepts provider-plus-authentication shorthand when exactly one adapter matches, defaults <code>runId</code>/<code>workspaceId</code> to the broker&apos;s binding, and still performs every admission, lease, deadline, and stop-evidence check.</p>
+      <p>For the complete schema, custody semantics, and selection rules, read the <a href="https://github.com/hraness/xcb/blob/main/docs/route.md">route contract</a> and <a href="https://github.com/hraness/xcb/blob/main/docs/quota-routing.md">quota routing</a> references in the repository.</p>
+    </>
+  );
+}
+
 export function TopicContent({ slug }: { slug: DocsSlug }) {
   switch (slug) {
+    case "route": return <RouteTasks />;
     case "getting-started": return <GettingStarted />;
     case "providers": return <Providers />;
     case "workspace": return <Workspace />;
