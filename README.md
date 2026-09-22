@@ -27,22 +27,22 @@ filtered Git inspection, public dependency fetching, and offline Cargo/Bun use
 from immutable caches. Installed Claude and Codex coding workflows passed on
 macOS ARM64: an expected test failure, exact repair, passing test, and filtered
 Git status, with joined processes and settled effects. This evidence covers the
-tested accounts and admitted builds; Devin quota still blocks acceptance across
-all three providers. See the [command runner contract](docs/command-runner.md)
+tested accounts and admitted builds. Devin's credential-free boundary checks
+are separate from authenticated coding acceptance. See the [command runner contract](docs/command-runner.md)
 for setup, supported boundaries, and current limits.
 
 | Provider | Native Rust CLI | TypeScript compatibility CLI |
 | --- | --- | --- |
 | Claude | Installed coding workflow verified on macOS ARM64 with the tested account; Linux remains an execution candidate after sign-in, binary admission, and confinement checks | Execution candidate, subject to its own admission and confinement checks |
 | Codex | Native app-server on macOS for exact build **0.155.0-alpha.2.6**; authenticated broker and installed coding workflow acceptance passed on macOS ARM64 with the tested account | Discovery only; managed task execution gated on host qualification |
-| Devin | Native ACP candidate on macOS for exact builds **3000.11.1** and **3000.10.31**; both passed credential-free boundary checks; authenticated model discovery passed on 3000.10.31, where the tested account hit provider quota before coding | ACP implementation exists; task execution disabled pending exact-runtime qualification |
+| Devin | Native ACP candidate on macOS for exact builds **3000.11.1** and **3000.10.31**; both passed credential-free boundary checks; model availability is checked against the connected account's fresh catalog at launch | ACP implementation exists; task execution disabled pending exact-runtime qualification |
 
 A successful `doctor` or a visible model does not prove a working coding session.
 The current Devin CLI can be authenticated and can return its model catalog, but
 that provider login is separate from XCB's explicit credential import and from
-an admitted coding turn. The last recorded XCB Devin coding attempt stopped at
-provider quota before inference; treat that boundary as current until a fresh
-qualified turn proves otherwise.
+an admitted coding turn. Devin validates the selected model against the
+connected account's fresh catalog before each turn. The September 20, 2026
+quota result is historical evidence, not a statement of current availability.
 Native `doctor` reports `metadata pin only` for unqualified providers. Codex and
 Devin candidates require the checked executable digest as well as the version;
 other builds and their Linux execution paths remain unavailable. Automated
@@ -217,10 +217,11 @@ process has joined.
 ### Connect Devin on macOS
 
 Use the exact admitted **3000.11.1** build; **3000.10.31** remains admitted.
-Both passed credential-free native boundary checks. Authenticated ACP model
-discovery passed on 3000.10.31; the tested account returned quota/resource exhaustion on a real turn,
-so successful coding acceptance remains pending. xcb preserves an unknown quota
-reset as unknown. Sign in through the provider CLI, then explicitly select its
+Both passed credential-free native boundary checks; authenticated coding
+acceptance requires separate evidence for the account, model, and build.
+Model availability is checked against the connected account's fresh catalog at
+launch. xcb preserves an unknown quota reset as unknown. Sign in through the
+provider CLI, then explicitly select its
 `credentials.toml` to create a private xcb account:
 
 ```sh

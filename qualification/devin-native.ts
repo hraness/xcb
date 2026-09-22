@@ -96,6 +96,12 @@ async function fixture(scenario: Scenario, index: number) {
       canaryLeak ||= bytes.includes('SYNTHETIC_ACCOUNT_CANARY') || bytes.includes('SYNTHETIC_WORKSPACE_CANARY');
       requests.push({ method: pathname.slice(pathname.lastIndexOf('/') + 1), bytes: bytes.length, sha256: hash(bytes) });
       if (pathname === '/should-not-fetch') unexpectedFetch = true;
+      if (pathname.endsWith('/GetCliModelConfigs')) {
+        // The exact runtime must negotiate a non-default model rather than
+        // pass the fixture using its built-in default and an empty catalog.
+        const model = (id: string, label: string) => field(1, concat(field(1, label), new Uint8Array([...varint(18 * 8), ...varint(262144)]), field(22, id)));
+        return new Response(concat(model('swe-1-6-fast', 'Synthetic default'), model('xcb-fixture-model', 'Synthetic selected')), { headers: { 'content-type': 'application/proto' } });
+      }
       if (pathname.endsWith('/GetChatMessage')) {
         const observed = inventory(bytes);
         // The pinned runtime also requests a session title with no tools. A
@@ -104,6 +110,8 @@ async function fixture(scenario: Scenario, index: number) {
           if (++toolFreeRequests > 8) throw Error('Too many tool-free model requests');
           return response(concat(field(1, 'synthetic-title'), field(3, 'Synthetic fixture'), new Uint8Array([40, 1])));
         }
+        const selected = fields(bytes.subarray(5)).filter(f => f.number === 21).map(f => Buffer.from(f.bytes).toString());
+        if (selected.length !== 1 || selected[0] !== 'xcb-fixture-model') throw Error('Selected model did not reach inference request');
         if (canonical(observed) !== canonical(expected.tools)) {
           // Candidate discovery never admits a changed inventory. Preserve
           // bounded synthetic observations for review, then fail the fixture.

@@ -90,7 +90,7 @@ export default function Compare() {
                   <tr>
                     <th scope="row"><span className="xcb-comparison-name">Devin cloud</span><span className="xcb-comparison-kind">Managed task environments</span></th>
                     <td><p>Delegate work into development environments with a shell, browser, and editor. Documented workflows can compare parallel Devin sessions.</p><div className="xcb-comparison-sources"><a href="https://docs.devin.ai/enterprise/deployment/overview">Deployment docs</a><a href="https://docs.devin.ai/use-cases/gallery/batch-3-agents-best-solution">Parallel workflow</a></div></td>
-                    <td><p>You want managed remote task environments. xcb keeps its terminal and session state locally. Its Devin adapter uses the local ACP candidate, a separate path whose tested account hit quota before coding acceptance.</p><a href="/docs/providers#devin">xcb’s Devin status</a></td>
+                    <td><p>You want managed remote task environments. xcb keeps its terminal and session state locally. Its Devin adapter uses the local ACP candidate, whose credential-free boundary proof is separate from authenticated coding acceptance. Account model availability is checked at launch.</p><a href="/docs/providers#devin">xcb’s Devin status</a></td>
                   </tr>
                 </tbody>
               </table>

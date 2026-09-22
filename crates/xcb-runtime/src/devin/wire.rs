@@ -73,6 +73,8 @@ pub(crate) struct DevinProtocol {
     mcp_proposed_version: Option<String>,
     #[cfg(test)]
     mcp_metadata_seen: bool,
+    #[cfg(test)]
+    unexpected_notification: Option<String>,
     listed: bool,
     output_tokens: u64,
 }
@@ -270,6 +272,8 @@ impl DevinProtocol {
             mcp_proposed_version: None,
             #[cfg(test)]
             mcp_metadata_seen: false,
+            #[cfg(test)]
+            unexpected_notification: None,
             listed: false,
             output_tokens: 0,
         })
@@ -679,6 +683,10 @@ impl DevinProtocol {
                 | "_cognition.ai/sessionChanged"
                 | "_cognition.ai/cwdChanged"
         ) {
+            #[cfg(test)]
+            {
+                self.unexpected_notification = Some(method);
+            }
             return Err(Error::Protocol("Devin unsupported notification"));
         }
         Ok((events, outgoing))
@@ -837,7 +845,12 @@ impl Protocol for DevinProtocol {
             .await?;
         self.session = Some(identity(&result["sessionId"])?);
         let models = parse_models(&result, now_ms())?;
-        if self.options.metadata_only {
+        // A cached route can disappear from this account's current catalog.
+        // Return that catalog to the host before any setter or prompt so it
+        // can persist the observation and reject the stale selection.
+        if self.options.metadata_only
+            || !models.iter().any(|model| model.id == self.options.model.id)
+        {
             return Ok(models);
         }
         let selected = if result["configOptions"].as_array().is_some_and(|options| {

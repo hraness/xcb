@@ -165,6 +165,73 @@ fn models_are_bounded_deduplicated_and_provider_scoped() {
     assert!(parse_models(&duplicate, 1).is_err());
 }
 
+#[tokio::test]
+async fn fresh_catalog_precedes_model_setter_and_preserves_exact_selection() {
+    use std::time::Duration;
+    use tokio::process::Command;
+
+    for offered in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("requests.jsonl");
+        let script = root.path().join("fixture.sh");
+        std::fs::write(&script, "log=$1\nshift\nfor reply in \"$@\"; do\n IFS= read -r line || exit 1\n printf '%s\\n' \"$line\" >> \"$log\"\n printf '%s\\n' \"$reply\"\ndone\nwhile IFS= read -r line; do printf '%s\\n' \"$line\" >> \"$log\"; done\n").unwrap();
+        let options = |current: &str| {
+            json!({"configOptions":[
+                {"id":"model","type":"select","currentValue":current,"options":if offered {
+                    json!([{"value":"swe-2-medium","name":"Selected"},{"value":"swe-2-high","name":"Current"}])
+                } else { json!([{"value":"swe-2-high","name":"Current"}]) }},
+                {"id":"mode","type":"select","currentValue":"accept-edits"}
+            ]})
+        };
+        let mut initial = options("swe-2-high");
+        initial["sessionId"] = json!("fresh-session");
+        let mut command = Command::new("/bin/sh");
+        command.arg(&script).arg(&log)
+            .arg(json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"affogato"}}}).to_string())
+            .arg(json!({"jsonrpc":"2.0","id":2,"result":initial}).to_string());
+        if offered {
+            command
+                .arg(json!({"jsonrpc":"2.0","id":3,"result":options("swe-2-medium")}).to_string())
+                .arg(json!({"jsonrpc":"2.0","id":4,"result":{}}).to_string());
+        }
+        let mut process = StreamProcess::spawn(command).unwrap();
+        let mut selected = protocol().options;
+        selected.model.id = Id::new("swe-2-medium").unwrap();
+        selected.tools = false;
+        let mut codec = DevinProtocol::new(selected, None).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            codec.initialize(&mut process, "fixture"),
+        )
+        .await;
+        assert!(process.join().await);
+        let models = result.unwrap().unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .any(|model| model.id.as_str() == "swe-2-medium"),
+            offered
+        );
+        assert!(!codec.ready);
+        assert!(codec.prompt_id.is_none());
+        let requests: Vec<Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(requests.len(), if offered { 4 } else { 2 });
+        assert_eq!(requests[1]["method"], "session/new");
+        if offered {
+            assert_eq!(requests[2]["method"], "session/set_config_option");
+            assert_eq!(
+                requests[2]["params"],
+                json!({"sessionId":"fresh-session","configId":"model","value":"swe-2-medium"})
+            );
+            assert_eq!(requests[3]["method"], "session/set_mode");
+        }
+    }
+}
+
 #[test]
 fn accepted_attachment_size_fits_acp_and_aggregate_overflow_is_actionable() {
     use crate::protocol::ImageInput;

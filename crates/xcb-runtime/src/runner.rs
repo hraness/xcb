@@ -1871,6 +1871,11 @@ pub(crate) async fn run_prepared<P: Protocol>(
             .map(|point| point.output_tokens)
             .unwrap_or(0);
         let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace; direct sessions have no managed mailbox. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
+        // Retain fresh discovery even when a cached selection has disappeared.
+        // The failed turn still cannot start or silently choose another model.
+        if protocol.refreshes_catalog() {
+            store.set_models(session.model.provider, &models)?;
+        }
         if !models.iter().any(|choice| {
             choice.id == session.model.id
                 && (session.model.effort.is_none() || choice.effort == session.model.effort)
@@ -1878,9 +1883,6 @@ pub(crate) async fn run_prepared<P: Protocol>(
             return Err(Error::Unavailable(
                 "selected model or effort is not in the fresh provider catalog",
             ));
-        }
-        if protocol.refreshes_catalog() {
-            store.set_models(session.model.provider, &models)?;
         }
         let (email, plan) = protocol.account_identity();
         if email.is_some() || plan.is_some() {

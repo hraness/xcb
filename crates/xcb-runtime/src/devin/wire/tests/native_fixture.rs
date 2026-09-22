@@ -138,7 +138,7 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         .current_dir(&cwd);
     let model = ModelChoice {
         provider: Provider::Devin,
-        id: Id::new("swe-1-6-fast").unwrap(),
+        id: Id::new("xcb-fixture-model").unwrap(),
         label: "Synthetic fixture".into(),
         mode: Mode::Fixed,
         resolved: None,
@@ -161,7 +161,8 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
     let outcome = tokio::select! {
     result=tokio::time::timeout(Duration::from_secs(30),async {
         let models=codec.initialize(&mut process,"Offline synthetic qualification; only the xcb broker is available.").await?;
-        require(models.is_empty(),"fake backend catalogue")?;
+        require(models.len()==2 && models.iter().any(|model| model.id.as_str()=="xcb-fixture-model"),"explicit fake backend catalogue")?;
+        require(codec.next_id==4,"fixture must exercise model setter and mode acknowledgement")?;
         codec.start(&mut process,Prompt{text:"Perform the synthetic broker fixture.".into(),images:vec![crate::protocol::ImageInput {media_type:"image/png".into(),base64:"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=".into()}]}).await?;
         let mut admitted=false;
         for _ in 0..1024 {
@@ -197,7 +198,7 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         .filter(|call| !codec.broker_names.contains(&call.name))
         .map(|call| json!({"name":call.name,"finished":call.finished,"approved":call.approved}))
         .collect();
-    let evidence = json!({"status":status,"process_joined":joined,"bridge_joined":bridge_joined,"provider_sha256":expected_provider,"helper_sha256":spec.helper_sha256,"production_policy_sha256":crate::digest(&production),"fixture_policy_sha256":crate::digest(&policy),"calls":recorded,"native_calls":native_calls,"denials":denials,"image_prompt":true,"mcp_proposed_version":codec.mcp_proposed_version,"mcp_metadata_seen":codec.mcp_metadata_seen});
+    let evidence = json!({"status":status,"process_joined":joined,"bridge_joined":bridge_joined,"provider_sha256":expected_provider,"helper_sha256":spec.helper_sha256,"production_policy_sha256":crate::digest(&production),"fixture_policy_sha256":crate::digest(&policy),"calls":recorded,"native_calls":native_calls,"denials":denials,"image_prompt":true,"mcp_proposed_version":codec.mcp_proposed_version,"mcp_metadata_seen":codec.mcp_metadata_seen,"unexpected_notification":codec.unexpected_notification});
     private::create(
         &directory.join("native-evidence.json"),
         &serde_json::to_vec_pretty(&evidence).unwrap(),

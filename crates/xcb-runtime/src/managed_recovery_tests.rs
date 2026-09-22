@@ -66,6 +66,7 @@ async fn prepared_with_goal(goal: String) -> Fixture {
 struct DiagnosticProtocol {
     model: ModelChoice,
     result_event: bool,
+    stale_catalog: bool,
 }
 
 impl crate::protocol::Protocol for DiagnosticProtocol {
@@ -74,7 +75,11 @@ impl crate::protocol::Protocol for DiagnosticProtocol {
         _: &mut crate::process::StreamProcess,
         _: &str,
     ) -> Result<Vec<ModelChoice>> {
-        Ok(vec![self.model.clone()])
+        let mut model = self.model.clone();
+        if self.stale_catalog {
+            model.id = Id::new("fresh-model").unwrap();
+        }
+        Ok(vec![model])
     }
 
     async fn start(
@@ -82,6 +87,10 @@ impl crate::protocol::Protocol for DiagnosticProtocol {
         process: &mut crate::process::StreamProcess,
         _: crate::protocol::Prompt,
     ) -> Result<()> {
+        assert!(
+            !self.stale_catalog,
+            "stale selection must never reach start"
+        );
         if self.result_event {
             process.send(&json!({"fixture":true})).await
         } else {
@@ -119,7 +128,7 @@ impl crate::protocol::Protocol for DiagnosticProtocol {
 
 #[tokio::test]
 async fn runner_diagnostic_survives_restart_and_bounded_managed_message() {
-    for result_event in [false, true] {
+    for (result_event, stale_catalog) in [(false, false), (true, false), (false, true)] {
         let Fixture {
             _root,
             managed,
@@ -128,6 +137,9 @@ async fn runner_diagnostic_survives_restart_and_bounded_managed_message() {
             session,
         } = prepared_with_goal("🦀".repeat(120)).await;
         let store = Arc::new(store);
+        store
+            .set_models(session.model.provider, std::slice::from_ref(&session.model))
+            .unwrap();
         let message = Message {
             id: new_id("input"),
             role: Role::User,
@@ -170,6 +182,7 @@ async fn runner_diagnostic_survives_restart_and_bounded_managed_message() {
             DiagnosticProtocol {
                 model: session.model,
                 result_event,
+                stale_catalog,
             },
             crate::broker::Workspace::open_with_coordination(
                 Path::new(&task.workspace),
@@ -184,6 +197,22 @@ async fn runner_diagnostic_survives_restart_and_bounded_managed_message() {
         assert!(outcome.facts.joined);
         assert_eq!(outcome.facts.effects, EffectState::None);
         let diagnostic = outcome.diagnostic.as_ref().unwrap();
+        if stale_catalog {
+            assert_eq!(
+                store
+                    .models()
+                    .unwrap()
+                    .iter()
+                    .map(|model| model.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["fresh-model"]
+            );
+            assert!(
+                diagnostic
+                    .as_str()
+                    .contains("not in the fresh provider catalog")
+            );
+        }
         assert!(
             notices
                 .lock()

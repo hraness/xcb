@@ -43,7 +43,7 @@ export default function Docs() {
         <article className="xcb-docs-body">
           <section aria-labelledby="readiness">
             <h2 id="readiness">What works today</h2>
-            <p>Installed Claude and Codex coding workflows have passed on macOS ARM64 with the tested accounts and admitted builds. That includes a failing test, a repair, a passing test, and filtered Git status. Devin model discovery passed, but provider quota blocked its coding acceptance.</p>
+            <p>Installed Claude and Codex coding workflows have passed on macOS ARM64 with the tested accounts and admitted builds. That includes a failing test, a repair, a passing test, and filtered Git status. Devin’s exact-build credential-free boundary proof is separate from authenticated coding acceptance; account model availability is checked at launch.</p>
             <p>XCB is still a source preview, with a narrower tool boundary than the providers’ own CLIs. A model listing or successful <code>doctor</code> check is not proof of a working session on your host. See <a href="/docs/providers">provider setup</a>, <a href="/docs/workspace">command limits</a>, and the <a href="/docs/reference#readiness">full readiness record</a>.</p>
           </section>
           <section aria-labelledby="standalone-package">

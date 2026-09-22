@@ -89,7 +89,7 @@ function Providers() {
         <tbody>
           <tr><th scope="row">Claude</th><td>Admitted Claude Code 2.1.268 or newer, major 2.</td><td>Installed coding workflow passed on macOS ARM64 with the tested account. Linux remains a candidate after its host checks.</td></tr>
           <tr><th scope="row">Codex</th><td>Exact admitted 0.155.0-alpha.2.6 build on macOS.</td><td>Authenticated file operations and installed coding workflow passed with the tested account.</td></tr>
-          <tr><th scope="row">Devin</th><td>Exact admitted 3000.11.1 and 3000.10.31 builds on macOS.</td><td>Both credential-free boundary fixtures passed; authenticated model discovery passed on 3000.10.31. Provider quota blocked the tested coding turn; its reset is unknown.</td></tr>
+          <tr><th scope="row">Devin</th><td>Exact admitted 3000.11.1 and 3000.10.31 builds on macOS.</td><td>Both credential-free boundary fixtures passed. Authenticated coding acceptance requires separate account/model/build evidence; model availability is checked against the account’s fresh catalog at launch.</td></tr>
         </tbody>
       </table></div>
       <p>Codex and Devin admission checks both executable bytes and version. A visible model or <code>metadata pin only</code> from <code>doctor</code> does not prove successful coding on your host. The separate TypeScript CLI keeps Codex and Devin task execution disabled pending qualification.</p>
@@ -118,7 +118,7 @@ xcb doctor --provider devin
 xcb accounts import-devin --source /absolute/path/to/credentials.toml
 xcb accounts refresh <account-id>
 xcb models`}</Code>
-      <p>Import preserves the original credentials and sessions. To refresh just the catalog, use <code>xcb models refresh devin --account &lt;account-id&gt;</code>. Native XCB currently supports fixed ACP model choices; compatibility catalog entries for Adaptive or Fusion do not establish native support. A successful <code>devin auth status</code> and populated catalog confirm provider access, not a qualified XCB coding turn; the recorded live attempt reached provider quota before inference.</p>
+      <p>Import preserves the original credentials and sessions. To refresh just the catalog, use <code>xcb models refresh devin --account &lt;account-id&gt;</code>. Native XCB currently supports fixed ACP model choices; compatibility catalog entries for Adaptive or Fusion do not establish native support. A successful <code>devin auth status</code> and populated catalog confirm provider access, not a qualified XCB coding turn. The selected model is checked against the connected account’s fresh catalog before each turn. The September 20, 2026 quota result is historical evidence, not a statement of current availability.</p>
       <h2 id="selection">Select an account and model</h2>
       <p>Copy the matching full key from <code>xcb models</code>. Defaults apply to new direct sessions; a saved session keeps its account binding. Managed tasks route automatically among eligible accounts and models.</p>
       <Code>{`xcb accounts default <account>
