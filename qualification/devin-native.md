@@ -54,6 +54,11 @@ reach requests, native effects never appear, the immutable configuration
 survives, a PNG prompt is accepted, and every provider process group and bridge
 handler joins.
 
+A low-context-budget scenario also exercises Devin's started and completed
+compaction notifications during brokered tool calls. It verifies the same
+native denials and broker effects while treating compaction as informational:
+summaries never become task output, and pending calls retain their custody.
+
 In this exact Devin build, `notebook_read` can run without an ACP permission
 callback. Credentials therefore enter through the trusted environment adapter;
 persistent account files and the consumer workspace must stay outside the

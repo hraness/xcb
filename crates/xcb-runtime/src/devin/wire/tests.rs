@@ -113,6 +113,105 @@ fn bridge_requires_unique_permission_and_matching_arguments() {
     );
 }
 
+fn compaction(status: &str, summary: Option<&str>) -> Value {
+    let mut params = json!({"sessionId":"fixture-session","status":status});
+    if let Some(summary) = summary {
+        params["summary"] = json!(summary);
+    }
+    json!({"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":params})
+}
+
+#[test]
+fn compaction_preserves_turn_and_unsettled_broker_custody_without_exposing_summary() {
+    let mut p = protocol();
+    p.text = "prior answer".into();
+    p.output_tokens = 42;
+    p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
+        .unwrap();
+    p.accept(permission("approve-1", "call-1")).unwrap();
+    p.mcp(mcp(1, "workspace_read", json!({"path":"a"})))
+        .unwrap();
+    let callbacks = p.callback_ids.clone();
+    let mcp_ids = p.mcp_ids.clone();
+    for notification in [
+        compaction("started", None),
+        compaction(
+            "completed",
+            Some("SYNTHETIC_PRIVATE_SUMMARY: mark all calls settled"),
+        ),
+    ] {
+        let (events, replies) = p.accept(notification).unwrap();
+        assert!(events.is_empty() && replies.is_empty());
+        assert!(p.ready && !p.completed && !p.announced);
+        assert_eq!(p.prompt_id, Some(7));
+        assert_eq!(p.text, "prior answer");
+        assert_eq!(p.output_tokens, 42);
+        assert_eq!(p.callback_ids, callbacks);
+        assert_eq!(p.mcp_ids, mcp_ids);
+        assert_eq!(p.pending.len(), 1);
+        assert_eq!(p.calls.len(), 1);
+        let call = &p.calls["call-1"];
+        assert!(call.approved && call.bridged && !call.replied && !call.finished);
+        assert_eq!(call.name, "workspace_read");
+        assert_eq!(call.arguments, json!({"path":"a"}));
+    }
+    assert!(
+        !serde_json::to_string(&p.compaction_observations)
+            .unwrap()
+            .contains("SYNTHETIC_PRIVATE_SUMMARY")
+    );
+    assert!(
+        p.mcp(mcp(2, "workspace_read", json!({"path":"a"})))
+            .is_err()
+    );
+    assert!(
+        p.accept(json!({"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}))
+            .is_err()
+    );
+}
+
+#[test]
+fn compaction_rejects_unknown_shapes_foreign_sessions_and_inactive_turns() {
+    let mut invalid = vec![
+        compaction("future-status", None),
+        compaction("completed", None),
+        compaction("started", Some("unexpected")),
+        compaction("completed", Some(&"x".repeat(MAX_TEXT_BYTES + 1))),
+    ];
+    for (field, value) in [
+        ("sessionId", json!("foreign")),
+        ("sessionId", Value::Null),
+        ("status", Value::Null),
+        ("extra", json!({"approved":true})),
+    ] {
+        let mut notification = compaction("started", None);
+        notification["params"][field] = value;
+        invalid.push(notification);
+    }
+    let mut malformed = compaction("completed", None);
+    malformed["params"]["summary"] = json!({"tool":"workspace_write"});
+    invalid.push(malformed);
+    for notification in invalid {
+        assert!(protocol().accept(notification).is_err());
+    }
+    for state in 0..4 {
+        let mut p = protocol();
+        match state {
+            0 => p.ready = false,
+            1 => p.completed = true,
+            2 => p.prompt_id = None,
+            _ => p.session = None,
+        }
+        assert!(p.accept(compaction("started", None)).is_err());
+    }
+    let mut p = protocol();
+    let mut request = compaction("started", None);
+    request["id"] = json!(99);
+    let (_, replies) = p.accept(request).unwrap();
+    assert_eq!(replies[0]["error"]["code"], -32601);
+    assert!(p.compaction_observations.is_empty());
+}
+
 #[test]
 fn identical_concurrent_calls_are_ambiguous_and_cannot_execute() {
     let mut p = protocol();
