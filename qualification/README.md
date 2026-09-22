@@ -75,12 +75,41 @@ to depend only on its generic file broker port.
 
 The pinned native runtime retains `doctor` in its discovery catalog with only an
 empty skills allowlist. The shared production builder also sets the documented
-`skillOverrides` for `doctor` and `checkup` to `off`; the native fixture proves those
-restrictive settings and keeps the empty catalog assertion intact. The
+`skillOverrides` for `doctor`, `checkup` and `design` to `off`; the native fixture
+proves those restrictive settings and keeps the empty catalog assertion intact.
+`design` was added for 2.1.278, which ships it as a bundled skill that
+`disableBundledSkills` alone does not suppress — see the 2026-09-22 live smoke
+below, where the empty-skills assertion is what caught it. The
 [SDK skills documentation](https://code.claude.com/docs/en/agent-sdk/skills) explains
 why discovery metadata and execution authority are different.
 
 ## Live Claude subscription smoke
+
+`2026-09-22-live-claude-subscription.json` is the current receipt and supersedes
+the 2026-09-17 one below. It records one user-operated CLI turn against the real
+Claude subscription service on the pinned **2.1.278** runtime, built from the
+exact commit the receipt names, with a clean working tree. `claude/sonnet/low`
+resolved to `claude-sonnet-5` and returned the required text from a disposable
+empty workspace that held no entries afterwards; the reported effect state was
+`none`, and the provider process joined before the completion was persisted.
+
+That turn is also what produced the two fixes it attests. The first attempt
+failed closed with `effective runtime boundary mismatch`, and capturing the
+runtime's own init event showed why: 2.1.278 advertises a bundled `design` skill
+that `disableBundledSkills` does not suppress, and the init event echoes the
+concrete model the runtime selected rather than the alias that was requested, so
+every catalog entry carrying `resolved` was refused. The empty-skills assertion
+is unchanged and is what caught the first; the model comparison moved to the
+resolved identifier and remains exact equality against a value observed from the
+same provider. Neither was reachable from the Rust suite before, because no
+fixture there encoded the version and the TypeScript fixture emits whatever it
+is told.
+
+Two differences from the 2026-09-17 receipt are recorded rather than inherited:
+run artifacts are **not** removed after the provider joins — each launch retains
+a private per-run copy of the provider executable (0500) and its generated
+Seatbelt policy (0600) under the state directory (0700) — and the model is named
+by its resolved identifier alongside the requested key.
 
 `2026-09-17-live-claude-subscription.json` records one user-operated CLI turn
 against the real Claude subscription service. The exact admitted 2.1.268 runtime

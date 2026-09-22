@@ -1,0 +1,100 @@
+{
+  "schema": "agentmixer.live-provider-smoke.v1",
+  "evidenceKind": "live-claude-subscription-cli-smoke",
+  "observedAt": "2026-09-22T15:35:10.000Z",
+  "platform": "darwin-arm64",
+  "host": {
+    "product": "macOS",
+    "version": "26.5.1",
+    "build": "25F80"
+  },
+  "supersedes": "qualification/2026-09-17-live-claude-subscription.json",
+  "source": {
+    "branch": "xcb-claude-pin-2-1-278-20260922",
+    "commit": "cbbac1b2c396007d0ed237ef92ae2209854eb271",
+    "gitTree": "4130fe138473d6a79f70026e3365af19e9a570bf",
+    "runnerSourceSha256": "281dffd27025eaefeb18bf0362264606726a92dc4637abd2971def552dc317e8",
+    "claudeRuntimeSourceSha256": "98dd65981d28590b17265a3e63cca98493d63e5ad9cb3edc3691ef2b40dc025e",
+    "sandboxSourceSha256": "1ff4701420a88c2b54b579f9a47ace3eb7b084f6b18c677d0518ea8e7bed4d96",
+    "workingTreeCleanAgainstCommit": true,
+    "binaryBuiltFromThisCommit": true
+  },
+  "runtime": {
+    "provider": "claude",
+    "version": "2.1.278",
+    "executableSha256": "bd245662fb8a0e321b3bf133e930371d6563c387527885f30b2613aef3ba14d6",
+    "xcbExecutableSha256": "63d1d1a61d87ca5c5915f3bf7e8e2d532484f24cad45a6afa031723758490989"
+  },
+  "admission": {
+    "route": "native",
+    "authentication": "subscription",
+    "pinMatchedInstalledRuntime": true,
+    "admittedAt": "2026-09-22T15:34:59.834Z",
+    "boundaryAssertionsEnforcedAtRunTime": [
+      "claude_code_version equals the compiled pin",
+      "cwd equals the launched workspace",
+      "model equals the concrete model the runtime selected",
+      "apiKeySource is none",
+      "permissionMode is dontAsk",
+      "effective tool inventory equals the expected broker manifest",
+      "skills is empty",
+      "plugins is empty",
+      "mcp_servers count and identity match the broker"
+    ]
+  },
+  "sandbox": {
+    "backend": "seatbelt",
+    "policyGeneratedPerRun": true,
+    "unsandboxedFallbackAvailableOnDarwin": false,
+    "runArtifactsRemovedAfterJoin": false,
+    "runArtifactCustody": "retained under the private state directory, mode 0700; the per-run provider copy is 0500 and the generated policy is 0600",
+    "independentSyntheticBoundaryEvidence": "qualification/2026-09-17-darwin-arm64.json"
+  },
+  "request": {
+    "requestedModelKey": "claude/sonnet/low",
+    "resolvedModel": "claude-sonnet-5",
+    "effort": "low",
+    "workspace": "disposable-empty-directory",
+    "workspaceEntriesAfterRun": 0,
+    "prompt": "Reply with exactly: agentmixer live",
+    "expectedOutput": "agentmixer live",
+    "observedOutput": "agentmixer live",
+    "completed": true,
+    "liveProviderRequests": 1,
+    "billingImpact": "subscription-plan-consumption-not-measured"
+  },
+  "custody": {
+    "providerExitedAndJoinedBeforeCompletionPersisted": true,
+    "reportedEffects": "none",
+    "pendingAttention": false
+  },
+  "privacy": {
+    "realCredentialUsed": true,
+    "credentialMaterialRecorded": false,
+    "accountIdentityRecorded": false,
+    "authorizationUrlRecorded": false,
+    "localFilesystemPathsRecorded": false,
+    "localSessionIdentifierRecorded": false
+  },
+  "findingsThisRunProduced": [
+    {
+      "id": "bundled-design-skill",
+      "summary": "2.1.278 advertises a bundled `design` skill that disableBundledSkills does not suppress, so the empty-skills assertion refused every native run.",
+      "resolvedBy": "skillOverrides now sets design to off alongside doctor and checkup",
+      "assertionChanged": false
+    },
+    {
+      "id": "alias-model-echo",
+      "summary": "The runtime echoes the concrete model it selected, not the alias requested, so every catalog entry carrying `resolved` failed the boundary check.",
+      "resolvedBy": "validate_init compares against resolved when present and id otherwise, still by exact equality",
+      "assertionChanged": true
+    }
+  ],
+  "claims": {
+    "authenticatedProviderTurnObserved": true,
+    "exactExpectedResponseObserved": true,
+    "pinnedRuntimeBoundaryAssertionsPassed": true,
+    "productionQualificationIssued": false,
+    "productionActivationIssued": false
+  }
+}
