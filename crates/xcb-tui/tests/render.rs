@@ -614,6 +614,7 @@ fn global_conversation_shows_managed_tasks_instead_of_provider_chrome() {
         detail: "the worker needs your input".into(),
         route: Some("claude/default/high · user@example.com".into()),
         route_reason: None,
+        settle: None,
         workspace: "/project".into(),
         updated_at_ms: 1,
     }];
@@ -650,6 +651,7 @@ fn managed_task(
         detail: format!("detail for {title}"),
         route: route.map(str::to_owned),
         route_reason: None,
+        settle: None,
         workspace: "/project".into(),
         updated_at_ms,
     }

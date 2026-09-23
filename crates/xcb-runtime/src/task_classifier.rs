@@ -4,81 +4,15 @@
 //! preference prediction, not a capability benchmark). Keep the six questions,
 //! literal-space features, coefficients, raw score scale and kind gates aligned.
 //! Large-prompt priority is an explicit xcb policy layered above that model.
+//! Features and the fitted head are shared with the route reflex
+//! (`xcb_core::reflex`), whose generation 0 is exactly this classifier.
 
 use crate::judge::{self, Judge, JudgeAnswers, JudgeQuestions};
-use std::{collections::BTreeSet, time::Duration};
+use std::time::Duration;
+use xcb_core::reflex::{self, Features, Reflex, route_features, with_judge_evidence};
 
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PROMPT_BYTES: usize = 32_768;
-const VERBS: &[&str] = &[
-    "run",
-    "create",
-    "fix",
-    "add",
-    "build",
-    "make",
-    "take",
-    "resume",
-    "continue",
-    "check",
-    "review",
-    "audit",
-    "deploy",
-    "merge",
-    "push",
-    "migrate",
-    "refactor",
-    "test",
-    "write",
-    "update",
-    "remove",
-    "delete",
-    "install",
-    "setup",
-    "set",
-    "configure",
-    "read",
-    "search",
-    "find",
-    "analyze",
-    "improve",
-    "change",
-    "edit",
-    "implement",
-    "design",
-    "ship",
-    "launch",
-    "clean",
-    "move",
-    "rename",
-    "upgrade",
-    "inspect",
-    "verify",
-    "publish",
-    "integrate",
-    "combine",
-    "unify",
-    "port",
-    "rewrite",
-    "rework",
-    "overhaul",
-    "assess",
-    "evaluate",
-    "compare",
-    "investigate",
-    "debug",
-    "diagnose",
-    "trace",
-    "profile",
-    "optimize",
-    "benchmark",
-    "scrape",
-    "extract",
-    "sync",
-    "import",
-    "export",
-    "generate",
-];
 const QUESTIONS_JSON: &str = r#"{
   "difficulty": {
     "type": "score",
@@ -146,15 +80,29 @@ const QUESTIONS_JSON: &str = r#"{
   }
 }"#;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Classification {
     pub frontier: bool,
     pub source: &'static str,
     pub score_milli: Option<i32>,
     pub kind: Option<String>,
+    /// Route reflex features: prompt shape, keyword cues and, when the judge
+    /// answered, its typed evidence.
+    pub features: Features,
+    pub judged: bool,
+    pub substantial: bool,
 }
 
 impl Classification {
+    /// Gate evidence for the route reflex program.
+    pub fn evidence(&self) -> serde_json::Value {
+        serde_json::json!({
+            "substantial": self.substantial,
+            "judged": self.judged,
+            "kind": self.kind,
+        })
+    }
+
     pub fn reason(&self) -> String {
         match (&self.kind, self.score_milli) {
             (Some(kind), Some(score)) => format!("{} · {kind} · score {score}", self.source),
@@ -171,69 +119,60 @@ fn questions() -> JudgeQuestions {
     serde_json::from_str(QUESTIONS_JSON).expect("static ALGAL classifier questions")
 }
 
-fn score(task: &str, answers: &JudgeAnswers) -> Option<Classification> {
+fn score(
+    task: &str,
+    answers: &JudgeAnswers,
+    complex_cue: bool,
+    routine_cue: bool,
+) -> Option<Classification> {
     judge::check_answers(&questions(), answers).ok()?;
-    // ALGAL splits on literal spaces, lowercases words without stripping
-    // punctuation, and counts distinct original word spellings before capping.
-    let words: Vec<_> = task.split(' ').filter(|word| !word.is_empty()).collect();
-    let first = words.first().copied().unwrap_or("").to_lowercase();
-    let lower = task.to_lowercase();
-    let imperative = VERBS.contains(&first.as_str());
-    let resume = ["resume", "continue"].contains(&first.as_str())
-        || [
-            "session named",
-            "session called",
-            "take over",
-            "pick up",
-            "continue the work",
-        ]
-        .iter()
-        .any(|cue| lower.contains(cue));
-    let verbs = words
-        .iter()
-        .copied()
-        .filter(|word| VERBS.contains(&word.to_lowercase().as_str()))
-        .collect::<BTreeSet<_>>()
-        .len()
-        .min(8);
     let answer = |name: &str| answers.answers.get(name);
     let scalar = |name: &str| answer(name)?.score().map(|(value, _)| value);
     let kind = answer("kind")?.choice()?.0;
     // Score answers are used verbatim, exactly as in the manifest. The native
     // Judge wire contract validates their five-criterion index range 0..=4.
-    let z = -1.8027
-        + 0.4530 * words.len().min(400) as f64 / 400.0
-        + 1.5943 * u8::from(imperative) as f64
-        + 0.6881 * u8::from(resume) as f64
-        + 0.4405 * verbs as f64 / 8.0
-        - 0.0755 * scalar("difficulty")? / 5.0
-        + 0.8716 * scalar("scope")? / 5.0
-        - 0.1508 * scalar("ambiguity")? / 5.0
-        - 0.4787 * scalar("stakes")? / 5.0
-        + 0.5851 * answer("frontier")?.noul()?;
+    let features = with_judge_evidence(
+        route_features(task, complex_cue, routine_cue),
+        scalar("difficulty")?,
+        scalar("scope")?,
+        scalar("ambiguity")?,
+        scalar("stakes")?,
+        answer("frontier")?.noul()?,
+    );
+    let prior = reflex::prior(Reflex::Route);
+    let head = prior.head(reflex::ROUTE_JUDGED).ok()?;
+    let z = head.logit(&features);
     let kind_gate = ["question", "probe"].contains(&kind);
     Some(Classification {
-        frontier: !kind_gate && z >= -0.619,
+        frontier: !kind_gate && head.decide(&features),
         source: "ALGAL fitted classifier",
         score_milli: Some((z * 1000.0).round() as i32),
         kind: Some(kind.into()),
+        features,
+        judged: true,
+        substantial: false,
     })
 }
 
 pub(crate) async fn classify(
     task: &str,
     backend: Option<&dyn Judge>,
-    fallback_frontier: bool,
+    complex_cue: bool,
+    routine_cue: bool,
 ) -> Classification {
+    let substantial = substantial(task);
     let fallback = |source| Classification {
-        frontier: fallback_frontier,
+        frontier: complex_cue,
         source,
         score_milli: None,
         kind: None,
+        features: route_features(task, complex_cue, routine_cue),
+        judged: false,
+        substantial,
     };
     // This guarantee is independent of remote availability and cannot be
     // demoted by a classifier, including its historical question/probe gate.
-    if substantial(task) {
+    if substantial {
         return Classification {
             frontier: true,
             ..fallback("large prompt · highest available quality")
@@ -245,7 +184,7 @@ pub(crate) async fn classify(
     let state = serde_json::json!({"task": xcb_core::display_text(task, MAX_PROMPT_BYTES)});
     let questions = questions();
     match tokio::time::timeout(TIMEOUT, backend.ask(&state, &questions)).await {
-        Ok(Ok(answers)) => score(task, &answers)
+        Ok(Ok(answers)) => score(task, &answers, complex_cue, routine_cue)
             .unwrap_or_else(|| fallback("deterministic fallback · invalid classifier response")),
         Ok(Err(_)) => fallback("deterministic fallback · classifier unavailable"),
         Err(_) => fallback("deterministic fallback · classifier timed out"),
@@ -293,18 +232,18 @@ mod tests {
     #[test]
     fn fitted_head_matches_algal_features_and_coefficients() {
         let task = "migrate the session store to the new envelope format and update every caller";
-        let result = score(task, &answers("refactor")).unwrap();
+        let result = score(task, &answers("refactor"), false, false).unwrap();
         assert!(result.frontier);
         assert_eq!(result.score_milli, Some(533));
         for kind in ["question", "probe"] {
-            let result = score(task, &answers(kind)).unwrap();
+            let result = score(task, &answers(kind), false, false).unwrap();
             assert!(!result.frontier);
             assert_eq!(result.score_milli, Some(533));
         }
         // Preserve the manifest's literal-space and punctuation behavior.
         assert_ne!(
-            score("fix bug", &answers("bugfix")),
-            score("fix, bug", &answers("bugfix"))
+            score("fix bug", &answers("bugfix"), false, false),
+            score("fix, bug", &answers("bugfix"), false, false)
         );
     }
 
@@ -312,12 +251,12 @@ mod tests {
     fn incomplete_and_nonfinite_answers_cannot_route() {
         let mut invalid = answers("feature");
         invalid.answers.remove("scope");
-        assert!(score("build it", &invalid).is_none());
+        assert!(score("build it", &invalid, false, false).is_none());
         invalid = answers("feature");
         invalid
             .answers
             .insert("frontier".into(), JudgeAnswer::Noul(f64::NAN));
-        assert!(score("build it", &invalid).is_none());
+        assert!(score("build it", &invalid, false, false).is_none());
     }
 
     #[test]
@@ -347,18 +286,18 @@ mod tests {
 
     #[tokio::test]
     async fn missing_judge_is_honest_and_large_prompts_skip_judgment() {
-        let fallback = classify("fix the bug", None, true).await;
+        let fallback = classify("fix the bug", None, true, false).await;
         assert!(fallback.frontier);
         assert!(fallback.source.contains("not available"));
         assert!(
-            !classify("a question", Some(&FakeJudge(false)), true)
+            !classify("a question", Some(&FakeJudge(false)), true, false)
                 .await
                 .frontier
         );
         let task = "word ".repeat(400);
         let result = tokio::time::timeout(
             Duration::from_millis(100),
-            classify(&task, Some(&FakeJudge(true)), false),
+            classify(&task, Some(&FakeJudge(true)), false, false),
         )
         .await
         .unwrap();
@@ -370,7 +309,7 @@ mod tests {
     async fn stalled_classifier_returns_a_bounded_deterministic_fallback() {
         let result = tokio::time::timeout(
             TIMEOUT + Duration::from_secs(2),
-            classify("fix the bug", Some(&FakeJudge(true)), true),
+            classify("fix the bug", Some(&FakeJudge(true)), true, false),
         )
         .await
         .unwrap();

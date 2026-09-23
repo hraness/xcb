@@ -29,6 +29,8 @@ Routing candidates must be admitted runtimes on enabled, credentialed, idle acco
 - [Accounts and providers](https://xcb.sh/docs/providers): supported builds, authentication, model selection, quota windows.
 - [Workspace commands](https://xcb.sh/docs/workspace): isolated runner, public dependencies, Git limits, cancellation, recovery.
 - [Customization](https://xcb.sh/docs/customization): sessions, panes, and optional behavior.
+- [Learned routing & continuation](https://xcb.sh/docs/reflexes): reflexes that learn the model tier you want and when a worker stopped short, with holdout-gated promotion and rollback.
+- [Routing that learns you](https://xcb.sh/reflexes): the use case: learned routing and continuation built from ALGAL programs and local evidence.
 - [Application API](https://xcb.sh/docs/application-api): ephemeral text generation with exact qualification; separate from coding sessions.
 - [Reference](https://xcb.sh/docs/reference): full project README and compatibility source reference.
 - [README as Markdown](https://xcb.sh/README.md): machine-readable project contract.
