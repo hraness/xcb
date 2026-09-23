@@ -2252,6 +2252,14 @@ pub(crate) async fn run_prepared<P: Protocol>(
         effects = combine_effects(effects, command.effects);
     }
     let process_joined = process.join().await;
+    if let Some(bytes) = process.stderr_overflow() {
+        // Volume is reported, never retained: provider stderr is not a
+        // bounded host diagnostic and may carry credentials or paths.
+        observer(Progress::Notice(format!(
+            "provider wrote {bytes} bytes to stderr (notice threshold {} bytes); the stream was drained to EOF but not retained",
+            crate::process::STDERR_NOTICE_BYTES
+        )));
+    }
     let protocol_joined = protocol.shutdown().await;
     let bridge_joined = close_bridge(bridge).await;
     let joined = process_joined && protocol_joined && bridge_joined && commands_joined;
