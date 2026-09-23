@@ -1,5 +1,4 @@
 mod application;
-mod route;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::json;
@@ -85,9 +84,6 @@ enum Commands {
         #[arg(long = "image")]
         images: Vec<PathBuf>,
     },
-    /// Select one eligible account/model route and run a single bounded turn.
-    /// Machine contract: requires --json and a closed request on stdin.
-    Route,
     Resume {
         id: Option<Id>,
     },
@@ -668,9 +664,6 @@ async fn dispatch(cli: Cli) -> Result<i32> {
     if let Some(Commands::Generate { capabilities }) = &cli.command {
         return application::dispatch(&root, *capabilities, cli.json).await;
     }
-    if matches!(&cli.command, Some(Commands::Route)) {
-        return route::dispatch(&root, cli.json).await;
-    }
     if let Some(Commands::ApplicationDiagnostic { account, request }) = &cli.command {
         return application::diagnostic_dispatch(&root, account, request, cli.json);
     }
@@ -705,8 +698,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             Commands::Generate { .. }
             | Commands::ApplicationDiagnostic { .. }
             | Commands::QualifyApplication { .. }
-            | Commands::ManagedDaemon
-            | Commands::Route,
+            | Commands::ManagedDaemon,
         ) => {
             unreachable!("early dispatch returns above")
         }
@@ -1167,7 +1159,6 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             task: &task,
                             required_provider,
                             preferred_provider,
-                            required_model: None,
                             excluded_routes: &excluded_routes,
                             excluded_accounts: &excluded_accounts,
                             account: None,

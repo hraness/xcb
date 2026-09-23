@@ -22,7 +22,7 @@ test("extracts the landing block between the shared Hraness markers", async () =
   expect(source.indexOf(LANDING_END)).toBeGreaterThan(source.indexOf(LANDING_START));
   const landing = readmeLanding(source);
   expect(landing.title).toBe("xcb");
-  expect(landing.lead).toContain("subscription router");
+  expect(landing.lead).toContain("local terminal workspace");
   expect(landing.markdown).toContain("customizable panes");
 });
 

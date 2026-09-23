@@ -1,12 +1,9 @@
 <!-- hraness:xcb-landing:start -->
 # xcb
 
-Excalibur (`xcb`) is a subscription router for coding agents. It selects an
-eligible account/model route across your own Claude, Codex, and Devin
-accounts, runs one bounded turn, and proves account custody when the work
-settles. Another agent calls `xcb --json route`; an application embeds the
-TypeScript SDK. The terminal workspace is the reference host, and the managed
-harness — being rebuilt as a self-evolving ALGAL harness — is experimental.
+Excalibur (`xcb`) brings your coding-agent accounts, model choices, sessions,
+and usage into one local terminal workspace. Choose an account, work on your
+project, and pick up where you left off without changing interfaces.
 
 The native Rust app is a source preview for supported Claude, Codex, and Devin
 runtimes. It includes workspace file tools, an isolated Linux command runner,
@@ -17,7 +14,7 @@ of the original provider tools.
 
 [Project site](https://xcb.sh) · [Getting started](https://xcb.sh/docs/getting-started) ·
 [Compare tools](https://xcb.sh/compare) · [Source](https://github.com/hraness/xcb) ·
-[Route contract](docs/route.md) · [Application API](docs/application-api.md) · [Compatibility reference](docs/compatibility.md) · [Contributing](CONTRIBUTING.md)
+[Application API](docs/application-api.md) · [Compatibility reference](docs/compatibility.md) · [Contributing](CONTRIBUTING.md)
 
 ## Readiness
 
@@ -308,12 +305,6 @@ xcb panes
 xcb doctor
 xcb completions zsh > /path/to/completions/_xcb
 ```
-
-For another program — typically a coding agent — `xcb --json route` is the
-closed machine contract: one JSON task document on stdin selects an eligible
-account/model route and runs exactly one bounded turn, returning the selected
-route, saved session id, and settled outcome facts as bounded JSON. See
-[the route contract](docs/route.md).
 
 `xcb chat --resume` reopens a control conversation; `xcb resume` opens a saved
 direct provider session and its workspace. Neither is a headless continuation

@@ -12,7 +12,7 @@ export function SiteHeader({ active }: Readonly<{ active?: "home" | "docs" | "co
         brandMark="/marks/xcb.svg"
         brandLabel="xcb home"
         links={[
-          { href: "/#router", label: "The router" },
+          { href: "/#workspace", label: "Why xcb" },
           { href: "/compare", label: "Compare", current: active === "compare" },
           { href: "/docs", label: "Docs", current: active === "docs" },
           { href: "https://github.com/hraness/xcb", label: "GitHub" },

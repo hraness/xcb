@@ -294,50 +294,6 @@ No live task adapter is bundled, and a selected subscription route is never
 replaced with an API route. Registering a capability profile does not enable a
 provider or establish account availability.
 
-## Embedding the subscription router
-
-`createSubscriptionRouter()` is the packaged entry point for the same path: it
-bundles the account lease store and qualified task adapters into one object so
-a host does not rewire `Xcb` internals.
-
-```ts
-import { openAccountDatabase, SqliteAccountLeases, createSubscriptionRouter } from "@hraness/xcb";
-
-const db = await openAccountDatabase("/private/path/to/router.sqlite");
-const router = createSubscriptionRouter({
-  leases: new SqliteAccountLeases(db),
-  adapters: [claudeTaskAdapter],          // host-qualified adapters only
-});
-```
-
-`router.routes()` lists the adapter-registered routes a caller can dispatch to;
-registration is not eligibility — custody, credentials and qualification are
-proven when a task runs. `router.run(request, broker)` accepts a relaxed
-request: `route` may be replaced by `provider` plus `authentication`
-(`"subscription"` by default) when exactly one adapter matches, `runId` and
-`workspaceId` default to the broker's binding, and `signal` defaults to a
-never-aborting signal:
-
-```ts
-const broker = createCapabilityBroker({ profile, workspaceId: "ws-1", runId: "run-1", isActive });
-const result = await router.run({
-  provider: "claude",
-  accountId: "a_…",
-  profile: { id: profile.id, version: profile.version, digest: profile.digest },
-  model: { id: "claude-sonnet-5", reasoningEffort: "low", serviceTier: null },
-  purpose: "respond",
-  prompt: "Summarize the diff in this workspace.",
-  limits: { maxRunMs: 60_000, maxCleanupMs: 10_000, maxOutputBytes: 65_536 },
-}, broker);
-```
-
-Ambiguous provider shorthand (`ROUTER_ROUTE_AMBIGUOUS`) means more than one
-adapter serves that provider and authentication kind; pass the exact `route`
-object instead. The runtime still performs every admission, lease, deadline,
-and stop-evidence check — the wrapper cannot create eligibility. For the
-machine CLI contract aimed at agents rather than embedding hosts, see the
-native [route contract](route.md).
-
 ## Opt-in Claude API route
 
 `createClaudeApiAdapter()` is an additional, explicitly selected **Claude API**

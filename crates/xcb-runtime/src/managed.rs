@@ -2603,7 +2603,6 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                                 task: &task.goal,
                                 required_provider,
                                 preferred_provider: task.provider_preference,
-                                required_model: None,
                                 excluded_routes: &excluded_routes,
                                 excluded_accounts: &excluded_accounts,
                                 account: None,
