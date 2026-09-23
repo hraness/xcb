@@ -782,11 +782,7 @@ pub async fn qualify_with_expected_generation(
 
 /// Canonical opaque generation accepted by the host qualification command.
 pub fn validate_expected_generation(value: &str) -> std::result::Result<(), FailureCode> {
-    if value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if xcb_core::hex64(value) {
         Ok(())
     } else {
         Err(FailureCode::InvalidRequest)

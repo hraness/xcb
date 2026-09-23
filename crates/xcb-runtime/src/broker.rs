@@ -53,7 +53,7 @@ fn io(error: rustix::io::Errno) -> Error {
     std::io::Error::from(error).into()
 }
 fn components(path: &str) -> Result<Vec<&std::ffi::OsStr>> {
-    if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control) {
+    if !xcb_core::bounded_path(path) {
         return Err(xcb_core::Error::Invalid("workspace path").into());
     }
     Path::new(path)
@@ -95,11 +95,7 @@ fn file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
     Ok(file)
 }
 fn revision_file_at(parent: &File, name: &std::ffi::OsStr, expected: &str) -> Result<File> {
-    if expected.len() != 64
-        || !expected
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
+    if !xcb_core::hex64(expected) {
         return Err(xcb_core::Error::Invalid("workspace revision").into());
     }
     let mut file = file_at(parent, name)?;

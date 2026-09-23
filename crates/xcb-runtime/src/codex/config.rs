@@ -213,11 +213,7 @@ struct CachedCatalog {
 }
 
 fn catalog_cache_path(root: &Path, expected_sha256: &str) -> Result<PathBuf> {
-    if expected_sha256.len() != 64
-        || !expected_sha256
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
+    if !xcb_core::hex64(expected_sha256) {
         return Err(Error::Unavailable("executable digest is invalid"));
     }
     Ok(private::directory(&root.join("providers"))?

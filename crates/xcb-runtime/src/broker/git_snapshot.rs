@@ -51,20 +51,11 @@ pub struct GitAssociation {
     pub common_dir: PathBuf,
 }
 
-type Stamp = (u64, u64, u64, u32, u32, u64, i64, i64, i64, i64);
+/// Inode identity guard for the source files a snapshot depends on; a change
+/// to any tracked field means the source moved under the read.
+type Stamp = xcb_core::FileIdentity;
 fn stamp(m: &std::fs::Metadata) -> Stamp {
-    (
-        m.dev(),
-        m.ino(),
-        m.len(),
-        m.mode(),
-        m.uid(),
-        m.nlink(),
-        m.mtime(),
-        m.mtime_nsec(),
-        m.ctime(),
-        m.ctime_nsec(),
-    )
+    Stamp::of(m)
 }
 fn unsupported() -> Error {
     Error::Unavailable(
@@ -75,18 +66,9 @@ fn changed() -> Error {
     Error::Conflict("Git source changed during command snapshot; retry after Git finishes")
 }
 fn path_parts(path: &str) -> Result<Vec<&str>> {
-    let parts: Vec<_> = path.split('/').collect();
-    if path.is_empty()
-        || path.len() > 4096
-        || parts.len() > DEPTH_LIMIT
-        || parts
-            .iter()
-            .any(|p| p.is_empty() || *p == "." || *p == "..")
-        || path.chars().any(char::is_control)
-    {
-        return Err(unsupported());
-    }
-    Ok(parts)
+    xcb_core::relative_parts(path)
+        .filter(|parts| parts.len() <= DEPTH_LIMIT)
+        .ok_or_else(unsupported)
 }
 fn open_dir(parent: &File, name: &str) -> Result<File> {
     Ok(File::from(
@@ -100,12 +82,7 @@ fn open_dir(parent: &File, name: &str) -> Result<File> {
     ))
 }
 fn physical(path: &Path) -> Result<()> {
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|p| !matches!(p, Component::RootDir | Component::Normal(_)))
-        || path.canonicalize()? != path
-    {
+    if !xcb_core::absolute_clean(path) || path.canonicalize()? != path {
         return Err(Error::PrivateState);
     }
     Ok(())
@@ -273,17 +250,10 @@ impl Budget {
     }
 }
 fn hex40(value: &str) -> bool {
-    value.len() == 40
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        && value.bytes().any(|b| b != b'0')
+    value.len() == 40 && xcb_core::hex_lower(value) && value.bytes().any(|b| b != b'0')
 }
 fn hex_name(value: &str, length: usize) -> bool {
-    value.len() == length
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    value.len() == length && xcb_core::hex_lower(value)
 }
 fn reference(value: &str) -> Result<()> {
     let parts = path_parts(value)?;
@@ -311,7 +281,7 @@ fn line(bytes: &[u8]) -> Result<&str> {
     Ok(value)
 }
 fn lexical(base: &Path, value: &str) -> Result<PathBuf> {
-    if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control) {
+    if !xcb_core::bounded_path(value) {
         return Err(unsupported());
     }
     let mut path = if Path::new(value).is_absolute() {
