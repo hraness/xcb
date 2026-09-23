@@ -46,6 +46,14 @@ pub struct RouteDecision {
     pub reason: String,
 }
 
+/// No admitted, enabled, credentialed account exists for the request; waiting
+/// cannot fix this, the user must add or reconnect one.
+pub const NO_CONNECTED_ACCOUNT: &str = "no eligible account; add or reconnect one (xcb accounts add <provider>, xcb doctor --provider <provider>, xcb accounts login <account>)";
+/// Connected accounts exist but every route is busy, quota-blocked or
+/// excluded for now; a later retry may succeed.
+pub const NO_ELIGIBLE_ROUTE: &str =
+    "no eligible admitted route; connect an account, finish active work, or wait for quota reset";
+
 pub struct RouteRequest<'a> {
     pub task: &'a str,
     pub required_provider: Option<Provider>,
@@ -404,22 +412,31 @@ async fn route_with_admitted(
     let offers = crate::offers::load(store.root()).unwrap_or_default();
     let models = store.models()?;
     let view = summary::snapshot(store, None, config, now)?;
-    let accounts: Vec<_> = view
+    // A connected account is admitted, enabled, credentialed and not waiting
+    // for reconnection. Without one, no wait or quota reset can help: the
+    // user must add or reconnect an account, and the supervisor says so.
+    let connected: Vec<_> = view
         .accounts
         .iter()
         .filter(|account| {
             admitted.contains(&account.provider)
                 && required_provider.is_none_or(|provider| provider == account.provider)
-                && !account.busy
                 && account.enabled
                 && !account.authentication_required
+                && account_hint.is_none_or(|hint| hint == &account.id)
+                && auth::has_credentials(store, &account.id).unwrap_or(false)
+        })
+        .collect();
+    let accounts: Vec<_> = connected
+        .iter()
+        .copied()
+        .filter(|account| {
+            !account.busy
                 && account.quota_blocked_until_ms.is_none()
                 && account
                     .remaining_percent
                     .is_none_or(|remaining| remaining > 0.0)
                 && !excluded_accounts.contains(&account.id)
-                && account_hint.is_none_or(|hint| hint == &account.id)
-                && auth::has_credentials(store, &account.id).unwrap_or(false)
         })
         .collect();
     let profile_by_key = eligible_profiles(&models, &offers, now, task, |model| {
@@ -478,9 +495,11 @@ async fn route_with_admitted(
     });
     candidates.truncate(8);
     if candidates.is_empty() {
-        return Err(Error::Unavailable(
-            "no eligible admitted route; connect an account, finish active work, or wait for quota reset",
-        ));
+        return Err(Error::Unavailable(if connected.is_empty() {
+            NO_CONNECTED_ACCOUNT
+        } else {
+            NO_ELIGIBLE_ROUTE
+        }));
     }
     let mut selected = 0usize;
     let mut judged = false;
@@ -638,6 +657,64 @@ mod tests {
             crate::kernel::new_session(&store, &work, &config, None, Some("codex/gpt-5.6-sol"))
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn no_connected_account_is_distinct_from_a_temporary_route_shortage() {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let config = Config::default();
+        let routes = BTreeSet::new();
+        let accounts = BTreeSet::new();
+        let request = || RouteRequest {
+            task: "fix a test",
+            required_provider: None,
+            preferred_provider: None,
+            excluded_routes: &routes,
+            excluded_accounts: &accounts,
+            account: None,
+        };
+        let admitted: BTreeSet<Provider> = [Provider::Claude].into();
+        // No accounts at all: waiting cannot help.
+        let Err(Error::Unavailable(reason)) =
+            route_with_admitted(&store, &config, request(), &admitted).await
+        else {
+            panic!("empty routing must fail");
+        };
+        assert_eq!(reason, NO_CONNECTED_ACCOUNT);
+        // An account without credentials is still not connected.
+        store
+            .add_account(Provider::Claude, "Synthetic", 1, None)
+            .unwrap();
+        let Err(Error::Unavailable(reason)) =
+            route_with_admitted(&store, &config, request(), &admitted).await
+        else {
+            panic!("uncredentialed routing must fail");
+        };
+        assert_eq!(reason, NO_CONNECTED_ACCOUNT);
+        // A connected account that is busy right now is a temporary shortage.
+        let busy = account(&store, Provider::Claude);
+        let work =
+            crate::private::directory(&store.root().parent().unwrap().join("synthetic-work"))
+                .unwrap();
+        let session = store
+            .create_session(
+                &busy,
+                model(Provider::Claude, "synthetic", None, None),
+                &work,
+                1,
+            )
+            .unwrap();
+        store
+            .prepare_run(&session.id, session.revision, crate::now_ms())
+            .unwrap();
+        let Err(Error::Unavailable(reason)) =
+            route_with_admitted(&store, &config, request(), &admitted).await
+        else {
+            panic!("busy routing must fail");
+        };
+        assert_eq!(reason, NO_ELIGIBLE_ROUTE);
     }
 
     fn model(
