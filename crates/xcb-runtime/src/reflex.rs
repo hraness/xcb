@@ -1015,14 +1015,22 @@ fn append_generation(
     // Another writer (the supervisor's automatic pass and a CLI `train`, say)
     // may have promoted since `current` was read; appending on a stale parent
     // would decide the same trial twice.
-    let active: Option<u32> = tx
+    // Resolved as `active_since` does: a stored generation whose feature
+    // schema no longer matches this build counts as the prior (version 0).
+    let active: Option<(u32, String)> = tx
         .query_row(
-            "SELECT version FROM generations WHERE reflex=?1 AND active=1",
+            "SELECT version,payload FROM generations WHERE reflex=?1 AND active=1 ORDER BY version DESC LIMIT 1",
             [reflex.as_str()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    if active.unwrap_or(0) != current.version {
+    let effective = active.map_or(0, |(version, payload)| {
+        serde_json::from_str::<Params>(&payload)
+            .ok()
+            .filter(|params| schema(params) == schema(&reflex::prior(reflex)))
+            .map_or(0, |_| version)
+    });
+    if effective != current.version {
         return Err(Error::Conflict("reflex generation changed; train again"));
     }
     let latest: i64 = tx.query_row(
@@ -1750,6 +1758,43 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_generation_from_an_older_schema_does_not_block_promotion() {
+        let dir = temp();
+        let store = ReflexStore::open(dir.path()).unwrap();
+        // An upgrade changed the feature schema: the stored active generation
+        // no longer matches, so the prior (version 0) is in effect.
+        let mut stale = reflex::prior(Reflex::Route);
+        stale.version = 1;
+        stale.parent = Some(0);
+        stale
+            .heads
+            .get_mut(ROUTE_PLAIN)
+            .unwrap()
+            .weights
+            .insert("retired_feature".into(), 1.0);
+        store
+            .db()
+            .unwrap()
+            .execute(
+                "INSERT INTO generations(reflex,version,active,created_at,payload) VALUES('route',1,1,0,?1)",
+                [serde_json::to_string(&stale).unwrap()],
+            )
+            .unwrap();
+        assert_eq!(store.active(Reflex::Route).unwrap().version, 0);
+        let head = reflex::prior(Reflex::Route).heads[ROUTE_PLAIN].clone();
+        let comparison = reflex::compare(&head, &head, &[]);
+        let adopted = store
+            .adopt(
+                Reflex::Route,
+                BTreeMap::from([(ROUTE_PLAIN.to_owned(), (head, comparison))]),
+                1,
+            )
+            .unwrap();
+        assert_eq!(adopted, Some(2));
+        assert_eq!(store.active(Reflex::Route).unwrap().version, 2);
     }
 
     #[test]

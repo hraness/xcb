@@ -683,80 +683,102 @@ fn contains_word(text: &str, cue: &str) -> bool {
     })
 }
 
-/// Word stems that veto answering a go-ahead request on the operator's
-/// behalf. Broader than the [`RISK`] feature cues, matched as word prefixes so
-/// inflections count ("deleting", "tokens"), and read over the whole report
-/// rather than its end, so a risky plan cannot hide above a short question.
-const CONFIRM_VETO: &[&str] = &[
+/// Stems that veto answering a go-ahead request anywhere in the report, so a
+/// destructive plan cannot hide above a short question: deletion, secrets and
+/// production.
+const VETO_ANYWHERE: &[&str] = &[
     "delet",
     "drop",
     "destroy",
     "wipe",
     "truncat",
-    "remov",
-    "rm -",
     "purg",
-    "overwrit",
     "force-push",
     "force push",
+    "push --force",
+    "push -f",
     "reset --hard",
-    "revert",
-    "rollback",
-    "roll back",
-    "deploy",
-    "release",
-    "publish",
-    "promot",
-    "migrat",
-    "push to main",
-    "push to master",
-    "production",
-    "prod ",
-    "live ",
-    "spend",
-    "purchas",
-    "pay",
-    "charg",
-    "billing",
-    "invoice",
-    "subscri",
-    "upgrad",
+    "rm -",
     "credential",
     "password",
     "secret",
-    "token",
-    "api key",
     "private key",
+    "api key",
     "ssh key",
-    "permission",
+    "production",
+    "prod",
+    "spend",
+    "purchas",
+    "billing",
+];
+
+/// Stems that veto only in the paragraph that asks, where they describe the
+/// step being proposed; across a whole work report they are ordinary words.
+const VETO_IN_ASK: &[&str] = &[
+    "deploy",
+    "releas",
+    "publish",
+    "migrat",
+    "push to main",
+    "push to master",
+    "tag",
+    "live",
+    "remov",
+    "overwrit",
+    "revert",
+    "rollback",
+    "roll back",
+    "pay",
+    "charg",
+    "invoice",
+    "subscri",
+    "upgrad",
+    "token",
     "access",
+    "permission",
     "sudo",
     "send",
     "email",
-    "post ",
+    "post",
     "tweet",
-    "message ",
     "invite",
     "share",
     "public",
 ];
 
+/// Word endings a stem may carry, so "deleting" and "tokens" match but
+/// "dropdown", "payload" and "tokenizer" do not.
+const VETO_ENDINGS: &[&str] = &[
+    "", "s", "es", "e", "ed", "d", "ing", "ion", "ions", "al", "ped", "ping", "ged", "ging",
+    "ment", "ments", "be", "bed", "bing", "ption", "ptions", "y", "ies", "ly",
+];
+
+fn stem_matches(text: &str, stem: &str) -> bool {
+    text.match_indices(stem).any(|(start, _)| {
+        let ending: String = text[start + stem.len()..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric())
+            .collect();
+        !text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric)
+            && VETO_ENDINGS.contains(&ending.as_str())
+    })
+}
+
 /// Whether a worker's request for a go-ahead names anything xcb must not
-/// approve on the operator's behalf: deletion, deployment or release,
-/// production, money, credentials or access, or sending something to people.
-/// Deliberately over-inclusive; a veto only leaves the question for the
-/// operator.
+/// approve on the operator's behalf: deletion, secrets or production anywhere
+/// in the report, or a deploy, release, migration, payment, access change or
+/// message to people in the paragraph that asks. Deliberately
+/// over-inclusive; a veto only leaves the question for the operator.
 pub fn confirm_vetoed(text: &str) -> bool {
     let text = tail(text, 16 * 1024);
-    CONFIRM_VETO.iter().any(|stem| {
-        text.match_indices(stem).any(|(start, _)| {
-            !text[..start]
-                .chars()
-                .next_back()
-                .is_some_and(char::is_alphanumeric)
-        })
-    }) || any(&text, RISK)
-        || any(&text, USER_ACT)
+    let ask = last_paragraph(&text);
+    VETO_ANYWHERE.iter().any(|stem| stem_matches(&text, stem))
+        || VETO_IN_ASK.iter().any(|stem| stem_matches(ask, stem))
+        || any(ask, RISK)
+        || any(ask, USER_ACT)
 }
 
 fn flag(value: bool) -> f64 {
@@ -1699,10 +1721,22 @@ mod tests {
             "detail ".repeat(80)
         );
         assert!(confirm_vetoed(&hidden));
-        // Prefixes match at word starts only.
-        assert!(!confirm_vetoed(
-            "Should I update the undeployable flag docs?"
-        ));
+        for risky in [
+            "Should I push this to prod?",
+            "Ship it live?",
+            "Tag the release?",
+        ] {
+            assert!(confirm_vetoed(risky), "{risky}");
+        }
+        // Stems match at word starts with ordinary endings only, and broad
+        // stems only in the asking paragraph.
+        for safe in [
+            "Should I update the undeployable flag docs?",
+            "Fixed the dropdown payload and the tokenizer. Should I open the PR?",
+            "Removed the dead helper and updated the public API.\n\nShould I open the PR and merge it?",
+        ] {
+            assert!(!confirm_vetoed(safe), "{safe}");
+        }
     }
 
     #[test]

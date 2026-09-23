@@ -2560,10 +2560,10 @@ impl ManagedStore {
             // "yes" to a turn that asked for the go-ahead, like "continue" to
             // one that stopped short, belongs in that task's session rather
             // than in a new task that lacks its context.
-            let answers_confirm = reply == xcb_core::reflex::Reply::Approve
+            let approves_request = reply == xcb_core::reflex::Reply::Approve
                 && trimmed.chars().count() <= 80
                 && task.settle.as_deref() == Some("confirm");
-            if (continue_like(trimmed) || answers_confirm)
+            if (continue_like(trimmed) || approves_request)
                 && attachments.is_empty()
                 && task.session.is_some()
                 && reflexes.settle == ReflexMode::Active
@@ -2896,7 +2896,7 @@ impl ManagedStore {
             _ => false,
         };
         let answer = match (result, &settle) {
-            (Ok(outcome), Some(decision)) => answers_confirm(&config, decision, &outcome.text),
+            (Ok(outcome), Some(decision)) => answers_confirm(&config, decision, outcome),
             _ => false,
         };
         let budget_exhausted = match result {
@@ -3480,11 +3480,14 @@ fn confirmable(decision: &reflex::Decision, text: &str) -> bool {
         && !xcb_core::reflex::confirm_vetoed(text)
 }
 
-/// Whether this settled turn's `confirm` decision may be answered "yes".
-fn answers_confirm(config: &Config, decision: &reflex::Decision, text: &str) -> bool {
+/// Whether this settled turn's `confirm` decision may be answered "yes":
+/// only a completed idle turn, whatever a custom program categorized.
+fn answers_confirm(config: &Config, decision: &reflex::Decision, outcome: &Outcome) -> bool {
     config.extensions.reflexes.settle != ReflexMode::Off
         && config.extensions.reflexes.confirm == ReflexMode::Active
-        && confirmable(decision, text)
+        && outcome.state == State::Idle
+        && outcome.facts.terminal == Terminal::Completed
+        && confirmable(decision, &outcome.text)
 }
 
 /// The settle head whose active decision started the task's current run: a
@@ -3601,8 +3604,8 @@ async fn task_should_continue(
     let stopped_short = semantic
         && config.extensions.reflexes.settle == ReflexMode::Active
         && settle.is_some_and(|decision| decision.value == "stopped_short");
-    let confirm = semantic
-        && settle.is_some_and(|decision| answers_confirm(&config, decision, &outcome.text));
+    let confirm =
+        semantic && settle.is_some_and(|decision| answers_confirm(&config, decision, outcome));
     let verdict = deterministic || stopped_short || confirm;
     // A turn asking for a go-ahead that xcb may not answer stays with the
     // operator: the judge is not consulted, so it cannot turn a vetoed

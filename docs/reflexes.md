@@ -221,11 +221,11 @@ reports without storing anything. Only the derived features are stored.
 - `active`: the decision acts. For route it sets the tier; for settle a
   `stopped_short` completed turn is continued.
 - `confirm`: whether a `confirm` turn is answered "yes, go ahead". It acts
-  only when both `settle` and `confirm` are `active`, nothing is handed to
-  the user, and the whole report names nothing on the veto list (deleting,
-  dropping or removing, deploying, releasing or publishing, production,
-  migrations, spending or billing, credentials, tokens or access, sending or
-  sharing, matched with their inflections), and a configured judge agrees
+  only when both `settle` and `confirm` are `active`, the turn completed,
+  nothing is handed to the user, the report never mentions deletion, secrets,
+  production or spending, the asking paragraph proposes no deploy, release,
+  tag, migration, removal, payment, access change or message to people
+  (stems match with their inflections), and a configured judge agrees
   that the step stays within the task, is reversible and needs no new
   permissions. A vetoed request is never sent to the judge, so the judge
   cannot turn it into a "yes".
