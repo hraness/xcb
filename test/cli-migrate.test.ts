@@ -125,7 +125,7 @@ describe("legacy sqlite namespaces", () => {
   });
 });
 
-describe("xcb migrate command", () => {
+describe("xcb-compat migrate command", () => {
   async function cliMigrate(env: Record<string, string>): Promise<{ code: number; stdout: string; stderr: string }> {
     const child = Bun.spawn([process.execPath, CLI, "migrate"], {
       cwd: ROOT,

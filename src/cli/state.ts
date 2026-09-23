@@ -8,7 +8,7 @@ import { assertPrivateDirectory, canonicalizePrivatePath, PRIVATE_CONTROL_REJECT
 
 export const CLI_STATE_ENV = "XCB_STATE";
 const STATE_DIRNAME = ".xcb";
-/** Pre-0.4.0 locations, read only by `xcb migrate`; never a live default. */
+/** Pre-0.4.0 locations, read only by `xcb-compat migrate`; never a live default. */
 export const LEGACY_STATE_ENV = "AGENTMIXER_STATE";
 const LEGACY_STATE_DIRNAME = ".agentmixer";
 const MAX_MIGRATION_ENTRIES = 16_384;

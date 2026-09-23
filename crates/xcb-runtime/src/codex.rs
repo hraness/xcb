@@ -5,6 +5,8 @@ pub use config::{
     ARGS, Admission, BINARY_SHA256, QUALIFIED_MODELS, SCHEMA_SHA256, StaticCatalog, VERSION,
     configuration, runtime_admitted, static_catalog, thread_configuration, version_admitted,
 };
+#[cfg(test)]
+pub(crate) use config::{fixture_catalog_source, static_catalog_bound};
 
 use crate::{
     Error, Result, broker, category, now_ms,

@@ -287,6 +287,19 @@ struct RouteObservation<'a> {
 pub struct ManagedStore {
     root: PathBuf,
     connection: Mutex<Connection>,
+    unreadable: Mutex<BTreeSet<String>>,
+}
+
+/// See `ManagedStore::view_stamp`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ViewStamp {
+    conversation: Id,
+    conversations: (i64, i64),
+    tasks: (i64, i64, i64),
+    messages: i64,
+    config: Option<std::time::SystemTime>,
+    fault: Option<std::time::SystemTime>,
+    unreadable: usize,
 }
 
 fn sql(value: u64) -> Result<i64> {
@@ -368,6 +381,7 @@ impl ManagedStore {
         Ok(Self {
             root,
             connection: Mutex::new(connection),
+            unreadable: Mutex::new(BTreeSet::new()),
         })
     }
     fn db(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -490,49 +504,107 @@ impl ManagedStore {
         Ok(messages)
     }
 
+    /// List readers tolerate one corrupt row: it is skipped and remembered so
+    /// the supervisor and UI keep working and the status text can report it.
+    /// Single-row reads and every transition stay strict (`task_from`).
+    fn task_rows(&self, sql: &str, limit: usize, active_only: bool) -> Result<Vec<ManagedTask>> {
+        let db = self.db()?;
+        let mut query = db.prepare(sql)?;
+        let rows = query.query_map([limit as i64], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut tasks = Vec::new();
+        let mut unreadable = Vec::new();
+        for row in rows {
+            let (id, payload, conversation) = row?;
+            let decoded = decode::<ManagedTask>(&payload).and_then(|task| {
+                task.validate()?;
+                if task.id.as_str() != id
+                    || task.conversation.as_str() != conversation
+                    || (active_only && task.state.terminal())
+                {
+                    return Err(Error::Conflict("managed task row mismatch"));
+                }
+                Ok(task)
+            });
+            match decoded {
+                Ok(task) => tasks.push(task),
+                Err(_) => unreadable.push(id),
+            }
+        }
+        drop(query);
+        drop(db);
+        if !unreadable.is_empty()
+            && let Ok(mut known) = self.unreadable.lock()
+        {
+            for id in unreadable {
+                if known.len() < 256 {
+                    known.insert(id);
+                }
+            }
+        }
+        Ok(tasks)
+    }
+    /// Task rows that a list reader could not decode or validate since this
+    /// store was opened. Bounded; never cleared by a successful read.
+    pub fn unreadable_tasks(&self) -> usize {
+        self.unreadable.lock().map(|known| known.len()).unwrap_or(0)
+    }
+    /// A cheap change signal for the managed view: aggregate timestamps,
+    /// counts and revisions, plus config and fault file stamps. Equal stamps
+    /// mean the rebuilt view would be identical, so the client skips it.
+    fn view_stamp(&self, state_root: &Path, conversation: &Id) -> Result<ViewStamp> {
+        let db = self.db()?;
+        let conversations: (i64, i64) = db.query_row(
+            "SELECT COALESCE(max(updated_at),0),count(*) FROM conversations",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let tasks: (i64, i64, i64) = db.query_row(
+            "SELECT COALESCE(max(updated_at),0),count(*),COALESCE(sum(revision),0) FROM tasks",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let messages: i64 = db.query_row(
+            "SELECT COALESCE(max(sequence),0) FROM messages WHERE conversation=?1",
+            [conversation.as_str()],
+            |row| row.get(0),
+        )?;
+        drop(db);
+        let modified = |path: PathBuf| fs::metadata(path).and_then(|meta| meta.modified()).ok();
+        Ok(ViewStamp {
+            conversation: conversation.clone(),
+            conversations,
+            tasks,
+            messages,
+            config: modified(state_root.join("config.json")),
+            fault: modified(self.root.join(SUPERVISOR_FAULT_FILE)),
+            unreadable: self.unreadable_tasks(),
+        })
+    }
     pub fn tasks(&self, limit: usize) -> Result<Vec<ManagedTask>> {
         if !(1..=256).contains(&limit) {
             return Err(xcb_core::Error::Invalid("managed task page").into());
         }
-        let db = self.db()?;
-        let mut query = db.prepare(
-            "SELECT payload,conversation FROM tasks ORDER BY updated_at DESC,id LIMIT ?1",
-        )?;
-        let rows = query.query_map([limit as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut tasks = Vec::new();
-        for row in rows {
-            let (payload, conversation) = row?;
-            let task: ManagedTask = decode(&payload)?;
-            task.validate()?;
-            if task.conversation.as_str() != conversation {
-                return Err(Error::Conflict("managed task conversation mismatch"));
-            }
-            tasks.push(task);
-        }
-        Ok(tasks)
+        self.task_rows(
+            "SELECT id,payload,conversation FROM tasks ORDER BY updated_at DESC,id LIMIT ?1",
+            limit,
+            false,
+        )
     }
     fn active_tasks(&self, limit: usize) -> Result<Vec<ManagedTask>> {
         if !(1..=256).contains(&limit) {
             return Err(xcb_core::Error::Invalid("managed active task page").into());
         }
-        let db = self.db()?;
-        let mut query = db.prepare("SELECT payload,conversation FROM tasks WHERE state IN ('queued','running','needs_input') ORDER BY updated_at DESC,id LIMIT ?1")?;
-        let rows = query.query_map([limit as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut tasks = Vec::new();
-        for row in rows {
-            let (payload, conversation) = row?;
-            let task: ManagedTask = decode(&payload)?;
-            task.validate()?;
-            if task.conversation.as_str() != conversation || task.state.terminal() {
-                return Err(Error::Conflict("managed active task mismatch"));
-            }
-            tasks.push(task);
-        }
-        Ok(tasks)
+        self.task_rows(
+            "SELECT id,payload,conversation FROM tasks WHERE state IN ('queued','running','needs_input') ORDER BY updated_at DESC,id LIMIT ?1",
+            limit,
+            true,
+        )
     }
     pub fn task(&self, id: &Id) -> Result<Option<ManagedTask>> {
         let db = self.db()?;
@@ -568,11 +640,17 @@ impl ManagedStore {
             if verified >= 1024 {
                 return Err(xcb_core::Error::Limit("managed receipt chain").into());
             }
-            let payload: String = self.db()?.query_row(
-                "SELECT payload FROM receipts WHERE digest=?1 AND task=?2 AND revision=?3 AND length(payload)<=2097152",
-                params![expected.last_receipt, id.as_str(), sql(expected.revision)?],
-                |row| row.get(0),
-            )?;
+            let payload: String = self
+                .db()?
+                .query_row(
+                    "SELECT payload FROM receipts WHERE digest=?1 AND task=?2 AND revision=?3 AND length(payload)<=2097152",
+                    params![expected.last_receipt, id.as_str(), sql(expected.revision)?],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(Error::Conflict(
+                    "managed receipt chain is missing the persisted task revision",
+                ))?;
             let receipt: Value = serde_json::from_str(&payload)?;
             if receipt["digest"] != expected.last_receipt
                 || receipt["manifestDigest"] != expected.policy_digest
@@ -606,10 +684,17 @@ impl ManagedStore {
                 }
                 break;
             }
-            let prior: String = self.db()?.query_row(
-                "SELECT payload FROM receipts WHERE digest=?1 AND task=?2 AND revision=?3 AND length(payload)<=2097152",
-                params![previous, id.as_str(), sql(expected.revision - 1)?], |row| row.get(0),
-            )?;
+            let prior: String = self
+                .db()?
+                .query_row(
+                    "SELECT payload FROM receipts WHERE digest=?1 AND task=?2 AND revision=?3 AND length(payload)<=2097152",
+                    params![previous, id.as_str(), sql(expected.revision - 1)?],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .ok_or(Error::Conflict(
+                    "managed receipt chain is missing a prior revision",
+                ))?;
             let prior: Value = serde_json::from_str(&prior)?;
             let prior_record = runtime::outputs(&manifest, &prior)
                 .map_err(|_| Error::Unavailable("managed receipt output rejected"))?;
@@ -965,13 +1050,15 @@ impl ManagedStore {
         let mut eligible = Vec::new();
         for row in rows {
             let (provider, completed, failed) = row?;
+            // Route statistics are a soft ranking input: a provider name this
+            // build does not know must not block intake for the workspace.
+            let Ok(provider) = provider.parse::<Provider>() else {
+                continue;
+            };
             if completed >= 2
                 && completed.saturating_mul(3) >= completed.saturating_add(failed).saturating_mul(2)
             {
-                eligible.push((
-                    provider.parse::<Provider>()?,
-                    completed.saturating_sub(failed),
-                ));
+                eligible.push((provider, completed.saturating_sub(failed)));
             }
         }
         eligible.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
@@ -1819,7 +1906,7 @@ impl ManagedStore {
     }
     pub fn status_text(&self) -> Result<String> {
         let active = self.active_tasks(128)?;
-        if active.is_empty() {
+        let mut lines = if active.is_empty() {
             let tasks = self.tasks(32)?;
             let mut lines =
                 vec!["Nothing needs you right now. No managed tasks are running.".to_owned()];
@@ -1829,15 +1916,28 @@ impl ManagedStore {
                     lines.push(task_status(task));
                 }
             }
-            return Ok(lines.join("\n"));
+            lines
+        } else {
+            let mut lines = vec![format!(
+                "{} active task{}:",
+                active.len(),
+                if active.len() == 1 { "" } else { "s" }
+            )];
+            for task in &active {
+                lines.push(task_status(task));
+            }
+            lines
+        };
+        let unreadable = self.unreadable_tasks();
+        if unreadable > 0 {
+            lines.push(format!(
+                "{unreadable} task row{} could not be decoded and {} skipped; run `xcb tasks verify <task-id>` on suspect tasks.",
+                if unreadable == 1 { "" } else { "s" },
+                if unreadable == 1 { "was" } else { "were" }
+            ));
         }
-        let mut lines = vec![format!(
-            "{} active task{}:",
-            active.len(),
-            if active.len() == 1 { "" } else { "s" }
-        )];
-        for task in &active {
-            lines.push(task_status(task));
+        if let Some(fault) = supervisor_fault(&self.root) {
+            lines.push(format!("Last supervisor fault: {fault}"));
         }
         Ok(lines.join("\n"))
     }
@@ -1906,11 +2006,20 @@ impl ManagedStore {
     }
 
     async fn finish(&self, store: &Store, id: &Id, result: Result<Outcome>) -> Result<ManagedTask> {
+        self.finish_ref(store, id, &result).await
+    }
+
+    async fn finish_ref(
+        &self,
+        store: &Store,
+        id: &Id,
+        result: &Result<Outcome>,
+    ) -> Result<ManagedTask> {
         // A user may cancel while an optional judgment is in flight. Recompute
         // against that revision instead of dropping this settled completion and
         // terminating the supervisor (and its unrelated workers).
         for _ in 0..4 {
-            match self.finish_once(store, id, &result).await {
+            match self.finish_once(store, id, result).await {
                 Err(Error::Conflict("managed task revision changed")) => continue,
                 outcome => return outcome,
             }
@@ -1976,14 +2085,15 @@ impl ManagedStore {
             None
         };
         let continue_task = match result {
-            Ok(outcome) if !unsettled => tokio::time::timeout(
-                Duration::from_secs(5),
-                task_should_continue(store, &task, outcome),
-            )
-            .await
-            .ok()
-            .and_then(std::result::Result::ok)
-            .unwrap_or(false),
+            Ok(outcome) if !unsettled => task_should_continue(store, &task, outcome)
+                .await
+                .unwrap_or(false),
+            _ => false,
+        };
+        let budget_exhausted = match result {
+            Ok(outcome) if !unsettled && !continue_task => {
+                continuation_budget_exhausted(&config, &task, outcome)
+            }
             _ => false,
         };
         let mut next = task.clone();
@@ -2007,7 +2117,9 @@ impl ManagedStore {
                     Some(outcome.text.clone()),
                 )
             }
-            Ok(outcome) if task.cancel_requested => (
+            // A cancel that lands after the worker already completed does not
+            // un-complete the settled turn; the completion arm below records it.
+            Ok(outcome) if task.cancel_requested && !settled_completion(outcome) => (
                 TaskState::Cancelled,
                 "worker cancellation settled".into(),
                 Some(outcome.text.clone()),
@@ -2028,18 +2140,19 @@ impl ManagedStore {
                     State::NeedsAnswer | State::NeedsAction | State::NeedsApproval => {
                         TaskState::NeedsInput
                     }
-                    State::Idle
-                        if outcome.facts.terminal == Terminal::Completed
-                            && outcome.facts.joined
-                            && outcome.facts.effects != EffectState::Uncertain =>
-                    {
-                        TaskState::Completed
-                    }
+                    State::Idle if settled_completion(outcome) => TaskState::Completed,
+                    // An interrupted but settled worker whose automatic
+                    // continuation budget ran out is not a failure: the user
+                    // renews the budget by replying.
+                    State::Idle if budget_exhausted => TaskState::NeedsInput,
                     State::Cancelled => TaskState::Cancelled,
                     State::Uncertain => TaskState::Uncertain,
                     _ => TaskState::Failed,
                 };
                 let detail = match state {
+                    TaskState::NeedsInput if budget_exhausted => {
+                        "automatic continuation budget exhausted; reply to continue"
+                    }
                     TaskState::NeedsInput => "the worker needs your input",
                     TaskState::Completed => {
                         "worker finished with settled execution; checks are worker-reported"
@@ -2134,72 +2247,94 @@ impl ManagedStore {
         Ok(finished)
     }
 
+    /// Reconcile every task left `running` by a previous supervisor. A task
+    /// whose record changed underneath (`Conflict`) is skipped; any other
+    /// per-task error is collected and returned after all tasks were
+    /// visited, so one bad record cannot block startup for the rest.
     pub async fn reconcile_startup(&self, store: &Store) -> Result<()> {
         let unsettled = store.unsettled_runs()?;
+        let mut first_error = None;
         for task in self
             .active_tasks(128)?
             .into_iter()
             .filter(|task| task.state == TaskState::Running)
         {
-            let Some(session_id) = &task.session else {
-                let mut next = task.clone();
-                next.state = TaskState::Queued;
-                next.detail = "dispatch was not admitted; queued again".into();
-                next.revision += 1;
-                next.updated_at_ms = now_ms();
-                self.transition(&task, next, None).await?;
-                continue;
-            };
-            if unsettled
-                .iter()
-                .any(|run| run.session.as_ref() == Some(session_id))
-            {
-                let mut next = task.clone();
-                next.state = TaskState::Uncertain;
-                next.detail =
-                    "supervisor restarted with an unsettled worker; explicit recovery required"
-                        .into();
-                next.revision += 1;
-                next.updated_at_ms = now_ms();
-                let message = Self::assistant(
-                    format!(
-                        "**{}** needs recovery. Its prior worker did not leave conclusive settlement evidence, so I did not retry it.",
-                        task.title
-                    ),
-                    Some(&task.id),
-                    next.revision,
-                );
-                self.transition(&task, next, Some(message)).await?;
-                continue;
+            match self.reconcile_task(store, &unsettled, &task).await {
+                Ok(()) | Err(Error::Conflict(_)) => (),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
             }
-            let total = store.message_count(session_id)?;
-            if total == task.message_count_before {
-                let mut next = task.clone();
-                next.state = TaskState::Queued;
-                next.detail = "dispatch stopped before provider admission; queued again".into();
-                next.revision += 1;
-                next.updated_at_ms = now_ms();
-                self.transition(&task, next, None).await?;
-                continue;
-            }
-            if let Some(outcome) = store.settled_outcome(session_id, task.message_count_before)? {
-                self.finish(store, &task.id, Ok(outcome)).await?;
-            } else {
-                let mut next = task.clone();
-                next.state = TaskState::Uncertain;
-                next.detail = "the worker crossed the provider boundary without a terminal result; no retry will be launched".into();
-                next.revision += 1;
-                next.updated_at_ms = now_ms();
-                let message = Self::assistant(
-                    format!(
-                        "**{}** needs recovery. Its worker started but no terminal response was retained, so I did not retry it.",
-                        task.title
-                    ),
-                    Some(&task.id),
-                    next.revision,
-                );
-                self.transition(&task, next, Some(message)).await?;
-            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    async fn reconcile_task(
+        &self,
+        store: &Store,
+        unsettled: &[crate::store::RunRecord],
+        task: &ManagedTask,
+    ) -> Result<()> {
+        let Some(session_id) = &task.session else {
+            let mut next = task.clone();
+            next.state = TaskState::Queued;
+            next.detail = "dispatch was not admitted; queued again".into();
+            next.revision += 1;
+            next.updated_at_ms = now_ms();
+            self.transition(task, next, None).await?;
+            return Ok(());
+        };
+        if unsettled
+            .iter()
+            .any(|run| run.session.as_ref() == Some(session_id))
+        {
+            let mut next = task.clone();
+            next.state = TaskState::Uncertain;
+            next.detail =
+                "supervisor restarted with an unsettled worker; explicit recovery required".into();
+            next.revision += 1;
+            next.updated_at_ms = now_ms();
+            let message = Self::assistant(
+                format!(
+                    "**{}** needs recovery. Its prior worker did not leave conclusive settlement evidence, so I did not retry it.",
+                    task.title
+                ),
+                Some(&task.id),
+                next.revision,
+            );
+            self.transition(task, next, Some(message)).await?;
+            return Ok(());
+        }
+        let total = store.message_count(session_id)?;
+        if total == task.message_count_before {
+            let mut next = task.clone();
+            next.state = TaskState::Queued;
+            next.detail = "dispatch stopped before provider admission; queued again".into();
+            next.revision += 1;
+            next.updated_at_ms = now_ms();
+            self.transition(task, next, None).await?;
+            return Ok(());
+        }
+        if let Some(outcome) = store.settled_outcome(session_id, task.message_count_before)? {
+            self.finish(store, &task.id, Ok(outcome)).await?;
+        } else {
+            let mut next = task.clone();
+            next.state = TaskState::Uncertain;
+            next.detail = "the worker crossed the provider boundary without a terminal result; no retry will be launched".into();
+            next.revision += 1;
+            next.updated_at_ms = now_ms();
+            let message = Self::assistant(
+                format!(
+                    "**{}** needs recovery. Its worker started but no terminal response was retained, so I did not retry it.",
+                    task.title
+                ),
+                Some(&task.id),
+                next.revision,
+            );
+            self.transition(task, next, Some(message)).await?;
         }
         Ok(())
     }
@@ -2309,6 +2444,47 @@ fn cancel_request(text: &str) -> bool {
 fn route_hint(text: &str) -> Option<Provider> {
     routing::explicit_provider_intent(text)
 }
+/// A settled, completed provider turn with a joined process: the one outcome
+/// that records `completed`, even when a cancel request landed late.
+fn settled_completion(outcome: &Outcome) -> bool {
+    outcome.state == State::Idle
+        && outcome.facts.terminal == Terminal::Completed
+        && outcome.facts.joined
+        && outcome.facts.effects != EffectState::Uncertain
+}
+
+/// The safety gates that automatic continuation requires regardless of any
+/// budget: a joined, settled, non-repeating idle worker interrupted by a
+/// turn or token limit with no pending attention or failure.
+fn continuation_safe(task: &ManagedTask, outcome: &Outcome) -> bool {
+    let repeated =
+        task.last_output.as_deref() == Some(xcb_core::display_text(&outcome.text, 8192).as_str());
+    !task.cancel_requested
+        && outcome.state == State::Idle
+        && outcome.facts.joined
+        && outcome.facts.effects != EffectState::Uncertain
+        && !outcome.facts.pending_attention
+        && outcome.facts.failure.is_none()
+        && !repeated
+        && matches!(
+            outcome.facts.terminal,
+            Terminal::TurnLimit | Terminal::TokenLimit
+        )
+}
+
+/// True when the only reason an interrupted worker is not continued is the
+/// automatic attempt/time budget (or a disabled auto-continue), which the
+/// user renews by replying. Genuine failures never satisfy this.
+fn continuation_budget_exhausted(config: &Config, task: &ManagedTask, outcome: &Outcome) -> bool {
+    let policy = &config.extensions.auto_continue;
+    let elapsed = now_ms().saturating_sub(task.input_at_ms.unwrap_or(task.created_at_ms));
+    continuation_safe(task, outcome)
+        && (task.attempts.saturating_add(1) >= task.max_attempts
+            || !policy.enabled
+            || task.attempts >= policy.max_consecutive
+            || elapsed >= policy.max_elapsed_ms)
+}
+
 async fn task_should_continue(
     store: &Store,
     task: &ManagedTask,
@@ -2346,8 +2522,11 @@ async fn task_should_continue(
     if !config.extensions.judge.enabled {
         return Ok(deterministic);
     }
-    let Some(backend) = judge::resolve(store.root(), &config.extensions.judge)? else {
-        return Ok(false);
+    // The judge may only veto after the deterministic gates pass. An absent,
+    // unresolvable, failing or slow judge leaves the deterministic verdict in
+    // force; it never disables continuation on its own.
+    let Ok(Some(backend)) = judge::resolve(store.root(), &config.extensions.judge) else {
+        return Ok(deterministic);
     };
     let mut questions = judge::JudgeQuestions::new();
     questions.insert(
@@ -2360,8 +2539,9 @@ async fn task_should_continue(
             }),
         },
     );
-    let answers = backend
-        .ask(
+    let asked = tokio::time::timeout(
+        Duration::from_secs(5),
+        backend.ask(
             &json!({
                 "task": xcb_core::display_text(&task.goal, 8192),
                 "worker_response": xcb_core::display_text(&outcome.text, 8192),
@@ -2371,8 +2551,12 @@ async fn task_should_continue(
                 "elapsed_ms": elapsed,
             }),
             &questions,
-        )
-        .await?;
+        ),
+    )
+    .await;
+    let Ok(Ok(answers)) = asked else {
+        return Ok(deterministic);
+    };
     Ok(answers
         .answers
         .get("continue_task")
@@ -2450,6 +2634,560 @@ struct Completion {
     result: Result<Outcome>,
 }
 
+/// Dispatch backoff for a task the supervisor could not launch. The wait
+/// doubles from five seconds to a one-minute cap and resets when the task
+/// record changes (a reply, a cancel, a new detail).
+struct LaunchAttempt {
+    at: Instant,
+    revision: u64,
+    misses: u32,
+}
+impl LaunchAttempt {
+    fn new(revision: u64) -> Self {
+        Self {
+            at: Instant::now(),
+            revision,
+            misses: 0,
+        }
+    }
+    /// Exponential wait after `misses` failed dispatches: 5 s, 10 s, 20 s,
+    /// 40 s, then the one-minute cap.
+    fn delay(&self) -> Duration {
+        Duration::from_secs((5u64 << self.misses.saturating_sub(1).min(4)).min(60))
+    }
+    fn due(&self, revision: u64) -> bool {
+        self.revision != revision || self.at.elapsed() >= self.delay()
+    }
+    fn miss(&mut self, revision: u64) {
+        if self.revision != revision {
+            self.misses = 0;
+        }
+        self.at = Instant::now();
+        self.revision = revision;
+        self.misses = self.misses.saturating_add(1);
+    }
+}
+
+/// A settled worker completion whose recording failed; retried with backoff
+/// before the task is marked uncertain, never dropped with the supervisor.
+struct Unrecorded {
+    completion: Completion,
+    at: Instant,
+    failures: u32,
+}
+
+const SUPERVISOR_FAULT_FILE: &str = "supervisor.fault.json";
+const MAX_FAULT_BYTES: usize = 4096;
+const MAX_TICK_FAULTS: u32 = 40;
+const MAX_RECORD_FAILURES: u32 = 6;
+/// Detail prefix for a queued task no connected account can serve; the UI
+/// shows it as needing action instead of an endless spinner.
+const NO_ACCOUNT_DETAIL: &str = "no eligible account: add or reconnect one (xcb accounts add <provider>, xcb doctor --provider <provider>, xcb accounts login <account>)";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupervisorFault {
+    version: u32,
+    at_ms: u64,
+    message: String,
+}
+
+/// Records the last supervisor fault in the managed state directory so a
+/// client can show why the detached process stopped or what it skipped.
+/// Only bounded, host-selected text is written: no paths, secrets or stderr.
+fn record_supervisor_fault(root: &Path, message: &str) {
+    let fault = SupervisorFault {
+        version: 1,
+        at_ms: now_ms(),
+        message: xcb_core::display_text(message, 512),
+    };
+    let Ok(bytes) = serde_json::to_vec(&fault) else {
+        return;
+    };
+    let path = root.join(SUPERVISOR_FAULT_FILE);
+    let _ = match private::read(&path, MAX_FAULT_BYTES) {
+        Ok(previous) => private::replace(&path, &bytes, &digest(previous)),
+        Err(_) => private::create(&path, &bytes),
+    };
+}
+
+fn clear_supervisor_fault(root: &Path) {
+    let _ = fs::remove_file(root.join(SUPERVISOR_FAULT_FILE));
+}
+
+/// The last recorded supervisor fault under a managed state directory.
+pub fn supervisor_fault(root: &Path) -> Option<String> {
+    let bytes = private::read(&root.join(SUPERVISOR_FAULT_FILE), MAX_FAULT_BYTES).ok()?;
+    let fault: SupervisorFault = serde_json::from_slice(&bytes).ok()?;
+    (fault.version == 1 && !fault.message.is_empty())
+        .then(|| xcb_core::display_text(&fault.message, 512))
+}
+
+fn fault_text(error: &Error) -> String {
+    Diagnostic::from_error(error).as_str().to_owned()
+}
+
+/// A queued task that only a new or reconnected account can unblock.
+fn blocked_on_account(task: &ManagedTask) -> bool {
+    task.state == TaskState::Queued && task.detail.starts_with(NO_ACCOUNT_DETAIL)
+}
+
+enum Dispatch {
+    /// A worker was spawned for the task.
+    Started,
+    /// The task record settled or changed; nothing more to do this tick.
+    Settled,
+    /// No worker could be launched now; retry with backoff and show why.
+    Deferred(String),
+}
+
+/// One supervisor's in-memory dispatch state. Per-task failures are isolated
+/// here so one bad task, route or record cannot stop the other workers.
+struct Supervisor {
+    managed: Arc<ManagedStore>,
+    store: Arc<Store>,
+    active: BTreeMap<Id, watch::Sender<bool>>,
+    active_accounts: BTreeMap<Id, Id>,
+    active_workspaces: BTreeMap<Id, String>,
+    launch_attempts: BTreeMap<Id, LaunchAttempt>,
+    joins: JoinSet<Completion>,
+    unrecorded: Vec<Unrecorded>,
+    unreadable_noted: usize,
+}
+
+impl Supervisor {
+    fn new(managed: Arc<ManagedStore>, store: Arc<Store>) -> Self {
+        Self {
+            managed,
+            store,
+            active: BTreeMap::new(),
+            active_accounts: BTreeMap::new(),
+            active_workspaces: BTreeMap::new(),
+            launch_attempts: BTreeMap::new(),
+            joins: JoinSet::new(),
+            unrecorded: Vec::new(),
+            unreadable_noted: 0,
+        }
+    }
+
+    /// Best-effort detail update for a task that stays in its state. A
+    /// changed record (`Conflict`) or a store error is ignored: the detail
+    /// is advisory and the next tick re-reads the task.
+    async fn note(&mut self, task: &ManagedTask, detail: String) -> Option<ManagedTask> {
+        if task.detail == detail || bounded_text(&detail, 4096).is_err() {
+            return None;
+        }
+        let mut next = task.clone();
+        next.detail = detail;
+        next.revision += 1;
+        next.updated_at_ms = now_ms();
+        self.managed.transition(task, next, None).await.ok()
+    }
+
+    fn miss(&mut self, id: &Id, revision: u64) {
+        self.launch_attempts
+            .entry(id.clone())
+            .or_insert_with(|| LaunchAttempt::new(revision))
+            .miss(revision);
+    }
+
+    /// A per-task supervisor failure: keep the task queued with a bounded
+    /// diagnostic and back off instead of stopping the supervisor.
+    async fn task_fault(&mut self, task: &ManagedTask, error: &Error) {
+        let detail = format!(
+            "supervisor could not dispatch this task: {}; retrying with backoff",
+            fault_text(error)
+        );
+        let revision = match self.note(task, detail).await {
+            Some(next) => next.revision,
+            None => task.revision,
+        };
+        self.miss(&task.id, revision);
+    }
+
+    /// A worker outcome the store refused to record. It is retried with
+    /// backoff; after the bound the task is marked uncertain so custody is
+    /// retained without an automatic retry.
+    async fn record(&mut self, completion: Completion, failures: u32) {
+        match self
+            .managed
+            .finish_ref(&self.store, &completion.id, &completion.result)
+            .await
+        {
+            Ok(finished) => {
+                if finished.state == TaskState::Queued
+                    && finished.detail.starts_with("dispatch did not cross")
+                {
+                    self.miss(&completion.id, finished.revision);
+                } else {
+                    self.launch_attempts.remove(&completion.id);
+                }
+            }
+            Err(error) => {
+                let failures = failures.saturating_add(1);
+                if failures < MAX_RECORD_FAILURES {
+                    self.unrecorded.push(Unrecorded {
+                        completion,
+                        at: Instant::now(),
+                        failures,
+                    });
+                    return;
+                }
+                record_supervisor_fault(
+                    self.managed.root(),
+                    &format!(
+                        "worker outcome could not be recorded: {}",
+                        fault_text(&error)
+                    ),
+                );
+                if let Ok(Some(task)) = self.managed.task(&completion.id)
+                    && !task.state.terminal()
+                {
+                    let mut next = task.clone();
+                    next.state = TaskState::Uncertain;
+                    next.detail = format!(
+                        "the worker outcome could not be recorded: {}; no retry will be launched",
+                        fault_text(&error)
+                    );
+                    next.next_prompt.clear();
+                    next.attachments.clear();
+                    next.revision += 1;
+                    next.updated_at_ms = now_ms();
+                    let message = ManagedStore::assistant(
+                        format!("**{}** needs recovery. {}", task.title, next.detail),
+                        Some(&task.id),
+                        next.revision,
+                    );
+                    let _ = self.managed.transition(&task, next, Some(message)).await;
+                }
+            }
+        }
+    }
+
+    /// One supervisor tick. Returns `Err` only for a supervisor-level
+    /// failure (the task list itself); every per-task failure is isolated.
+    async fn tick(&mut self, draining: bool) -> Result<()> {
+        while let Some(joined) = self.joins.try_join_next() {
+            match joined {
+                Ok(completion) => {
+                    self.active.remove(&completion.id);
+                    self.active_accounts.remove(&completion.id);
+                    self.active_workspaces.remove(&completion.id);
+                    self.record(completion, 0).await;
+                }
+                Err(_) => record_supervisor_fault(
+                    self.managed.root(),
+                    "a managed worker task ended without a completion record",
+                ),
+            }
+        }
+        let due: Vec<_> = {
+            let mut pending = std::mem::take(&mut self.unrecorded);
+            let (due, waiting): (Vec<_>, Vec<_>) = pending.drain(..).partition(|entry| {
+                entry.at.elapsed() >= Duration::from_secs(5u64 << entry.failures.min(4))
+            });
+            self.unrecorded = waiting;
+            due
+        };
+        for entry in due {
+            self.record(entry.completion, entry.failures).await;
+        }
+        let unreadable = self.managed.unreadable_tasks();
+        if unreadable > self.unreadable_noted {
+            self.unreadable_noted = unreadable;
+            record_supervisor_fault(
+                self.managed.root(),
+                &format!("{unreadable} task rows could not be decoded and were skipped"),
+            );
+        }
+        let tasks = self.managed.active_tasks(128)?;
+        let ids: BTreeSet<_> = tasks.iter().map(|task| task.id.clone()).collect();
+        self.launch_attempts.retain(|id, _| ids.contains(id));
+        for task in &tasks {
+            if !task.cancel_requested {
+                continue;
+            }
+            if let Some(cancel) = self.active.get(&task.id) {
+                let _ = cancel.send(true);
+            } else if matches!(task.state, TaskState::Queued | TaskState::NeedsInput) {
+                match self.managed.settle_unstarted_cancel(task).await {
+                    Ok(_) | Err(Error::Conflict(_)) => (),
+                    Err(error) => self.task_fault(task, &error).await,
+                }
+            }
+        }
+        for task in tasks
+            .into_iter()
+            .filter(|task| !draining && task.state == TaskState::Queued && !task.cancel_requested)
+        {
+            if self.active.len() >= MAX_ACTIVE {
+                break;
+            }
+            if self.active.contains_key(&task.id)
+                || self
+                    .active_workspaces
+                    .values()
+                    .any(|workspace| workspace == &task.workspace)
+                || self
+                    .launch_attempts
+                    .get(&task.id)
+                    .is_some_and(|attempt| !attempt.due(task.revision))
+            {
+                continue;
+            }
+            match self.launch(&task).await {
+                Ok(Dispatch::Started) => {
+                    self.launch_attempts.remove(&task.id);
+                }
+                Ok(Dispatch::Settled) => {
+                    self.launch_attempts.remove(&task.id);
+                }
+                Ok(Dispatch::Deferred(detail)) => {
+                    let revision = match self.note(&task, detail).await {
+                        Some(next) => next.revision,
+                        None => task.revision,
+                    };
+                    self.miss(&task.id, revision);
+                }
+                Err(error) => self.task_fault(&task, &error).await,
+            }
+        }
+        Ok(())
+    }
+
+    async fn launch(&mut self, task: &ManagedTask) -> Result<Dispatch> {
+        let managed = self.managed.clone();
+        let store = self.store.clone();
+        if workspace_busy(&store, &task.workspace)? {
+            return Ok(Dispatch::Deferred(
+                "waiting for an eligible worker: the workspace has an active turn".into(),
+            ));
+        }
+        if !Path::new(&task.workspace).is_dir() {
+            let mut failed = task.clone();
+            failed.state = TaskState::Failed;
+            failed.detail = "workspace is unavailable".into();
+            failed.revision += 1;
+            failed.updated_at_ms = now_ms();
+            let message = ManagedStore::assistant(
+                format!(
+                    "**{}** could not start because its workspace is unavailable.",
+                    task.title
+                ),
+                Some(&task.id),
+                failed.revision,
+            );
+            return match managed.transition(task, failed, Some(message)).await {
+                Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
+                Err(error) => Err(error),
+            };
+        }
+        let config = Config::load(store.root())?.0;
+        let prompt = worker_prompt(
+            task,
+            &managed.preferences(Path::new(&task.workspace))?,
+            &managed.mailbox_tail(&task.id, 16)?,
+        );
+        if bounded_text(&prompt, xcb_core::MAX_TEXT_BYTES).is_err() {
+            let mut failed = task.clone();
+            failed.state = TaskState::Failed;
+            failed.detail =
+                "worker prompt exceeds the supported context limit; start a smaller task".into();
+            failed.revision += 1;
+            failed.updated_at_ms = now_ms();
+            let message =
+                ManagedStore::assistant(failed.detail.clone(), Some(&task.id), failed.revision);
+            return match managed.transition(task, failed, Some(message)).await {
+                Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
+                Err(error) => Err(error),
+            };
+        }
+        let created_session = task.session.is_none();
+        let mut route_reason = task
+            .route_reason
+            .clone()
+            .unwrap_or_else(|| "continuing the existing worker session".into());
+        let session = if let Some(id) = &task.session {
+            match store.session(id)? {
+                Some(session) => session,
+                None => {
+                    return match managed
+                        .fail_unstarted(
+                            task,
+                            "the saved worker session is missing; start a new task with the retained goal",
+                        )
+                        .await
+                    {
+                        Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
+                        Err(error) => Err(error),
+                    };
+                }
+            }
+        } else {
+            if task.worker_sessions.len() >= 16 {
+                return match managed
+                    .fail_unstarted(
+                        task,
+                        "the worker-session limit was reached; start a new task from the last report",
+                    )
+                    .await
+                {
+                    Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
+                    Err(error) => Err(error),
+                };
+            }
+            let required_provider = task
+                .provider_required
+                .then_some(task.provider_preference)
+                .flatten();
+            let excluded_routes: BTreeSet<_> = task.tried_routes.iter().cloned().collect();
+            let excluded_accounts: BTreeSet<_> = task.failed_accounts.iter().cloned().collect();
+            let decision = match routing::smart_route(
+                &store,
+                &config,
+                routing::RouteRequest {
+                    task: &task.goal,
+                    required_provider,
+                    preferred_provider: task.provider_preference,
+                    excluded_routes: &excluded_routes,
+                    excluded_accounts: &excluded_accounts,
+                    account: None,
+                },
+            )
+            .await
+            {
+                Ok(decision) => decision,
+                Err(Error::Unavailable(reason)) if reason == routing::NO_CONNECTED_ACCOUNT => {
+                    return Ok(Dispatch::Deferred(match required_provider {
+                        Some(provider) => format!("{NO_ACCOUNT_DETAIL} · required {provider}"),
+                        None => NO_ACCOUNT_DETAIL.into(),
+                    }));
+                }
+                Err(Error::Conflict(reason) | Error::Unavailable(reason)) => {
+                    return Ok(Dispatch::Deferred(format!(
+                        "waiting for an eligible worker: {reason}"
+                    )));
+                }
+                Err(error) => return Err(error),
+            };
+            route_reason = decision.reason;
+            let model_key = decision.model.key();
+            match kernel::new_session(
+                &store,
+                Path::new(&task.workspace),
+                &config,
+                Some(&decision.account),
+                Some(&model_key),
+            ) {
+                Ok(session) => session,
+                Err(Error::Conflict(reason) | Error::Unavailable(reason)) => {
+                    return Ok(Dispatch::Deferred(format!(
+                        "waiting for an eligible worker: {reason}"
+                    )));
+                }
+                Err(error) => {
+                    let mut failed = task.clone();
+                    failed.state = TaskState::Failed;
+                    failed.detail = "worker route preparation failed".into();
+                    failed.last_output = Some(error.to_string());
+                    failed.revision += 1;
+                    failed.updated_at_ms = now_ms();
+                    let message = ManagedStore::assistant(
+                        format!(
+                            "**{}** could not prepare a worker route: {error}",
+                            task.title
+                        ),
+                        Some(&task.id),
+                        failed.revision,
+                    );
+                    return match managed.transition(task, failed, Some(message)).await {
+                        Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
+                        Err(error) => Err(error),
+                    };
+                }
+            }
+        };
+        if self
+            .active_accounts
+            .values()
+            .any(|account| account == &session.account)
+        {
+            if created_session {
+                store.remove_session(&session.id)?;
+            }
+            return Ok(Dispatch::Deferred(
+                "waiting for an eligible worker: the selected account is busy with another task"
+                    .into(),
+            ));
+        }
+        let route = format!("{} · {}", session.model.key(), session.account);
+        let message_count = store.message_count(&session.id)?;
+        let prepared = match managed
+            .prepare(task, session.id.clone(), route, route_reason, message_count)
+            .await
+        {
+            Ok(task) => task,
+            Err(Error::Conflict(_)) => {
+                if created_session {
+                    store.remove_session(&session.id)?;
+                }
+                return Ok(Dispatch::Settled);
+            }
+            Err(error) => return Err(error),
+        };
+        let images = prepared.attachments.clone();
+        let id = prepared.id.clone();
+        let (cancel, cancelled) = watch::channel(false);
+        self.active.insert(id.clone(), cancel);
+        self.active_accounts
+            .insert(id.clone(), session.account.clone());
+        self.active_workspaces
+            .insert(id.clone(), prepared.workspace.clone());
+        self.joins.spawn(async move {
+            let observer: Observer =
+                Arc::new(
+                    |event| {
+                        if let Progress::Notice(_) | Progress::Tool(_) = event {}
+                    },
+                );
+            // A nested task turns a worker panic into an ordinary error for
+            // `finish`, which retains custody instead of ending the supervisor.
+            let result = match tokio::spawn(kernel::execute_once(
+                store, session.id, prompt, images, cancelled, observer,
+            ))
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(Error::Unavailable(
+                    "managed worker task aborted inside the supervisor",
+                )),
+            };
+            Completion { id, result }
+        });
+        Ok(Dispatch::Started)
+    }
+
+    /// Cancel every worker and record each settlement before exit.
+    async fn shutdown(&mut self) {
+        for cancel in self.active.values() {
+            let _ = cancel.send(true);
+        }
+        while let Some(joined) = self.joins.join_next().await {
+            match joined {
+                Ok(completion) => self.record(completion, 0).await,
+                Err(_) => record_supervisor_fault(
+                    self.managed.root(),
+                    "a managed worker task ended without a completion record",
+                ),
+            }
+        }
+        let pending = std::mem::take(&mut self.unrecorded);
+        for entry in pending {
+            self.record(entry.completion, MAX_RECORD_FAILURES).await;
+        }
+    }
+}
+
 pub async fn daemon(root: PathBuf) -> Result<i32> {
     let managed = Arc::new(ManagedStore::open(&root)?);
     let lock_path = managed.root().join("supervisor.lock");
@@ -2468,247 +3206,83 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
     }
     let mut identity = crate::managed_supervisor::SupervisorIdentity::register(&root)?;
     let store = Arc::new(Store::open(&root)?);
-    managed.reconcile_startup(&store).await?;
-    let offer_root = root.clone();
-    let mut offer_refresh = tokio::task::spawn_blocking(move || {
-        let _ = crate::offers::refresh_if_due(&offer_root, now_ms());
-    });
-    let mut active: BTreeMap<Id, watch::Sender<bool>> = BTreeMap::new();
-    let mut active_accounts: BTreeMap<Id, Id> = BTreeMap::new();
-    let mut active_workspaces: BTreeMap<Id, String> = BTreeMap::new();
-    let mut launch_attempts: BTreeMap<Id, Instant> = BTreeMap::new();
-    let mut joins: JoinSet<Completion> = JoinSet::new();
+    // Lock, identity and store failures above are the only fatal startup
+    // errors. Everything after this point is recorded and isolated.
+    clear_supervisor_fault(managed.root());
+    if let Err(error) = managed.reconcile_startup(&store).await {
+        record_supervisor_fault(
+            managed.root(),
+            &format!(
+                "startup reconciliation skipped a task: {}",
+                fault_text(&error)
+            ),
+        );
+    }
+    let mut supervisor = Supervisor::new(managed.clone(), store);
+    let spawn_refresh = |root: PathBuf| {
+        tokio::task::spawn_blocking(move || {
+            let _ = crate::offers::refresh_if_due(&root, now_ms());
+        })
+    };
+    let mut offer_refresh = Some(spawn_refresh(root.clone()));
     let mut idle_since = Instant::now();
     let mut offer_check = Instant::now();
+    let mut tick_faults = 0u32;
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                if offer_check.elapsed() >= Duration::from_secs(60 * 60) && offer_refresh.is_finished() {
-                    let _ = (&mut offer_refresh).await;
-                    let offer_root = root.clone();
+                if offer_check.elapsed() >= Duration::from_secs(60 * 60)
+                    && offer_refresh.as_ref().is_none_or(tokio::task::JoinHandle::is_finished)
+                {
+                    if let Some(handle) = offer_refresh.take() {
+                        let _ = handle.await;
+                    }
                     offer_check = Instant::now();
-                    offer_refresh = tokio::task::spawn_blocking(move || {
-                        let _ = crate::offers::refresh_if_due(&offer_root, now_ms());
-                    });
-                }
-                while let Some(joined) = joins.try_join_next() {
-                    let completion = joined.map_err(|_| Error::Unavailable("managed worker task failed"))?;
-                    active.remove(&completion.id);
-                    active_accounts.remove(&completion.id);
-                    active_workspaces.remove(&completion.id);
-                    let finished = managed.finish(&store, &completion.id, completion.result).await?;
-                    if finished.state == TaskState::Queued
-                        && finished.detail.starts_with("dispatch did not cross")
-                    {
-                        launch_attempts.insert(completion.id, Instant::now());
-                    } else {
-                        launch_attempts.remove(&completion.id);
-                    }
-                }
-                let tasks = managed.active_tasks(128)?;
-                for task in &tasks {
-                    if !task.cancel_requested { continue; }
-                    if let Some(cancel) = active.get(&task.id) {
-                        let _ = cancel.send(true);
-                    } else if matches!(task.state, TaskState::Queued | TaskState::NeedsInput) {
-                        match managed.settle_unstarted_cancel(task).await {
-                            Ok(_) | Err(Error::Conflict(_)) => (),
-                            Err(error) => return Err(error),
-                        }
-                    }
+                    offer_refresh = Some(spawn_refresh(root.clone()));
                 }
                 let draining = identity.binary_replaced();
-                for task in tasks.into_iter().filter(|task| !draining && task.state == TaskState::Queued && !task.cancel_requested) {
-                    if active.len() >= MAX_ACTIVE { break; }
-                    if active.contains_key(&task.id)
-                        || active_workspaces.values().any(|workspace| workspace == &task.workspace)
-                        || launch_attempts
-                            .get(&task.id)
-                            .is_some_and(|attempt| attempt.elapsed() < Duration::from_secs(5))
-                        || workspace_busy(&store, &task.workspace)?
-                    {
-                        continue;
-                    }
-                    launch_attempts.insert(task.id.clone(), Instant::now());
-                    if !Path::new(&task.workspace).is_dir() {
-                        let mut failed = task.clone();
-                        failed.state = TaskState::Failed;
-                        failed.detail = "workspace is unavailable".into();
-                        failed.revision += 1;
-                        failed.updated_at_ms = now_ms();
-                        let message = ManagedStore::assistant(
-                            format!("**{}** could not start because its workspace is unavailable.", task.title),
-                            Some(&task.id),
-                            failed.revision,
+                match supervisor.tick(draining).await {
+                    Ok(()) => tick_faults = 0,
+                    Err(error) => {
+                        tick_faults = tick_faults.saturating_add(1);
+                        record_supervisor_fault(
+                            managed.root(),
+                            &format!("supervisor tick failed: {}", fault_text(&error)),
                         );
-                        match managed.transition(&task, failed, Some(message)).await {
-                            Ok(_) | Err(Error::Conflict(_)) => continue,
-                            Err(error) => return Err(error),
+                        if tick_faults >= MAX_TICK_FAULTS {
+                            supervisor.shutdown().await;
+                            return Err(error);
                         }
                     }
-                    let config = Config::load(store.root())?.0;
-                    let prompt = worker_prompt(
-                        &task,
-                        &managed.preferences(Path::new(&task.workspace))?,
-                        &managed.mailbox_tail(&task.id, 16)?,
-                    );
-                    if bounded_text(&prompt, xcb_core::MAX_TEXT_BYTES).is_err() {
-                        let mut failed = task.clone();
-                        failed.state = TaskState::Failed;
-                        failed.detail = "worker prompt exceeds the supported context limit; start a smaller task".into();
-                        failed.revision += 1;
-                        failed.updated_at_ms = now_ms();
-                        let message = ManagedStore::assistant(failed.detail.clone(), Some(&task.id), failed.revision);
-                        match managed.transition(&task, failed, Some(message)).await {
-                            Ok(_) | Err(Error::Conflict(_)) => continue,
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    let created_session = task.session.is_none();
-                    let mut route_reason = task
-                        .route_reason
-                        .clone()
-                        .unwrap_or_else(|| "continuing the existing worker session".into());
-                    let session = if let Some(id) = &task.session {
-                        match store.session(id)? {
-                            Some(session) => session,
-                            None => {
-                                match managed.fail_unstarted(&task, "the saved worker session is missing; start a new task with the retained goal").await {
-                                    Ok(_) | Err(Error::Conflict(_)) => continue,
-                                    Err(error) => return Err(error),
-                                }
-                            }
-                        }
-                    } else {
-                        if task.worker_sessions.len() >= 16 {
-                            match managed.fail_unstarted(&task, "the worker-session limit was reached; start a new task from the last report").await {
-                                Ok(_) | Err(Error::Conflict(_)) => continue,
-                                Err(error) => return Err(error),
-                            }
-                        }
-                        let required_provider = task
-                            .provider_required
-                            .then_some(task.provider_preference)
-                            .flatten();
-                        let excluded_routes: BTreeSet<_> =
-                            task.tried_routes.iter().cloned().collect();
-                        let excluded_accounts: BTreeSet<_> =
-                            task.failed_accounts.iter().cloned().collect();
-                        let decision = match routing::smart_route(
-                            &store,
-                            &config,
-                            routing::RouteRequest {
-                                task: &task.goal,
-                                required_provider,
-                                preferred_provider: task.provider_preference,
-                                excluded_routes: &excluded_routes,
-                                excluded_accounts: &excluded_accounts,
-                                account: None,
-                            },
-                        )
-                        .await
-                        {
-                            Ok(decision) => decision,
-                            Err(Error::Conflict(_) | Error::Unavailable(_)) => continue,
-                            Err(error) => return Err(error),
-                        };
-                        route_reason = decision.reason;
-                        let model_key = decision.model.key();
-                        match kernel::new_session(
-                            &store,
-                            Path::new(&task.workspace),
-                            &config,
-                            Some(&decision.account),
-                            Some(&model_key),
-                        ) {
-                            Ok(session) => session,
-                            Err(Error::Conflict(_) | Error::Unavailable(_)) => continue,
-                            Err(error) => {
-                                let mut failed = task.clone();
-                                failed.state = TaskState::Failed;
-                                failed.detail = "worker route preparation failed".into();
-                                failed.last_output = Some(error.to_string());
-                                failed.revision += 1;
-                                failed.updated_at_ms = now_ms();
-                                let message = ManagedStore::assistant(
-                                    format!("**{}** could not prepare a worker route: {error}", task.title),
-                                    Some(&task.id),
-                                    failed.revision,
-                                );
-                                match managed.transition(&task, failed, Some(message)).await {
-                                    Ok(_) | Err(Error::Conflict(_)) => continue,
-                                    Err(error) => return Err(error),
-                                }
-                            }
-                        }
-                    };
-                    if active_accounts.values().any(|account| account == &session.account) {
-                        if created_session {
-                            store.remove_session(&session.id)?;
-                        }
-                        continue;
-                    }
-                    let route = format!("{} · {}", session.model.key(), session.account);
-                    let message_count = store.message_count(&session.id)?;
-                    let prepared = match managed
-                        .prepare(
-                            &task,
-                            session.id.clone(),
-                            route,
-                            route_reason,
-                            message_count,
-                        )
-                        .await
-                    {
-                        Ok(task) => task,
-                        Err(Error::Conflict(_)) => {
-                            if created_session {
-                                store.remove_session(&session.id)?;
-                            }
-                            continue;
-                        }
-                        Err(error) => return Err(error),
-                    };
-                    let images = prepared.attachments.clone();
-                    let id = prepared.id.clone();
-                    let (cancel, cancelled) = watch::channel(false);
-                    active.insert(id.clone(), cancel);
-                    active_accounts.insert(id.clone(), session.account.clone());
-                    active_workspaces.insert(id.clone(), prepared.workspace.clone());
-                    let store = store.clone();
-                    joins.spawn(async move {
-                        let observer: Observer = Arc::new(|event| { if let Progress::Notice(_) | Progress::Tool(_) = event {} });
-                        let result = kernel::execute_once(
-                            store,
-                            session.id,
-                            prompt,
-                            images,
-                            cancelled,
-                            observer,
-                        )
-                        .await;
-                        Completion { id, result }
-                    });
                 }
-                let nonterminal = !managed.active_tasks(1)?.is_empty();
-                if active.is_empty() && draining { break; }
-                if active.is_empty() && !nonterminal {
-                    if idle_since.elapsed() >= IDLE_EXIT { break; }
+                let nonterminal = managed.active_tasks(1).map(|tasks| !tasks.is_empty()).unwrap_or(true);
+                if supervisor.active.is_empty() && draining { break; }
+                if supervisor.active.is_empty() && !nonterminal {
+                    if idle_since.elapsed() >= IDLE_EXIT {
+                        // Settle the in-flight offer refresh while still holding
+                        // the lock, then re-check: a client that committed a task
+                        // meanwhile saw the lock held and relies on this loop.
+                        if let Some(handle) = offer_refresh.take() {
+                            let _ = handle.await;
+                        }
+                        match managed.active_tasks(1) {
+                            Ok(tasks) if tasks.is_empty() => break,
+                            _ => idle_since = Instant::now(),
+                        }
+                    }
                 } else { idle_since = Instant::now(); }
             }
             _ = interrupt.recv() => {
-                for cancel in active.values() { let _ = cancel.send(true); }
-                while let Some(joined) = joins.join_next().await {
-                    let completion = joined.map_err(|_| Error::Unavailable("managed worker task failed"))?;
-                    managed.finish(&store, &completion.id, completion.result).await?;
-                }
+                supervisor.shutdown().await;
                 break;
             }
         }
     }
-    let _ = offer_refresh.await;
+    if let Some(handle) = offer_refresh.take() {
+        let _ = handle.await;
+    }
     Ok(0)
 }
 
@@ -2778,12 +3352,21 @@ fn managed_view(
             .filter(|task| !active_ids.contains(&task.id))
             .take(16),
     );
+    // A queued task that no connected account can serve needs the user, not
+    // a spinner: it shows as needing action until an account is added.
+    let task_state = |task: &ManagedTask| {
+        if blocked_on_account(task) {
+            State::NeedsAction
+        } else {
+            task.state.ui()
+        }
+    };
     view.tasks = tasks
         .iter()
         .map(|task| TaskRow {
             id: task.id.clone(),
             title: task.title.clone(),
-            state: task.state.ui(),
+            state: task_state(task),
             detail: task.detail.clone(),
             route: task.route.clone(),
             workspace: task.workspace.clone(),
@@ -2795,6 +3378,8 @@ fn managed_view(
         .any(|task| &task.conversation == conversation && !task.state.terminal());
     view.state = if tasks.iter().any(|task| task.state == TaskState::NeedsInput) {
         State::NeedsAnswer
+    } else if tasks.iter().any(blocked_on_account) {
+        State::NeedsAction
     } else if tasks
         .iter()
         .any(|task| matches!(task.state, TaskState::Queued | TaskState::Running))
@@ -2806,20 +3391,23 @@ fn managed_view(
         State::Idle
     };
     view.pane = xcb_core::panes::Pane::focus();
-    view.extensions.insert(
-        0,
-        (
-            "algal supervisor".into(),
-            format!(
-                "on · {} tasks · {}",
-                tasks.len(),
-                workspace
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("workspace")
-            ),
-        ),
+    let mut status = format!(
+        "on · {} tasks · {}",
+        tasks.len(),
+        workspace
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("workspace")
     );
+    let unreadable = managed.unreadable_tasks();
+    if unreadable > 0 {
+        status.push_str(&format!(" · {unreadable} unreadable task rows skipped"));
+    }
+    if let Some(fault) = supervisor_fault(managed.root()) {
+        status.push_str(&format!(" · last supervisor fault: {fault}"));
+    }
+    view.extensions
+        .insert(0, ("algal supervisor".into(), status));
     Ok(view)
 }
 
@@ -2838,14 +3426,20 @@ pub async fn serve_ui(
     ensure_daemon(store.root(), &executable)?;
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     let mut quit = false;
+    let mut last_stamp: Option<ViewStamp> = None;
+    let mut last_ensure = Instant::now();
+    let mut last_ensure_error: Option<String> = None;
+    let mut dispatch_pending = false;
     while !quit {
         ticker.tick().await;
+        let mut handled = false;
         for _ in 0..32 {
             let intent = match input.try_recv() {
                 Ok(intent) => intent,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => Intent::Quit,
             };
+            handled = true;
             match intent {
                 Intent::Submit {
                     id,
@@ -2863,6 +3457,7 @@ pub async fn serve_ui(
                         .await
                     {
                         Ok(()) => {
+                            last_ensure = Instant::now();
                             if let Err(error) = ensure_daemon(store.root(), &executable) {
                                 output.try_send(Update::Notice(format!("Task was saved, but the background supervisor could not start: {error}"))).ok();
                             }
@@ -2945,15 +3540,37 @@ pub async fn serve_ui(
                 }
             }
         }
-        if !quit {
-            output
-                .try_send(Update::View(Box::new(managed_view(
-                    &store,
-                    &managed,
-                    &conversation,
-                    &workspace,
-                )?)))
-                .ok();
+        if quit {
+            break;
+        }
+        // Rebuild the view only when a cheap change signal moved or an
+        // intent was handled; the 250 ms cadence itself is unchanged.
+        let stamp = managed.view_stamp(store.root(), &conversation).ok();
+        if handled || stamp.is_none() || stamp != last_stamp {
+            let view = managed_view(&store, &managed, &conversation, &workspace)?;
+            dispatch_pending = view
+                .tasks
+                .iter()
+                .any(|task| matches!(task.state, State::Working | State::NeedsAction));
+            output.try_send(Update::View(Box::new(view))).ok();
+            last_stamp = stamp;
+        }
+        // A supervisor may exit between committing a task and the client's
+        // lock probe; while work is pending, re-probe cheaply every 5 s.
+        if dispatch_pending && last_ensure.elapsed() >= Duration::from_secs(5) {
+            last_ensure = Instant::now();
+            let error = ensure_daemon(store.root(), &executable)
+                .err()
+                .map(|error| error.to_string());
+            if error.is_some() && error != last_ensure_error {
+                output
+                    .try_send(Update::Notice(format!(
+                        "The background supervisor could not start: {}",
+                        error.as_deref().unwrap_or_default()
+                    )))
+                    .ok();
+            }
+            last_ensure_error = error;
         }
     }
     output.try_send(Update::Stopped).ok();
@@ -4273,5 +4890,540 @@ mod tests {
             updated_at_ms: 1,
         };
         assert!(worker_prompt(&task, &preferences, &[]).contains("keep updates concise"));
+    }
+
+    fn idle_outcome(terminal: Terminal, text: &str) -> Outcome {
+        Outcome {
+            diagnostic: None,
+            text: text.into(),
+            state: State::Idle,
+            facts: xcb_core::policy::TurnFacts {
+                terminal,
+                joined: true,
+                effects: EffectState::Settled,
+                pending_attention: false,
+                failure: None,
+            },
+        }
+    }
+
+    /// A queued task already bound to a prepared worker session, ready for
+    /// `finish` without a provider process.
+    async fn prepared_task(
+        managed: &ManagedStore,
+        xcb: &Store,
+        chat: &Id,
+        workspace: &Path,
+        name: &str,
+    ) -> ManagedTask {
+        use xcb_core::models::{Mode, ModelChoice};
+        let account = xcb.add_account(Provider::Claude, "Test", 1, None).unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("sonnet").unwrap(),
+            label: "Sonnet".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        let session = xcb
+            .create_session(&account.id, model, workspace, 1)
+            .unwrap();
+        let task = managed
+            .create_task(chat, message(name), "do work".into(), vec![], workspace)
+            .await
+            .unwrap();
+        managed
+            .prepare(
+                &task,
+                session.id,
+                "claude/sonnet".into(),
+                "fixture".into(),
+                0,
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn mark_running(managed: &ManagedStore, task: &ManagedTask) -> ManagedTask {
+        let mut running = task.clone();
+        running.state = TaskState::Running;
+        running.revision += 1;
+        running.updated_at_ms = now_ms();
+        managed.transition(task, running, None).await.unwrap()
+    }
+
+    /// A task record changed underneath the supervisor is a `Conflict`: it is
+    /// skipped, not collected, and the remaining tasks still reconcile.
+    #[tokio::test]
+    async fn startup_reconcile_continues_past_a_conflicting_task() {
+        let root = root();
+        let workspace = workspace(&root);
+        let state = private::directory(&workspace.join("state")).unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let conflicted = managed
+            .create_task(
+                &chat,
+                message("m_conflict"),
+                "one".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        let clean = managed
+            .create_task(&chat, message("m_clean"), "two".into(), vec![], &workspace)
+            .await
+            .unwrap();
+        let conflicted = mark_running(&managed, &conflicted).await;
+        mark_running(&managed, &clean).await;
+        // A record that no longer matches the persisted policy digest produces
+        // a Conflict transition, like a task another writer already settled.
+        let mut poisoned = conflicted.clone();
+        poisoned.policy_digest = "sha256:changed".into();
+        managed
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE tasks SET payload=?1 WHERE id=?2",
+                params![
+                    serde_json::to_string(&poisoned).unwrap(),
+                    conflicted.id.as_str()
+                ],
+            )
+            .unwrap();
+        managed.reconcile_startup(&xcb).await.unwrap();
+        let skipped = managed.task(&conflicted.id).unwrap().unwrap();
+        assert_eq!(skipped.state, TaskState::Running);
+        let recovered = managed.task(&clean.id).unwrap().unwrap();
+        assert_eq!(recovered.state, TaskState::Queued);
+    }
+
+    /// A task whose reconcile fails is collected and reported after the sweep;
+    /// it must not abort reconciliation for the remaining tasks.
+    #[tokio::test]
+    async fn startup_reconcile_collects_a_per_task_error_and_recovers_the_rest() {
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let broken = prepared_task(&managed, &xcb, &chat, &workspace, "m_broken").await;
+        let session = broken.session.clone().unwrap();
+        let clean = managed
+            .create_task(&chat, message("m_clean"), "two".into(), vec![], &workspace)
+            .await
+            .unwrap();
+        mark_running(&managed, &clean).await;
+        // Leave a settled worker outcome behind, then corrupt the session row
+        // so only this task's reconcile fails.
+        let input = Message {
+            id: new_id("input"),
+            role: Role::User,
+            text: broken.goal.clone(),
+            attachments: vec![],
+            at_ms: now_ms(),
+            provenance: None,
+        };
+        let current = xcb
+            .append_message(
+                &session,
+                xcb.session(&session).unwrap().unwrap().revision,
+                &input,
+            )
+            .unwrap();
+        let run = xcb
+            .prepare_run(&session, current.revision, now_ms())
+            .unwrap();
+        let outcome = idle_outcome(Terminal::Completed, "done");
+        let current = xcb.session(&session).unwrap().unwrap();
+        xcb.append_message(
+            &session,
+            current.revision,
+            &Message {
+                id: new_id("answer"),
+                role: Role::Assistant,
+                text: outcome.text.clone(),
+                attachments: vec![],
+                at_ms: now_ms(),
+                provenance: None,
+            },
+        )
+        .unwrap();
+        xcb.settle_outcome(&run, &input.id, &outcome, now_ms())
+            .unwrap();
+        let raw = rusqlite::Connection::open(state.join("xcb.sqlite")).unwrap();
+        raw.execute(
+            "UPDATE sessions SET payload='{corrupt' WHERE id=?1",
+            [session.as_str()],
+        )
+        .unwrap();
+        drop(raw);
+        // The failing task is reported; the healthy one still reconciles.
+        assert!(managed.reconcile_startup(&xcb).await.is_err());
+        let skipped = managed.task(&broken.id).unwrap().unwrap();
+        assert_eq!(skipped.state, TaskState::Running);
+        let recovered = managed.task(&clean.id).unwrap().unwrap();
+        assert_eq!(recovered.state, TaskState::Queued);
+    }
+
+    /// One task's dispatch error is recorded on that task with backoff while
+    /// the tick continues; a queued task no connected account can serve shows
+    /// the user what to do instead of spinning forever.
+    #[tokio::test]
+    async fn supervisor_tick_isolates_per_task_errors_and_marks_no_account() {
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = Arc::new(ManagedStore::open(&state).unwrap());
+        let xcb = Arc::new(Store::open(&state).unwrap());
+        let chat = conversation(&managed, &workspace).await;
+        // A queued task whose saved worker session no longer decodes fails its
+        // own launch; the tick continues for the remaining task.
+        let broken = prepared_task(&managed, &xcb, &chat, &workspace, "m_broken").await;
+        let session = broken.session.clone().unwrap();
+        let mut requeued = broken.clone();
+        requeued.state = TaskState::Queued;
+        requeued.revision += 1;
+        requeued.updated_at_ms = now_ms();
+        let broken = managed.transition(&broken, requeued, None).await.unwrap();
+        let raw = rusqlite::Connection::open(state.join("xcb.sqlite")).unwrap();
+        raw.execute(
+            "UPDATE sessions SET payload='{corrupt' WHERE id=?1",
+            [session.as_str()],
+        )
+        .unwrap();
+        drop(raw);
+        let stranded = managed
+            .create_task(
+                &chat,
+                message("m_stranded"),
+                "three".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        let mut supervisor = Supervisor::new(managed.clone(), xcb.clone());
+        supervisor.tick(false).await.unwrap();
+        let broken = managed.task(&broken.id).unwrap().unwrap();
+        assert_eq!(broken.state, TaskState::Queued);
+        assert!(
+            broken.detail.contains("supervisor could not dispatch"),
+            "{}",
+            broken.detail
+        );
+        let stranded = managed.task(&stranded.id).unwrap().unwrap();
+        assert_eq!(stranded.state, TaskState::Queued);
+        assert!(
+            stranded.detail.starts_with(NO_ACCOUNT_DETAIL),
+            "{}",
+            stranded.detail
+        );
+        assert!(blocked_on_account(&stranded));
+        assert_eq!(supervisor.launch_attempts.len(), 2);
+        let view = managed_view(&xcb, &managed, &chat, &workspace).unwrap();
+        assert_eq!(view.state, State::NeedsAction);
+        assert!(
+            view.tasks
+                .iter()
+                .any(|task| task.id == stranded.id && task.state == State::NeedsAction)
+        );
+        // The launch backoff means an immediate second tick retries nothing.
+        supervisor.tick(false).await.unwrap();
+        assert_eq!(
+            managed.task(&broken.id).unwrap().unwrap().revision,
+            broken.revision
+        );
+        assert_eq!(
+            managed.task(&stranded.id).unwrap().unwrap().revision,
+            stranded.revision
+        );
+    }
+
+    /// An interrupted but settled worker denied only by the automatic
+    /// continuation budget is `needs_input`, not `failed`; a real failure at
+    /// the same budget edge still fails.
+    #[tokio::test]
+    async fn exhausted_continuation_budget_asks_for_input_instead_of_failing() {
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_budget").await;
+        let mut spent = task.clone();
+        spent.attempts = task.max_attempts - 1;
+        spent.revision += 1;
+        spent.updated_at_ms = now_ms();
+        let spent = managed.transition(&task, spent, None).await.unwrap();
+        let prompt = spent.next_prompt.clone();
+        let finished = managed
+            .finish(
+                &xcb,
+                &spent.id,
+                Ok(idle_outcome(Terminal::TurnLimit, "Still working.")),
+            )
+            .await
+            .unwrap();
+        assert_eq!(finished.state, TaskState::NeedsInput);
+        assert_eq!(
+            finished.detail,
+            "automatic continuation budget exhausted; reply to continue"
+        );
+        // The prompt survives so an explicit reply can renew the budget.
+        assert_eq!(finished.next_prompt, prompt);
+        // A budget pause is not a "failed" route observation.
+        let rows: i64 = managed
+            .db()
+            .unwrap()
+            .query_row("SELECT count(*) FROM route_stats", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+        // Genuine failures at the same boundary still fail.
+        let second = prepared_task(&managed, &xcb, &chat, &workspace, "m_genuine").await;
+        let mut spent = second.clone();
+        spent.attempts = second.max_attempts - 1;
+        spent.revision += 1;
+        spent.updated_at_ms = now_ms();
+        let spent = managed.transition(&second, spent, None).await.unwrap();
+        let mut failed = idle_outcome(Terminal::Failed, "The migration failed.");
+        failed.state = State::Failed;
+        failed.facts.failure = Some(Failure::Unknown);
+        let finished = managed.finish(&xcb, &spent.id, Ok(failed)).await.unwrap();
+        assert_eq!(finished.state, TaskState::Failed);
+        let rows: i64 = managed
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT failed FROM route_stats WHERE provider='claude'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    /// With the judge enabled but unresolvable (no configured key), the
+    /// deterministic continuation verdict stays in force.
+    #[tokio::test]
+    async fn unresolvable_judge_keeps_the_deterministic_verdict() {
+        let root = root();
+        let workspace = workspace(&root);
+        let state = private::directory(&workspace.join("state")).unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let mut config = Config::default();
+        config.extensions.judge.enabled = true;
+        config.save(&state, None).unwrap();
+        // No judge key or endpoint is configured: resolve cannot produce one.
+        assert!(
+            judge::resolve(&state, &config.extensions.judge)
+                .unwrap()
+                .is_none()
+        );
+        let chat = conversation(&managed, &workspace).await;
+        let task = managed
+            .create_task(
+                &chat,
+                message("m_judge"),
+                "keep going".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        assert!(
+            task_should_continue(
+                &xcb,
+                &task,
+                &idle_outcome(Terminal::TurnLimit, "turn limit reached")
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    /// List readers skip a corrupt task row and count it for the status text;
+    /// single-row reads stay strict.
+    #[tokio::test]
+    async fn undecodable_task_rows_are_skipped_counted_and_surfaced() {
+        let root = root();
+        let workspace = workspace(&root);
+        let managed = ManagedStore::open(&workspace).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        managed
+            .create_task(&chat, message("m_good"), "good".into(), vec![], &workspace)
+            .await
+            .unwrap();
+        let bad = managed
+            .create_task(&chat, message("m_bad"), "bad".into(), vec![], &workspace)
+            .await
+            .unwrap();
+        managed
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE tasks SET payload='{corrupt' WHERE id=?1",
+                [bad.id.as_str()],
+            )
+            .unwrap();
+        let tasks = managed.tasks(10).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(managed.active_tasks(10).unwrap().len(), 1);
+        assert_eq!(managed.unreadable_tasks(), 1);
+        assert!(
+            managed
+                .status_text()
+                .unwrap()
+                .contains("could not be decoded")
+        );
+        // Single-row reads and transitions stay strict.
+        assert!(managed.task(&bad.id).is_err());
+    }
+
+    /// A settled, completed provider turn records `completed` even when a
+    /// cancel request landed after the worker finished.
+    #[tokio::test]
+    async fn cancel_after_a_settled_completion_stays_completed() {
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        for (message_id, outcome, expected) in [
+            (
+                "m_done",
+                idle_outcome(Terminal::Completed, "All done."),
+                TaskState::Completed,
+            ),
+            (
+                "m_early",
+                idle_outcome(Terminal::TurnLimit, "Partial work."),
+                TaskState::Cancelled,
+            ),
+        ] {
+            let task = prepared_task(&managed, &xcb, &chat, &workspace, message_id).await;
+            let mut cancelled = task.clone();
+            cancelled.cancel_requested = true;
+            cancelled.revision += 1;
+            cancelled.updated_at_ms = now_ms();
+            let cancelled = managed.transition(&task, cancelled, None).await.unwrap();
+            let finished = managed
+                .finish(&xcb, &cancelled.id, Ok(outcome))
+                .await
+                .unwrap();
+            assert_eq!(finished.state, expected, "{message_id}");
+        }
+    }
+
+    /// A provider string this build does not know in route statistics is a
+    /// soft input: it is ignored and cannot block task intake.
+    #[tokio::test]
+    async fn unknown_route_stat_providers_do_not_block_intake() {
+        let root = root();
+        let workspace = workspace(&root);
+        let store = ManagedStore::open(&workspace).unwrap();
+        {
+            let db = store.db().unwrap();
+            db.execute(
+                "INSERT INTO route_stats(scope,provider,completed,failed) VALUES(?1,'andromeda-9',2,0)",
+                [workspace.to_str().unwrap()],
+            )
+            .unwrap();
+        }
+        assert_eq!(store.learned_route(&workspace).unwrap(), None);
+        {
+            let db = store.db().unwrap();
+            db.execute(
+                "INSERT INTO route_stats(scope,provider,completed,failed) VALUES(?1,'claude',2,0)",
+                [workspace.to_str().unwrap()],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            store.learned_route(&workspace).unwrap(),
+            Some(Provider::Claude)
+        );
+        let chat = conversation(&store, &workspace).await;
+        store
+            .create_task(
+                &chat,
+                message("m_intake"),
+                "fix the bug".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+    }
+
+    /// The managed view is rebuilt and sent only when its cheap change stamp
+    /// moves or an intent was handled; identical views are not re-sent.
+    #[tokio::test]
+    async fn serve_ui_resends_the_view_only_when_something_changed() {
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let xcb = Arc::new(Store::open(&state).unwrap());
+        let managed = ManagedStore::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let (commands, input) = std::sync::mpsc::sync_channel(8);
+        let (updates, display) = std::sync::mpsc::sync_channel(16);
+        let ui = tokio::spawn(serve_ui(
+            xcb,
+            chat,
+            input,
+            updates,
+            PathBuf::from("/usr/bin/true"),
+        ));
+        async fn collect(display: &Receiver<Update>, ms: u64) -> Vec<Box<View>> {
+            // `serve_ui` shares this test's single-threaded runtime: sleep to
+            // let it tick, then drain whatever it produced.
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            let mut views = Vec::new();
+            while let Ok(update) = display.try_recv() {
+                if let Update::View(view) = update {
+                    views.push(view);
+                }
+            }
+            views
+        }
+        // The first tick builds one view; unchanged ticks send nothing more.
+        let views = collect(&display, 600).await;
+        assert_eq!(views.len(), 1);
+        commands
+            .send(Intent::Submit {
+                id: message("m_pulse"),
+                text: "watch this".into(),
+                attachments: vec![],
+            })
+            .unwrap();
+        let views = collect(&display, 800).await;
+        assert_eq!(views.len(), 1);
+        assert!(
+            views[0]
+                .tasks
+                .iter()
+                .any(|task| task.title.contains("watch this"))
+        );
+        commands.send(Intent::Quit).unwrap();
+        ui.await.unwrap().unwrap();
     }
 }

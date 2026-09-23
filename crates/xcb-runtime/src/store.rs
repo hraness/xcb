@@ -771,6 +771,9 @@ impl Store {
         let db = self.db()?;
         session_from(&db, id)
     }
+    /// List readers tolerate one corrupt session row: it is skipped so the
+    /// summary and routing snapshot keep working. Single-row reads and every
+    /// run boundary stay strict (`session`, `session_from`).
     pub fn sessions(&self, limit: usize) -> Result<Vec<Session>> {
         if !(1..=256).contains(&limit) {
             return Err(xcb_core::Error::Invalid("session page limit").into());
@@ -781,8 +784,12 @@ impl Store {
         let rows = query.query_map([limit as i64], |row| row.get::<_, String>(0))?;
         let mut sessions = Vec::new();
         for row in rows {
-            let session: Session = decode(&row?)?;
-            session.validate()?;
+            let Ok(session) = decode::<Session>(&row?).and_then(|session| {
+                session.validate()?;
+                Ok(session)
+            }) else {
+                continue;
+            };
             sessions.push(session);
         }
         Ok(sessions)

@@ -146,8 +146,190 @@ fn digest_file(mut file: File, limit: u64) -> Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
+/// The exact file identity a verified digest is bound to, read from the same
+/// descriptor the digest is computed on. An inode replacement changes `ino`;
+/// an in-place write or permission change changes `size`, `mtime`, or the
+/// unforgeable status-change time `ctime` — any difference re-digests. The
+/// identity is a cache key, never a substitute for the checks
+/// `executable_file` runs on every call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl FileIdentity {
+    fn read(metadata: &fs::Metadata) -> Self {
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            size: metadata.len(),
+            mtime: (metadata.mtime(), metadata.mtime_nsec()),
+            ctime: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
+
+/// Process-wide verified digests keyed by canonical executable path. A route
+/// decision loads every provider's pin and each turn re-verifies the host and
+/// provider binaries, which re-read and re-hashed up to 512 MiB per call; the
+/// identity-bound cache makes a repeated verification a metadata read while
+/// remaining provably equivalent to re-hashing the exact installed bytes.
+const VERIFIED_DIGEST_LIMIT: usize = 16;
+
+fn verified_digests() -> &'static std::sync::Mutex<BTreeMap<PathBuf, (FileIdentity, String)>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<PathBuf, (FileIdentity, String)>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Full executable digests actually performed per canonical path, so
+/// launch-path tests can observe cache hits while running in parallel.
+#[cfg(test)]
+static EXECUTABLE_DIGESTS: std::sync::Mutex<BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+fn digested_executables(path: &Path) -> usize {
+    EXECUTABLE_DIGESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(path)
+        .copied()
+        .unwrap_or(0)
+}
+
 pub fn executable_digest(path: &Path) -> Result<String> {
-    digest_file(executable_file(path)?, 512 * 1024 * 1024)
+    let file = executable_file(path)?;
+    // fstat of the open descriptor: the identity below names the inode the
+    // digest is computed from, never a re-resolved path.
+    let identity = FileIdentity::read(&file.metadata()?);
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    {
+        let cache = verified_digests()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((known, sha256)) = cache.get(&key)
+            && *known == identity
+        {
+            return Ok(sha256.clone());
+        }
+    }
+    let sha256 = digest_file(file, 512 * 1024 * 1024)?;
+    #[cfg(test)]
+    EXECUTABLE_DIGESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(key.clone())
+        .and_modify(|count| *count += 1)
+        .or_insert(1);
+    {
+        let mut cache = verified_digests()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while cache.len() >= VERIFIED_DIGEST_LIMIT {
+            cache.pop_first();
+        }
+        cache.insert(key, (identity, sha256.clone()));
+    }
+    Ok(sha256)
+}
+
+/// `clonefile(2)` is atomic: the name either holds the complete copy-on-write
+/// clone or is absent, so a failure never leaves a partial snapshot and the
+/// stream copy below can still create the name itself. `CLONE_NOFOLLOW`
+/// matches the `O_NOFOLLOW` custody of the source descriptor.
+#[cfg(target_os = "macos")]
+fn clone_file(source: &File, path: &Path) -> bool {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    let Ok(directory) = rustix::fs::openat(
+        rustix::fs::CWD,
+        parent,
+        rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) else {
+        return false;
+    };
+    rustix::fs::fclonefileat(
+        source,
+        &directory,
+        std::path::Path::new(name),
+        rustix::fs::CloneFlags::NOFOLLOW,
+    )
+    .is_ok()
+}
+
+/// `FICLONE` clones extents atomically on copy-on-write filesystems;
+/// `copy_file_range` keeps the copy inside the kernel everywhere else. Any
+/// error or short progress falls back to the stream copy on the same
+/// descriptors.
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "sparc", target_arch = "sparc64"))
+))]
+fn clone_into(source: &File, target: &File) -> bool {
+    if rustix::fs::ioctl_ficlone(target, source).is_ok() {
+        return true;
+    }
+    let Ok(size) = source.metadata().map(|meta| meta.len()) else {
+        return false;
+    };
+    let mut off_in = 0u64;
+    let mut off_out = 0u64;
+    while off_in < size {
+        let remaining = (size - off_in).min(i32::MAX as u64) as usize;
+        match rustix::fs::copy_file_range(
+            source,
+            Some(&mut off_in),
+            target,
+            Some(&mut off_out),
+            remaining,
+        ) {
+            // The kernel advances both offsets; zero progress is EOF or a
+            // stall, so the caller falls back to the stream copy.
+            Ok(0) => return false,
+            Ok(_) => (),
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// Write the opened executable to `path` with the least work the filesystem
+/// allows, falling back to the bounded stream copy. The caller still digests
+/// the result: a clone carries a new inode, so the pinned-byte proof must be
+/// repeated against the snapshot itself.
+fn snapshot_executable(source: &File, path: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if clone_file(source, path) {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o500))?;
+        return Ok(());
+    }
+    let mut target = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o500)
+        .custom_flags((rustix::fs::OFlags::CLOEXEC).bits() as i32)
+        .open(path)?;
+    #[cfg(all(
+        target_os = "linux",
+        not(any(target_arch = "sparc", target_arch = "sparc64"))
+    ))]
+    if clone_into(source, &target) {
+        target.sync_all()?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o500))?;
+        return Ok(());
+    }
+    std::io::copy(&mut source.take(512 * 1024 * 1024 + 1), &mut target)?;
+    target.flush()?;
+    target.sync_all()?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o500))?;
+    Ok(())
 }
 
 /// Captured before a long-lived terminal can observe an in-place xcb update.
@@ -295,17 +477,7 @@ impl Pin {
         self.verify()?;
         let source_path = std::env::current_exe()?.canonicalize()?;
         let path = directory.join("xcb-helper");
-        let source = executable_file(&source_path)?;
-        let mut target = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o500)
-            .custom_flags((rustix::fs::OFlags::CLOEXEC).bits() as i32)
-            .open(&path)?;
-        std::io::copy(&mut source.take(512 * 1024 * 1024 + 1), &mut target)?;
-        target.flush()?;
-        target.sync_all()?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+        snapshot_executable(&executable_file(&source_path)?, &path)?;
         if executable_digest(&path)? != self.host_sha256 {
             return Err(Error::Unavailable("host relay snapshot changed"));
         }
@@ -314,17 +486,7 @@ impl Pin {
     pub fn snapshot(&self, directory: &Path) -> Result<PathBuf> {
         self.verify()?;
         let path = directory.join("provider");
-        let source = executable_file(&self.executable)?;
-        let mut target = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o500)
-            .custom_flags((rustix::fs::OFlags::CLOEXEC).bits() as i32)
-            .open(&path)?;
-        std::io::copy(&mut source.take(512 * 1024 * 1024 + 1), &mut target)?;
-        target.flush()?;
-        target.sync_all()?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+        snapshot_executable(&executable_file(&self.executable)?, &path)?;
         if executable_digest(&path)? != self.sha256 {
             return Err(Error::Unavailable("executable snapshot changed"));
         }
@@ -1075,6 +1237,189 @@ mod tests {
     #[test]
     fn zero_process_group_id_is_rejected_as_absence_proof() {
         assert!(prove_process_group_absent(0).is_err());
+    }
+
+    /// A pinned executable digest that bypasses the verified-digest cache, so
+    /// tests can observe the first `Pin::load` re-hash directly.
+    fn uncached_digest(path: &Path) -> String {
+        digest_file(executable_file(path).unwrap(), 512 * 1024 * 1024).unwrap()
+    }
+
+    fn codex_pin(root: &Path, executable: &Path, sha256: String) -> Pin {
+        let (_, host_sha256) = host_identity().unwrap();
+        let pin = Pin {
+            provider: Provider::Codex,
+            executable: executable.to_owned(),
+            sha256,
+            version: "0.0.0".into(),
+            host_sha256,
+            observed_at_ms: crate::now_ms(),
+        };
+        pin.save(root).unwrap();
+        pin
+    }
+
+    #[test]
+    fn repeated_pin_loads_verify_against_one_executable_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        host_identity().unwrap();
+        codex_pin(&root, &executable, uncached_digest(&executable));
+        let digested = digested_executables(&executable);
+        for _ in 0..3 {
+            Pin::load(&root, Provider::Codex).unwrap();
+        }
+        assert_eq!(digested_executables(&executable) - digested, 1);
+    }
+
+    #[test]
+    fn touched_and_resized_executables_are_digested_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        host_identity().unwrap();
+        codex_pin(&root, &executable, uncached_digest(&executable));
+        Pin::load(&root, Provider::Codex).unwrap();
+        let digested = digested_executables(&executable);
+        // A pure metadata touch still re-hashes; identical bytes pass again.
+        File::options()
+            .write(true)
+            .open(&executable)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(60))
+            .unwrap();
+        Pin::load(&root, Provider::Codex).unwrap();
+        assert_eq!(digested_executables(&executable) - digested, 1);
+        // A size change re-hashes and the changed bytes fail verification.
+        fs::write(&executable, b"#!/bin/sh\necho changed\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(Pin::load(&root, Provider::Codex).is_err());
+        assert_eq!(digested_executables(&executable) - digested, 2);
+    }
+
+    #[test]
+    fn a_replaced_inode_with_the_same_size_is_digested_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        host_identity().unwrap();
+        codex_pin(&root, &executable, uncached_digest(&executable));
+        Pin::load(&root, Provider::Codex).unwrap();
+        let digested = digested_executables(&executable);
+        // Same size, different inode and bytes: a stale path or size cache
+        // would return the old digest; verification must fail closed.
+        let replacement = root.join("replacement");
+        fs::write(&replacement, b"#!/bin/sh\necho no\n").unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&replacement, &executable).unwrap();
+        assert!(Pin::load(&root, Provider::Codex).is_err());
+        assert_eq!(digested_executables(&executable) - digested, 1);
+    }
+
+    #[test]
+    fn snapshot_clones_then_proves_the_pinned_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        let pin = codex_pin(&root, &executable, uncached_digest(&executable));
+        let launch = private::directory(&root.join("launch")).unwrap();
+        let snapshot = pin.snapshot(&launch).unwrap();
+        assert_eq!(executable_digest(&snapshot).unwrap(), pin.sha256);
+        assert_eq!(
+            fs::metadata(&snapshot).unwrap().permissions().mode() & 0o7777,
+            0o500
+        );
+        // The snapshot is a distinct inode: on clone-capable filesystems this
+        // also proves the clone path produced launch-owned bytes.
+        assert_ne!(
+            fs::metadata(&snapshot).unwrap().ino(),
+            fs::metadata(&executable).unwrap().ino()
+        );
+        assert!(pin.snapshot(&launch).is_err());
+    }
+
+    /// Launch-path timing on a synthetic 150 MiB provider executable that
+    /// embeds the Codex catalog fixture. Fixtures live under `XCB_BENCH_DIR`
+    /// (default: the system temp directory). Run with
+    /// `cargo test -p xcb-runtime launch_path_benchmark --locked -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "launch-path benchmark; run explicitly with --ignored --nocapture"]
+    fn launch_path_benchmark() {
+        use std::time::Instant;
+        let base = std::env::var_os("XCB_BENCH_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        fs::create_dir_all(&base).unwrap();
+        let directory = tempfile::tempdir_in(&base).unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = root.join("codex");
+        {
+            // 150 MiB of xorshift filler with the pretty-printed catalog
+            // fixture embedded once, NUL-terminated, a third of the way in.
+            let mut file = std::io::BufWriter::new(fs::File::create(&executable).unwrap());
+            let mut state = 0x9E37_79B9_7F4A_7C15u64;
+            let mut block = [0u8; 64 * 1024];
+            let total = 150 * 1024 * 1024usize;
+            let catalog_at = total / 3;
+            let mut written = 0usize;
+            let mut fixture =
+                serde_json::to_vec_pretty(&crate::codex::fixture_catalog_source()).unwrap();
+            fixture.push(0);
+            while written < total {
+                for chunk in block.chunks_mut(8) {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+                }
+                if written == catalog_at {
+                    file.write_all(&fixture).unwrap();
+                }
+                file.write_all(&block).unwrap();
+                written += block.len();
+            }
+            file.flush().unwrap();
+        }
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let sha256 = executable_digest(&executable).unwrap();
+        let (_, host_sha256) = host_identity().unwrap();
+        let pin = Pin {
+            provider: Provider::Codex,
+            executable: executable.clone(),
+            sha256: sha256.clone(),
+            version: crate::codex::VERSION.into(),
+            host_sha256,
+            observed_at_ms: crate::now_ms(),
+        };
+        pin.save(&root).unwrap();
+        let size = fs::metadata(&executable).unwrap().len();
+        eprintln!(
+            "benchmark executable: {} bytes at {}",
+            size,
+            executable.display()
+        );
+        for round in 1..=3 {
+            let started = Instant::now();
+            let loaded = Pin::load(&root, Provider::Codex).unwrap();
+            assert_eq!(loaded.sha256, sha256);
+            eprintln!("Pin::load #{round}: {:?}", started.elapsed());
+        }
+        for round in 1..=2 {
+            let launch = private::directory(&root.join(format!("launch-{round}"))).unwrap();
+            let started = Instant::now();
+            let snapshot = pin.snapshot(&launch).unwrap();
+            eprintln!("Pin::snapshot #{round}: {:?}", started.elapsed());
+            assert_eq!(fs::metadata(&snapshot).unwrap().len(), size);
+        }
+        for round in 1..=3 {
+            let started = Instant::now();
+            let catalog =
+                crate::codex::static_catalog_bound(&root, &pin, Some("gpt-6-astra"), &sha256)
+                    .unwrap();
+            eprintln!("static_catalog #{round}: {:?}", started.elapsed());
+            assert!(catalog.admission.models.contains("gpt-6-astra"));
+        }
     }
     #[tokio::test]
     async fn interrupted_frame_read_preserves_the_partial_json_prefix() {

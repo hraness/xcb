@@ -191,8 +191,10 @@ export async function packageSmoke(tarballArgument?: string): Promise<void> {
       } catch { /* absent as required */ }
     }
     const bin = record(manifest.bin ?? {}, "packed bin");
-    if (Reflect.ownKeys(bin).length !== 1 || bin.xcb !== "dist/cli.js") {
-      problems.push(`packed bin must be exactly { xcb: "dist/cli.js" }`);
+    // The compatibility bin is deliberately not named `xcb`: a global install must
+    // never shadow the native binary that owns that name.
+    if (Reflect.ownKeys(bin).length !== 1 || bin["xcb-compat"] !== "dist/cli.js") {
+      problems.push(`packed bin must be exactly { "xcb-compat": "dist/cli.js" }`);
     }
     const exportsField = record(manifest.exports, "packed exports")["."];
     const exportPaths = typeof exportsField === "string" ? [exportsField] : Object.values(record(exportsField, "packed export entry"));
@@ -293,11 +295,11 @@ export async function packageSmoke(tarballArgument?: string): Promise<void> {
       const installedCli = join(modules, "@hraness/xcb/dist/cli.js");
       const version = (await run([executable, installedCli, "--version"], consumer)).trim();
       if (version !== manifest.version) {
-        throw new Error(`Installed xcb --version returned ${version}, expected ${String(manifest.version)}`);
+        throw new Error(`Installed xcb-compat --version returned ${version}, expected ${String(manifest.version)}`);
       }
       const help = await run([executable, installedCli, "--help"], consumer);
-      if (!help.includes("xcb auth claude") || !help.includes("xcb doctor")) {
-        throw new Error("Installed xcb --help did not print the usage surface");
+      if (!help.includes("xcb-compat auth claude") || !help.includes("xcb-compat doctor") || help.includes("  xcb ")) {
+        throw new Error("Installed xcb-compat --help did not print the usage surface");
       }
     }
     console.log("XCB standalone package boundary verified under Bun and Node.");
