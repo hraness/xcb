@@ -94,8 +94,9 @@ quality. Its implementation and provenance are in `task_classifier.rs` and
 The fitted head is generation 0 of the `route` [reflex](reflexes.md). The
 reflex runs it as an effect-free ALGAL program, records the decision, and
 learns later generations from your explicit and implicit tier choices. A
-generation is promoted only when it improves on a fixed holdout, and
-`xcb reflex rollback route 0` restores the fitted head.
+generation is promoted only after it beats the active one on the next labels,
+which neither was fitted on, and `xcb reflex rollback route 0` restores the
+fitted head.
 
 Score answers use zero-based criterion indices, as specified by the
 [TypeSafe API](https://docs.typesafe.ai/api#score-answer). Five criteria therefore
