@@ -63,6 +63,14 @@ terminals. Independent workspaces can run concurrently. Tasks in the same
 workspace execute serially; a worker must not wait synchronously for a queued
 peer that cannot acquire that workspace.
 
+A per-task dispatch or settlement fault is isolated to that task, recorded
+as a bounded detail, and retried with backoff; it does not stop the other
+workers. Lock, identity and store failures stay fatal, as does a sustained
+run of ticks that cannot even list tasks. The last supervisor-level fault
+is kept in a bounded file the next client surfaces. Task and session list
+readers skip a corrupt row rather than fail the page; single-row reads and
+transitions stay strict, and skipped task rows are counted for the view.
+
 Cancellation belongs to the originating conversation unless the user names a
 task. Closing a terminal detaches. Active managed worker sessions are protected
 from session removal/pruning. A replacement supervisor binary drains settled
@@ -83,6 +91,9 @@ exclusions are applied before shortlisting and ranking models. Explicit
 provider directives constrain both dispatch and route preview. A learned
 workspace preference is a soft ranking input. Relative quality, cost and
 latency values are heuristics, not measured quality or billing guarantees.
+When no admitted, enabled, credentialed account exists, a queued task says
+so and waits for the user to add or reconnect one; a temporary route
+shortage retries with backoff.
 
 Public promotions are bounded, expiring observations with source digests.
 They do not prove a user's entitlement and cannot qualify an unadmitted
