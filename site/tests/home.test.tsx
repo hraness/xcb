@@ -36,8 +36,11 @@ test("the homepage clearly separates source installation from verified releases"
   const heroHeadings: string[] = [];
   new HTMLRewriter().on("h1#hero-title", { text(chunk) { heroHeadings.push(chunk.text); } }).transform(html);
   expect(heroHeadings.join("").trim()).not.toBe("");
-  // The opening names every supported provider.
-  for (const provider of ["Claude", "Codex", "Devin"]) expect(html).toContain(provider);
+  // The hero summary names every supported provider.
+  const heroSummary: string[] = [];
+  new HTMLRewriter().on('header[aria-labelledby="hero-title"] .hraness-marketing-hero__summary', { text(chunk) { heroSummary.push(chunk.text); } }).transform(html);
+  expect(heroSummary.join("").trim()).not.toBe("");
+  for (const provider of ["Claude", "Codex", "Devin"]) expect(heroSummary.join("")).toContain(provider);
   expect(html).toContain("./scripts/install-native.sh");
   if (publishedRelease === null) {
     expect(html).toContain("No native release is published yet; install from source");

@@ -107,7 +107,7 @@
 Public copy is the site, README, `docs/`, `llms.txt`, `package.json` and GitHub
 descriptions, CLI help, and TUI text. Follow `STYLE.md` and `WRITING.md`.
 
-- The canonical one-line description, taken from the home page hero, is
+- The canonical one-line description, used as the README and `llms.txt` lead, is
   “xcb routes coding tasks across the Claude, Codex, and Devin subscriptions
   you already pay for.” The page descriptions, README lead, `llms.txt` lead,
   `package.json` description, support value proposition, and CLI `about` use

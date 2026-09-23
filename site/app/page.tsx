@@ -60,15 +60,15 @@ export default function Home() {
           </div>
           <MarketingSection id="why" heading="Why xcb." headingId="why-title" summary="Use the coding subscriptions you already pay for, whether you start a task or another agent does.">
             <div className="xcb-fit-grid">
-              <div><h3>Keep working when one account hits its limit</h3><p>When an account reaches a known quota limit, xcb skips it until the provider’s reported reset and sends the next task to the best-ranked account and model that is free.</p></div>
+              <div><h3>Keep working when an account hits a known quota limit</h3><p>When an account reaches a known quota limit, xcb skips it until the provider’s reported reset and sends the next task to the best-ranked account and model that is free.</p></div>
               <div><h3>Made for other agents</h3><p>Another agent can hand xcb a task as one JSON request and get back the result, the route it took, and a session it can resume. Apps can use the TypeScript SDK instead, which holds the account the app names while its task runs.</p></div>
               <div><h3>Self-tuning, in development</h3><p>The managed harness is being rebuilt to propose routing rules, test them on labeled examples, and keep only rules that score strictly better. The design keeps provider checks, account locking, and run records outside what it can change.</p></div>
             </div>
           </MarketingSection>
-          <MarketingSection id="router" heading="What happens when xcb routes a task." headingId="router-title" summary="xcb checks which accounts can take the task, holds the one it picks, and records how the run ended.">
+          <MarketingSection id="router" heading="What happens when xcb routes a task" headingId="router-title" summary="xcb checks which accounts can take the task, holds the one it picks, and records how the run ended.">
             <div className="xcb-fit-grid">
               <div><h3>The account stays locked until the run ends</h3><p>While the provider runs, xcb holds the chosen account so no other task can start on it. Credentials never enter your project folder, and xcb releases the account only after it has independent proof that the provider process exited.</p></div>
-              <div><h3>Only accounts that can run the task</h3><p>A candidate needs a supported provider build, an enabled and signed-in account, and a model xcb has recently seen in that provider’s catalog. Accounts inside a known quota window are skipped. A provider’s advertised promotion never counts as proof that your account qualifies for it.</p></div>
+              <div><h3>Only accounts that pass xcb’s checks</h3><p>A candidate needs a supported provider build, an enabled and signed-in account, and a model xcb has recently seen in that provider’s catalog. Accounts inside a known quota window are skipped. A provider’s advertised promotion never counts as proof that your account qualifies for it.</p></div>
               <div><h3>One turn per route call</h3><p>Each route call runs one provider turn on one model, with an optional deadline and a cap on the returned text. File access goes through xcb’s broker, xcb waits for the provider’s processes to exit, and when the outcome is uncertain it says so instead of retrying.</p></div>
             </div>
             <a className="xcb-text-link" href="/docs/route">How routing works →</a>
@@ -96,7 +96,7 @@ export default function Home() {
           <MarketingSection id="workspace" heading="Prefer to drive? There's a terminal." headingId="workspace-title" layout="split" summary="The xcb terminal puts the same router behind an interface you drive yourself, with conversations, sessions, panes, and usage in one place.">
             <WorkspacePreview />
           </MarketingSection>
-          <MarketingSection id="harness" heading="In development: a harness that tunes its own routing." headingId="harness-title" summary="The managed harness is being rebuilt on ALGAL so it can propose routing rules, test them on labeled examples, and keep a rule only when it scores strictly better. Provider checks, account locking, and run records stay fixed and deterministic.">
+          <MarketingSection id="harness" heading="In development: a harness that tunes its own routing" headingId="harness-title" summary="The managed harness is being rebuilt on ALGAL so it can propose routing rules, test them on labeled examples, and keep a rule only when it scores strictly better. Provider checks, account locking, and run records stay fixed and deterministic.">
             <div className="xcb-pane-example">
               <span className="xcb-badge" aria-label="Experimental feature">Experimental</span>
               <div className="xcb-evolve-loop" aria-label="The evolution loop">
