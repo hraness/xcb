@@ -146,6 +146,7 @@ pub enum PickAction {
     Model(String),
     Account(Id),
     Conversation(Id),
+    NewConversation,
     Session(Id),
     Task(Id),
     Text(String),
@@ -217,10 +218,12 @@ fn display_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Compact age for task rows: `12s ago`, `3m 7s ago`, `1h 4m ago`.
+/// Compact age for rows: `12s ago`, `3m 7s ago`, `1h 4m ago`, `2d 3h ago`.
 fn age_label(ms: u64) -> String {
     let seconds = ms / 1000;
-    if seconds >= 3600 {
+    if seconds >= 86400 {
+        format!("{}d {}h ago", seconds / 86400, seconds % 86400 / 3600)
+    } else if seconds >= 3600 {
         format!("{}h {}m ago", seconds / 3600, seconds % 3600 / 60)
     } else if seconds >= 60 {
         format!("{}m {}s ago", seconds / 60, seconds % 60)
@@ -973,17 +976,23 @@ impl App {
                     })
                     .collect(),
             ),
-            "/sessions" if self.managed_mode() => self.picker(
-                "Control conversations",
-                self.view
-                    .conversations
-                    .iter()
-                    .map(|conversation| PickItem {
-                        label: format!("{} · {}", conversation.title, conversation.workspace),
-                        action: PickAction::Conversation(conversation.id.clone()),
-                    })
-                    .collect(),
-            ),
+            "/sessions" if self.managed_mode() => {
+                let mut items = vec![PickItem {
+                    label: "＋ new conversation".into(),
+                    action: PickAction::NewConversation,
+                }];
+                items.extend(self.view.conversations.iter().map(|conversation| PickItem {
+                    label: format!(
+                        "{} · {} msgs · {} · {}",
+                        conversation.title,
+                        conversation.messages,
+                        age_label(display_now_ms().saturating_sub(conversation.updated_at_ms)),
+                        conversation.workspace
+                    ),
+                    action: PickAction::Conversation(conversation.id.clone()),
+                }));
+                self.picker("Control conversations", items)
+            }
             "/sessions" => self.picker(
                 "Direct provider sessions",
                 self.view
@@ -1635,6 +1644,7 @@ impl App {
                 PickAction::Model(id) => self.send(output, Intent::Model(id)),
                 PickAction::Account(id) => self.send(output, Intent::Account(id)),
                 PickAction::Conversation(id) => self.send(output, Intent::Conversation(id)),
+                PickAction::NewConversation => self.send(output, Intent::NewSession),
                 PickAction::Session(id) => self.send(output, Intent::Resume(id)),
                 PickAction::Task(id) => {
                     if let Some(task) = self.view.tasks.iter().find(|task| task.id == id) {

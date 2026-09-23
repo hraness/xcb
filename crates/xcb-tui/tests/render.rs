@@ -791,8 +791,50 @@ fn task_inspect_modal_renders_route_detail_and_scrolls() {
     }
 }
 
+fn account_row() -> xcb_core::ui::AccountRow {
+    xcb_core::ui::AccountRow {
+        id: xcb_core::Id::new("a_fixture").unwrap(),
+        provider: xcb_core::Provider::Claude,
+        name: "fixture@example.com".into(),
+        email: None,
+        subscription: "test".into(),
+        remaining_percent: None,
+        resets_at_ms: None,
+        quota_blocked_until_ms: None,
+        runway: xcb_core::usage::Estimate::unknown("test"),
+        busy: false,
+        enabled: true,
+        authentication_required: false,
+    }
+}
+
 #[test]
 fn empty_global_conversation_has_quiet_dispatcher_chrome() {
+    let mut app = app();
+    app.view.session = None;
+    app.view
+        .extensions
+        .insert(0, ("algal supervisor".into(), "on".into()));
+    app.view.accounts = vec![account_row()];
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(contents.contains("global dispatcher"));
+    assert!(contents.contains("Describe work or ask about the running task swarm"));
+    assert!(contents.contains("Message · / for commands"));
+    assert!(!contents.contains("usage: unmeasured"));
+}
+
+#[test]
+fn empty_managed_state_guides_account_setup() {
     let mut app = app();
     app.view.session = None;
     app.view
@@ -809,10 +851,8 @@ fn empty_global_conversation_has_quiet_dispatcher_chrome() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(contents.contains("global dispatcher"));
-    assert!(contents.contains("Describe work or ask about the running task swarm"));
-    assert!(contents.contains("Message · / for commands"));
-    assert!(!contents.contains("usage: unmeasured"));
+    assert!(contents.contains("no provider accounts"));
+    assert!(contents.contains("xcb accounts add <provider>"));
 }
 
 #[test]
