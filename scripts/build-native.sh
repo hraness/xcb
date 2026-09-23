@@ -50,10 +50,18 @@ fi
 
 mkdir -p "$root/artifacts"
 name="xcb-${version}-${os}-${arch}"
+archive="$root/artifacts/${name}.tar.gz"
+checksum_file="${archive}.sha256"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 install -m 0755 "$binary" "$work/xcb"
-tar -czf "$root/artifacts/${name}.tar.gz" -C "$work" xcb
-$sha256_cmd "$root/artifacts/${name}.tar.gz" | sed 's/ .*//' > "$root/artifacts/${name}.tar.gz.sha256"
-echo "tarball=$root/artifacts/${name}.tar.gz"
-echo "sha256=$root/artifacts/${name}.tar.gz.sha256"
+# The archive must hold exactly one regular member named `xcb`: no AppleDouble
+# `._xcb` companions, extended attributes, or directory entries. The installer
+# rejects anything else, so prove it here before the bytes leave the builder.
+COPYFILE_DISABLE=1 tar -czf "$archive" -C "$work" xcb
+$sha256_cmd "$archive" | sed 's/ .*//' > "$checksum_file"
+# Re-admit the packaged bytes exactly as the installer will: one regular
+# member, matching checksum, and an extracted binary reporting this version.
+"$root/scripts/check-native-archive.sh" "$version" "$archive"
+echo "tarball=$archive"
+echo "sha256=$checksum_file"
