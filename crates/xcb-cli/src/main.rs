@@ -490,6 +490,36 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
+/// One table cell: control characters stripped, then cut to `width` display
+/// columns. A cut cell ends with `…` so truncation is visible instead of a
+/// silent drop.
+fn cell(value: &str, width: usize) -> String {
+    let clean = xcb_core::display_text(value, usize::MAX);
+    if clean.chars().count() <= width {
+        return clean;
+    }
+    let mut text: String = clean.chars().take(width.saturating_sub(1)).collect();
+    text.push('…');
+    text
+}
+
+/// Relative time like "3h ago" for table output; 0 ms renders as "never".
+fn human_age(now_ms: u64, then_ms: u64) -> String {
+    if then_ms == 0 {
+        return "never".into();
+    }
+    let minutes = now_ms.saturating_sub(then_ms) / 60_000;
+    if minutes < 1 {
+        "just now".into()
+    } else if minutes < 60 {
+        format!("{minutes}m ago")
+    } else if minutes < 60 * 24 {
+        format!("{}h ago", minutes / 60)
+    } else {
+        format!("{}d ago", minutes / (60 * 24))
+    }
+}
+
 fn print_json(value: impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
@@ -644,7 +674,7 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
         return Ok(());
     }
     println!(
-        "  ACCOUNT                             PROVIDER  PLAN                REMAINING              EST. RUNWAY"
+        "  ID          ACCOUNT                             PROVIDER  PLAN                REMAINING              EST. RUNWAY"
     );
     let now = now_ms();
     for account in view.accounts {
@@ -675,15 +705,16 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
         // provider email rendered as the account's display identity, which is
         // the documented purpose of this local status table.
         println!(
-            "{} {:<35} {:<9} {:<19} {:<22} {}{}{}{}{}",
+            "{} {:<11} {:<35} {:<9} {:<19} {:<22} {}{}{}{}{}",
             if config.default_account.as_ref() == Some(&account.id) {
                 ">"
             } else {
                 " "
             },
-            xcb_core::display_text(&account.name, 35),
+            cell(account.id.as_str(), 11),
+            cell(&account.name, 35),
             account.provider,
-            xcb_core::display_text(&account.subscription, 19),
+            cell(&account.subscription, 19),
             remaining,
             runway,
             if account.busy { " · busy" } else { "" },
@@ -699,9 +730,12 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
                 .unwrap_or_default()
         );
     }
+    println!(
+        "\n> marks the default account · ids are shortened; xcb accounts --json prints them in full"
+    );
     if let Some(seconds) = view.total_runway_seconds {
         println!(
-            "\nMeasured pool runway: ~{:.1}h ({}/{} pools; estimate, not a billing statement)",
+            "Measured pool runway: ~{:.1}h ({}/{} pools; estimate, not a billing statement)",
             seconds / 3600.0,
             view.runway_coverage.0,
             view.runway_coverage.1
@@ -1352,9 +1386,24 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             if cli.json {
                 print_json(choices)?;
             } else {
+                println!("  MODEL                                                 LABEL · MODE");
+                // choose_model defaults each provider to its first row in this
+                // ordering, so mark those rows.
+                let mut defaulted = std::collections::BTreeSet::new();
                 for choice in choices {
-                    println!("{:<56} {} · {:?}", choice.key(), choice.label, choice.mode);
+                    println!(
+                        "{} {:<56} {} · {:?}",
+                        if defaulted.insert(choice.provider) {
+                            "*"
+                        } else {
+                            " "
+                        },
+                        choice.key(),
+                        cell(&choice.label, 56),
+                        choice.mode
+                    );
                 }
+                println!("* default route per provider (xcb models default <key> repins it)");
             }
             Ok(0)
         }
@@ -1398,13 +1447,20 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     if cli.json {
                         print_json(sessions)?;
                     } else {
+                        println!(
+                            "{:<34}  {:<8} {:<24} {:<15} {:<9} TITLE",
+                            "SESSION ID", "PROVIDER", "MODEL", "STATE", "ACTIVE"
+                        );
+                        let now = now_ms();
                         for session in sessions {
                             println!(
-                                "{}  {}  {}  {}",
-                                session.id,
+                                "{:<34}  {:<8} {:<24} {:<15} {:<9} {}",
+                                session.id.as_str(),
                                 session.model.provider,
-                                session.model.label,
-                                session.title
+                                cell(&session.model.label, 24),
+                                session.state.label(),
+                                human_age(now, session.last_active_at_ms),
+                                cell(&session.title, 60)
                             );
                         }
                     }
@@ -1767,11 +1823,16 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             json!({"version":1,"policy":state.policy,"lastCheckMs":state.last_check_ms,"availableVersion":state.available_version}),
                         )?;
                     } else {
+                        let available = match state.available_version.as_deref() {
+                            Some(version) => format!("available {version}"),
+                            None if state.last_check_ms == 0 => "not checked yet".into(),
+                            None => "no newer release recorded".into(),
+                        };
                         println!(
-                            "update policy: {} · last check {} · available {}",
+                            "update policy: {} · last check {} · {}",
                             state.policy,
-                            state.last_check_ms,
-                            state.available_version.as_deref().unwrap_or("none")
+                            human_age(now_ms(), state.last_check_ms),
+                            available
                         );
                     }
                 }
