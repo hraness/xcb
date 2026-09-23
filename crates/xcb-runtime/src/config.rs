@@ -38,6 +38,47 @@ pub struct JudgeConfig {
     pub endpoint: Option<String>,
 }
 
+/// How a reflex participates in decisions. `Observe` records decisions and
+/// labels and learns from them without acting; `Active` lets the reflex's
+/// decision drive routing or continuation within every deterministic gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReflexMode {
+    Off,
+    Observe,
+    Active,
+}
+
+/// Reflex policy. Routing is active by default because its shipped
+/// parameters reproduce the prior classifier exactly. Continuation from a
+/// stopped-short report spends provider turns, so it only observes until the
+/// user opts in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReflexConfig {
+    pub route: ReflexMode,
+    pub settle: ReflexMode,
+    /// Fit and promote new parameter generations from local labels.
+    pub learn: bool,
+}
+impl Default for ReflexConfig {
+    fn default() -> Self {
+        Self {
+            route: ReflexMode::Active,
+            settle: ReflexMode::Observe,
+            learn: true,
+        }
+    }
+}
+impl ReflexConfig {
+    pub fn mode(&self, reflex: xcb_core::reflex::Reflex) -> ReflexMode {
+        match reflex {
+            xcb_core::reflex::Reflex::Route => self.route,
+            xcb_core::reflex::Reflex::Settle => self.settle,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Extensions {
@@ -48,6 +89,7 @@ pub struct Extensions {
     pub aicharts_export: bool,
     pub hooks: bool,
     pub judge: JudgeConfig,
+    pub reflexes: ReflexConfig,
 }
 impl Default for Extensions {
     fn default() -> Self {
@@ -59,6 +101,7 @@ impl Default for Extensions {
             aicharts_export: false,
             hooks: false,
             judge: JudgeConfig::default(),
+            reflexes: ReflexConfig::default(),
         }
     }
 }

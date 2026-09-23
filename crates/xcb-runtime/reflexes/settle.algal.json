@@ -1,0 +1,370 @@
+{
+  "contract": "algal.organism.v1",
+  "key": "organism:xcb-settle-reflex",
+  "name": "XCB settle reflex",
+  "note": "How a settled worker turn ended. Non-idle deterministic states map to their category; an interrupted limit is unfinished; an idle report with a blocked cue and no completion claim is blocked; otherwise the learned head separates done from stopped short.",
+  "budgets": {
+    "maxSteps": 6,
+    "maxAgentCalls": 0,
+    "maxWork": 60000,
+    "maxContextBytes": 65536,
+    "maxOutputBytes": 16384,
+    "maxDepth": 1
+  },
+  "interface": {
+    "inputs": {
+      "features": {
+        "cell": "src",
+        "port": "features"
+      },
+      "params": {
+        "cell": "src",
+        "port": "params"
+      },
+      "evidence": {
+        "cell": "src",
+        "port": "evidence"
+      }
+    },
+    "outputs": {
+      "decision": {
+        "cell": "decide",
+        "port": "out"
+      }
+    }
+  },
+  "cells": [
+    {
+      "id": "src",
+      "kind": "input",
+      "outputs": {
+        "features": "json",
+        "params": "json",
+        "evidence": "json"
+      }
+    },
+    {
+      "id": "head",
+      "kind": "expr",
+      "inputs": {
+        "features": "json",
+        "params": "json",
+        "evidence": "json"
+      },
+      "expr": {
+        "contract": "algal.expr.v1",
+        "program": [
+          "let",
+          "h",
+          [
+            "get",
+            "params",
+            "unfinished"
+          ],
+          {
+            "head": "unfinished",
+            "z": [
+              "fold",
+              [
+                "get",
+                "h",
+                "terms"
+              ],
+              [
+                "get",
+                "h",
+                "bias"
+              ],
+              "acc",
+              "t",
+              [
+                "add",
+                [
+                  "get",
+                  "acc"
+                ],
+                [
+                  "mul",
+                  [
+                    "get",
+                    "t",
+                    "w"
+                  ],
+                  [
+                    "let",
+                    "v",
+                    [
+                      "get",
+                      "features",
+                      [
+                        "get",
+                        "t",
+                        "f"
+                      ]
+                    ],
+                    [
+                      "if",
+                      [
+                        "isNum",
+                        [
+                          "get",
+                          "v"
+                        ]
+                      ],
+                      [
+                        "get",
+                        "v"
+                      ],
+                      0
+                    ]
+                  ]
+                ]
+              ]
+            ],
+            "cut": [
+              "get",
+              "h",
+              "cut"
+            ]
+          }
+        ]
+      },
+      "output": {
+        "kind": "json",
+        "schema": {}
+      }
+    },
+    {
+      "id": "decide",
+      "kind": "expr",
+      "inputs": {
+        "scored": "json",
+        "evidence": "json"
+      },
+      "expr": {
+        "contract": "algal.expr.v1",
+        "program": [
+          "let",
+          "s",
+          [
+            "get",
+            "evidence",
+            "state"
+          ],
+          [
+            "if",
+            [
+              "neq",
+              [
+                "get",
+                "s"
+              ],
+              "idle"
+            ],
+            {
+              "category": [
+                "let",
+                "m",
+                [
+                  "quote",
+                  {
+                    "working": "uncertain",
+                    "needs_answer": "question",
+                    "needs_action": "needs_action",
+                    "needs_approval": "needs_approval",
+                    "limited": "limited",
+                    "failed": "failed",
+                    "cancelled": "cancelled",
+                    "uncertain": "uncertain"
+                  }
+                ],
+                [
+                  "get",
+                  "m",
+                  [
+                    "get",
+                    "s"
+                  ]
+                ]
+              ],
+              "gate": "state",
+              "head": "unfinished",
+              "score": [
+                "round",
+                [
+                  "mul",
+                  [
+                    "get",
+                    "scored",
+                    "z"
+                  ],
+                  1000
+                ]
+              ]
+            },
+            [
+              "if",
+              [
+                "gte",
+                [
+                  "get",
+                  "evidence",
+                  "limit"
+                ],
+                1
+              ],
+              {
+                "category": "interrupted",
+                "gate": "limit",
+                "head": "unfinished",
+                "score": [
+                  "round",
+                  [
+                    "mul",
+                    [
+                      "get",
+                      "scored",
+                      "z"
+                    ],
+                    1000
+                  ]
+                ]
+              },
+              [
+                "if",
+                [
+                  "and",
+                  [
+                    "gte",
+                    [
+                      "get",
+                      "evidence",
+                      "blocked"
+                    ],
+                    1
+                  ],
+                  [
+                    "lt",
+                    [
+                      "get",
+                      "evidence",
+                      "done_claim"
+                    ],
+                    1
+                  ]
+                ],
+                {
+                  "category": "blocked",
+                  "gate": "blocked",
+                  "head": "unfinished",
+                  "score": [
+                    "round",
+                    [
+                      "mul",
+                      [
+                        "get",
+                        "scored",
+                        "z"
+                      ],
+                      1000
+                    ]
+                  ]
+                },
+                {
+                  "category": [
+                    "if",
+                    [
+                      "gte",
+                      [
+                        "get",
+                        "scored",
+                        "z"
+                      ],
+                      [
+                        "get",
+                        "scored",
+                        "cut"
+                      ]
+                    ],
+                    "stopped_short",
+                    "done"
+                  ],
+                  "gate": "head",
+                  "head": "unfinished",
+                  "score": [
+                    "round",
+                    [
+                      "mul",
+                      [
+                        "get",
+                        "scored",
+                        "z"
+                      ],
+                      1000
+                    ]
+                  ]
+                }
+              ]
+            ]
+          ]
+        ]
+      },
+      "output": {
+        "kind": "json",
+        "schema": {}
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": {
+        "cell": "src",
+        "port": "features"
+      },
+      "to": {
+        "cell": "head",
+        "port": "features"
+      }
+    },
+    {
+      "from": {
+        "cell": "src",
+        "port": "params"
+      },
+      "to": {
+        "cell": "head",
+        "port": "params"
+      }
+    },
+    {
+      "from": {
+        "cell": "src",
+        "port": "evidence"
+      },
+      "to": {
+        "cell": "head",
+        "port": "evidence"
+      }
+    },
+    {
+      "from": {
+        "cell": "head",
+        "port": "out"
+      },
+      "to": {
+        "cell": "decide",
+        "port": "scored"
+      }
+    },
+    {
+      "from": {
+        "cell": "src",
+        "port": "evidence"
+      },
+      "to": {
+        "cell": "decide",
+        "port": "evidence"
+      }
+    }
+  ]
+}

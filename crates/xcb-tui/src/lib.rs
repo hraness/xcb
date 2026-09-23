@@ -308,6 +308,9 @@ fn inspect_task(task: &xcb_core::ui::TaskRow) -> Modal {
     if let Some(reason) = &task.route_reason {
         lines.push(format!("routing    {reason}"));
     }
+    if let Some(settle) = &task.settle {
+        lines.push(format!("last turn  {}", settle.replace('_', " ")));
+    }
     lines.push(String::new());
     lines.push(task.detail.clone());
     Modal::Inspect {
@@ -399,6 +402,7 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         task.detail.hash(&mut hasher);
         task.route.hash(&mut hasher);
         task.route_reason.hash(&mut hasher);
+        task.settle.hash(&mut hasher);
         task.updated_at_ms.hash(&mut hasher);
     }
     for task in &view.backlog {
