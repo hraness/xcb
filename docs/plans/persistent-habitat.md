@@ -90,11 +90,16 @@ revision-safe controls. A final review also covered quota-only unavailability,
 command alias collisions and retained uncertainty.
 
 All required local gates passed: workspace tests, strict clippy, rustfmt, the
-compatibility check (1,064 tests plus package smoke), and the site check
+compatibility check (1,065 tests plus package smoke), and the site check
 (41 source tests plus production runtime acceptance). Final isolated CLI/PTY
 acceptance passed 23 checks against the rebuilt binary. It exercised persistence,
 backlog edit/release, stale revisions, priority preservation, timer pause,
 attention/history views and aliases; its owned daemon exited cleanly.
+
+CI review also tightened two synthetic lifecycle fixtures: pending-turn protocol
+rejection excludes unrelated HTTP and cancels delayed callbacks, while joined
+cancellation/drop tests use a directly reapable process leader. Exact denial,
+group-absence and custody assertions remain in place.
 
 The current boundaries and next integration contracts are in
 [`project-agents.md`](../project-agents.md): autonomous proposal admission,
