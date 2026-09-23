@@ -390,10 +390,7 @@ fn interval(start: u64, finish: u64, receipt: &Receipt, now: u64) -> Result<()> 
     )
 }
 fn sha256(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    xcb_core::hex64(value)
 }
 fn require(condition: bool) -> Result<()> {
     if condition {
@@ -403,33 +400,7 @@ fn require(condition: bool) -> Result<()> {
     }
 }
 
-#[derive(PartialEq, Eq)]
-struct FileIdentity {
-    dev: u64,
-    ino: u64,
-    mode: u32,
-    uid: u32,
-    gid: u32,
-    links: u64,
-    bytes: u64,
-    mtime: (i64, i64),
-    ctime: (i64, i64),
-}
-impl From<&Metadata> for FileIdentity {
-    fn from(metadata: &Metadata) -> Self {
-        Self {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-            mode: metadata.mode(),
-            uid: metadata.uid(),
-            gid: metadata.gid(),
-            links: metadata.nlink(),
-            bytes: metadata.len(),
-            mtime: (metadata.mtime(), metadata.mtime_nsec()),
-            ctime: (metadata.ctime(), metadata.ctime_nsec()),
-        }
-    }
-}
+type FileIdentity = xcb_core::FileIdentity;
 struct OpenEvidence {
     path: PathBuf,
     file: File,
@@ -439,8 +410,8 @@ struct OpenEvidence {
 impl OpenEvidence {
     fn verify(&self) -> Result<()> {
         private::check_file(&self.file, self.maximum as u64)?;
-        require(FileIdentity::from(&self.file.metadata()?) == self.identity)?;
-        require(FileIdentity::from(&fs::symlink_metadata(&self.path)?) == self.identity)
+        require(FileIdentity::of(&self.file.metadata()?) == self.identity)?;
+        require(FileIdentity::of(&fs::symlink_metadata(&self.path)?) == self.identity)
     }
 }
 #[derive(Default)]
@@ -457,7 +428,7 @@ impl Reader {
     }
     fn read(&mut self, path: &Path, maximum: usize) -> Result<Vec<u8>> {
         let file = private::open_file(path, maximum as u64)?;
-        let identity = FileIdentity::from(&file.metadata()?);
+        let identity = FileIdentity::of(&file.metadata()?);
         let mut bytes = Vec::new();
         (&file).take(maximum as u64 + 1).read_to_end(&mut bytes)?;
         require(!bytes.is_empty() && bytes.len() <= maximum)?;
@@ -952,7 +923,7 @@ mod tests {
     fn synthetic_receipt_is_read_only_and_exposes_only_four_fixed_public_fields() {
         let fixture = Fixture::new();
         let path = fixture.directory.join("receipt.json");
-        let before = FileIdentity::from(&fs::metadata(&path).unwrap());
+        let before = FileIdentity::of(&fs::metadata(&path).unwrap());
         let bytes = fs::read(&path).unwrap();
         let admitted = fixture.read().unwrap();
         assert!(admitted.covers("claude/synthetic-model"));
@@ -967,7 +938,7 @@ mod tests {
             serde_json::to_value(fixture.read().unwrap().public()).unwrap(),
             public
         );
-        assert!(FileIdentity::from(&fs::metadata(path).unwrap()) == before);
+        assert!(FileIdentity::of(&fs::metadata(path).unwrap()) == before);
         // Production admission still requires actual verified host/provider bytes.
         assert!(load(&fixture.root, &fixture.expected(), NOW).is_err());
     }
@@ -1237,13 +1208,13 @@ mod tests {
         assert!(sha256(&record.generation));
         assert_eq!(record.account, account.id);
         let bytes = fs::read(&path).unwrap();
-        let identity = FileIdentity::from(&fs::metadata(&path).unwrap());
+        let identity = FileIdentity::of(&fs::metadata(&path).unwrap());
         assert_eq!(
             ensure_generation(&store, &run).unwrap().generation,
             record.generation
         );
         assert_eq!(fs::read(&path).unwrap(), bytes);
-        assert!(FileIdentity::from(&fs::metadata(&path).unwrap()) == identity);
+        assert!(FileIdentity::of(&fs::metadata(&path).unwrap()) == identity);
         let other = crate::store::Store::open(store.root()).unwrap();
         assert!(ensure_generation(&other, &run).is_err());
         assert!(rotate_generation(&other, &run).is_err());

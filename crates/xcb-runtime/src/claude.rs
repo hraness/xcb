@@ -54,18 +54,21 @@ pub enum Event {
     },
     Assistant {
         text: String,
-        thinking: String,
     },
     Quota {
         window: Option<String>,
         utilization: Option<f64>,
         resets_at_ms: Option<u64>,
         failure: Option<Failure>,
+        /// Telemetry drift the host reports without failing the turn.
+        notice: Option<&'static str>,
     },
     Result {
         terminal: Terminal,
         text: String,
         models: Vec<(String, Counters)>,
+        /// Account-level classification of a provider-marked error result.
+        failure: Option<Failure>,
     },
     Subagent {
         id: String,
@@ -76,14 +79,7 @@ pub enum Event {
     Notice,
 }
 fn string<'a>(value: &'a Value, key: &str, max: usize) -> Result<&'a str> {
-    let text = value
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or(Error::Protocol("missing string"))?;
-    if text.len() > max {
-        return Err(Error::Protocol("oversized string"));
-    }
-    Ok(text)
+    crate::wire_helpers::field_text(value, key, max, "missing string", "oversized string")
 }
 fn optional_string(value: &Value, key: &str, max: usize) -> Result<Option<String>> {
     value
@@ -93,16 +89,10 @@ fn optional_string(value: &Value, key: &str, max: usize) -> Result<Option<String
         .transpose()
 }
 fn number(value: &Value, key: &str) -> Result<u64> {
-    value
-        .get(key)
-        .and_then(Value::as_u64)
-        .ok_or(Error::Protocol("missing counter"))
+    crate::wire_helpers::field_counter(value, key, "missing counter")
 }
 fn maybe_count(value: &Value, key: &str) -> Result<u64> {
-    match value.get(key) {
-        None | Some(Value::Null) => Ok(0),
-        Some(value) => value.as_u64().ok_or(Error::Protocol("invalid counter")),
-    }
+    crate::wire_helpers::optional_field_counter(value, key, "invalid counter")
 }
 fn counters(value: &Value) -> Result<Counters> {
     let value = Counters {
@@ -124,11 +114,39 @@ fn counters(value: &Value) -> Result<Counters> {
     Ok(value)
 }
 
+/// Conservative match on the pinned CLI's authentication error text. It is
+/// consulted only for frames the provider itself marked as errors, so it can
+/// classify a failure but never fail a turn on its own.
+pub(crate) fn authentication_cue(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "not logged in",
+        "/login",
+        "invalid api key",
+        "authentication_error",
+        "authentication failed",
+        "invalid authentication",
+        "unauthorized",
+        "oauth token",
+        "expired token",
+        "token has expired",
+        "token expired",
+        "invalid token",
+    ]
+    .iter()
+    .any(|cue| lower.contains(cue))
+}
+
 pub fn parse_event(bytes: &[u8]) -> Result<Event> {
     if bytes.len() > MAX_JSON_BYTES {
         return Err(Error::Protocol("frame limit"));
     }
-    let value: Value = serde_json::from_slice(bytes)?;
+    parse_value(serde_json::from_slice(bytes)?)
+}
+
+/// Classify one already-parsed frame whose byte length was bounded by the
+/// reader; callers that need other fields of the same frame parse it once.
+pub fn parse_value(value: Value) -> Result<Event> {
     match string(&value, "type", 80)? {
         "control_request" => Ok(Event::Control(value)),
         "control_response" => Ok(Event::ControlResponse(value)),
@@ -204,59 +222,53 @@ pub fn parse_event(bytes: &[u8]) -> Result<Event> {
                     return Err(Error::Protocol("assistant text limit"));
                 }
             }
+            // Thinking blocks are bounded above but never retained here: the
+            // host renders streamed thinking deltas, not the final message copy.
             Ok(Event::Assistant {
                 text: display_text(&text, MAX_TEXT_BYTES),
-                thinking: display_text(&thinking, MAX_TEXT_BYTES),
             })
         }
         "rate_limit_event" => {
+            // Telemetry only. Unknown windows, statuses and out-of-range
+            // meters are reported and tolerated; only an explicit rejection
+            // can fail the turn, and it does so even with an unknown window.
             let info = value
                 .get("rate_limit_info")
                 .ok_or(Error::Protocol("rate limit info"))?;
-            let status = string(info, "status", 80)?;
-            if !matches!(status, "allowed" | "allowed_warning" | "rejected") {
-                return Err(Error::Protocol("unknown quota status"));
-            }
+            let (rejected, notice) = match info.get("status").and_then(Value::as_str) {
+                Some("rejected") => (true, None),
+                Some("allowed" | "allowed_warning") => (false, None),
+                _ => (
+                    false,
+                    Some("Claude reported an unrecognized rate limit status; treated as allowed"),
+                ),
+            };
             let utilization = info
                 .get("utilization")
-                .map(|value| {
-                    value
-                        .as_f64()
-                        .filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
-                        .ok_or(Error::Protocol("quota utilization"))
-                })
-                .transpose()?;
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+                .map(|value| value.clamp(0.0, 1.0));
             let resets_at_ms = info
                 .get("resetsAt")
-                .map(|value| {
-                    value
-                        .as_u64()
-                        .filter(|value| *value < 100_000_000_000)
-                        .and_then(|value| value.checked_mul(1000))
-                        .ok_or(Error::Protocol("quota reset"))
-                })
-                .transpose()?;
+                .and_then(Value::as_u64)
+                .filter(|value| *value < 100_000_000_000)
+                .and_then(|value| value.checked_mul(1000));
             let window = info
                 .get("rateLimitType")
-                .map(|value| {
-                    value
-                        .as_str()
-                        .filter(|value| {
-                            [
-                                "five_hour",
-                                "seven_day",
-                                "seven_day_opus",
-                                "seven_day_sonnet",
-                                "seven_day_overage_included",
-                                "overage",
-                            ]
-                            .contains(value)
-                        })
-                        .map(str::to_owned)
-                        .ok_or(Error::Protocol("quota window"))
+                .and_then(Value::as_str)
+                .filter(|value| {
+                    [
+                        "five_hour",
+                        "seven_day",
+                        "seven_day_opus",
+                        "seven_day_sonnet",
+                        "seven_day_overage_included",
+                        "overage",
+                    ]
+                    .contains(value)
                 })
-                .transpose()?;
-            let failure = (status == "rejected").then_some(
+                .map(str::to_owned);
+            let failure = rejected.then_some(
                 if matches!(
                     window.as_deref(),
                     Some("seven_day_opus" | "seven_day_sonnet")
@@ -271,6 +283,7 @@ pub fn parse_event(bytes: &[u8]) -> Result<Event> {
                 utilization,
                 resets_at_ms,
                 failure,
+                notice,
             })
         }
         "result" => {
@@ -321,12 +334,136 @@ pub fn parse_event(bytes: &[u8]) -> Result<Event> {
                     models.push((id.to_owned(), counters(value)?));
                 }
             }
+            let failure = (is_error && terminal == Terminal::Failed && authentication_cue(&text))
+                .then_some(Failure::Authentication);
             Ok(Event::Result {
                 terminal,
                 text: display_text(&text, MAX_TEXT_BYTES),
                 models,
+                failure,
             })
         }
         _ => Ok(Event::Notice),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn quota(
+        value: Value,
+    ) -> (
+        Option<String>,
+        Option<f64>,
+        Option<Failure>,
+        Option<&'static str>,
+    ) {
+        match parse_event(&serde_json::to_vec(&value).unwrap()).unwrap() {
+            Event::Quota {
+                window,
+                utilization,
+                failure,
+                notice,
+                ..
+            } => (window, utilization, failure, notice),
+            _ => panic!("rate_limit_event must stay a quota observation"),
+        }
+    }
+
+    #[test]
+    fn rate_limit_telemetry_tolerates_drift_but_rejection_still_classifies() {
+        let frame = |info: Value| json!({"type":"rate_limit_event","rate_limit_info":info});
+        // Unknown windows, statuses and out-of-range meters are drift the host
+        // reports without failing a turn that may already have run tools.
+        let (window, _, failure, notice) = quota(frame(json!({
+            "status":"throttled","rateLimitType":"five_hour","utilization":0.5
+        })));
+        assert_eq!((window, failure), (Some("five_hour".into()), None));
+        assert!(notice.is_some());
+        let (window, utilization, failure, _) = quota(frame(json!({
+            "status":"allowed","rateLimitType":"monthly_enterprise","utilization":1.7
+        })));
+        assert_eq!((window, utilization, failure), (None, Some(1.0), None));
+        let (_, utilization, _, _) = quota(frame(json!({
+            "status":"allowed_warning","rateLimitType":"seven_day","utilization":-0.25
+        })));
+        assert_eq!(utilization, Some(0.0));
+        let (_, utilization, _, _) = quota(frame(json!({
+            "status":"allowed","rateLimitType":"seven_day","utilization":"high"
+        })));
+        assert_eq!(utilization, None);
+        // An explicit rejection classifies even when its window is unknown.
+        for (window, expected) in [
+            (json!("quarterly"), Failure::AccountQuota),
+            (Value::Null, Failure::AccountQuota),
+            (json!("seven_day_opus"), Failure::ModelQuota),
+            (json!("five_hour"), Failure::AccountQuota),
+        ] {
+            let (_, _, failure, _) = quota(frame(json!({
+                "status":"rejected","rateLimitType":window,"utilization":1.0
+            })));
+            assert_eq!(failure, Some(expected));
+        }
+        // A missing rate_limit_info object is still malformed, not drift.
+        assert!(parse_event(br#"{"type":"rate_limit_event"}"#).is_err());
+    }
+
+    #[test]
+    fn provider_error_results_classify_authentication_conservatively() {
+        let failure =
+            |value: Value| match parse_event(&serde_json::to_vec(&value).unwrap()).unwrap() {
+                Event::Result {
+                    terminal, failure, ..
+                } => (terminal, failure),
+                _ => panic!("result frame must stay a result"),
+            };
+        for text in [
+            "Not logged in · Please run /login",
+            "OAuth token has expired",
+            "401 Unauthorized: invalid authentication",
+        ] {
+            let (terminal, classified) = failure(json!({
+                "type":"result","subtype":"error_during_execution","is_error":true,
+                "result":format!("Synthetic provider text: {text}"),
+            }));
+            assert_eq!(
+                (terminal, classified),
+                (Terminal::Failed, Some(Failure::Authentication)),
+                "{text}"
+            );
+        }
+        let (terminal, classified) = failure(json!({
+            "type":"result","subtype":"error_during_execution","is_error":true,
+            "errors":["invalid api key provided"],
+        }));
+        assert_eq!(
+            (terminal, classified),
+            (Terminal::Failed, Some(Failure::Authentication))
+        );
+        // Non-auth provider text stays unknown, and a turn limit or a
+        // successful answer is never reclassified as authentication.
+        assert_eq!(
+            failure(json!({
+                "type":"result","subtype":"error_during_execution","is_error":true,
+                "result":"synthetic renderer crash",
+            })),
+            (Terminal::Failed, None)
+        );
+        assert_eq!(
+            failure(json!({
+                "type":"result","subtype":"error_max_turns","is_error":true,
+                "result":"please log in to continue",
+            })),
+            (Terminal::TurnLimit, None)
+        );
+        assert_eq!(
+            failure(json!({
+                "type":"result","subtype":"success","is_error":false,
+                "result":"I could not log in to the deployment target",
+            })),
+            (Terminal::Completed, None)
+        );
     }
 }

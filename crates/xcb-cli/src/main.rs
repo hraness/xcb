@@ -1,4 +1,5 @@
 mod application;
+mod route;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::json;
@@ -28,13 +29,18 @@ use xcb_runtime::{
 #[command(
     name = "xcb",
     version,
-    about = "Excalibur — a local, composable terminal workspace for coding agents"
+    about = "Excalibur — a local, composable terminal workspace for coding agents",
+    after_help = "Plain `xcb` opens a persistent managed conversation in the terminal UI.\n\nFirst run:\n  xcb accounts add <provider> --plan <label>\n  xcb doctor --provider <provider>\n  xcb accounts login <account-id>\n  xcb accounts refresh <account-id>\n  xcb"
 )]
 struct Cli {
+    /// State root for accounts, sessions, and tasks (default:
+    /// ~/.local/share/xcb, or $XCB_STATE).
     #[arg(long, global = true)]
     state: Option<PathBuf>,
+    /// Emit machine-readable JSON where a command supports it.
     #[arg(long, global = true)]
     json: bool,
+    /// Workspace the command applies to (run, chat, models route).
     #[arg(long, global = true, default_value = ".")]
     cwd: PathBuf,
     #[command(subcommand)]
@@ -43,60 +49,84 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Open a persistent control conversation; workers continue after detach.
+    /// Open the control conversation for this directory; workers continue after detach.
     Chat {
-        #[arg(long)]
+        /// Reopen this control conversation instead of the latest one for the directory.
+        #[arg(long, conflicts_with = "new")]
         resume: Option<Id>,
+        /// Start a new control conversation even if one exists for this directory.
+        #[arg(long)]
+        new: bool,
     },
     /// Bounded, ephemeral application inference with no tools or hooks.
     Generate {
+        /// Print capability rows and exit without running inference.
         #[arg(long)]
         capabilities: bool,
     },
     /// Read bounded private failure metadata for one exact application request.
     ApplicationDiagnostic {
+        /// Account that ran the request.
         #[arg(long)]
         account: Id,
+        /// Request identifier to inspect.
         #[arg(long)]
         request: Id,
     },
     /// Run a fixed application qualification challenge using private gate evidence.
     QualifyApplication {
+        /// Account the qualification runs under.
         #[arg(long)]
         account: Id,
+        /// Model the qualification runs under.
         #[arg(long)]
         model: String,
+        /// Evidence bundle produced by the private qualification gate.
         #[arg(long, required_unless_present = "inspect", conflicts_with = "inspect")]
         evidence: Option<PathBuf>,
         /// Renew only if this existing credential generation still matches.
         #[arg(long, conflicts_with = "inspect", value_parser = parse_expected_generation)]
         expected_generation: Option<String>,
+        /// Report the stored qualification state without running a challenge.
         #[arg(long)]
         inspect: bool,
     },
+    /// Run one headless task in the current workspace and print the result.
     Run {
+        /// Task text; piped stdin is used when omitted.
         #[arg(short = 'p', long)]
         prompt: Option<String>,
+        /// Account name or id to run on; the configured default otherwise.
         #[arg(long)]
         account: Option<String>,
+        /// Model key (provider/model[/effort]); "auto" asks the judge to route.
         #[arg(long)]
         model: Option<String>,
+        /// Attach an image file to the prompt; repeatable, up to 8.
         #[arg(long = "image")]
         images: Vec<PathBuf>,
     },
+    /// Select one eligible account/model route and run a single bounded turn.
+    /// Machine contract: requires --json and a closed request on stdin.
+    Route,
+    /// Reopen a direct provider session in the terminal UI.
     Resume {
+        /// Session to reopen; the latest session when omitted.
         id: Option<Id>,
     },
+    /// List accounts; subcommands add, connect, and manage them.
     Accounts {
         #[command(subcommand)]
         command: Option<AccountCommand>,
     },
+    /// List observed models; subcommands refresh catalogs and set the default.
     Models {
         #[command(subcommand)]
         command: Option<ModelCommand>,
     },
     /// Inspect conditional public offers; observations do not verify account entitlement.
     Offers {
+        /// Re-check the published offers before listing them.
         #[arg(long)]
         refresh: bool,
     },
@@ -112,28 +142,37 @@ enum Commands {
     },
     /// List persistent managed control conversations.
     Conversations,
+    /// List installed panes; subcommands inspect, validate, and install them.
     Panes {
         #[command(subcommand)]
         command: Option<PaneCommand>,
     },
+    /// Toggle product extensions (auto-continue, gobstopper, usage, hooks).
     Plugins {
         #[command(subcommand)]
         command: Option<PluginCommand>,
     },
+    /// Manage user hook executables bound to lifecycle events.
     Hooks {
         #[command(subcommand)]
         command: Option<HookCommand>,
     },
+    /// Configure the optional routing judge (key, policy, status).
     Judge {
         #[command(subcommand)]
         command: Option<JudgeCommand>,
     },
+    /// Check provider binaries, accounts, and recent unsettled runs.
     Doctor {
+        /// Check only this provider (claude, codex, or devin).
         #[arg(long)]
         provider: Option<Provider>,
+        /// Provider binary to qualify instead of the discovered one;
+        /// requires --provider.
         #[arg(long)]
         executable: Option<PathBuf>,
     },
+    /// Print the effective configuration as JSON.
     Config,
     /// Check for a verified native release, configure update policy, or run
     /// the background update check used by a user-level scheduler.
@@ -143,12 +182,17 @@ enum Commands {
     },
     /// Install the latest verified native release (alias: `xcb update install`).
     Upgrade {
+        /// Version tag to install; the latest verified release when omitted.
         version: Option<String>,
+        /// Suppress progress output (used by the updater itself).
         #[arg(long, hide = true)]
         quiet: bool,
     },
+    /// Inspect or clean up unsettled runs and disposable launch artifacts.
     Recover {
+        /// Recover this run; lists unsettled runs when omitted.
         run: Option<Id>,
+        /// Apply the recovery instead of only reporting what would change.
         #[arg(long)]
         yes: bool,
         /// Inventory disposable launch snapshots; --yes removes only snapshots
@@ -156,22 +200,38 @@ enum Commands {
         #[arg(long = "launch-artifacts")]
         launch_artifacts: bool,
     },
+    /// Inspect or archive retained offline command jobs.
+    Command {
+        #[command(subcommand)]
+        command: CommandJobs,
+    },
+    /// Internal: run the managed supervisor (spawned by xcb, not for users).
     #[command(name = "managed-daemon", hide = true)]
     ManagedDaemon,
+    /// Internal: stdio bridge used by a provider's MCP helper.
     #[command(name = "broker-stdio", hide = true)]
     BrokerStdio,
+    /// Internal: in-namespace loopback CONNECT forwarder for sandboxed children.
     #[command(name = "egress-forward", hide = true)]
     EgressForward {
+        /// Host bridge socket to dial.
         socket: PathBuf,
+        /// Loopback port the forwarder listens on inside the namespace.
         port: u16,
+        /// Loopback address of the in-namespace HTTP listener, or "-".
         lo_up: String,
+        /// File holding the environment for the supervised child, or "-".
         env_file: String,
+        /// Remote port CONNECT requests target.
         #[arg(long, default_value_t = 443)]
         target_port: u16,
+        /// Command to supervise, after `--`.
         #[arg(last = true, required = true)]
         child: Vec<String>,
     },
+    /// Print shell completions for xcb.
     Completions {
+        /// Shell to generate completions for (bash, zsh, fish, …).
         shell: clap_complete::Shell,
     },
 }
@@ -184,6 +244,7 @@ enum UpdateCommand {
     Status,
     /// Set the user-level policy. The default is notify.
     Enable {
+        /// Update policy: notify, auto, or disable.
         #[arg(long, default_value = "notify", value_parser = parse_update_policy)]
         policy: xcb_runtime::update::Policy,
     },
@@ -191,12 +252,15 @@ enum UpdateCommand {
     Disable,
     /// Install a verified release using the recorded global installer.
     Install {
+        /// Version tag to install; the latest verified release when omitted.
         version: Option<String>,
+        /// Suppress progress output (used by the updater itself).
         #[arg(long, hide = true)]
         quiet: bool,
     },
     /// Run one scheduled check; intended for LaunchAgent/systemd user timers.
     Daemon {
+        /// Suppress progress output.
         #[arg(long, hide = true)]
         quiet: bool,
     },
@@ -207,80 +271,129 @@ enum AccountCommand {
     /// Add an account. Its name is fixed: the provider account email once
     /// observed, otherwise `provider/<id>` — there are no custom labels.
     Add {
+        /// Provider to add: claude, codex, or devin.
         provider: Provider,
+        /// Plan label shown by `xcb accounts`; a display label only, never
+        /// verified against the provider's entitlement.
         #[arg(long, default_value = "Subscription")]
         plan: String,
     },
+    /// Sign in to an account through the provider's own login flow.
     Login {
+        /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
+    /// Store a provider API token piped on stdin for this account.
     Token {
+        /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
+    /// Make an account the default for new direct sessions.
     Default {
+        /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
+    /// Stop routing work to an account without removing it.
     Disable {
+        /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
+    /// Re-enable a disabled account.
     Enable {
+        /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
+    /// Refresh an account's observed identity, plan, and usage window.
     Refresh {
+        /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
+    /// Copy agentmixer-era accounts and sessions from a legacy state root.
     ImportAgentmixer {
+        /// Absolute path to the legacy .agentmixer state directory.
         #[arg(long)]
         source: PathBuf,
     },
+    /// Copy an existing Codex CLI sign-in (auth.json) into a new account.
     ImportCodex {
+        /// Absolute path to the Codex auth.json to copy.
         #[arg(long)]
         source: PathBuf,
     },
     /// Copy one existing Devin sign-in into a private xcb account.
     ImportDevin {
+        /// Absolute path to the Devin credentials.toml to copy.
         #[arg(long)]
         source: PathBuf,
     },
 }
 #[derive(Subcommand)]
 enum ModelCommand {
+    /// Discover the provider's current model catalog through an account.
     Refresh {
+        /// Provider whose catalog is refreshed: claude, codex, or devin.
         provider: Provider,
+        /// Account whose credentials run the discovery (required for devin).
         #[arg(long)]
         account: Option<String>,
         /// Legacy discovery flag; use an explicit credential import and --account.
         #[arg(long)]
         from_native: bool,
     },
+    /// Make an observed model the default, e.g. `xcb models default claude/sonnet/high`.
     Default {
+        /// Full observed model key (provider/model[/effort]) from `xcb models`.
         key: String,
     },
     /// Inspect relative model profiles, including models without an eligible account.
     Tiers {
+        /// Task description used to rank the model profiles.
         #[arg(long, default_value = "general coding task")]
         task: String,
     },
     /// Preview managed routing for --cwd without reserving an account.
     /// Uses the configured judge when enabled; selection may change before execution.
     Route {
+        /// Task description the route is previewed for.
         #[arg(long)]
         task: String,
+        /// Restrict the preview to one provider (claude, codex, or devin).
         #[arg(long)]
         provider: Option<Provider>,
     },
 }
 #[derive(Subcommand)]
 enum SessionCommand {
+    /// Write local aiCharts session observations to an export file.
     Export,
+    /// Remove one session and its transcript.
     Rm {
+        /// Session id (listed by `xcb sessions`).
         id: Id,
+        /// Apply the removal; without it the command only reports the plan.
         #[arg(long)]
         yes: bool,
     },
+    /// Remove idle sessions older than a number of days.
     Prune {
+        /// Age threshold in days (1–3650, default 30).
         #[arg(default_value_t = 30, value_parser = clap::value_parser!(u16).range(1..=3650))]
         days: u16,
+        /// Apply the prune; without it the command only reports candidates.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+#[derive(Subcommand)]
+enum CommandJobs {
+    /// Move joined, acknowledged command jobs older than --days into
+    /// jobs-archive/. Records are never deleted; unjoined, cleanup-pending
+    /// and recent jobs are retained.
+    Prune {
+        /// Archive only jobs whose newest receipt is older than this many days.
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+        /// Apply the archive; without it only the dry-run report prints.
         #[arg(long)]
         yes: bool,
     },
@@ -289,35 +402,54 @@ enum SessionCommand {
 enum TaskCommand {
     /// Replay local ALGAL transition receipts and verify their chain and task record.
     Verify {
+        /// Managed task id (listed by `xcb tasks`).
         id: Id,
     },
+    /// Print one managed task's durable record as JSON.
     Show {
+        /// Managed task id (listed by `xcb tasks`).
         id: Id,
     },
     /// Read up to 64 messages; pass the last sequence as --after for the next page.
     Messages {
+        /// Managed task id (listed by `xcb tasks`).
         id: Id,
+        /// Only messages after this sequence number (default 0).
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(..=i64::MAX as u64))]
         after: u64,
     },
 }
 #[derive(Subcommand)]
 enum PaneCommand {
+    /// Print one pane's definition as JSON.
     Show {
+        /// Pane id (default "focus").
         #[arg(default_value = "focus")]
         id: Id,
     },
+    /// Validate a pane file without installing it.
     Check {
+        /// Path to the pane definition file.
         path: PathBuf,
     },
+    /// Install a pane definition file.
     Install {
+        /// Path to the pane definition file.
         path: PathBuf,
     },
 }
 #[derive(Subcommand)]
 enum PluginCommand {
-    Enable { name: String },
-    Disable { name: String },
+    /// Turn an extension on (auto-continue, gobstopper, usage, hooks).
+    Enable {
+        /// Extension name.
+        name: String,
+    },
+    /// Turn an extension off.
+    Disable {
+        /// Extension name.
+        name: String,
+    },
 }
 #[derive(Subcommand)]
 enum JudgeCommand {
@@ -336,16 +468,24 @@ enum JudgeCommand {
 }
 #[derive(Subcommand)]
 enum HookCommand {
+    /// Bind an executable to a lifecycle event.
     Add {
+        /// Lifecycle event: session_start, session_end, turn_start, or turn_end.
         event: String,
+        /// Executable the event runs.
         executable: PathBuf,
+        /// Kill the hook after this many milliseconds (default 5000).
         #[arg(long, default_value_t = 5_000)]
         timeout_ms: u64,
     },
+    /// Re-enable a disabled hook.
     Enable {
+        /// Hook id.
         id: Id,
     },
+    /// Disable a hook without removing it.
     Disable {
+        /// Hook id.
         id: Id,
     },
 }
@@ -373,6 +513,36 @@ fn human_bytes(bytes: u64) -> String {
         format!("{bytes} B")
     } else {
         format!("{value:.1} {}", units[unit])
+    }
+}
+
+/// One table cell: control characters stripped, then cut to `width` display
+/// columns. A cut cell ends with `…` so truncation is visible instead of a
+/// silent drop.
+fn cell(value: &str, width: usize) -> String {
+    let clean = xcb_core::display_text(value, usize::MAX);
+    if clean.chars().count() <= width {
+        return clean;
+    }
+    let mut text: String = clean.chars().take(width.saturating_sub(1)).collect();
+    text.push('…');
+    text
+}
+
+/// Relative time like "3h ago" for table output; 0 ms renders as "never".
+fn human_age(now_ms: u64, then_ms: u64) -> String {
+    if then_ms == 0 {
+        return "never".into();
+    }
+    let minutes = now_ms.saturating_sub(then_ms) / 60_000;
+    if minutes < 1 {
+        "just now".into()
+    } else if minutes < 60 {
+        format!("{minutes}m ago")
+    } else if minutes < 60 * 24 {
+        format!("{}h ago", minutes / 60)
+    } else {
+        format!("{}d ago", minutes / (60 * 24))
     }
 }
 
@@ -530,7 +700,7 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
         return Ok(());
     }
     println!(
-        "  ACCOUNT                             PROVIDER  PLAN                REMAINING              EST. RUNWAY"
+        "  ID          ACCOUNT                             PROVIDER  PLAN                REMAINING              EST. RUNWAY"
     );
     let now = now_ms();
     for account in view.accounts {
@@ -561,15 +731,16 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
         // provider email rendered as the account's display identity, which is
         // the documented purpose of this local status table.
         println!(
-            "{} {:<35} {:<9} {:<19} {:<22} {}{}{}{}{}",
+            "{} {:<11} {:<35} {:<9} {:<19} {:<22} {}{}{}{}{}",
             if config.default_account.as_ref() == Some(&account.id) {
                 ">"
             } else {
                 " "
             },
-            xcb_core::display_text(&account.name, 35),
+            cell(account.id.as_str(), 11),
+            cell(&account.name, 35),
             account.provider,
-            xcb_core::display_text(&account.subscription, 19),
+            cell(&account.subscription, 19),
             remaining,
             runway,
             if account.busy { " · busy" } else { "" },
@@ -585,9 +756,12 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
                 .unwrap_or_default()
         );
     }
+    println!(
+        "\n> marks the default account · ids are shortened; xcb accounts --json prints them in full"
+    );
     if let Some(seconds) = view.total_runway_seconds {
         println!(
-            "\nMeasured pool runway: ~{:.1}h ({}/{} pools; estimate, not a billing statement)",
+            "Measured pool runway: ~{:.1}h ({}/{} pools; estimate, not a billing statement)",
             seconds / 3600.0,
             view.runway_coverage.0,
             view.runway_coverage.1
@@ -664,6 +838,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
     if let Some(Commands::Generate { capabilities }) = &cli.command {
         return application::dispatch(&root, *capabilities, cli.json).await;
     }
+    if matches!(&cli.command, Some(Commands::Route)) {
+        return route::dispatch(&root, cli.json).await;
+    }
     if let Some(Commands::ApplicationDiagnostic { account, request }) = &cli.command {
         return application::diagnostic_dispatch(&root, account, request, cli.json);
     }
@@ -698,13 +875,14 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             Commands::Generate { .. }
             | Commands::ApplicationDiagnostic { .. }
             | Commands::QualifyApplication { .. }
-            | Commands::ManagedDaemon,
+            | Commands::ManagedDaemon
+            | Commands::Route,
         ) => {
             unreachable!("early dispatch returns above")
         }
-        None => managed_chat(store, cli.cwd.canonicalize()?, None, cli.json).await,
-        Some(Commands::Chat { resume }) => {
-            managed_chat(store, cli.cwd.canonicalize()?, resume, cli.json).await
+        None => managed_chat(store, cli.cwd.canonicalize()?, None, false, cli.json).await,
+        Some(Commands::Chat { resume, new }) => {
+            managed_chat(store, cli.cwd.canonicalize()?, resume, new, cli.json).await
         }
         Some(Commands::Resume { id }) => {
             let id = id
@@ -764,6 +942,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 &config,
                 account.as_ref(),
                 model.as_deref(),
+                None,
             )?;
             let (cancel, cancelled) = watch::channel(false);
             // Install both handlers before starting any provider. SIGTERM must
@@ -1159,6 +1338,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             task: &task,
                             required_provider,
                             preferred_provider,
+                            required_model: None,
                             excluded_routes: &excluded_routes,
                             excluded_accounts: &excluded_accounts,
                             account: None,
@@ -1238,9 +1418,24 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             if cli.json {
                 print_json(choices)?;
             } else {
+                println!("  MODEL                                                 LABEL · MODE");
+                // choose_model defaults each provider to its first row in this
+                // ordering, so mark those rows.
+                let mut defaulted = std::collections::BTreeSet::new();
                 for choice in choices {
-                    println!("{:<56} {} · {:?}", choice.key(), choice.label, choice.mode);
+                    println!(
+                        "{} {:<56} {} · {:?}",
+                        if defaulted.insert(choice.provider) {
+                            "*"
+                        } else {
+                            " "
+                        },
+                        choice.key(),
+                        cell(&choice.label, 56),
+                        choice.mode
+                    );
                 }
+                println!("* default route per provider (xcb models default <key> repins it)");
             }
             Ok(0)
         }
@@ -1284,13 +1479,20 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     if cli.json {
                         print_json(sessions)?;
                     } else {
+                        println!(
+                            "{:<34}  {:<8} {:<24} {:<15} {:<9} TITLE",
+                            "SESSION ID", "PROVIDER", "MODEL", "STATE", "ACTIVE"
+                        );
+                        let now = now_ms();
                         for session in sessions {
                             println!(
-                                "{}  {}  {}  {}",
-                                session.id,
+                                "{:<34}  {:<8} {:<24} {:<15} {:<9} {}",
+                                session.id.as_str(),
                                 session.model.provider,
-                                session.model.label,
-                                session.title
+                                cell(&session.model.label, 24),
+                                session.state.label(),
+                                human_age(now, session.last_active_at_ms),
+                                cell(&session.title, 60)
                             );
                         }
                     }
@@ -1367,10 +1569,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             } else if conversations.is_empty() {
                 println!("No managed conversations.");
             } else {
+                let counts = managed.message_counts()?;
                 for conversation in conversations {
+                    let messages = counts.get(&conversation.id).copied().unwrap_or_default();
                     println!(
-                        "{}  {} · {}",
-                        conversation.id, conversation.title, conversation.workspace
+                        "{}  {} · {} msgs · {}",
+                        conversation.id, conversation.title, messages, conversation.workspace
                     );
                 }
             }
@@ -1388,11 +1592,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     } else {
                         for task in tasks {
                             println!(
-                                "{}  {} · {} · {}",
+                                "{}  {} · {} · {}{}",
                                 task.id,
-                                task.state.as_str(),
+                                task.state.label(),
                                 task.title,
-                                task.detail
+                                task.detail,
+                                task.route
+                                    .as_deref()
+                                    .map(|route| format!(" · {route}"))
+                                    .unwrap_or_default()
                             );
                         }
                     }
@@ -1653,11 +1861,16 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             json!({"version":1,"policy":state.policy,"lastCheckMs":state.last_check_ms,"availableVersion":state.available_version}),
                         )?;
                     } else {
+                        let available = match state.available_version.as_deref() {
+                            Some(version) => format!("available {version}"),
+                            None if state.last_check_ms == 0 => "not checked yet".into(),
+                            None => "no newer release recorded".into(),
+                        };
                         println!(
-                            "update policy: {} · last check {} · available {}",
+                            "update policy: {} · last check {} · {}",
                             state.policy,
-                            state.last_check_ms,
-                            state.available_version.as_deref().unwrap_or("none")
+                            human_age(now_ms(), state.last_check_ms),
+                            available
                         );
                     }
                 }
@@ -1873,6 +2086,35 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Some(Commands::Command {
+            command: CommandJobs::Prune { days, yes },
+        }) => {
+            let root = xcb_runtime::command_tool::default_root()?;
+            let report = xcb_runtime::command::CommandBackend::prune_joined_jobs(
+                &root,
+                now_ms().saturating_sub(u64::from(days) * 86_400_000),
+                yes,
+            )?;
+            if cli.json {
+                print_json(report)?;
+            } else {
+                println!(
+                    "{} {} joined command job(s) older than {days} days into {}. {} unjoined, {} cleanup-pending and {} recent job(s) retained.{}",
+                    if yes { "Archived" } else { "Would archive" },
+                    report.candidates.len(),
+                    root.join("jobs-archive").display(),
+                    report.retained_unjoined,
+                    report.retained_cleanup_pending,
+                    report.retained_recent,
+                    if yes {
+                        ""
+                    } else {
+                        " Repeat with --yes to apply."
+                    }
+                );
+            }
+            Ok(0)
+        }
         Some(Commands::EgressForward {
             socket,
             port,
@@ -1908,6 +2150,7 @@ async fn managed_chat(
     store: Arc<Store>,
     cwd: PathBuf,
     resume: Option<Id>,
+    new: bool,
     json: bool,
 ) -> Result<i32> {
     if json {
@@ -1925,6 +2168,12 @@ async fn managed_chat(
         Some(id) => managed
             .conversation(&id)?
             .ok_or(Error::Unavailable("managed conversation not found"))?,
+        // The ambient launch reopens this directory's live thread; `/new` or
+        // `--new` is the explicit way to start a parallel conversation.
+        None if !new => match managed.latest_conversation_for_workspace(&cwd)? {
+            Some(conversation) => conversation,
+            None => managed.create_conversation(&cwd).await?,
+        },
         None => managed.create_conversation(&cwd).await?,
     };
     let executable = std::env::current_exe()?;
@@ -2394,11 +2643,26 @@ mod tests {
     #[test]
     fn managed_task_cli_lists_and_inspects_without_exposing_daemon_controls() {
         let cli = Cli::try_parse_from(["xcb", "chat"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Chat { resume: None })));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Chat {
+                resume: None,
+                new: false
+            })
+        ));
         let cli = Cli::try_parse_from(["xcb", "chat", "--resume", "c_example"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Commands::Chat { resume: Some(id) }) if id.as_str() == "c_example")
+            matches!(cli.command, Some(Commands::Chat { resume: Some(id), .. }) if id.as_str() == "c_example")
         );
+        let cli = Cli::try_parse_from(["xcb", "chat", "--new"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Chat {
+                resume: None,
+                new: true
+            })
+        ));
+        assert!(Cli::try_parse_from(["xcb", "chat", "--resume", "c_example", "--new"]).is_err());
         let cli = Cli::try_parse_from(["xcb", "conversations"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Conversations)));
         let cli = Cli::try_parse_from(["xcb", "tasks"]).unwrap();
@@ -2489,6 +2753,27 @@ mod tests {
     }
 
     #[test]
+    fn command_prune_cli_shape_defaults_to_dry_run() {
+        let cli = Cli::try_parse_from(["xcb", "command", "prune"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Command {
+                command: CommandJobs::Prune {
+                    days: 30,
+                    yes: false
+                }
+            })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "command", "prune", "--days", "7", "--yes"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Command {
+                command: CommandJobs::Prune { days: 7, yes: true }
+            })
+        ));
+    }
+
+    #[test]
     fn recover_cli_shape_accepts_optional_run_and_yes() {
         let cli = Cli::try_parse_from(["xcb", "recover"]).unwrap();
         assert!(matches!(
@@ -2540,5 +2825,46 @@ mod tests {
                 launch_artifacts: true
             })
         ));
+    }
+
+    /// `--help` is part of the product surface: every subcommand must carry
+    /// an `about` line and every argument a `help` line, recursively, so no
+    /// bare name ever ships undocumented. Hidden internal commands count too.
+    #[test]
+    fn every_command_and_argument_is_documented() {
+        fn check(command: &clap::Command, path: &str) {
+            for sub in command.get_subcommands() {
+                let name = format!("{path} {}", sub.get_name());
+                assert!(
+                    sub.get_about()
+                        .is_some_and(|about| !about.to_string().trim().is_empty()),
+                    "{name} has no about text"
+                );
+                for arg in sub.get_arguments() {
+                    assert!(
+                        arg.get_help()
+                            .is_some_and(|help| !help.to_string().trim().is_empty()),
+                        "{name} argument '{}' has no help text",
+                        arg.get_id()
+                    );
+                }
+                check(sub, &name);
+            }
+        }
+        let cli = Cli::command();
+        assert!(
+            cli.get_after_help()
+                .is_some_and(|text| text.to_string().contains("Plain `xcb`")),
+            "xcb --help must explain what plain `xcb` does"
+        );
+        for arg in cli.get_arguments() {
+            assert!(
+                arg.get_help()
+                    .is_some_and(|help| !help.to_string().trim().is_empty()),
+                "global argument '{}' has no help text",
+                arg.get_id()
+            );
+        }
+        check(&cli, "xcb");
     }
 }

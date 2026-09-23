@@ -5,11 +5,14 @@ pub use config::{
     ARGS, Admission, BINARY_SHA256, QUALIFIED_MODELS, SCHEMA_SHA256, StaticCatalog, VERSION,
     configuration, runtime_admitted, static_catalog, thread_configuration, version_admitted,
 };
+#[cfg(test)]
+pub(crate) use config::{fixture_catalog_source, static_catalog_bound};
 
 use crate::{
-    Error, Result, broker, now_ms,
+    Error, Result, broker, category, now_ms,
     process::StreamProcess,
-    protocol::{Batch, Event, Prompt, Protocol},
+    protocol::{Batch, Event, MAX_TURN_FRAMES, Prompt, Protocol},
+    wire_helpers::require,
 };
 use serde_json::{Value, json};
 use std::{
@@ -21,12 +24,14 @@ use xcb_core::{
     Id, MAX_JSON_BYTES, MAX_TEXT_BYTES, Provider,
     models::{Mode, ModelChoice},
     policy::{Failure, Terminal},
-    usage::{COUNTER_LIMIT, Counters, QuotaPoint},
+    usage::{Counters, QuotaPoint},
 };
 
 const MAX_CALLS: usize = 1024;
 const MAX_ITEMS: usize = 4096;
-const MAX_FRAMES: usize = 65_536;
+// Backstop only: the host ends a turn gracefully at MAX_TURN_FRAMES, and this
+// count also covers initialization traffic, so it must never trip first.
+const MAX_FRAMES: usize = 2 * MAX_TURN_FRAMES;
 const WIRE_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const PROMPT_BYTES: usize = 1024 * 1024;
 const IMAGE_BASE64_BYTES: usize = (10 * 1024 * 1024_usize).div_ceil(3) * 4;
@@ -68,6 +73,8 @@ pub(crate) struct CodexProtocol {
     ready: bool,
     completed: bool,
     remote_disabled: bool,
+    /// One bounded notice per turn for tolerated unknown item kinds.
+    unrecognized_item: bool,
     descriptors: Vec<Value>,
     names: BTreeSet<String>,
     items: BTreeMap<String, Item>,
@@ -85,13 +92,6 @@ pub(crate) struct CodexProtocol {
     observed_plan: Option<String>,
 }
 
-fn require(ok: bool, reason: &'static str) -> Result<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(Error::Protocol(reason))
-    }
-}
 // Provider errors can contain account identifiers, request headers or URLs.
 // Retain only the host-selected operation, numeric code and a fixed category.
 fn rpc_failure(method: &'static str, error: &Value) -> Error {
@@ -102,8 +102,8 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
         .collect::<String>()
         .to_ascii_lowercase();
     let known_category = match error_tag(error) {
-        "usageLimitExceeded" => Some("provider usage limit exceeded"),
-        "unauthorized" => Some("authentication rejected; reconnect this account"),
+        "usageLimitExceeded" => Some(category::CODEX_USAGE_LIMIT),
+        "unauthorized" => Some(category::AUTHENTICATION),
         "contextWindowExceeded" => Some("provider context window exceeded"),
         "cyberPolicy" | "misalignmentPolicyViolation" | "sandboxError" => {
             Some("provider policy rejected the operation")
@@ -116,7 +116,7 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
         .iter()
         .any(|s| message.contains(s))
     {
-        "TLS certificate or transport failure"
+        category::TLS
     } else if [
         "unauthorized",
         "authentication",
@@ -127,7 +127,7 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
     .iter()
     .any(|s| message.contains(s))
     {
-        "authentication rejected; reconnect this account"
+        category::AUTHENTICATION
     } else if ["permission denied", "operation not permitted"]
         .iter()
         .any(|s| message.contains(s))
@@ -156,7 +156,7 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
     .iter()
     .any(|s| message.contains(s))
     {
-        "provider request or network failure"
+        category::NETWORK
     } else {
         "provider rejected the operation"
     };
@@ -179,47 +179,31 @@ fn error_tag(error: &Value) -> &str {
 }
 
 fn object(value: &Value) -> Result<&serde_json::Map<String, Value>> {
-    value
-        .as_object()
-        .filter(|v| v.len() <= 256)
-        .ok_or(Error::Protocol("Codex object bound"))
+    crate::wire_helpers::object(value, "Codex object bound")
 }
 fn closed(value: &Value, keys: &[&str]) -> Result<()> {
-    require(
-        object(value)?.keys().all(|k| keys.contains(&k.as_str())),
+    crate::wire_helpers::closed(
+        value,
+        keys,
+        "Codex object bound",
+        "Codex object bound",
         "Codex unexpected field",
     )
 }
 fn text(value: &Value, max: usize) -> Result<&str> {
-    value
-        .as_str()
-        .filter(|s| s.len() <= max)
-        .ok_or(Error::Protocol("Codex text bound"))
+    crate::wire_helpers::text(value, max, "Codex text bound")
 }
 fn identity(value: &Value) -> Result<String> {
-    let value = text(value, 160)?;
-    require(
-        !value.is_empty() && !value.chars().any(char::is_control),
-        "Codex identity",
-    )?;
-    Ok(value.into())
+    crate::wire_helpers::identity(value, "Codex text bound", "Codex identity")
 }
 fn count(value: &Value) -> Result<u64> {
-    value
-        .as_u64()
-        .filter(|v| *v <= COUNTER_LIMIT)
-        .ok_or(Error::Protocol("Codex counter"))
+    crate::wire_helpers::counter(value, "Codex counter")
 }
 fn optional_count(value: &Value) -> Result<u64> {
-    if value.is_null() { Ok(0) } else { count(value) }
+    crate::wire_helpers::counter_or_null(value, "Codex counter")
 }
 fn response_id(value: &Value) -> Result<String> {
-    if value.is_string() {
-        identity(value)?;
-    } else {
-        require(value.as_i64().is_some(), "Codex RPC id")?;
-    }
-    Ok(serde_json::to_string(value)?)
+    crate::wire_helpers::rpc_key(value, "Codex text bound", "Codex identity", "Codex RPC id")
 }
 
 pub fn parse_models(value: &Value, observed_at_ms: u64) -> Result<Vec<ModelChoice>> {
@@ -275,17 +259,9 @@ pub fn parse_models(value: &Value, observed_at_ms: u64) -> Result<Vec<ModelChoic
 }
 
 fn usage(value: &Value) -> Result<(Counters, u64)> {
-    closed(
-        value,
-        &[
-            "totalTokens",
-            "inputTokens",
-            "cachedInputTokens",
-            "cacheWriteInputTokens",
-            "outputTokens",
-            "reasoningOutputTokens",
-        ],
-    )?;
+    // Telemetry: the known counters must still reconcile exactly, but a new
+    // provider-side counter is drift to tolerate, not a reason to fail a turn.
+    object(value)?;
     let input = count(&value["inputTokens"])?;
     let cache_read = count(&value["cachedInputTokens"])?;
     let cache_write = optional_count(&value["cacheWriteInputTokens"])?;
@@ -460,6 +436,7 @@ impl CodexProtocol {
             ready: false,
             completed: false,
             remote_disabled: false,
+            unrecognized_item: false,
             descriptors,
             names,
             items: BTreeMap::new(),
@@ -643,6 +620,25 @@ impl CodexProtocol {
                 && !self.completed
                 && self.thread_id.as_deref() == params["threadId"].as_str()
                 && self.turn_id.as_deref() == params["turnId"].as_str(),
+            "Codex turn scope",
+        )
+    }
+    /// Scope for observations only. A turn the provider announced through
+    /// `turn/started` while its `turn/start` RPC is still pending can already
+    /// fail (quota, authentication); that classification must survive even
+    /// though nothing executable is admitted before the RPC response.
+    fn observation_scope(&self, params: &Value) -> Result<()> {
+        if self.turn_id.is_some() {
+            return self.scope(params);
+        }
+        require(
+            !self.completed
+                && self.turn_rpc.is_some()
+                && self.thread_id.as_deref() == params["threadId"].as_str()
+                && self
+                    .early_turn
+                    .as_deref()
+                    .is_some_and(|early| Some(early) == params["turnId"].as_str()),
             "Codex turn scope",
         )
     }
@@ -966,7 +962,27 @@ impl CodexProtocol {
                             }
                         }
                     }
-                    _ => return Err(Error::Protocol("Codex native executable item denied")),
+                    // Native execution records stay fatal: these kinds mean
+                    // the provider ran something outside the admitted tool
+                    // boundary. Other item kinds are opaque display traffic;
+                    // tolerate each unknown kind once as a bounded diagnostic
+                    // rather than failing a turn whose tools already ran.
+                    "commandExecution"
+                    | "fileChange"
+                    | "mcpToolCall"
+                    | "webSearch"
+                    | "collabAgentToolCall"
+                    | "functionCallOutput" => {
+                        return Err(Error::Protocol("Codex native executable item denied"));
+                    }
+                    _ => {
+                        if !completed && !self.unrecognized_item {
+                            self.unrecognized_item = true;
+                            events.push(Event::Diagnostic(crate::runner::Diagnostic::notice(
+                                "Codex sent an unrecognized item kind; it was ignored",
+                            )));
+                        }
+                    }
                 }
             }
             "item/agentMessage/delta"
@@ -1027,7 +1043,7 @@ impl CodexProtocol {
                 }
             }
             "error" => {
-                self.scope(p)?;
+                self.observation_scope(p)?;
                 require(p["willRetry"].is_boolean(), "Codex error retry flag")?;
                 let failure = match error_tag(&p["error"]) {
                     "usageLimitExceeded" => Some(Failure::AccountQuota),
@@ -1055,14 +1071,18 @@ impl CodexProtocol {
                 self.thread_scope(p)?;
                 let turn = &p["turn"];
                 require(
-                    self.ready
-                        && !self.completed
-                        && self.turn_id.as_deref() == turn["id"].as_str()
-                        && self.calls.values().all(|c| c.completed),
-                    "Codex terminal with unresolved calls",
+                    self.ready && !self.completed && self.turn_id.as_deref() == turn["id"].as_str(),
+                    "Codex terminal scope",
                 )?;
+                // Only a successful turn must have resolved every tool call. A
+                // failed or interrupted turn abandons the rest: the host has
+                // already settled every call it executed, and hiding the
+                // provider's own failure category behind a protocol error
+                // would leave the account misclassified.
+                let unresolved = self.calls.values().filter(|c| !c.completed).count();
                 let terminal = match turn["status"].as_str() {
                     Some("completed") => {
+                        require(unresolved == 0, "Codex terminal with unresolved calls")?;
                         require(
                             turn["error"].is_null()
                                 && self.items.values().all(|item| item.completed),
@@ -1108,6 +1128,14 @@ impl CodexProtocol {
                     }
                     _ => return Err(Error::Protocol("Codex terminal status")),
                 };
+                if unresolved > 0 {
+                    for call in self.calls.values_mut() {
+                        call.completed = true;
+                    }
+                    events.push(Event::Diagnostic(crate::runner::Diagnostic::notice(
+                        "Codex ended the turn with unresolved tool calls; they were abandoned",
+                    )));
+                }
                 self.completed = true;
                 let output = self
                     .final_text
@@ -1124,9 +1152,22 @@ impl CodexProtocol {
                     models,
                 });
             }
-            // Never accept reroutes, native executable tools, auth recovery,
-            // external token requests, plugins or unknown protocol operations.
-            _ => return Err(Error::Protocol("Codex unadmitted notification")),
+            // Never accept reroutes, native executable items, account or
+            // auth recovery, or unknown turn operations: those change what
+            // the admitted boundary means. Any other id-less notification
+            // cannot request anything, so it is reported as drift instead of
+            // failing a turn whose tools may already have run.
+            _ => {
+                require(
+                    !["model/", "account/", "item/", "turn/"]
+                        .iter()
+                        .any(|prefix| method.starts_with(prefix)),
+                    "Codex unadmitted notification",
+                )?;
+                events.push(Event::Diagnostic(crate::runner::Diagnostic::notice(
+                    "Codex sent an unrecognized notification; it was ignored",
+                )));
+            }
         }
         Ok((events, outgoing))
     }
@@ -1187,6 +1228,20 @@ impl Protocol for CodexProtocol {
     /// The email/plan the provider reported for the connected account, if any.
     fn account_identity(&self) -> (Option<String>, Option<String>) {
         (self.observed_email.clone(), self.observed_plan.clone())
+    }
+    /// `turn/interrupt` names the exact admitted turn; before admission the
+    /// provider has nothing to interrupt and the runner falls back to the
+    /// bounded stdin-close grace and kill.
+    fn interruption(&mut self) -> Option<Value> {
+        if self.completed {
+            return None;
+        }
+        let thread = self.thread_id.as_ref()?;
+        let turn = self.turn_id.as_ref()?;
+        self.next_id += 1;
+        Some(
+            json!({"id":self.next_id,"method":"turn/interrupt","params":{"threadId":thread,"turnId":turn}}),
+        )
     }
     async fn next(&mut self, process: &mut StreamProcess) -> Result<Batch> {
         let frame = process

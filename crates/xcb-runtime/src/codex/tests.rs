@@ -110,6 +110,86 @@ fn native_execution_and_permission_requests_are_not_granted() {
 }
 
 #[test]
+fn unknown_non_executable_items_become_one_bounded_diagnostic() {
+    let mut c = started();
+    // A display-only item kind the pinned schema does not list: tolerated once
+    // inside an admitted turn instead of failing work already underway.
+    let item = json!({"id":"odd1","type":"mysteryWidget","secret":"SYNTHETIC_SECRET","text":"provider controlled text"});
+    let (events, replies) = c.accept(notice("item/started", item.clone())).unwrap();
+    assert!(replies.is_empty());
+    assert!(
+        matches!(&events[..], [Event::Diagnostic(detail)] if detail.as_str() == "Codex sent an unrecognized item kind; it was ignored")
+    );
+    // Completion of the tolerated item resolves without another notice, and a
+    // second unknown kind does not spam the diagnostic channel.
+    let (events, _) = c.accept(notice("item/completed", item)).unwrap();
+    assert!(events.is_empty());
+    let (events, _) = c
+        .accept(notice(
+            "item/started",
+            json!({"id":"odd2","type":"otherWidget"}),
+        ))
+        .unwrap();
+    assert!(events.is_empty());
+    // The admitted turn continues normally.
+    c.accept(notice("item/started", call_item())).unwrap();
+    // Every kind that records native execution stays fatal, started or
+    // completed alike.
+    for kind in [
+        "commandExecution",
+        "fileChange",
+        "mcpToolCall",
+        "webSearch",
+        "collabAgentToolCall",
+        "functionCallOutput",
+    ] {
+        let mut c = started();
+        assert!(
+            c.accept(notice("item/started", json!({"id":"native1","type":kind})))
+                .is_err(),
+            "{kind}"
+        );
+        let mut c = started();
+        c.items.insert(
+            "native1".into(),
+            Item {
+                kind: kind.into(),
+                completed: false,
+            },
+        );
+        assert!(
+            c.accept(notice(
+                "item/completed",
+                json!({"id":"native1","type":kind})
+            ))
+            .is_err(),
+            "{kind} completion"
+        );
+    }
+}
+
+#[test]
+fn interruption_names_only_the_admitted_turn() {
+    // Turn RPC minted but not yet admitted: the provider owns nothing to
+    // interrupt, so the runner's stdin-close grace is the whole signal.
+    let mut c = codec();
+    c.initialized = true;
+    c.thread_id = Some("thread1".into());
+    c.turn_rpc = Some(7);
+    assert!(c.interruption().is_none());
+    // Admission pins the exact thread/turn pair into the request.
+    let mut c = started();
+    let frame = c.interruption().unwrap();
+    assert_eq!(frame["method"], "turn/interrupt");
+    assert_eq!(frame["params"]["threadId"], "thread1");
+    assert_eq!(frame["params"]["turnId"], "turn1");
+    assert_eq!(frame["id"], json!(c.next_id));
+    // Once the turn has completed there is nothing left to interrupt.
+    c.completed = true;
+    assert!(c.interruption().is_none());
+}
+
+#[test]
 fn readiness_requires_the_matching_rpc_and_rejects_early_execution() {
     let mut c = codec();
     c.thread_id = Some("thread1".into());
@@ -736,5 +816,182 @@ fn broker_guidance_keeps_native_sandbox_read_only_and_zero_tool_launches_empty()
             assert!(!instructions.contains("authorized host broker writes"));
             assert!(!instructions.contains("workspace_write"));
         }
+    }
+}
+
+#[test]
+fn delta_bursts_beyond_legacy_frame_fixtures_are_streamed_load() {
+    // --include-partial-messages style streaming makes every delta a frame;
+    // the codec backstop sits far above a long turn, so 65,536+ deltas are
+    // ordinary load, never a protocol error.
+    let mut c = started();
+    c.accept(notice(
+        "item/started",
+        json!({"id":"answer1","type":"agentMessage","text":"","phase":"commentary"}),
+    ))
+    .unwrap();
+    let frame = serde_json::to_vec(&json!({
+        "method":"item/agentMessage/delta",
+        "params":{"threadId":"thread1","turnId":"turn1","itemId":"answer1","delta":"x"}
+    }))
+    .unwrap();
+    let mut deltas = 0usize;
+    for _ in 0..70_000 {
+        let value = c.envelope(&frame).unwrap();
+        let (events, replies) = c.accept(value).unwrap();
+        assert!(replies.is_empty());
+        deltas += events
+            .iter()
+            .filter(|event| matches!(event, Event::Delta { .. }))
+            .count();
+    }
+    assert_eq!(deltas, 70_000);
+    assert!(c.frames > 65_536 && c.frames < MAX_FRAMES);
+}
+
+#[test]
+fn usage_tolerates_new_provider_counters_while_reconciling_known_ones() {
+    let mut value = json!({"totalTokens":150,"inputTokens":120,"cachedInputTokens":80,"cacheWriteInputTokens":10,"outputTokens":30,"reasoningOutputTokens":20});
+    value["futureProviderCounter"] = json!(9);
+    let (counters, total) = usage(&value).unwrap();
+    assert_eq!(total, 150);
+    assert_eq!(counters.output, 30);
+    // Drift is only tolerated on top of counters that still reconcile: a
+    // broken total or a missing required counter still fails closed.
+    for broken in [
+        json!({"totalTokens":151,"inputTokens":120,"cachedInputTokens":80,"outputTokens":30,"reasoningOutputTokens":20,"futureProviderCounter":9}),
+        json!({"totalTokens":150,"inputTokens":120,"cachedInputTokens":80,"outputTokens":30,"futureProviderCounter":9}),
+        json!({"totalTokens":150,"inputTokens":120,"cachedInputTokens":130,"cacheWriteInputTokens":10,"outputTokens":30,"reasoningOutputTokens":20}),
+    ] {
+        assert!(usage(&broken).is_err());
+    }
+}
+
+#[test]
+fn failed_terminal_classifies_and_abandons_unresolved_tool_calls() {
+    // A failed turn with an in-progress dynamic tool call hides behind no
+    // protocol error: the account settles from the provider's own category.
+    let mut c = started();
+    c.accept(notice("item/started", call_item())).unwrap();
+    let (events, replies) = c
+        .accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"failed","error":{"codexErrorInfo":"usageLimitExceeded","message":"SYNTHETIC_SECRET"}}}}))
+        .unwrap();
+    assert!(replies.is_empty());
+    assert_eq!(
+        events.iter().find_map(|event| match event {
+            Event::Quota { failure, .. } => *failure,
+            _ => None,
+        }),
+        Some(Failure::AccountQuota)
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::Result {
+            terminal: Terminal::Failed,
+            ..
+        }
+    )));
+    assert!(c.completed && c.calls["call1"].completed);
+    // An interrupted turn abandons the same way; a completed turn still
+    // requires every call resolved.
+    let mut c = started();
+    c.accept(notice("item/started", call_item())).unwrap();
+    let (events, _) = c
+        .accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"interrupted","error":null}}}))
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::Result {
+            terminal: Terminal::Cancelled,
+            ..
+        }
+    )));
+    assert!(c.calls["call1"].completed);
+    let mut c = started();
+    c.accept(notice("item/started", call_item())).unwrap();
+    assert!(
+        c.accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"completed","error":null}}}))
+            .is_err()
+    );
+}
+
+#[test]
+fn early_turn_errors_classify_before_turn_admission() {
+    // A turn announced by turn/started while turn/start is still pending can
+    // already fail; the classification must survive admission never arriving.
+    let early = |codec: &mut CodexProtocol| {
+        codec.thread_id = Some("thread1".into());
+        codec.turn_rpc = Some(7);
+        codec
+            .accept(json!({"method":"turn/started","params":{"threadId":"thread1","turn":{"id":"turn9"}}}))
+            .unwrap();
+    };
+    let mut c = codec();
+    early(&mut c);
+    let (events, _) = c
+        .accept(json!({"method":"error","params":{"threadId":"thread1","turnId":"turn9","willRetry":false,"error":{"codexErrorInfo":"usageLimitExceeded","message":"SYNTHETIC_SECRET"}}}))
+        .unwrap();
+    assert_eq!(
+        events.iter().find_map(|event| match event {
+            Event::Quota { failure, .. } => *failure,
+            _ => None,
+        }),
+        Some(Failure::AccountQuota)
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Diagnostic(_)))
+    );
+    // Authentication classifies the same way; unknown turn scopes still fail.
+    let mut c = codec();
+    early(&mut c);
+    let (events, _) = c
+        .accept(json!({"method":"error","params":{"threadId":"thread1","turnId":"turn9","willRetry":false,"error":{"codexErrorInfo":"unauthorized","message":"SYNTHETIC_SECRET"}}}))
+        .unwrap();
+    assert_eq!(
+        events.iter().find_map(|event| match event {
+            Event::Quota { failure, .. } => *failure,
+            _ => None,
+        }),
+        Some(Failure::Authentication)
+    );
+    for mut notification in [
+        json!({"method":"error","params":{"threadId":"thread1","turnId":"other","willRetry":false,"error":{"message":"x"}}}),
+        json!({"method":"error","params":{"threadId":"foreign","turnId":"turn9","willRetry":false,"error":{"message":"x"}}}),
+    ] {
+        let mut c = codec();
+        early(&mut c);
+        assert!(c.accept(notification.clone()).is_err());
+        notification["params"]["turnId"] = json!("turn9");
+        // Without an announced early turn the pending RPC alone is not scope.
+        assert!(codec().accept(notification).is_err());
+    }
+}
+
+#[test]
+fn unrecognized_id_less_notifications_are_drift_not_turn_failures() {
+    let (events, _) = started()
+        .accept(json!({"method":"telemetry/futureShape","params":{"threadId":"thread1","turnId":"turn1","data":{"x":1}}}))
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::Diagnostic(_)))
+    );
+    // Authority surfaces stay fail-closed: reroutes, native items, account or
+    // auth recovery, and unknown turn operations remain protocol errors.
+    for method in [
+        "model/reroute",
+        "account/chatgptAuthTokens/refresh",
+        "item/futureExecutable",
+        "turn/restarted",
+    ] {
+        assert!(
+            started()
+                .accept(json!({"method":method,"params":{"threadId":"thread1","turnId":"turn1"}}))
+                .is_err(),
+            "{method}"
+        );
     }
 }

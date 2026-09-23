@@ -1,9 +1,9 @@
 # Publishing
 
-The planned xcb pipeline publishes `@hraness/xcb` and native binaries from one
-tag channel. As of September 19, 2026, xcb has no published release; existing
-v0.3.0 assets are AgentMixer. This document describes the release contract, not
-publication evidence.
+The xcb pipeline publishes `@hraness/xcb` and native binaries from one tag
+channel. Releases tagged v0.3.0 and earlier are AgentMixer. This document
+describes the release contract, not publication evidence; the release assets
+and the site publication datum below record what is actually published.
 An immutable annotated `v<version>` tag at a reviewed commit in current `main`
 history is a release request. The tag version must equal `package.json`'s
 `version`; no other tag shape is admitted.
@@ -123,19 +123,41 @@ published to npm; they are a separate release surface alongside the
 
 ## Site publication datum
 
-`site/published-release.json` keeps `version`, `archiveUrl`, and
-`verificationRun` null until a verified xcb package exists. The homepage then
-shows the source installation path and offers no archive download. After public
-release verification passes, set all three fields to the exact stable version,
-existing `hraness-xcb-<version>.tgz` asset URL, and successful
-`https://github.com/hraness/xcb/actions/runs/<run-id>` URL.
+`site/published-release.json` is the one source of truth for the release state
+the site shows. Its four fields — `version`, `verificationRun`, `archiveUrl`,
+and `native` — stay null until a verified xcb release exists. In that state
+every public page renders the honest "no native release is published yet;
+install from source" copy and offers no download. `site/app/publication.ts`
+parses the datum and rejects any other shape at build time.
 
-Verify the actual asset and its packed manifest (`name: @hraness/xcb`, matching
-version), checksum, and provenance before changing the datum. A pre-rename
-AgentMixer release cannot satisfy this contract: do not invent an xcb asset URL
-from its version number. The site validates the explicit archive coordinate and
-never rewrites README installation commands to another release version.
-Keep all fields null if publication or verification is incomplete. Regenerate
-the README with `cd site && bun run sync:readme`, then run `bun run check` before
-deploying. Native binary availability must be verified separately; a compatibility
-archive does not prove native artifacts exist.
+After public release verification passes, set:
+
+- `version`: the exact stable version, no `v` prefix. It must not exceed the
+  source version in `package.json`.
+- `verificationRun`: the successful
+  `https://github.com/hraness/xcb/actions/runs/<run-id>` URL.
+- `archiveUrl`: the existing
+  `https://github.com/hraness/xcb/releases/download/v<version>/hraness-xcb-<version>.tgz`
+  compatibility package asset, or `null` when the release carries none.
+- `native`: a list with at most one entry per built platform, each
+  `{ "platform", "url", "sha256Url" }`. Admitted platforms are
+  `darwin-aarch64` and `linux-x86_64`; `url` must be the exact
+  `.../v<version>/xcb-<version>-<platform>.tar.gz` asset and `sha256Url` that
+  URL plus `.sha256`. Omit a platform whose asset does not exist; the site
+  then says it must be built from source.
+
+At least one of `archiveUrl` or a native entry is required once `version` is
+set. The site then renders "latest verified release: v<version>" with the
+per-platform native download and checksum links and the verification run.
+
+Verify the actual assets — the packed manifest (`name: @hraness/xcb`, matching
+version), each native archive's checksum, and provenance — before changing the
+datum. A pre-rename AgentMixer release cannot satisfy this contract: do not
+invent an xcb asset URL from its version number. The site validates every
+explicit asset coordinate and never rewrites README installation commands to
+another release version. Keep all fields null if publication or verification is
+incomplete. `site/tests/fixtures/published-release.json` exercises the
+published state in tests without claiming a release. Regenerate the README with
+`cd site && bun run sync:readme`, then run `bun run check` before deploying.
+A compatibility archive does not prove native artifacts exist, and a native
+entry for one platform does not prove another platform's asset exists.
