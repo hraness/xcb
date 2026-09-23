@@ -3,6 +3,7 @@ import {
   MarketingInstallPanel,
   MarketingPage,
   MarketingQuestionList,
+  MarketingRelated,
   MarketingSection,
   ProductHero,
 } from "@hraness/design-kit/react/server";
@@ -130,6 +131,69 @@ xcb update enable --policy notify   # macOS only: daily release check`}</code></
             </details>
           </MarketingInstallPanel>
           <MarketingQuestionList heading="Before you begin." headingId="questions-title" id="questions" questions={questions.map(({ question, answer }) => ({ question, answer: <p>{answer}</p> }))} />
+          <MarketingRelated
+            groups={[
+              {
+                heading: "The agent platform",
+                headingId: "related-tools",
+                summary: "The layer your agent runs through: sessions, accounts, web reads, and the models behind them.",
+                items: [
+                  {
+                    name: "Gobstopper",
+                    href: "https://gobstopper.sh",
+                    role: "Automatic context compaction for agent sessions",
+                    relationship: "Gobstopper context management ships inside xcb as a default-on plugin, with bounded continuation and settled-boundary checks.",
+                  },
+                  {
+                    name: "Ghostget",
+                    href: "https://ghostget.com",
+                    role: "A bounded bridge to provider data",
+                    relationship: "Ghostget is the bounded web capability an xcb-routed agent can call: named, attested operations instead of a driven browser.",
+                  },
+                  {
+                    name: "Aicharts",
+                    href: "https://aicharts.io",
+                    role: "AI model benchmarks and usage inspection",
+                    relationship: "Aicharts benchmarks the models and subscription usage across providers; xcb's local usage measurement stays local and upload is unavailable.",
+                  },
+                ],
+              },
+              {
+                heading: "The personal apps",
+                headingId: "related-apps",
+                items: [
+                  {
+                    name: "PeopleBlade",
+                    href: "https://peopleblade.com",
+                    role: "A private contact book for you and your agent",
+                    relationship: "PeopleBlade's CLI is the kind of local, bounded surface an xcb-managed agent can drive against a real private domain.",
+                  },
+                  {
+                    name: "Soulscrape",
+                    href: "https://soulscrape.com",
+                    role: "A dated, cited dossier on a person",
+                    relationship: "Soulscrape turns authorized evidence into a cited working model, a bounded artifact an xcb task can produce and inspect.",
+                  },
+                  {
+                    name: "Textbutler",
+                    href: "https://textbutler.app",
+                    role: "A personal message butler for Mac",
+                    relationship: "Textbutler studies message history and drafts replies locally, the same bring-your-own-agent shape xcb's workspace organizes.",
+                  },
+                  {
+                    name: "Wordcell",
+                    href: "https://wordcell.io",
+                    role: "A Markdown knowledge base for agents",
+                    relationship: "Wordcell is the queryable vault behind an agent's notes and sources, local files an xcb session can search and cite.",
+                  },
+                ],
+              },
+            ]}
+            heading="From the same workshop."
+            headingId="related-title"
+            label="Related"
+            summary="Each Hraness product owns one private domain and gives your agent the same kind of access: local, bounded, and inspectable."
+          />
           <MarketingCallToAction heading="Stop leaving subscriptions idle." headingId="cta-title" summary="One contract for your agents, one SDK for your applications — on the accounts you already pay for." actions={[{ href: "/docs/getting-started", label: "Get started ↗" }, { href: repository, label: "Explore the source" }]} footnote="xcb / Excalibur · Built by Hraness · MIT licensed" />
         </MarketingPage>
       </main>
