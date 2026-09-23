@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 const SWORD_FRAMES = 12;
+const SWORD_MOTION = "(hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) and (forced-colors: none)";
 
 function swordFrame(index: number) {
   return `/sword/frame-${String(index).padStart(2, "0")}.png`;
@@ -14,12 +15,22 @@ function Sword() {
   const loaded = useRef(false);
 
   useEffect(() => {
-    if (loaded.current || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    loaded.current = true;
-    for (let i = 1; i < SWORD_FRAMES; i += 1) {
-      const image = new Image();
-      image.src = swordFrame(i);
-    }
+    const motion = window.matchMedia(SWORD_MOTION);
+    const preload = () => {
+      if (!motion.matches || loaded.current) return;
+      loaded.current = true;
+      for (let i = 1; i < SWORD_FRAMES; i += 1) {
+        const image = new Image();
+        image.src = swordFrame(i);
+      }
+    };
+    const syncMotion = () => {
+      if (!motion.matches) setFrame(0);
+      else preload();
+    };
+    preload();
+    motion.addEventListener("change", syncMotion);
+    return () => motion.removeEventListener("change", syncMotion);
   }, []);
 
   return (
@@ -27,6 +38,7 @@ function Sword() {
       className="xcb-sword"
       aria-hidden="true"
       onPointerMove={(event) => {
+        if (event.pointerType === "touch" || !window.matchMedia(SWORD_MOTION).matches) return;
         const rect = event.currentTarget.getBoundingClientRect();
         const progress = (event.clientX - rect.left) / rect.width;
         setFrame(Math.min(SWORD_FRAMES - 1, Math.max(0, Math.floor(progress * SWORD_FRAMES))));

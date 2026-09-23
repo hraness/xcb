@@ -47,8 +47,7 @@ export default function Home() {
       <main id="main" tabIndex={-1}>
         <MarketingPage>
           <div className="hraness-material-wall xcb-opening">
-            <HeroField />
-            <ProductHero className="xcb-marketing-hero" align="center" name=""
+            <ProductHero backdrop={<HeroField />} className="xcb-marketing-hero" align="start" name=""
               heading="All your AI subscriptions. One router." headingId="hero-title" summary={summary}
               actions={[{ href: "/docs/getting-started", label: "Get started ↗" }, { href: "/docs/route", label: "Route contract" }]}
               boundary="Open source · uses the subscriptions you already have · source build"
