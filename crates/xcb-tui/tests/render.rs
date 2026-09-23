@@ -5,7 +5,7 @@ use xcb_core::{
     panes::{Node, Pane, Source},
     session::{Attachment, Message, MessageProvenance, Role, Session, State},
 };
-use xcb_tui::{App, render};
+use xcb_tui::{App, Modal, render};
 
 fn app() -> App {
     let mut app = App::default();
@@ -609,8 +609,10 @@ fn global_conversation_shows_managed_tasks_instead_of_provider_chrome() {
         id: Id::new("t_login").unwrap(),
         title: "Fix login redirect".into(),
         state: State::NeedsAnswer,
+        status: Some("needs input".into()),
         detail: "the worker needs your input".into(),
         route: Some("claude/default/high · user@example.com".into()),
+        route_reason: None,
         workspace: "/project".into(),
         updated_at_ms: 1,
     }];
@@ -630,6 +632,162 @@ fn global_conversation_shows_managed_tasks_instead_of_provider_chrome() {
     assert!(contents.contains("Fix login redirect"));
     assert!(contents.contains("1 needs you"));
     assert!(!contents.contains("Choose an account"));
+}
+
+fn managed_task(
+    id: &str,
+    title: &str,
+    status: &str,
+    route: Option<&str>,
+    updated_at_ms: u64,
+) -> xcb_core::ui::TaskRow {
+    xcb_core::ui::TaskRow {
+        id: Id::new(id).unwrap(),
+        title: title.into(),
+        state: State::Working,
+        status: Some(status.into()),
+        detail: format!("detail for {title}"),
+        route: route.map(str::to_owned),
+        route_reason: None,
+        workspace: "/project".into(),
+        updated_at_ms,
+    }
+}
+
+#[test]
+fn managed_tasks_show_phase_and_routed_model_in_rows_and_footer() {
+    let mut app = app();
+    app.view.session = None;
+    app.view
+        .extensions
+        .insert(0, ("algal supervisor".into(), "on".into()));
+    app.view.tasks = vec![
+        managed_task(
+            "t_run",
+            "Build feature",
+            "running",
+            Some("devin/swe-2-high · a_01234567"),
+            2,
+        ),
+        managed_task(
+            "t_wait",
+            "Write docs",
+            "queued — waiting for a route",
+            None,
+            1,
+        ),
+    ];
+    app.view.pane = Pane::focus();
+    let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    // Queued and running are distinct phases, and the dispatched route
+    // surfaces on the row and in the footer.
+    assert!(
+        contents.contains("◌ Write docs"),
+        "queued marker: {contents}"
+    );
+    assert!(
+        contents.contains("● Build feature"),
+        "running marker: {contents}"
+    );
+    assert!(
+        contents.contains("queued — waiting for a route"),
+        "queued phase: {contents}"
+    );
+    assert!(
+        contents.contains("· running ·"),
+        "running phase: {contents}"
+    );
+    assert!(
+        contents.contains("devin/swe-2-high · a_01234567"),
+        "routed model and account: {contents}"
+    );
+    assert!(contents.contains("1 running"), "running count: {contents}");
+    assert!(contents.contains("1 queued"), "queued count: {contents}");
+}
+
+#[test]
+fn long_notices_wrap_to_the_viewport_instead_of_truncating() {
+    let mut app = app();
+    app.notice = "a managed task inspect answer that used to lose everything past \
+        the first row: worker could not start because the selected account hit \
+        its session cap — tail of the notice"
+        .into();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    // The phrase wraps across two rows, so assert on the trailing segment
+    // that a single truncated row could never reach.
+    assert!(
+        contents.contains("of the notice"),
+        "the wrapped tail must render: {contents}"
+    );
+    assert!(contents.contains("past the first row"));
+    // The notice stays bounded: extra rows never consume the composer.
+    assert!(contents.contains("? needs answer") || contents.contains("needs answer"));
+}
+
+#[test]
+fn task_inspect_modal_renders_route_detail_and_scrolls() {
+    let mut app = app();
+    let mut lines = vec![
+        "Fix login".into(),
+        "running · updated 2m ago".into(),
+        String::new(),
+        "task       t_one".into(),
+        "workspace  /project".into(),
+        "route      devin/swe-2-high · a_01234567".into(),
+        "routing    learned workspace preference for devin".into(),
+        String::new(),
+    ];
+    lines.extend((1..=40).map(|index| format!("detail row {index:02}")));
+    app.modal = Some(Modal::Inspect {
+        title: "t_one · running".into(),
+        lines,
+        scroll: 0,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    assert!(contents.contains("devin/swe-2-high · a_01234567"));
+    assert!(contents.contains("learned workspace preference"));
+    assert!(contents.contains("detail row 01"));
+    assert!(
+        !contents.contains("detail row 40"),
+        "the tail stays below the initial viewport"
+    );
+
+    // End jumps to the tail; the header rows leave the viewport.
+    app.handle(
+        crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::End,
+            crossterm::event::KeyModifiers::NONE,
+        )),
+        &std::sync::mpsc::sync_channel(1).0,
+    );
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    assert!(
+        contents.contains("detail row 40"),
+        "scrolled tail: {contents}"
+    );
+    assert!(
+        !contents.contains("detail row 01"),
+        "scrolled head: {contents}"
+    );
+    match &app.modal {
+        Some(Modal::Inspect { scroll, .. }) => assert!(*scroll > 0),
+        _ => panic!("inspect modal"),
+    }
 }
 
 #[test]
