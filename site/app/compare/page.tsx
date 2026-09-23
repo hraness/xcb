@@ -80,7 +80,7 @@ export default function Compare() {
                   <tr>
                     <th scope="row"><span className="xcb-comparison-name">Claude Code &amp; Codex</span><span className="xcb-comparison-kind">Provider coding tools</span></th>
                     <td><p>Work directly in a provider’s coding experience. Claude Code includes file editing, commands, integrations, and agent delegation. Codex offers its CLI, IDE extension, and cloud app surfaces for delegated tasks.</p><div className="xcb-comparison-sources"><a href="https://code.claude.com/docs/en/overview">Claude Code docs</a><a href="https://github.com/openai/codex">Codex source &amp; docs</a><a href="https://developers.openai.com/codex/app">Codex app</a></div></td>
-                    <td><p>You want that provider’s full native experience. xcb wraps admitted runtimes with its own tools and terminal; it does not reproduce every provider feature.</p></td>
+                    <td><p>You want that provider’s full native experience. xcb wraps the exact supported provider runtimes with its own tools and terminal; it does not reproduce every provider feature.</p></td>
                   </tr>
                   <tr>
                     <th scope="row"><span className="xcb-comparison-name">OpenCode</span><span className="xcb-comparison-kind">Multi-provider coding agent</span></th>
@@ -108,7 +108,7 @@ export default function Compare() {
             <div className="xcb-comparison-fit">
               <div><h3>Choose xcb for a shared local workflow.</h3><p>Select a named account, choose an observed model, reopen a saved session, and inspect usage without changing terminal interfaces.</p></div>
               <div><h3>Keep provider tools for their full capabilities.</h3><p>The tested Claude and Codex setups passed coding workflows on macOS ARM64. xcb’s command runner currently uses offline Linux with prepared public dependencies and read-only Git inspection. Native macOS commands, Git commits, and pushes are outside that runner.</p></div>
-              <div><h3>Use orchestration tools for a task graph.</h3><p>xcb’s current evidence covers account concurrency and controlled continuation, not a general fleet of agents planning and merging parallel work. It selects observed, admitted models; an unknown model name cannot activate a provider.</p></div>
+              <div><h3>Use orchestration tools for a task graph.</h3><p>xcb’s current evidence covers account concurrency and controlled continuation, not a general fleet of agents planning and merging parallel work. It selects observed, supported models; an unknown model name cannot activate a provider.</p></div>
               <div><h3>Distinguish local state from local inference.</h3><p>xcb keeps its sessions and account state on your machine. Model requests still go to the selected provider. Subscription allowances remain separate, and unknown usage stays unknown.</p></div>
               <a className="xcb-compare-guide-link" href="/docs/getting-started">Read the setup guide ↗</a>
             </div>

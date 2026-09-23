@@ -48,12 +48,7 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         .candidate_sha256
         .as_deref()
         .unwrap_or(super::super::super::config::BINARY_SHA256);
-    assert!(
-        expected_provider.len() == 64
-            && expected_provider
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    );
+    assert!(xcb_core::hex64(expected_provider));
     assert_eq!(
         crate::process::executable_digest(&spec.provider).unwrap(),
         expected_provider

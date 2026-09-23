@@ -34,6 +34,7 @@ fn input(workspace: &Path, event: Event) -> HookInput {
         title: "Test".into(),
         pane: "focus".parse().unwrap(),
         state: State::Idle,
+        managed_task: None,
         revision: 0,
         created_at_ms: 1,
         last_active_at_ms: 1,
