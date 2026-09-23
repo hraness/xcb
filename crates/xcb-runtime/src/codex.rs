@@ -5,11 +5,13 @@ pub use config::{
     ARGS, Admission, BINARY_SHA256, QUALIFIED_MODELS, SCHEMA_SHA256, StaticCatalog, VERSION,
     configuration, runtime_admitted, static_catalog, thread_configuration, version_admitted,
 };
+#[cfg(test)]
+pub(crate) use config::{fixture_catalog_source, static_catalog_bound};
 
 use crate::{
-    Error, Result, broker, now_ms,
+    Error, Result, broker, category, now_ms,
     process::StreamProcess,
-    protocol::{Batch, Event, Prompt, Protocol},
+    protocol::{Batch, Event, MAX_TURN_FRAMES, Prompt, Protocol},
 };
 use serde_json::{Value, json};
 use std::{
@@ -26,7 +28,9 @@ use xcb_core::{
 
 const MAX_CALLS: usize = 1024;
 const MAX_ITEMS: usize = 4096;
-const MAX_FRAMES: usize = 65_536;
+// Backstop only: the host ends a turn gracefully at MAX_TURN_FRAMES, and this
+// count also covers initialization traffic, so it must never trip first.
+const MAX_FRAMES: usize = 2 * MAX_TURN_FRAMES;
 const WIRE_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const PROMPT_BYTES: usize = 1024 * 1024;
 const IMAGE_BASE64_BYTES: usize = (10 * 1024 * 1024_usize).div_ceil(3) * 4;
@@ -102,8 +106,8 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
         .collect::<String>()
         .to_ascii_lowercase();
     let known_category = match error_tag(error) {
-        "usageLimitExceeded" => Some("provider usage limit exceeded"),
-        "unauthorized" => Some("authentication rejected; reconnect this account"),
+        "usageLimitExceeded" => Some(category::CODEX_USAGE_LIMIT),
+        "unauthorized" => Some(category::AUTHENTICATION),
         "contextWindowExceeded" => Some("provider context window exceeded"),
         "cyberPolicy" | "misalignmentPolicyViolation" | "sandboxError" => {
             Some("provider policy rejected the operation")
@@ -116,7 +120,7 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
         .iter()
         .any(|s| message.contains(s))
     {
-        "TLS certificate or transport failure"
+        category::TLS
     } else if [
         "unauthorized",
         "authentication",
@@ -127,7 +131,7 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
     .iter()
     .any(|s| message.contains(s))
     {
-        "authentication rejected; reconnect this account"
+        category::AUTHENTICATION
     } else if ["permission denied", "operation not permitted"]
         .iter()
         .any(|s| message.contains(s))
@@ -156,7 +160,7 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
     .iter()
     .any(|s| message.contains(s))
     {
-        "provider request or network failure"
+        category::NETWORK
     } else {
         "provider rejected the operation"
     };
@@ -275,17 +279,9 @@ pub fn parse_models(value: &Value, observed_at_ms: u64) -> Result<Vec<ModelChoic
 }
 
 fn usage(value: &Value) -> Result<(Counters, u64)> {
-    closed(
-        value,
-        &[
-            "totalTokens",
-            "inputTokens",
-            "cachedInputTokens",
-            "cacheWriteInputTokens",
-            "outputTokens",
-            "reasoningOutputTokens",
-        ],
-    )?;
+    // Telemetry: the known counters must still reconcile exactly, but a new
+    // provider-side counter is drift to tolerate, not a reason to fail a turn.
+    object(value)?;
     let input = count(&value["inputTokens"])?;
     let cache_read = count(&value["cachedInputTokens"])?;
     let cache_write = optional_count(&value["cacheWriteInputTokens"])?;
@@ -643,6 +639,25 @@ impl CodexProtocol {
                 && !self.completed
                 && self.thread_id.as_deref() == params["threadId"].as_str()
                 && self.turn_id.as_deref() == params["turnId"].as_str(),
+            "Codex turn scope",
+        )
+    }
+    /// Scope for observations only. A turn the provider announced through
+    /// `turn/started` while its `turn/start` RPC is still pending can already
+    /// fail (quota, authentication); that classification must survive even
+    /// though nothing executable is admitted before the RPC response.
+    fn observation_scope(&self, params: &Value) -> Result<()> {
+        if self.turn_id.is_some() {
+            return self.scope(params);
+        }
+        require(
+            !self.completed
+                && self.turn_rpc.is_some()
+                && self.thread_id.as_deref() == params["threadId"].as_str()
+                && self
+                    .early_turn
+                    .as_deref()
+                    .is_some_and(|early| Some(early) == params["turnId"].as_str()),
             "Codex turn scope",
         )
     }
@@ -1027,7 +1042,7 @@ impl CodexProtocol {
                 }
             }
             "error" => {
-                self.scope(p)?;
+                self.observation_scope(p)?;
                 require(p["willRetry"].is_boolean(), "Codex error retry flag")?;
                 let failure = match error_tag(&p["error"]) {
                     "usageLimitExceeded" => Some(Failure::AccountQuota),
@@ -1055,14 +1070,18 @@ impl CodexProtocol {
                 self.thread_scope(p)?;
                 let turn = &p["turn"];
                 require(
-                    self.ready
-                        && !self.completed
-                        && self.turn_id.as_deref() == turn["id"].as_str()
-                        && self.calls.values().all(|c| c.completed),
-                    "Codex terminal with unresolved calls",
+                    self.ready && !self.completed && self.turn_id.as_deref() == turn["id"].as_str(),
+                    "Codex terminal scope",
                 )?;
+                // Only a successful turn must have resolved every tool call. A
+                // failed or interrupted turn abandons the rest: the host has
+                // already settled every call it executed, and hiding the
+                // provider's own failure category behind a protocol error
+                // would leave the account misclassified.
+                let unresolved = self.calls.values().filter(|c| !c.completed).count();
                 let terminal = match turn["status"].as_str() {
                     Some("completed") => {
+                        require(unresolved == 0, "Codex terminal with unresolved calls")?;
                         require(
                             turn["error"].is_null()
                                 && self.items.values().all(|item| item.completed),
@@ -1108,6 +1127,14 @@ impl CodexProtocol {
                     }
                     _ => return Err(Error::Protocol("Codex terminal status")),
                 };
+                if unresolved > 0 {
+                    for call in self.calls.values_mut() {
+                        call.completed = true;
+                    }
+                    events.push(Event::Diagnostic(crate::runner::Diagnostic::notice(
+                        "Codex ended the turn with unresolved tool calls; they were abandoned",
+                    )));
+                }
                 self.completed = true;
                 let output = self
                     .final_text
@@ -1124,9 +1151,22 @@ impl CodexProtocol {
                     models,
                 });
             }
-            // Never accept reroutes, native executable tools, auth recovery,
-            // external token requests, plugins or unknown protocol operations.
-            _ => return Err(Error::Protocol("Codex unadmitted notification")),
+            // Never accept reroutes, native executable items, account or
+            // auth recovery, or unknown turn operations: those change what
+            // the admitted boundary means. Any other id-less notification
+            // cannot request anything, so it is reported as drift instead of
+            // failing a turn whose tools may already have run.
+            _ => {
+                require(
+                    !["model/", "account/", "item/", "turn/"]
+                        .iter()
+                        .any(|prefix| method.starts_with(prefix)),
+                    "Codex unadmitted notification",
+                )?;
+                events.push(Event::Diagnostic(crate::runner::Diagnostic::notice(
+                    "Codex sent an unrecognized notification; it was ignored",
+                )));
+            }
         }
         Ok((events, outgoing))
     }

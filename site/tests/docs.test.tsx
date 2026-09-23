@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import Docs, { metadata as overviewMetadata } from "../app/docs/page";
 import DocsTopicPage, { dynamicParams, generateMetadata, generateStaticParams } from "../app/docs/[slug]/page";
 import { docsTopics } from "../app/docs/topics";
+import { publishedRelease } from "../app/publication";
 import { readmeHtml } from "../app/readme.generated";
 import { accessibleReferenceHtml } from "../app/docs/topic-content";
 
@@ -54,7 +55,7 @@ describe("organized documentation", () => {
       const metadata = await generateMetadata({ params: Promise.resolve({ slug: topic.slug }) });
       expect(metadata.alternates?.canonical).toBe(`/docs/${topic.slug}`);
       expect(metadata.openGraph?.url).toBe(`/docs/${topic.slug}`);
-      expect(metadata.title).toBe(`${topic.title} · XCB docs`);
+      expect(metadata.title).toBe(`${topic.title} · xcb docs`);
       expect(metadata.description).toBe(topic.description);
     }
     await expect(generateMetadata({ params: Promise.resolve({ slug: "missing-topic" }) }))
@@ -89,8 +90,12 @@ describe("organized documentation", () => {
     const html = await renderTopic("getting-started");
     expect(html).toContain("rustup toolchain install 1.97.1 --profile minimal");
     expect(html).toContain("./scripts/install-native.sh");
-    expect(html).toContain("No native XCB release");
-    expect(html).toContain("npm package is published yet");
+    if (publishedRelease === null) {
+      expect(html).toContain("No native xcb release");
+      expect(html).toContain("npm package is published yet");
+    } else {
+      expect(html).toContain(`v${publishedRelease.version}`);
+    }
     expect(html).toContain("xcb accounts login &lt;account-id&gt;");
     expect(html).toContain("xcb accounts refresh &lt;account-id&gt;");
     expect(html).toContain("xcb chat --resume &lt;conversation-id&gt;");

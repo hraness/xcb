@@ -73,8 +73,18 @@ install_from_release() {
 
   # Admit one logical regular entry before extraction. Stream its contents to
   # our own path: archive permissions, links and paths never create objects.
-  LC_ALL=C tar -tzf "$stage/archive.tar.gz" > "$stage/members"
-  LC_ALL=C tar -tvzf "$stage/archive.tar.gz" > "$stage/types"
+  # macOS bsdtar folds AppleDouble `._xcb` companions into `xcb` and hides
+  # them from listings; `!mac-ext` lists them like GNU tar does (GNU tar has no
+  # --options, so its plain listing is the fallback).
+  tar_list() {
+    if listed=$(LC_ALL=C tar --options '!mac-ext' "$1" "$2" 2>/dev/null); then
+      printf '%s\n' "$listed"
+    else
+      LC_ALL=C tar "$1" "$2"
+    fi
+  }
+  tar_list -tzf "$stage/archive.tar.gz" > "$stage/members"
+  tar_list -tvzf "$stage/archive.tar.gz" > "$stage/types"
   [ "$(wc -l < "$stage/members" | tr -d '[:space:]')" = 1 ] || fail "archive must contain only the xcb binary"
   [ "$(cat "$stage/members")" = xcb ] || fail "unsafe archive path"
   [ "$(wc -l < "$stage/types" | tr -d '[:space:]')" = 1 ] || fail "unsafe archive entry type"
@@ -94,6 +104,10 @@ install_from_source() {
     }
   ' "$root/Cargo.toml")
   version_valid "$expected_version" || fail "invalid Cargo workspace version"
+  command -v "$CARGO" >/dev/null 2>&1 || fail "cargo not found (CARGO=$CARGO). Install the Rust toolchain from https://rustup.rs, then run 'rustup toolchain install 1.97.1 --profile minimal' and retry; or set XCB_VERSION=<release> to install a verified release instead"
+  if ! command -v rustup >/dev/null 2>&1; then
+    echo "warning: rustup not found; the build expects the toolchain pinned in rust-toolchain.toml (Rust 1.97.1)" >&2
+  fi
   cd "$root"
   # Cargo owns artifact selection, including configured target directories and
   # triples. Install into our empty private stage so a stale default target
@@ -178,6 +192,23 @@ if [ -e "$share_dir/install.json" ] || [ -L "$share_dir/install.json" ]; then
   regular_file "$share_dir/install.json" || fail "existing install manifest is unsafe"
 fi
 mv -f "$stage/install.json" "$share_dir/install.json"
+
+# Another `xcb` earlier on PATH (a Homebrew or cargo install, an old copy)
+# would be picked over the one just installed. Warn, never modify it.
+remaining=$PATH
+while [ -n "$remaining" ]; do
+  case "$remaining" in
+    *:*) entry=${remaining%%:*}; remaining=${remaining#*:} ;;
+    *) entry=$remaining; remaining= ;;
+  esac
+  [ -n "$entry" ] || continue
+  resolved=$(cd "$entry" 2>/dev/null && pwd -P) || continue
+  [ "$resolved" != "$bin_dir" ] || break
+  if [ -f "$entry/xcb" ] && [ -x "$entry/xcb" ]; then
+    echo "warning: $entry/xcb precedes $bin_dir on PATH and will shadow $destination; remove it or reorder PATH" >&2
+    break
+  fi
+done
 
 case ":$PATH:" in
   *":$bin_dir:"*) ;;

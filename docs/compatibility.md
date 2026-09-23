@@ -25,9 +25,10 @@ The retained application package provides:
 ## Build from source
 
 This reference describes the TypeScript compatibility source, whose CLI differs
-from the native Rust CLI in the [quick start](../README.md). No `@hraness/xcb`
-registry package or xcb release archive is currently published. The existing
-`v0.3.0` release is AgentMixer and retains its original package identity.
+from the native Rust CLI in the [quick start](../README.md). Check the
+[release assets](https://github.com/hraness/xcb/releases) for a verified
+`hraness-xcb-<version>.tgz` package archive before installing one; releases
+tagged `v0.3.0` and earlier are AgentMixer and retain that package identity.
 
 With Bun 1.3.14, run from the repository root:
 
@@ -37,8 +38,8 @@ bun scripts/build-dist.ts
 bun src/cli.ts --help
 ```
 
-Use `bun src/cli.ts` in place of `xcb` in the compatibility examples below.
-Keep the native and compatibility state roots separate.
+Use `bun src/cli.ts` in place of `xcb-compat` in the compatibility examples
+below. Keep the native and compatibility state roots separate.
 
 ## Standalone package
 
@@ -68,21 +69,23 @@ contract.
 
 ## Command-line interface
 
-The compatibility build includes an `xcb` executable that drives the library
-task runtime. These commands describe that executable, not the native Rust CLI.
-Use the source invocation above until a verified xcb package is published:
+The compatibility build installs an `xcb-compat` executable that drives the
+library task runtime, so a global `npm install` can never shadow the native
+`xcb` binary. These commands describe that executable, not the native Rust
+CLI. Use the source invocation above when no verified xcb package is
+installed:
 
 ```sh
-xcb doctor            # inspect provider binaries, admit this runtime
-xcb auth claude       # sign in with a Claude subscription
-xcb auth status       # show stored sign-in state
-xcb auth logout       # remove the stored credential
-xcb                   # open the chat in the current directory
-xcb run -p "task"     # one headless turn (--cwd picks the workspace)
-xcb sessions          # list local sessions
-xcb sessions rm <id>  # remove a session and its transcript
-xcb sessions prune    # drop sessions idle over 30 days (or N days)
-xcb resume [id]       # continue a session (default: most recent)
+xcb-compat doctor            # inspect provider binaries, admit this runtime
+xcb-compat auth claude       # sign in with a Claude subscription
+xcb-compat auth status       # show stored sign-in state
+xcb-compat auth logout       # remove the stored credential
+xcb-compat                   # open the chat in the current directory
+xcb-compat run -p "task"     # one headless turn (--cwd picks the workspace)
+xcb-compat sessions          # list local sessions
+xcb-compat sessions rm <id>  # remove a session and its transcript
+xcb-compat sessions prune    # drop sessions idle over 30 days (or N days)
+xcb-compat resume [id]       # continue a session (default: most recent)
 ```
 
 Assistant text streams into the chat as the provider completes each content
@@ -90,7 +93,7 @@ block, and provider-declared errors (for example a plan's session limit) print
 their own message next to the typed outcome code. Piped output stays clean:
 streaming, spinners and ANSI styling only engage on a TTY.
 
-`xcb` is the kernel layer: one local CLI that keeps provider account
+`xcb-compat` is the kernel layer: one local CLI that keeps provider account
 custody, process lifecycle, brokered workspace tools, and unified responses on
 this machine. Cloud sync and orchestration belong to higher-level products
 built on this package; sessions are local-only.
@@ -99,7 +102,9 @@ The chat keeps the model's entire tool surface inside the opened directory:
 `workspace.list`, `workspace.read`, `workspace.search`, `workspace.write`, and
 bounded public `web.fetch`. There is no shell, process, or arbitrary-path
 operation. Writes are atomic and require the file's current revision, so a
-stale or speculative edit fails instead of clobbering. `/help` lists the
+stale or speculative edit fails instead of clobbering. Reads are limited to
+128 KiB per file with a guided error, and listings or searches that reach
+their bounds report `truncated` instead of failing. `/help` lists the
 in-session commands; Ctrl-C cancels a running turn and Ctrl-D exits.
 
 State lives under `~/.xcb` (mode `0700`, override with
@@ -107,7 +112,7 @@ State lives under `~/.xcb` (mode `0700`, override with
 per-provider config directories, the local admission records `doctor` writes,
 and the subscription credential `auth` stores.
 
-`xcb auth claude` runs `claude setup-token` to mint a long-lived
+`xcb-compat auth claude` runs `claude setup-token` to mint a long-lived
 (one-year) subscription OAuth token, captured and stored mode-0600 in the
 private state root — not the shared login keychain, so it cannot overwrite or
 be overwritten by a normal `claude` sign-in. The token reaches the provider
@@ -154,7 +159,7 @@ that evidence. Selecting either unqualified provider fails closed.
 
 ### Judged routing, continuation, and compaction (optional)
 
-`xcb` can ask a judgment service — the jev interface — to pick among admitted
+`xcb-compat` can ask a judgment service — the jev interface — to pick among admitted
 routes, advise whether a safely stopped turn remains unfinished, or veto
 Gobstopper elision of stale tool results that remain important. The port is
 provider-neutral: `ask(state, questions)` returns typed answers (`noul`,
@@ -167,15 +172,15 @@ advice sends at most 8 KiB each of the original task and last response. Judged
 compaction sends the current task, an ≤ 88 KiB fitted view of recent non-tool
 messages, and up to 64 old tool names and byte counts — never the tool-result
 bodies themselves. Every call allows ≤ 128 KiB total state, ≤ 64 questions, a
-≤ 256 KiB response, and one 15-second HTTPS POST. `xcb run --provider auto` is
+≤ 256 KiB response, and one 15-second HTTPS POST. `xcb-compat run --provider auto` is
 itself the opt-in on the compatibility surface — the flag names the behavior,
 and it needs a key:
 
 ```sh
-xcb judge token < /secure/path/to/judge-key   # pipe the key on stdin — never an argument
-xcb judge status            # where the key resolves from (never prints it)
-xcb judge test              # one live bounded batch (noul, choice, score)
-xcb judge logout            # remove the vaulted key
+xcb-compat judge token < /secure/path/to/judge-key   # pipe the key on stdin — never an argument
+xcb-compat judge status            # where the key resolves from (never prints it)
+xcb-compat judge test              # one live bounded batch (noul, choice, score)
+xcb-compat judge logout            # remove the vaulted key
 ```
 
 The key vaults mode-0600 under the private state root; `XCB_JEV_API_KEY` or
@@ -205,15 +210,16 @@ bound remain verbatim.
 
 ## Migrating from AgentMixer
 
-The unreleased 0.4.0 source renames the compatibility package's public identifiers from
+The 0.4.0 line renames the compatibility package's public identifiers from
 AgentMixer to xcb: `@hraness/agentmixer` → `@hraness/xcb`, the `agentmixer`
-executable → `xcb`, `~/.agentmixer` → `~/.xcb`, `AGENTMIXER_*` environment
+executable → `xcb-compat` (the bare `xcb` name belongs to the native Rust
+CLI), `~/.agentmixer` → `~/.xcb`, `AGENTMIXER_*` environment
 variables → `XCB_*`, `agentmixer.*` schema ids → `xcb.*`, `agentmixer_*`
 SQLite tables → `xcb_*`, and the `AgentMixer` runtime class → `Xcb`.
 
 Existing state is never renamed or overwritten silently:
 
-- Run `xcb migrate` once to copy `~/.agentmixer` (or `$AGENTMIXER_STATE`) into
+- Run `xcb-compat migrate` once to copy `~/.agentmixer` (or `$AGENTMIXER_STATE`) into
   the canonical root. The target must be empty; the legacy directory is left
   untouched so an older install still works — remove it yourself when ready.
 - Alternatively, point `XCB_STATE` at the existing directory; the
@@ -222,7 +228,7 @@ Existing state is never renamed or overwritten silently:
 - `AGENTMIXER_CLAUDE` / `AGENTMIXER_CODEX` binary pins are still honored when
   the `XCB_*` variable is unset; rename them when convenient.
 - Update dependents: package imports use `@hraness/xcb`, the runtime class is
-  `Xcb`, and shell invocations use `xcb`. The last AgentMixer release line is
+  `Xcb`, and shell invocations use `xcb-compat`. The last AgentMixer release line is
   `@hraness/agentmixer@0.3.0` under tag `v0.3.0`.
 
 ## Application-owned capability profiles

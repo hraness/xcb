@@ -83,6 +83,13 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         needs_args: false,
     },
     SlashCommand {
+        name: "/mouse",
+        alias: "",
+        args: "",
+        summary: "toggle wheel scrolling vs. terminal text selection",
+        needs_args: false,
+    },
+    SlashCommand {
         name: "/new",
         alias: "/n",
         args: "",
@@ -180,6 +187,15 @@ struct SessionDraft {
 
 /// Bound on remembered per-context drafts; the least recently used is evicted.
 const MAX_DRAFT_SESSIONS: usize = 64;
+
+/// How long a notice stays on screen without any key press before it is
+/// dropped on the next refresh.
+const NOTICE_TTL: Duration = Duration::from_secs(8);
+
+/// Byte bound of the Prompt/Pane editor dialog.
+const EDITOR_MAX: usize = 64 * 1024;
+const EDITOR_PASTE_TOO_LARGE: &str =
+    "Paste exceeds the 64 KiB editor limit; attach a file or trim it";
 
 fn view_context(view: &View) -> Option<Id> {
     view.conversation
@@ -357,8 +373,50 @@ pub struct App {
     pub(crate) render_cache: std::cell::RefCell<render::RenderCache>,
     dirty: bool,
     view_fingerprint: u64,
+    /// Mouse capture is off by default so terminal-native drag selection and
+    /// copy keep working; `/mouse` turns wheel scrolling on.
+    pub mouse_capture: bool,
+    /// Set by `/mouse`; the terminal loop applies the change and clears it.
+    mouse_toggled: bool,
+    /// Whether the terminal accepted the kitty keyboard-enhancement flags;
+    /// only then does Shift-Enter arrive distinguishable from Enter.
+    pub keyboard_enhanced: bool,
+    /// The help dialog was opened by `?` on an empty composer; a second `?`
+    /// closes it and types the literal character instead.
+    help_via_question: bool,
+    /// Notice text last observed and when it appeared; drives expiry.
+    notice_seen: String,
+    notice_since: Option<Instant>,
 }
 impl App {
+    /// The pending `/mouse` change, if any: `Some(true)` enables capture.
+    pub fn take_mouse_toggle(&mut self) -> Option<bool> {
+        std::mem::take(&mut self.mouse_toggled).then_some(self.mouse_capture)
+    }
+    /// Notices are transient: any key press dismisses one, and the periodic
+    /// view refresh drops one that has been on screen for `NOTICE_TTL`.
+    fn track_notice(&mut self) {
+        if self.notice != self.notice_seen {
+            self.notice_seen.clone_from(&self.notice);
+            self.notice_since = (!self.notice.is_empty()).then(Instant::now);
+        }
+    }
+    fn expire_notice(&mut self) {
+        self.track_notice();
+        if self
+            .notice_since
+            .is_some_and(|since| since.elapsed() >= NOTICE_TTL)
+        {
+            self.notice.clear();
+            self.notice_seen.clear();
+            self.notice_since = None;
+            self.dirty = true;
+        }
+    }
+    fn open_help(&mut self, via_question: bool) {
+        self.modal = Some(Modal::Help);
+        self.help_via_question = via_question;
+    }
     fn managed_mode(&self) -> bool {
         self.view
             .extensions
@@ -436,6 +494,7 @@ impl App {
             "/attach",
             "/exit",
             "/help",
+            "/mouse",
             "/new",
             "/quit",
             "/sessions",
@@ -516,6 +575,7 @@ impl App {
     pub fn apply(&mut self, update: Update) -> bool {
         match update {
             Update::View(mut view) => {
+                self.expire_notice();
                 if view.pane_error.is_some() {
                     view.pane = self.view.pane.clone();
                     view.pane_revision = self.view.pane_revision.clone();
@@ -739,7 +799,17 @@ impl App {
             .map_or(command, |entry| entry.name);
         let arguments = arguments.trim();
         match command {
-            "/help" => self.modal = Some(Modal::Help),
+            "/help" => self.open_help(false),
+            "/mouse" => {
+                self.mouse_capture = !self.mouse_capture;
+                self.mouse_toggled = true;
+                self.notice = if self.mouse_capture {
+                    "Mouse capture on: the wheel scrolls the transcript; hold Shift (Option on macOS) to select text."
+                } else {
+                    "Mouse capture off: terminal text selection works; PageUp/PageDown scroll the transcript."
+                }
+                .into();
+            }
             "/quit" | "/exit" => {
                 self.send(output, Intent::Quit);
                 return false;
@@ -925,6 +995,14 @@ impl App {
         if repaints {
             self.dirty = true;
         }
+        // A key press or paste acknowledges whatever notice was showing; the
+        // handler below sets a fresh one when it has something to say.
+        if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release)
+            || matches!(&event, Event::Paste(_))
+        {
+            self.notice.clear();
+            self.track_notice();
+        }
         if self.modal.is_some() {
             return self.modal_event(event, output);
         }
@@ -1010,8 +1088,10 @@ impl App {
                         if self.can_cancel_work() {
                             self.request_cancel(output);
                         } else if !self.composer.text().is_empty() {
-                            self.composer.set_text("");
-                            self.notice = "Draft cleared. Press Ctrl-C again to quit.".into();
+                            self.composer.clear_to_history();
+                            self.notice =
+                                "Draft cleared (Ctrl-R restores). Press Ctrl-C again to quit."
+                                    .into();
                         } else {
                             self.send(output, Intent::Quit);
                             return false;
@@ -1046,8 +1126,17 @@ impl App {
                 }
             }
             match key.code {
-                KeyCode::Char('?') if self.composer.text().is_empty() => {
-                    self.modal = Some(Modal::Help);
+                KeyCode::Char('?')
+                    if self.composer.text().is_empty()
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.open_help(true);
+                    return true;
+                }
+                KeyCode::F(1) => {
+                    self.open_help(false);
                     return true;
                 }
                 KeyCode::PageUp => {
@@ -1058,7 +1147,15 @@ impl App {
                     self.scroll_transcript(10);
                     return true;
                 }
-                KeyCode::End => {
+                // Plain End edits a draft (cursor to end of line); with a
+                // modifier, or when there is nothing to edit, it jumps the
+                // transcript back to the newest output.
+                KeyCode::End
+                    if key
+                        .modifiers
+                        .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL)
+                        || self.composer.text().is_empty() =>
+                {
                     self.paused.set(false);
                     self.scroll.set(0);
                     return true;
@@ -1077,8 +1174,8 @@ impl App {
         }
         if let Event::Mouse(mouse) = &event {
             // The wheel always scrolls the transcript — never the composer.
-            // With mouse capture enabled the terminal delivers real scroll
-            // events instead of translating them into arrow keys.
+            // Mouse events only arrive while `/mouse` capture is on; off, the
+            // terminal keeps selection and turns the wheel into arrow keys.
             match mouse.kind {
                 MouseEventKind::ScrollUp => self.scroll_transcript(-3),
                 MouseEventKind::ScrollDown => self.scroll_transcript(3),
@@ -1166,6 +1263,7 @@ impl App {
                     error: None,
                 })
             }
+            ComposerAction::Rejected(reason) => self.notice = reason.into(),
             ComposerAction::None => (),
         }
         true
@@ -1195,14 +1293,17 @@ impl App {
                 },
             );
         } else if let Ok(text) = clipboard.get_text() {
-            self.composer.handle(Event::Paste(text));
+            if let ComposerAction::Rejected(reason) = self.composer.handle(Event::Paste(text)) {
+                self.notice = reason.into();
+            }
         } else {
             self.notice = "No supported text or image on the clipboard.".into();
         }
     }
     fn modal_event(&mut self, event: Event, output: &SyncSender<Intent>) -> bool {
-        // Ctrl-C inside a dialog keeps the global ordering: cancel a live run
-        // first, quit when idle. Esc still only closes the dialog.
+        // Ctrl-C inside a dialog keeps the composer's ordering: cancel a live
+        // run first; idle, it closes the dialog and warns, so a second press
+        // is what quits. Esc still only closes the dialog.
         if let Event::Key(key) = &event
             && key.kind != KeyEventKind::Release
             && key.code == KeyCode::Char('c')
@@ -1212,21 +1313,45 @@ impl App {
                 self.request_cancel(output);
                 return true;
             }
-            self.send(output, Intent::Quit);
-            return false;
+            // Prompt-editor text is newer than the composer draft it was
+            // opened from; it returns to the composer instead of vanishing.
+            if let Some(Modal::Editor {
+                textarea,
+                kind: EditorKind::Prompt,
+                ..
+            }) = self.modal.take()
+            {
+                let text = textarea.lines().join("\n");
+                if !text.is_empty() {
+                    self.composer.set_text(&text);
+                }
+            }
+            self.notice = if self.composer.text().is_empty() {
+                "Dialog closed. Press Ctrl-C again to quit."
+            } else {
+                "Dialog closed; draft kept. Ctrl-C again clears it (Ctrl-R restores)."
+            }
+            .into();
+            return true;
+        }
+        if let (Some(Modal::Help), Event::Key(key)) = (&self.modal, &event)
+            && key.kind != KeyEventKind::Release
+            && key.code == KeyCode::Char('?')
+        {
+            self.modal = None;
+            // `?` opened help from an empty composer, so a second `?` means
+            // the character itself was wanted.
+            if std::mem::take(&mut self.help_via_question) && self.composer.text().is_empty() {
+                self.composer.handle(Event::Paste("?".into()));
+            }
+            return true;
         }
         if matches!(
-            (&self.modal, &event),
-            (
-                Some(Modal::Help),
-                Event::Key(key)
-            ) if key.kind != KeyEventKind::Release
-                && matches!(key.code, KeyCode::Char('?') | KeyCode::Esc)
-        ) || matches!(
             &event,
             Event::Key(key) if key.kind != KeyEventKind::Release && key.code == KeyCode::Esc
         ) {
             self.modal = None;
+            self.help_via_question = false;
             return true;
         }
         let mut chosen = None;
@@ -1335,15 +1460,16 @@ impl App {
                         }
                     } else {
                         match event {
-                            Event::Paste(text)
+                            Event::Paste(text) => {
+                                let text = text.replace("\r\n", "\n");
                                 if textarea.lines().iter().map(String::len).sum::<usize>()
                                     + text.len()
-                                    <= 64 * 1024 =>
-                            {
-                                textarea.insert_str(xcb_core::display_text(
-                                    &text.replace("\r\n", "\n"),
-                                    64 * 1024,
-                                ));
+                                    <= EDITOR_MAX
+                                {
+                                    textarea.insert_str(xcb_core::display_text(&text, EDITOR_MAX));
+                                } else {
+                                    self.notice = EDITOR_PASTE_TOO_LARGE.into();
+                                }
                             }
                             Event::Key(key)
                                 if key.kind != KeyEventKind::Release
@@ -1352,7 +1478,7 @@ impl App {
                                         .iter()
                                         .map(String::len)
                                         .sum::<usize>()
-                                        < 64 * 1024
+                                        < EDITOR_MAX
                                         || !matches!(key.code, KeyCode::Char(_))) =>
                             {
                                 textarea.input(key);
@@ -1420,12 +1546,17 @@ impl App {
     }
 }
 
-struct Restore;
+struct Restore {
+    keyboard_enhanced: bool,
+}
 impl Drop for Restore {
     fn drop(&mut self) {
+        if self.keyboard_enhanced {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        // Disabling capture that was never enabled is harmless.
         let _ = execute!(
             io::stdout(),
-            PopKeyboardEnhancementFlags,
             DisableBracketedPaste,
             DisableMouseCapture,
             LeaveAlternateScreen
@@ -1441,16 +1572,25 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
         ));
     }
     enable_raw_mode()?;
-    let _restore = Restore;
-    execute!(
-        io::stdout(),
-        EnterAlternateScreen,
-        EnableBracketedPaste,
-        EnableMouseCapture,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    )?;
+    // Only terminals that answer the kitty protocol query get the enhancement
+    // flags pushed; elsewhere pushing them is a no-op at best and Shift-Enter
+    // is indistinguishable from Enter, which the help text reflects.
+    let keyboard_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    let _restore = Restore { keyboard_enhanced };
+    // Mouse capture stays off so the terminal's own drag-select and copy keep
+    // working; `/mouse` enables wheel scrolling on request.
+    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+    if keyboard_enhanced {
+        execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    }
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let mut app = App::default();
+    let mut app = App {
+        keyboard_enhanced,
+        ..App::default()
+    };
     let mut ticks = 0u64;
     let mut refresh = Instant::now();
     let mut needs_draw = true;
@@ -1493,6 +1633,11 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
             if quit {
                 break;
             }
+        }
+        match app.take_mouse_toggle() {
+            Some(true) => execute!(io::stdout(), EnableMouseCapture)?,
+            Some(false) => execute!(io::stdout(), DisableMouseCapture)?,
+            None => (),
         }
         ticks = ticks.wrapping_add(1);
         // The kernel publishes ~1s views on its own; the TUI's extra refresh

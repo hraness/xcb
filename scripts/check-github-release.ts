@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { lstat, readdir, readFile, stat } from "node:fs/promises";
+import { basename, join, resolve } from "node:path";
 
 import {
+  assertNativeAssetBytes,
   assertReleaseAssetBytes,
+  nativeAssetFilePairs,
   publicRepository,
   releaseDistribution,
   releasePackageForName,
@@ -12,6 +14,7 @@ import { assertReviewedMainComparison } from "./release-ref-authority";
 
 const maximumJsonBytes = 512 * 1_024;
 const maximumArtifactBytes = 32 * 1_024 * 1_024;
+const maximumNativeArchiveBytes = 64 * 1_024 * 1_024;
 
 function required(name: string, pattern?: RegExp): string {
   const value = process.env[name];
@@ -71,20 +74,27 @@ async function fetchJson(
   }
 }
 
-async function fetchArtifact(url: string, label: string): Promise<Uint8Array> {
+async function fetchArtifact(
+  url: string,
+  label: string,
+  maximum: number = maximumArtifactBytes,
+): Promise<Uint8Array> {
   const response = await fetch(url, {
     cache: "no-store",
     headers: { "Cache-Control": "no-cache", "User-Agent": "xcb-release-admission" },
     redirect: "follow",
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(60_000),
   });
   if (response.status !== 200) throw new Error(`${label} returned HTTP ${String(response.status)}.`);
-  return readBounded(response, label, maximumArtifactBytes);
+  return readBounded(response, label, maximum);
 }
 
-const [tarballArgument, checksumArgument, manifestArgument, extra] = process.argv.slice(2);
+const [tarballArgument, checksumArgument, manifestArgument, nativeDirectoryArgument, extra] =
+  process.argv.slice(2);
 if (tarballArgument === undefined || checksumArgument === undefined || extra !== undefined) {
-  throw new Error("Usage: check-github-release.ts ARTIFACT.tgz SHA256SUMS [MANIFEST.json]");
+  throw new Error(
+    "Usage: check-github-release.ts ARTIFACT.tgz SHA256SUMS [MANIFEST.json [NATIVE_ASSETS_DIR]]",
+  );
 }
 if (required("GITHUB_REPOSITORY") !== publicRepository) {
   throw new Error(`GitHub release admission must run in ${publicRepository}.`);
@@ -206,5 +216,53 @@ if (
   !Buffer.from(publishedTarball).equals(tarballBytes)
   || !Buffer.from(publishedChecksum).equals(checksumBytes)
 ) throw new Error("GitHub Release bytes differ from the reviewed workflow artifact.");
+
+// Native parity: when the workflow's native asset directory is given, the
+// immutable release must carry exactly those archive/checksum pairs and each
+// published pair must be byte-identical to the smoke-tested workflow artifact.
+// This is the terminal gate of a native-only release, so it fails closed on an
+// empty directory, a missing pair, or any extra native asset on the release.
+if (nativeDirectoryArgument !== undefined) {
+  const directory = resolve(nativeDirectoryArgument);
+  const entries = (await readdir(directory)).toSorted();
+  for (const entry of entries) {
+    const information = await lstat(join(directory, entry));
+    if (!information.isFile() || information.isSymbolicLink()) {
+      throw new Error(`Native release asset ${entry} is not one regular non-symlink file.`);
+    }
+  }
+  const pairs = nativeAssetFilePairs(entries, manifest.version);
+  if (pairs.length === 0 || release.natives.length !== pairs.length) {
+    throw new Error(`GitHub Release ${verifiedTag} does not carry the exact native asset set.`);
+  }
+  for (const pair of pairs) {
+    const published = release.natives.find((candidate) => candidate.archive.name === pair.archive);
+    if (published === undefined || published.checksum.name !== pair.checksum) {
+      throw new Error(`GitHub Release ${verifiedTag} is missing native asset ${pair.archive}.`);
+    }
+    const [localArchive, localChecksum] = await Promise.all([
+      readFile(join(directory, pair.archive)),
+      readFile(join(directory, pair.checksum)),
+    ]);
+    if (localArchive.byteLength === 0 || localArchive.byteLength > maximumNativeArchiveBytes) {
+      throw new Error(`Native release asset ${pair.archive} is not one finite archive.`);
+    }
+    const [publishedArchive, publishedChecksum] = await Promise.all([
+      fetchArtifact(published.archive.browserDownloadUrl, `GitHub Release ${pair.archive}`, maximumNativeArchiveBytes),
+      fetchArtifact(published.checksum.browserDownloadUrl, `GitHub Release ${pair.checksum}`),
+    ]);
+    assertNativeAssetBytes(
+      published,
+      publishedArchive,
+      publishedChecksum,
+      (bytes) => createHash("sha256").update(bytes).digest("hex"),
+    );
+    if (
+      !Buffer.from(publishedArchive).equals(localArchive)
+      || !Buffer.from(publishedChecksum).equals(localChecksum)
+    ) throw new Error(`GitHub Release native asset ${pair.archive} differs from the smoke-tested workflow artifact.`);
+    console.log(`- native ${pair.archive}: exact published bytes, size, digest, and adjacent checksum`);
+  }
+}
 
 console.log(`Immutable Latest GitHub Release ${verifiedTag} exposes the exact reviewed bytes.`);

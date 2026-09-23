@@ -96,16 +96,17 @@ describe("built xcb site", () => {
   test("serves the homepage, docs, and static discovery files through Next", async () => {
     const server = await startBuiltSite();
     try {
-      const [homeResponse, docsResponse, robotsResponse, llmsResponse, missingResponse] = await Promise.all([
+      const [homeResponse, docsResponse, robotsResponse, llmsResponse, readmeResponse, missingResponse] = await Promise.all([
         fetch(`${server.origin}/`, { redirect: "manual" }),
         fetch(`${server.origin}/docs`, { redirect: "manual" }),
         fetch(`${server.origin}/robots.txt`, { redirect: "manual" }),
         fetch(`${server.origin}/llms.txt`, { redirect: "manual" }),
+        fetch(`${server.origin}/README.md`, { redirect: "manual" }),
         fetch(`${server.origin}/missing`, { redirect: "manual" }),
       ]);
-      const [home, docs, robots, llms] = await Promise.all([homeResponse.text(), docsResponse.text(), robotsResponse.text(), llmsResponse.text()]);
+      const [home, docs, robots, llms, readme] = await Promise.all([homeResponse.text(), docsResponse.text(), robotsResponse.text(), llmsResponse.text(), readmeResponse.text()]);
       expect(homeResponse.status).toBe(200);
-      expect(home).toContain(publishedRelease === null ? "First xcb package release in preparation" : `Current verified compatibility release · v${publishedRelease.version}`);
+      expect(home).toContain(publishedRelease === null ? "No native release is published yet" : `v${publishedRelease.version}`);
       expect(home).toContain('<link rel="canonical" href="https://xcb.sh"');
       expect(home).toContain('aria-label="Ask AI about this"');
       expect(docsResponse.status).toBe(200);
@@ -115,8 +116,12 @@ describe("built xcb site", () => {
       expect(robots).toContain("Sitemap: https://xcb.sh/sitemap.xml");
       expect(llmsResponse.status).toBe(200);
       expect(llms).toContain("https://xcb.sh/docs");
+      expect(readmeResponse.status).toBe(200);
+      expect(readmeResponse.headers.get("content-type")).toContain("text/markdown");
+      expect(readme).toContain("# xcb");
+      expect(readme).not.toContain("hraness:xcb-landing");
       expect(docs).toContain('og:site_name" content="xcb"');
-      expect(docs).toContain('twitter:title" content="Documentation · XCB"');
+      expect(docs).toContain('twitter:title" content="Documentation · xcb"');
       expect(docs).toContain('twitter:card" content="summary_large_image"');
       expect(missingResponse.status).toBe(404);
 
