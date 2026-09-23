@@ -3,8 +3,28 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { LANDING_END, LANDING_START, readmeLanding, renderReadmeHtml, renderReadmeMarkdown } from "./readme-html.ts";
+import { parsePublishedRelease } from "../app/publication.ts";
+import { readmeWithPublication } from "./sync-readme.ts";
 
 const repository = join(import.meta.dir, "..", "..");
+
+test("adds verified links to both site README formats without changing generic source guidance", async () => {
+  const source = await readFile(join(repository, "README.md"), "utf8");
+  const release = parsePublishedRelease(JSON.parse(await readFile(join(repository, "site/tests/fixtures/published-release.json"), "utf8")));
+  if (release === null) throw new Error("published fixture required");
+  expect(readmeWithPublication(source, null)).toBe(source);
+  const published = readmeWithPublication(source, release);
+  expect(published.indexOf("Latest verified release:")).toBeGreaterThan(published.indexOf("### Install a verified release"));
+  expect(published.indexOf("Latest verified release:")).toBeLessThan(published.indexOf("On a supported platform"));
+  const urls = [release.verificationRun, release.archiveUrl!, ...release.native.flatMap((asset) => [asset.url, asset.sha256Url])];
+  for (const url of urls) {
+    expect(renderReadmeHtml(published)).toContain(`href="${url}"`);
+    expect(renderReadmeMarkdown(published)).toContain(url);
+    expect(source).not.toContain(url);
+  }
+  expect(() => readmeWithPublication("# No installation heading", release)).toThrow("exactly one");
+  expect(() => readmeWithPublication(`${source}\n### Install a verified release\n`, release)).toThrow("exactly one");
+});
 
 test("renders the repository README with stable heading fragments and repository-rooted relative links", async () => {
   const source = await readFile(join(repository, "README.md"), "utf8");

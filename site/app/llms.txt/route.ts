@@ -1,4 +1,4 @@
-import { publishedRelease } from "../publication";
+import { publicationMarkdown, publishedRelease } from "../publication";
 
 // llms.txt is a machine-readable site summary. Its release claim comes from
 // the same signed-off datum as every public page, so it cannot drift.
@@ -6,7 +6,8 @@ export const dynamic = "force-static";
 
 const releaseLine = publishedRelease === null
   ? "No native xcb binary or @hraness/xcb npm package is published yet; the source build is the installation path."
-  : `Latest verified release: v${publishedRelease.version}, with native archives and checksums verified by ${publishedRelease.verificationRun}.`;
+  : `Latest verified release: v${publishedRelease.version}, verified by ${publishedRelease.verificationRun}.`;
+const releaseDetails = publicationMarkdown(publishedRelease);
 
 const body = `# xcb
 
@@ -18,7 +19,7 @@ Native xcb is an MIT-licensed Rust source preview. ${releaseLine} Releases tagge
 
 Routing candidates must be admitted runtimes on enabled, credentialed, idle accounts with observed fresh model entries, outside known quota windows; ranking uses task class and relative quality/cost/latency Pareto tiers, with an optional judge ordering only already-eligible routes. The workspace broker can read and edit files. A separately configured Linux ARM64 command runner supports offline tests/builds, prepared public Cargo/Bun dependencies, and filtered read-only Git inspection. It does not run native macOS commands, arbitrary network operations, private dependency installs, commits, or pushes. Model requests still go to the selected provider; local state does not mean offline inference. xcb is not an unlimited parallel agent fleet.
 
-## Pages
+${releaseDetails === "" ? "" : `## Verified release\n\n${releaseDetails}\n\n`}## Pages
 
 - [Overview](https://xcb.sh/): the subscription router, its two contracts, route guarantees, and source installation.
 - [Download](https://xcb.sh/download): latest verified native release, per-platform archives, and the source build.

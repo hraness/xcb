@@ -77,4 +77,23 @@ export function parsePublishedRelease(value: unknown): PublishedRelease | null {
   return { version: parsedVersion, verificationRun, archiveUrl: archiveUrl as string | null, native: assets };
 }
 
+/** Shared machine-readable release links, only for artifacts in the verified datum. */
+export function publicationMarkdown(release: PublishedRelease | null): string {
+  if (release === null) return "";
+  const lines = [
+    `Latest verified release: **v${release.version}** · [public verification run](${release.verificationRun}) · [release notes](https://github.com/hraness/xcb/releases/tag/v${release.version}).`,
+    "",
+  ];
+  for (const { platform, label } of nativePlatforms) {
+    const asset = release.native.find((entry) => entry.platform === platform);
+    if (asset !== undefined) {
+      lines.push(`- ${label}: [xcb-${release.version}-${platform}.tar.gz](${asset.url}) · [SHA-256](${asset.sha256Url})`);
+    }
+  }
+  if (release.archiveUrl !== null) {
+    lines.push(`- [TypeScript compatibility archive](${release.archiveUrl}) (separate from the native app)`);
+  }
+  return lines.join("\n");
+}
+
 export const publishedRelease = parsePublishedRelease(publication);
