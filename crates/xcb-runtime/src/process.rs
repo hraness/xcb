@@ -238,6 +238,100 @@ pub fn executable_digest(path: &Path) -> Result<String> {
     Ok(sha256)
 }
 
+/// `clonefile(2)` is atomic: the name either holds the complete copy-on-write
+/// clone or is absent, so a failure never leaves a partial snapshot and the
+/// stream copy below can still create the name itself. `CLONE_NOFOLLOW`
+/// matches the `O_NOFOLLOW` custody of the source descriptor.
+#[cfg(target_os = "macos")]
+fn clone_file(source: &File, path: &Path) -> bool {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return false;
+    };
+    let Ok(directory) = rustix::fs::openat(
+        rustix::fs::CWD,
+        parent,
+        rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) else {
+        return false;
+    };
+    rustix::fs::fclonefileat(
+        source,
+        &directory,
+        std::path::Path::new(name),
+        rustix::fs::CloneFlags::NOFOLLOW,
+    )
+    .is_ok()
+}
+
+/// `FICLONE` clones extents atomically on copy-on-write filesystems;
+/// `copy_file_range` keeps the copy inside the kernel everywhere else. Any
+/// error or short progress falls back to the stream copy on the same
+/// descriptors.
+#[cfg(all(
+    target_os = "linux",
+    not(any(target_arch = "sparc", target_arch = "sparc64"))
+))]
+fn clone_into(source: &File, target: &File) -> bool {
+    if rustix::fs::ioctl_ficlone(target, source).is_ok() {
+        return true;
+    }
+    let Ok(size) = source.metadata().map(|meta| meta.len()) else {
+        return false;
+    };
+    let mut off_in = 0u64;
+    let mut off_out = 0u64;
+    while off_in < size {
+        let remaining = (size - off_in).min(i32::MAX as u64) as usize;
+        match rustix::fs::copy_file_range(
+            source,
+            Some(&mut off_in),
+            target,
+            Some(&mut off_out),
+            remaining,
+        ) {
+            // The kernel advances both offsets; zero progress is EOF or a
+            // stall, so the caller falls back to the stream copy.
+            Ok(0) => return false,
+            Ok(_) => (),
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
+/// Write the opened executable to `path` with the least work the filesystem
+/// allows, falling back to the bounded stream copy. The caller still digests
+/// the result: a clone carries a new inode, so the pinned-byte proof must be
+/// repeated against the snapshot itself.
+fn snapshot_executable(source: &File, path: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if clone_file(source, path) {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o500))?;
+        return Ok(());
+    }
+    let mut target = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o500)
+        .custom_flags((rustix::fs::OFlags::CLOEXEC).bits() as i32)
+        .open(path)?;
+    #[cfg(all(
+        target_os = "linux",
+        not(any(target_arch = "sparc", target_arch = "sparc64"))
+    ))]
+    if clone_into(source, &target) {
+        target.sync_all()?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o500))?;
+        return Ok(());
+    }
+    std::io::copy(&mut source.take(512 * 1024 * 1024 + 1), &mut target)?;
+    target.flush()?;
+    target.sync_all()?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o500))?;
+    Ok(())
+}
+
 /// Captured before a long-lived terminal can observe an in-place xcb update.
 /// Pins identify this process's starting implementation, never replacement bytes
 /// installed later at the same executable pathname.
@@ -383,17 +477,7 @@ impl Pin {
         self.verify()?;
         let source_path = std::env::current_exe()?.canonicalize()?;
         let path = directory.join("xcb-helper");
-        let source = executable_file(&source_path)?;
-        let mut target = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o500)
-            .custom_flags((rustix::fs::OFlags::CLOEXEC).bits() as i32)
-            .open(&path)?;
-        std::io::copy(&mut source.take(512 * 1024 * 1024 + 1), &mut target)?;
-        target.flush()?;
-        target.sync_all()?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+        snapshot_executable(&executable_file(&source_path)?, &path)?;
         if executable_digest(&path)? != self.host_sha256 {
             return Err(Error::Unavailable("host relay snapshot changed"));
         }
@@ -402,17 +486,7 @@ impl Pin {
     pub fn snapshot(&self, directory: &Path) -> Result<PathBuf> {
         self.verify()?;
         let path = directory.join("provider");
-        let source = executable_file(&self.executable)?;
-        let mut target = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o500)
-            .custom_flags((rustix::fs::OFlags::CLOEXEC).bits() as i32)
-            .open(&path)?;
-        std::io::copy(&mut source.take(512 * 1024 * 1024 + 1), &mut target)?;
-        target.flush()?;
-        target.sync_all()?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o500))?;
+        snapshot_executable(&executable_file(&self.executable)?, &path)?;
         if executable_digest(&path)? != self.sha256 {
             return Err(Error::Unavailable("executable snapshot changed"));
         }
@@ -1200,6 +1274,28 @@ mod tests {
         fs::rename(&replacement, &executable).unwrap();
         assert!(Pin::load(&root, Provider::Codex).is_err());
         assert_eq!(digested_executables(&executable) - digested, 1);
+    }
+
+    #[test]
+    fn snapshot_clones_then_proves_the_pinned_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        let pin = codex_pin(&root, &executable, uncached_digest(&executable));
+        let launch = private::directory(&root.join("launch")).unwrap();
+        let snapshot = pin.snapshot(&launch).unwrap();
+        assert_eq!(executable_digest(&snapshot).unwrap(), pin.sha256);
+        assert_eq!(
+            fs::metadata(&snapshot).unwrap().permissions().mode() & 0o7777,
+            0o500
+        );
+        // The snapshot is a distinct inode: on clone-capable filesystems this
+        // also proves the clone path produced launch-owned bytes.
+        assert_ne!(
+            fs::metadata(&snapshot).unwrap().ino(),
+            fs::metadata(&executable).unwrap().ino()
+        );
+        assert!(pin.snapshot(&launch).is_err());
     }
 
     #[tokio::test]
