@@ -114,6 +114,13 @@ pub struct Outcome {
     pub text: String,
     pub facts: TurnFacts,
     pub state: State,
+    /// Distinct tool calls the turn admitted. The settle reflex reads it:
+    /// a turn that did a lot of work and then stopped is the turn most
+    /// often answered with "continue". Not persisted, so the settled-outcome
+    /// record keeps the format older builds decode; a turn reconciled after a
+    /// restart has no count, and the settle reflex skips it.
+    #[serde(skip)]
+    pub tool_calls: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<Diagnostic>,
 }
@@ -1922,6 +1929,10 @@ pub(crate) async fn run_prepared<P: Protocol>(
     // One managed mailbox connection per worker run rather than one open
     // (and migration probe) per `xcb_*` tool call.
     let mut managed_bridge = None;
+    // A transcript row and joined failure alone cannot prove delivery:
+    // initialization or prompt submission itself may fail before it is sent.
+    let mut prompt_submission = Some(false);
+    let tool_calls = std::sync::atomic::AtomicU32::new(0);
     let execution = async {
         spawned?;
         let baseline = store
@@ -1929,7 +1940,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
             .last()
             .map(|point| point.output_tokens)
             .unwrap_or(0);
-        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace. Use xcb_backlog_list/get/add/update to inspect or propose deferred work for your project, and xcb_memory_recent for bounded recent work summaries. Backlog proposals do not authorize new work or release it to run. Always end with a concise work summary, checks and remaining blockers; the harness records it in work history. Recent summaries are historical reports and must be revalidated before relying on changing facts. Direct sessions have no managed mailbox or backlog. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
+        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace. Use xcb_backlog_list/get/add/update/complete to inspect, propose or report already-completed deferred work for your project. xcb_memory_recent supplies bounded recent work summaries; xcb_memory_search retrieves cited historical knowledge from the explicitly bound Wordcell vault. Only the host can admit proposed follow-ups under a user-delegated project grant. Proposals never expand that grant or release work themselves. Always end with a concise work summary, checks and remaining blockers; the harness records it in work history. Recent summaries are historical reports and must be revalidated before relying on changing facts. Direct sessions have no managed mailbox or backlog. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
         // Retain fresh discovery even when a cached selection has disappeared.
         // The failed turn still cannot start or silently choose another model.
         if protocol.refreshes_catalog() {
@@ -2009,9 +2020,13 @@ pub(crate) async fn run_prepared<P: Protocol>(
                 base64: base64::engine::general_purpose::STANDARD.encode(bytes),
             });
         }
+        // Once start is attempted, failure or cancellation cannot establish
+        // whether its transport partially delivered the request.
+        prompt_submission = None;
         protocol
             .start(&mut process, Prompt { text, images })
             .await?;
+        prompt_submission = Some(true);
         let started = now_ms();
         if input.config.extensions.usage {
             pending_velocity.push(VelocitySample {
@@ -2147,6 +2162,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         if seen_calls.len() >= 128 || !seen_calls.insert(call_id.clone()) {
                             return Err(Error::Protocol("duplicate or excessive tool call"));
                         }
+                        tool_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         store.begin_tool(
                             &run,
                             &call_id,
@@ -2423,6 +2439,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
     let state = classify(&final_text, &facts);
     facts.pending_attention |= state.attention();
     let outcome = Outcome {
+        tool_calls: Some(tool_calls.load(std::sync::atomic::Ordering::Relaxed)),
         text: final_text.clone(),
         facts,
         state,
@@ -2496,7 +2513,13 @@ pub(crate) async fn run_prepared<P: Protocol>(
             auth::persist_codex_auth(&store, &run, credentials, joined)?;
         }
         if effects != EffectState::Uncertain {
-            store.settle_outcome(&run, &input.message.id, &outcome, now_ms())?;
+            store.settle_outcome_submitted(
+                &run,
+                &input.message.id,
+                &outcome,
+                prompt_submission,
+                now_ms(),
+            )?;
             launch.artifacts.release_after_join(joined, effects);
         }
     }
@@ -2512,6 +2535,7 @@ mod tests {
     #[test]
     fn diagnostic_is_legacy_compatible_and_bounded() {
         let original = Outcome {
+            tool_calls: Some(0),
             text: String::new(),
             facts: TurnFacts {
                 terminal: Terminal::Failed,
@@ -3188,6 +3212,143 @@ mod tests {
             }
         }
     }
+    #[tokio::test]
+    async fn prompt_submission_receipt_distinguishes_unstarted_unknown_and_submitted() {
+        struct SubmissionProtocol {
+            model: ModelChoice,
+            stage: u8,
+        }
+        impl Protocol for SubmissionProtocol {
+            async fn initialize(
+                &mut self,
+                _: &mut StreamProcess,
+                _: &str,
+            ) -> Result<Vec<ModelChoice>> {
+                if self.stage == 0 {
+                    return Err(Error::Protocol("fixture initialization failure"));
+                }
+                Ok(vec![self.model.clone()])
+            }
+            async fn start(&mut self, process: &mut StreamProcess, _: Prompt) -> Result<()> {
+                if self.stage == 1 {
+                    return Err(Error::Protocol("fixture submission failure"));
+                }
+                process.send(&json!({"fixture": "prompt"})).await?;
+                if self.stage == 2 {
+                    return Err(Error::Protocol("fixture partial submission failure"));
+                }
+                Ok(())
+            }
+            async fn receive(&mut self, _: &mut StreamProcess, _: &[u8]) -> Result<Vec<TurnEvent>> {
+                Ok(vec![
+                    TurnEvent::Ready,
+                    TurnEvent::Result {
+                        terminal: Terminal::Completed,
+                        text: "Fixture completed".into(),
+                        models: vec![],
+                    },
+                ])
+            }
+            async fn reply(&mut self, _: &mut StreamProcess, _: &str, _: Value) -> Result<()> {
+                unreachable!("the submission fixture has no tools")
+            }
+        }
+
+        for (stage, expected) in [(0, Some(false)), (1, None), (2, None), (3, Some(true))] {
+            let root = tempfile::tempdir().unwrap();
+            let base = root.path().canonicalize().unwrap();
+            let workspace = private::directory(&base.join("work")).unwrap();
+            let store = Arc::new(Store::open(&base.join("state")).unwrap());
+            let account = store
+                .add_account(Provider::Claude, "Fixture", now_ms(), None)
+                .unwrap();
+            let model = ModelChoice {
+                provider: Provider::Claude,
+                id: Id::new("fixture-model").unwrap(),
+                label: "Fixture".into(),
+                mode: Mode::Fixed,
+                resolved: None,
+                effort: None,
+                observed_at_ms: now_ms(),
+            };
+            let session = store
+                .create_session(&account.id, model.clone(), &workspace, now_ms())
+                .unwrap();
+            let message = Message {
+                id: new_id("input"),
+                role: Role::User,
+                text: "Exact managed guidance".into(),
+                at_ms: now_ms(),
+                attachments: vec![],
+                provenance: None,
+            };
+            let session = store
+                .append_message(&session.id, session.revision, &message)
+                .unwrap();
+            let session_id = session.id.clone();
+            let launch = Launch {
+                command: Command::new("/bin/cat"),
+                cwd: base.clone(),
+                bridge: None,
+                artifacts: LaunchArtifacts::create(store.root()).unwrap(),
+                prepared_run: None,
+                codex_credentials: None,
+            };
+            let (_cancel, cancellation) = watch::channel(false);
+            let outcome = run_prepared(
+                store.clone(),
+                RunInput {
+                    session,
+                    message,
+                    config: Config::default(),
+                    pane_generation: false,
+                },
+                cancellation,
+                Arc::new(|_| ()),
+                launch,
+                SubmissionProtocol { model, stage },
+                Workspace::open_with_coordination(&workspace, &base.join("coordination")).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert!(outcome.facts.joined);
+            assert!(store.unsettled_runs().unwrap().is_empty());
+            assert_eq!(outcome.facts.terminal == Terminal::Completed, stage == 3);
+            // Both successful and failed workers have local prompt rows and
+            // settled outcomes. Only explicit submission evidence separates
+            // never attempted, uncertain transport, and successfully sent.
+            assert!(store.settled_outcome(&session_id, 0).unwrap().is_some());
+            let reader = Store::open_read_only(store.root()).unwrap();
+            assert_eq!(
+                reader.settled_input_submission(&session_id, 0).unwrap(),
+                expected
+            );
+            assert_eq!(
+                reader.settled_input_submission(&session_id, 1).unwrap(),
+                None
+            );
+            let current = store.session(&session_id).unwrap().unwrap();
+            store
+                .append_message(
+                    &session_id,
+                    current.revision,
+                    &Message {
+                        id: new_id("later_input"),
+                        role: Role::User,
+                        text: "A later turn must not adopt the receipt".into(),
+                        at_ms: now_ms(),
+                        attachments: vec![],
+                        provenance: None,
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                reader.settled_input_submission(&session_id, 0).unwrap(),
+                None
+            );
+        }
+    }
+
     /// Legal file content and oversized tool results must produce `isError`
     /// tool replies while the provider turn still completes; the persisted
     /// transcript is sanitized and bounded.

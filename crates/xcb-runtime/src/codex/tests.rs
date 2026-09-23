@@ -806,6 +806,8 @@ fn broker_guidance_keeps_native_sandbox_read_only_and_zero_tool_launches_empty()
                     "xcb_backlog_add",
                     "xcb_backlog_update",
                     "xcb_memory_recent",
+                    "xcb_backlog_complete",
+                    "xcb_memory_search",
                     "workspace_list",
                     "workspace_read",
                     "workspace_search",

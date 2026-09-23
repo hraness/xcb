@@ -1,141 +1,211 @@
 # Persistent project agents
 
-A managed conversation is a persistent project agent. Open it again by its
-conversation ID to find the same project, backlog and history. Each ready task
-can use a different eligible provider/model; the conversation remains stable.
+A managed conversation is a persistent project agent. Reopen its conversation ID
+for the same workspace, backlog, work history, and goal. Each task routes to an
+eligible model automatically; large prompts prefer known frontier quality, and
+observed usage limits produce a warning when they force a lower-ranked route.
+Model selection normally needs no input from you.
 
-## Work and attention
+## Work, questions and approvals
 
 ```sh
 xcb backlog --conversation <conversation-id>
 xcb backlog add <conversation-id> "Review the next milestone" --priority 7
-xcb backlog edit <task-id> "Review the authentication milestone" --revision 1
+xcb backlog edit <task-id> "Review authentication" --revision 1
 xcb backlog release <task-id> --revision 2
+xcb backlog complete <deferred-task-id> "Already covered by the passing parser tests" --revision 1
 xcb attention
 xcb backlog reply <task-id> "Use the existing project conventions"
-xcb backlog memory <conversation-id>
-xcb schedules add <conversation-id> "Inspect the project and report the next useful step" --every 3600
-xcb schedules pause <schedule-id> --revision 1
+xcb backlog reconcile <uncertain-task-id> --revision 4
 ```
 
-The TUI supports `/backlog`, `/backlog all`, `/attention`, and `/schedule`.
-Use `/schedule every 3600 <prompt>` for an hourly prompt, then inspect its row
-for its ID and enabled state. Backlog edits and releases use the revision in
-the displayed row so a stale view cannot silently overwrite another edit.
+The TUI provides `/backlog`, `/backlog all`, `/attention`, `/reply <id> <answer>`,
+`/backlog add`, `/backlog edit`, `/backlog run`, `/backlog complete`, and
+`/backlog reconcile`. Open a row for its complete prompt, summary, status and ID.
+Mutations carry the displayed revision; a stale view cannot overwrite newer work.
 
-A backlog item can be held for later or released for execution. Deferred items
-are editable with revision checks. Running work preserves its original goal and
-receipts; a follow-up is explicit additional input. Priority orders ready work,
-and a workspace still admits only one coding turn at a time.
+The attention inbox spans agents and distinguishes questions, approvals, required
+actions, and uncertain effects. A provider constraint that conflicts with an
+automatic project proposal becomes a routing question. Reply with revised work
+that respects the grant; xcb reroutes against fresh availability. A reply never
+grants host permissions, repairs credentials, releases account custody, or answers
+another approval automatically.
 
-The attention inbox spans conversations. Questions, approvals and actions retain
-their distinct states. Open an item to see its detail and answer in its owning
-conversation. Answering a question does not prove an external approval, repair
-credentials, release an uncertain account lease or bypass a provider boundary.
+Every managed task is also its history entry. Its final report records changes,
+checks and blockers. Failed and uncertain work retain their status. Completing a
+deferred item records a reported summary; it does not pretend a worker ran.
+Reconciliation changes uncertainty only when the exact retained underlying turn
+has a conclusive outcome and all worker runs have settled. Missing process IDs or
+elapsed time alone cannot prove arbitrary effects completed. If evidence is
+missing, the item remains visible and blocks automatic progression.
 
-Every managed task is also its work-history entry. Its settled final response is
-the summary; failed and uncertain work keep their status instead of appearing
-completed. Workers are instructed to summarize changes, checks and blockers.
-There is no second synthetic completion task to keep in sync.
+## Steering and the durable inbox
 
-The existing managed-store retention policy keeps terminal task history for
-30 days within bounded storage. Nonterminal backlog work and unresolved uncertain
-work are retained; schedules retain the last task needed to prove whether
-recurrence can proceed. Recent
-working memory follows retained task history. Promote durable findings to
-Wordcell through the project integration when they should outlive that window.
+```sh
+xcb steer <task-id> "Keep the public API unchanged" --id <event-id>
+xcb watch <target-task-id> <source-task-id> --id <watch-id>
+xcb inbox --task <task-id> --json
+xcb inbox --conversation <conversation-id> --limit 64 --json
+```
 
-## Recurring work
+Use `/steer <task-id> <text>`, `/watch <target-task-id> <source-task-id>`, and
+`/inbox [all|task-id]` in the TUI. Explicit steering queues guidance for that task;
+ordinary chat still creates work. The optional CLI `--id` lets a caller retry the
+same operation without duplicating it. Reusing an ID with changed input fails.
+Inbox queries are newest first. `--task` and `--conversation` are mutually
+exclusive; `--before <sequence>` pages older results within the selected scope,
+and `--limit` accepts 1–256 rows, defaulting to 64.
 
-An explicitly created interval schedule stores the prompt, conversation, next
-due time and enabled state. xcb's local supervisor supplies wall-clock wakeups.
-The provider receives an ordinary bounded managed task. The daemon stays alive
-while enabled schedules exist; closing a terminal detaches from it.
+Acceptance means xcb persisted the event. Preparation means an exact set of
+events was selected for a worker turn. Settled delivery means that set was
+included in a proven worker turn; it does not prove the model understood or
+followed the guidance. Events accepted after preparation remain pending for a
+later turn. Reading the inbox or a worker's mailbox does not acknowledge prompt
+delivery.
 
-Downtime coalesces missed intervals into one occurrence. An occurrence identity
-makes enqueue replay safe across restarts. A schedule does not overlap its own
-unfinished work. A task needing human input blocks recurrence until answered.
-An uncertain task blocks that conversation's schedules indefinitely: this
-version has no in-place managed-task uncertainty resolution operation. Inspect
-and recover the underlying run and effects before explicitly creating a new
-conversation and schedule; opening another conversation does not release any
-account or workspace custody. Pausing future occurrences
-does not cancel a running task. The supervisor is local: starting xcb again is
-required after the machine's process manager terminates it or after reboot.
-No OS login service or provider-native timer is installed by these commands.
+Guidance reaches a running task at its next safe turn boundary. It does not
+interrupt a provider turn, answer an approval, release deferred work, reset an
+attempt budget, or expand a project grant. Existing cancellation, attention,
+project pause and expiry, provider constraints, and custody checks still apply.
+Held events remain visible while a gate prevents another turn. Closed tasks and
+tasks with immutable ALGAL program inputs reject new guidance. Resolve a question
+or approval through its existing attention flow; steering cannot substitute for
+that response.
 
-Schedules retain ordinary task attempt/time limits. Persistent operation means
-many separately accountable bounded tasks, not an unbounded continuation loop.
+A watch requests the source task's terminal report for the target task in the
+same project and workspace. Its stable identity prevents duplicate reports when
+registration or settlement is replayed. A waiting inbox entry reserves the report
+until its source settles conclusively. A report arriving after the target closes
+remains visible history and does not reopen the task. Explicit guidance and
+subscribed reports may request another authorized turn, but available events
+share a bounded batch instead of each creating its own dispatch. Overflow remains
+pending; text omitted by the prompt limit is not marked delivered. Cancellation,
+answers and approvals acquire no batching delay.
 
-## Agent tools and collaboration
+The inbox records context and delivery evidence, not additional execution
+authority. Unknown worker settlement retains custody and prevents an automatic
+retry. See [inbox measurement](inbox-measurement.md) for what event batching can
+demonstrate and how to compare it without assuming token or cost savings.
 
-Managed workers can inspect their project's backlog with `xcb_backlog_list`,
-read a complete current prompt with `xcb_backlog_get`, propose deferred work
-with `xcb_backlog_add`, and edit deferred unstarted work with
-`xcb_backlog_update`. Stable call identities and expected revisions protect
-replay and concurrent edits. These tools do not release tasks or create timers.
-The user supplies execution authority through the control conversation or CLI.
-Agent-authored follow-ups therefore do not form a self-draining queue yet.
+The additive upgrade preserves the existing mailbox and imports messages for
+open recipients with stable event IDs. Earlier versions did not record prompt
+consumption, so a previously read message may appear in a worker prompt once
+after upgrade. Imported messages have no invented delivery receipt and still
+respect deferred work, attention and custody gates. Migration waits for exclusive
+supervisor custody; provider adapters and their qualification remain unchanged.
 
-`xcb_swarm_status`, `xcb_message_list` and `xcb_message_send` retain durable
-coordination between active tasks in the same workspace. Cross-workspace access
-requires an explicit host authorization design; a task cannot discover unrelated
-projects or request a broader capability by sending a message. Never wait
-synchronously for another task blocked on the same workspace lock.
+## Bounded autonomy
 
-## Working memory and Wordcell
+```sh
+xcb projects configure <conversation-id> "Maintain and improve the parser" --tasks 10 --hours 24
+xcb projects --json
+xcb projects pause <conversation-id> --revision 1
+xcb projects resume <conversation-id> --revision 2
+```
 
-`xcb_memory_recent` returns a bounded newest-first working set of recent settled
-summaries, with task IDs and statuses. Fresh worker contexts can use this local
-working set before retrieving external knowledge. A historical report says what
-a previous agent concluded; it is not proof that a file, dependency, account,
-service or policy is unchanged.
+In the TUI, use `/project grant 10 24 Maintain and improve the parser`, `/project`,
+`/project all`, `/project pause`, and `/project resume`. CLI replacement grants
+require the current revision. A grant contains a user-authored goal, an expiry
+from one hour to 30 days, and a budget of 1–100 automatic follow-up tasks. An
+optional CLI `--provider` is a hard constraint inherited by automatic work.
+Configuring a grant does not invent an initial task: submit the first prompt,
+release a backlog item, or add a schedule to begin the project work.
 
-Use ALGAL's memory layer for observations with explicit applicability
-prerequisites and derivation provenance. Its bounded fact/query results can be
-cached locally, but changed dependencies require new evidence. Retain the source
-record and receipt when exporting an insight rather than turning model output
-into an observed fact.
+Workers propose deferred follow-ups with `xcb_backlog_add`. xcb admits one only
+when its parent completed conclusively, the proposal belongs to the current
+grant, no project work or attention remains, and the budget and expiry allow it.
+Admission and budget consumption are atomic. User-added deferred items still
+require release. Agents cannot expand their own grants or create schedules.
+The goal guides reasoning; xcb enforces project boundaries, provenance, budgets,
+and provider constraints rather than claiming to prove semantic task scope.
 
-Wordcell is the external long-term project knowledge system. Keep durable
-project decisions, reusable procedures and verified findings there through the
-project's existing integration. The local work history remains available without
-Wordcell connectivity. This change does not upload transcripts, synchronize
-private summaries automatically, overwrite external memory, or claim cached
-knowledge is current. A future explicit promotion operation should record the
-source task, workspace, validation evidence, applicability dependencies and the
-Wordcell reference; fetching should retain source timestamps and provenance.
+Pause holds future automatic dispatch and project schedule occurrences while
+running work settles. Resume keeps the same consumed budget and expiry. A new
+grant replaces the old generation; queued old automatic work does not acquire
+new authority implicitly. Expiry and exhaustion stop automatic proposals.
+Explicit schedules have their own recurring authority and remain bounded by
+ordinary per-task attempt/time limits; pause them separately when ending them.
+
+## Schedules and startup
+
+```sh
+xcb schedules add <conversation-id> "Inspect the project and report the next useful step" --every 3600
+xcb schedules pause <schedule-id> --revision 1
+xcb schedules resume <schedule-id> --revision 2
+```
+
+Use `/schedule`, `/schedule all`, `/schedule every 3600 <prompt>`, and
+`/schedule pause|resume <id>` in the TUI. The host owns the clock; no provider-native
+scheduler is involved. Downtime coalesces missed intervals into one occurrence.
+Durable occurrence identities prevent duplicate enqueue, and outstanding work,
+questions or uncertainty block overlapping project occurrences.
+
+The supervisor remains alive while enabled schedules exist. Closing the terminal
+detaches; reopening xcb resumes persisted state. Opt-in [macOS login
+startup](habitat-service.md) restarts the supervisor after desktop login. Without
+a service manager, restart xcb after reboot. No task runs while the machine is
+powered off. Persistent work is a sequence of accountable bounded tasks.
 
 ## ALGAL programs
 
-The existing `algal.process.v1` process stores manifests, generations, mailbox
-wakes and receipts. Its `schedule` operation subscribes to mailbox events; it
-is not a wall-clock timer. xcb is the right owner for real time and process
-liveness. A program-backed schedule should dispatch a fresh bounded invocation
-of a pinned admitted manifest, retaining its ordinary host capabilities, fuel,
-process-generation limits and effect receipts. Scheduling must never turn a
-model-supplied path or shell command into a trusted host executor.
+```sh
+xcb schedules program <conversation-id> examples/project-planner.algal.json --inputs examples/project-planner-inputs.json --every 3600
+```
 
-The initial timer surface dispatches prompts. Program registration and execution
-remain a separate host admission boundary; the VM does not need an infinite-loop
-mode to support a persistent project agent.
+Registration validates and pins the full manifest, typed input values and their
+digests. Moving or editing the original file cannot change an existing schedule.
+The program must expose a text `summary` and may expose a text `prompt`. Its
+summary and receipt digest become ordinary task history; a prompt becomes a
+deferred proposal and needs the same project grant as worker proposals.
 
-## Next integration boundaries
+This release admits deterministic `input`, `const`, `fn` and `expr` cells with
+bounded graph size, steps, work, context and output. Useful pure functions include
+ALGAL memory queries and context compaction over explicitly supplied input data.
+There are no imports, host effects, transports, or persistent VM store. Cancellation
+joins bounded execution before settlement. Restart can replay pure work safely;
+proposal publication retains stable occurrence identity.
 
-Fully autonomous backlog execution needs a conversation-level policy defining
-the authorized project goal, permitted task sources, concurrency, cost/attempt
-budgets and pause conditions. A worker proposal should become runnable only
-after the host admits it against that policy. Human questions and provider or
-host approvals remain distinct attention items; a schedule must not answer them.
+Effectful programs need a resumable xcb host adapter before admission. The pinned
+VM's generic subprocess backend cannot carry managed parent identity, private
+state-root, tool custody and approvals, so it is rejected. Providers and tools
+continue through normal xcb tasks produced by the planner.
 
-Program schedules should store an admitted manifest digest and typed inputs,
-not an executable path. Each occurrence should produce a normal task identity,
-VM receipt and work summary, with cancellation joining all host effects before
-settlement. A restart should reconcile the occurrence receipt before dispatch.
+## Working memory and Wordcell
 
-Router-specific clarification is also future work. Today the router applies
-explicit provider constraints and estimates demand; worker questions surface
-through the attention inbox. A future route question should carry bounded
-choices and the constraint that requires clarification, then reroute against
-fresh availability after the user answers. Routine model selection should
-remain automatic.
+`xcb backlog memory <conversation-id>` and worker `xcb_memory_recent` return a
+bounded newest-first set of task summaries with IDs and statuses. Fresh workers
+receive a small recent working set. This is historical context, not proof that a
+file, dependency, account or service is unchanged. Terminal history has a bounded
+30-day retention window; unresolved work and proposal/schedule dependencies remain
+protected. Keep durable decisions in the external project vault.
+
+```sh
+xcb memory configure <conversation-id> --vault /absolute/project/vault --wordcell /absolute/bin/wordcell
+xcb memory status <conversation-id>
+xcb memory search <conversation-id> "parser decision"
+xcb memory promote <task-id> --body-file decision.md
+```
+
+The host explicitly binds a canonical local Wordcell vault and pins the executable
+and interpreter. Replacing either requires rebinding with the current revision.
+Workers use `xcb_memory_search`, and the TUI supports `/memory search <query>`.
+Search uses Wordcell's exact local mode with bounded results, no history or graph
+expansion. Retrieved records remain cited, untrusted context.
+
+Promotion writes only the supplied short UTF-8 note plus source task provenance.
+It never exports a conversation or copies private summaries automatically.
+Deterministic note identity and Wordcell's no-clobber creation make identical
+promotion idempotent. The harness retains an intent and process receipt before a
+write; interrupted or unproven writes report uncertainty instead of success.
+Retain applicability conditions and validation references in the authored note so
+future agents can distinguish a past report from current evidence.
+
+## Collaboration
+
+`xcb_swarm_status`, `xcb_message_list`, and `xcb_message_send` provide durable
+coordination between active tasks in the same workspace. Backlog tools are scoped
+to the owning project. Messages do not expand authority or expose other workspaces.
+Inter-agent messages enter the target's durable inbox and share its bounded
+delivery batches. Use an explicit watch when a task needs another task's terminal
+report. Never wait synchronously for another task blocked on the same workspace
+lock.

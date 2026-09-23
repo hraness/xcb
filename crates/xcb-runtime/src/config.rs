@@ -41,23 +41,34 @@ pub struct JudgeConfig {
 /// How a reflex participates in decisions. `Observe` records decisions and
 /// labels and learns from them without acting; `Active` lets the reflex's
 /// decision drive routing or continuation within every deterministic gate.
+/// `Auto` observes until the operator's own labels certify a head (see
+/// `xcb_core::reflex::certify`), then acts on the turns it scores above the
+/// certified threshold, and returns to observing if its precision falls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReflexMode {
     Off,
     Observe,
     Active,
+    Auto,
 }
 
 /// Reflex policy. Routing is active by default because its shipped
-/// parameters reproduce the prior classifier exactly. Continuation from a
-/// stopped-short report spends provider turns, so it only observes until the
-/// user opts in.
+/// parameters reproduce the prior classifier exactly. Continuing a
+/// stopped-short report and answering a worker's request for confirmation
+/// are `auto` by default: each acts only once the operator's own replies
+/// certify its precision. `confirm` never acts while settle is off or only
+/// observing, and routing has no `auto` mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReflexConfig {
     pub route: ReflexMode,
     pub settle: ReflexMode,
+    /// `active`: a completed turn the settle reflex categorizes as `confirm`
+    /// is answered with a standing go-ahead, unless the request carries a
+    /// risk or hand-off cue. `auto` does so once the head is certified.
+    /// `observe` and `off` never answer.
+    pub confirm: ReflexMode,
     /// Fit and promote new parameter generations from local labels.
     pub learn: bool,
 }
@@ -65,7 +76,8 @@ impl Default for ReflexConfig {
     fn default() -> Self {
         Self {
             route: ReflexMode::Active,
-            settle: ReflexMode::Observe,
+            settle: ReflexMode::Auto,
+            confirm: ReflexMode::Auto,
             learn: true,
         }
     }
@@ -147,6 +159,7 @@ impl Config {
             || !(1000..=3_600_000).contains(&context.min_interval_ms)
             || !(1..=16).contains(&continuation.max_consecutive)
             || !(1000..=3_600_000).contains(&continuation.max_elapsed_ms)
+            || self.extensions.reflexes.route == ReflexMode::Auto
             || self
                 .extensions
                 .judge

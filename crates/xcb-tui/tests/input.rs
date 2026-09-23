@@ -1098,13 +1098,18 @@ fn global_command_menu_only_shows_conversation_and_task_controls() {
             "/backlog",
             "/exit",
             "/help",
+            "/inbox",
+            "/memory",
             "/mouse",
             "/new",
+            "/project",
             "/quit",
             "/reply",
             "/schedule",
             "/sessions",
+            "/steer",
             "/tasks",
+            "/watch",
         ]
     );
     assert!(!names.contains(&"/model"));

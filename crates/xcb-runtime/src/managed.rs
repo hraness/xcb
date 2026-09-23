@@ -1,6 +1,6 @@
 use crate::{
     Error, Result, attachments,
-    config::{Config, ReflexMode},
+    config::{Config, ReflexConfig, ReflexMode},
     digest, judge, kernel, new_id, now_ms, private, reflex, routing,
     runner::{Diagnostic, Observer, Outcome, Progress},
     store::Store,
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -49,6 +49,12 @@ const POLICY: &str = include_str!("../managed-transition.algal.json");
 #[path = "managed_habitat.rs"]
 mod habitat;
 pub use habitat::{HabitatSchedule, WorkMemory};
+#[path = "managed_project.rs"]
+mod project;
+pub use project::{MemoryBinding, ProjectPolicy, ProjectProposal};
+#[path = "managed_inbox.rs"]
+mod inbox;
+pub use inbox::{InboxEvent, InboxWatch};
 
 #[cfg(test)]
 #[path = "managed_mailbox_tests.rs"]
@@ -198,11 +204,31 @@ pub struct ManagedTask {
     /// Editable prompt; original goal remains immutable receipt identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backlog_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_proposal: Option<ProjectProposal>,
+    #[serde(default)]
+    pub routing_question: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<crate::managed_program::AdmittedProgram>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_generation: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_receipt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<Id>,
     pub detail: String,
     /// How the last settled worker turn ended, as categorized by the settle
     /// reflex (`done`, `stopped_short`, `question`, `blocked`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settle: Option<String>,
+    /// The settle head whose decision started the current automatic run,
+    /// if any. Only its runs are labeled by how they turned out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acted: Option<String>,
+    /// This turn was requested or materially steered by durable inbox input;
+    /// its result/cancellation is not feedback about a reflex decision.
+    #[serde(default)]
+    pub inbox_continuation: bool,
     pub attempts: u32,
     pub max_attempts: u32,
     pub message_count_before: usize,
@@ -222,6 +248,17 @@ impl ManagedTask {
             && self.conversation == other.conversation
             && self.workspace == other.workspace
             && self.goal == other.goal
+            && self.program == other.program
+            && self.program_generation == other.program_generation
+            && self.schedule == other.schedule
+            && self
+                .project_proposal
+                .as_ref()
+                .map(|p| (&p.parent, &p.generation, p.required_provider))
+                == other
+                    .project_proposal
+                    .as_ref()
+                    .map(|p| (&p.parent, &p.generation, p.required_provider))
             && self.provider_preference == other.provider_preference
             && self.provider_required == other.provider_required
             && self.max_attempts == other.max_attempts
@@ -269,6 +306,12 @@ impl ManagedTask {
             || !self.last_receipt.starts_with("sha256:")
         {
             return Err(xcb_core::Error::Invalid("managed task").into());
+        }
+        if let Some(program) = &self.program {
+            program.verify()?;
+            if self.session.is_some() || !self.worker_sessions.is_empty() {
+                return Err(Error::Conflict("program task cannot own provider sessions"));
+            }
         }
         label(&self.title, 160)?;
         bounded_text(&self.workspace, 4096)?;
@@ -377,6 +420,8 @@ struct ViewStamp {
     tasks: (i64, i64, i64),
     messages: i64,
     schedules: (i64, i64),
+    projects: (i64, i64, i64),
+    inbox: (i64, i64),
     config: Option<std::time::SystemTime>,
     fault: Option<std::time::SystemTime>,
     progress: Option<std::time::SystemTime>,
@@ -464,6 +509,27 @@ fn stamp_retention(root: &Path) {
     }
 }
 
+fn managed_migration_guard(root: &Path) -> Result<File> {
+    let path = root.join("supervisor.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(&path)?;
+    private::check_file(&file, 4096)?;
+    private::same_file(&path, &file)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Error::Conflict(
+            "managed state upgrade waits for the running supervisor to stop; let active work settle, pause schedules with the existing xcb, then restart xcb",
+        )),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 impl ManagedStore {
     pub fn open(root: &Path) -> Result<Self> {
         let root = private::directory(&root.join("managed"))?;
@@ -494,11 +560,19 @@ impl ManagedStore {
         }
         connection.pragma_update(None, "synchronous", "FULL")?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 2 {
+        if version > 4 {
             return Err(Error::Unavailable(
                 "managed state was written by a newer xcb",
             ));
         }
+        // A prior supervisor owns the old writer contract until all its work
+        // settles. Never advance the schema underneath that admitted writer.
+        // The daemon itself opens/migrates before taking its dispatch lock.
+        let _migration_guard = if version < 4 {
+            Some(managed_migration_guard(&root)?)
+        } else {
+            None
+        };
         // Incremental vacuum lets routine retention return freed pages to the
         // filesystem; on an existing file it only takes effect if a rebuild
         // already enabled it, so this is a no-op there.
@@ -547,6 +621,8 @@ impl ManagedStore {
             }
         }
         habitat::migrate(&mut connection)?;
+        project::migrate(&mut connection)?;
+        inbox::migrate(&mut connection)?;
         let mut store = Self {
             root,
             connection: Mutex::new(connection),
@@ -655,13 +731,14 @@ impl ManagedStore {
                 )? as u64;
                 let stale_tasks: Vec<String> = {
                     let mut query = tx.prepare(
-                        "SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled') AND updated_at<?1 AND id NOT IN (SELECT last_task FROM habitat_schedules WHERE last_task IS NOT NULL) LIMIT ?2",
+                        "SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled') AND updated_at<?1 AND id NOT IN (SELECT task FROM inbox_batches) AND id NOT IN (SELECT task FROM inbox_events WHERE status='waiting' OR updated_at>=?1) AND id NOT IN (SELECT source FROM inbox_watches w JOIN tasks target ON target.id=w.task WHERE (target.state NOT IN ('completed','failed','cancelled') OR target.updated_at>=?1)) AND id NOT IN (SELECT last_task FROM habitat_schedules WHERE last_task IS NOT NULL) AND id NOT IN (SELECT json_extract(payload,'$.project_proposal.parent') FROM tasks WHERE json_valid(payload) AND json_extract(payload,'$.project_proposal.parent') IS NOT NULL AND state IN ('queued','running','needs_input','uncertain')) LIMIT ?2",
                     )?;
                     query
                         .query_map(params![sql(cutoff)?, RETENTION_BATCH], |row| row.get(0))?
                         .collect::<rusqlite::Result<Vec<_>>>()?
                 };
                 for id in &stale_tasks {
+                    inbox::retain_task(&tx, id)?;
                     removed +=
                         tx.execute("DELETE FROM receipts WHERE task=?1", [id.as_str()])? as u64;
                     removed += tx.execute(
@@ -940,6 +1017,16 @@ impl ManagedStore {
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
+        let projects = db.query_row(
+            "SELECT count(*),COALESCE(sum(revision),0),COALESCE(sum(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.expires_at_ms')<=?1 ELSE 0 END),0) FROM project_policies",
+            [sql(now_ms())?],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let inbox = db.query_row(
+            "SELECT count(*),COALESCE(sum(revision),0) FROM inbox_events",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
         drop(db);
         let modified = |path: PathBuf| fs::metadata(path).and_then(|meta| meta.modified()).ok();
         Ok(ViewStamp {
@@ -948,6 +1035,8 @@ impl ManagedStore {
             tasks,
             messages,
             schedules,
+            projects,
+            inbox,
             config: modified(state_root.join("config.json")),
             fault: modified(self.root.join(SUPERVISOR_FAULT_FILE)),
             progress: modified(self.root.join(PROGRESS_FILE)),
@@ -1110,16 +1199,6 @@ impl ManagedStore {
         Ok(ids)
     }
 
-    fn mailbox_tail(&self, task: &Id, limit: usize) -> Result<Vec<MailboxMessage>> {
-        let latest: i64 = self.db()?.query_row(
-            "SELECT COALESCE(max(sequence),0) FROM mailbox_messages WHERE target_task=?1",
-            [task.as_str()],
-            |row| row.get(0),
-        )?;
-        let latest =
-            u64::try_from(latest).map_err(|_| xcb_core::Error::Invalid("mailbox sequence"))?;
-        self.mailbox(task, latest.saturating_sub(limit as u64), limit)
-    }
     pub fn mailbox(&self, task: &Id, after: u64, limit: usize) -> Result<Vec<MailboxMessage>> {
         if !(1..=64).contains(&limit) {
             return Err(xcb_core::Error::Invalid("mailbox page").into());
@@ -1264,6 +1343,9 @@ impl ManagedStore {
                 created_at_ms: now_ms(),
             };
             message.validate()?;
+            // The inbox reservation can reject bounded, deterministic input.
+            // It is still uncommitted, so such rejection has no external effect.
+            inbox::mailbox_event(&tx, &message, &current_target)?;
             effects = EffectState::Uncertain;
             tx.execute(
                 "INSERT INTO mailbox_messages(id,source_task,target_task,sequence,created_at,payload) VALUES(?1,?2,?3,?4,?5,?6)",
@@ -1317,6 +1399,8 @@ impl ManagedStore {
                 | "xcb_backlog_get"
                 | "xcb_backlog_add"
                 | "xcb_backlog_update"
+                | "xcb_backlog_complete"
+                | "xcb_memory_search"
                 | "xcb_memory_recent"
         ) {
             return self
@@ -1474,6 +1558,46 @@ impl ManagedStore {
             Some(provider) => Ok((Some(provider), true)),
             None => Ok((self.learned_route(workspace)?, false)),
         }
+    }
+
+    /// Stopping a run the settle reflex started is direct evidence that the
+    /// decision to continue was wrong. Best effort: learning never fails a
+    /// cancellation.
+    fn label_cancelled_continuation(&self, task: &ManagedTask) {
+        // Input accepted before dispatch changes why this turn would run.
+        // Do not train a reflex from cancellation of that ambiguous turn.
+        if !self
+            .inbox_pending(task)
+            .is_ok_and(|events| events.is_empty())
+        {
+            return;
+        }
+        let reflexes = self.config_reflexes();
+        let Some(root) = self.root.parent() else {
+            return;
+        };
+        let Some(head) = acted_continuation(task) else {
+            return;
+        };
+        if let Ok(store) = reflex::ReflexStore::open(root) {
+            let _ = store.label_and_learn(
+                Reflex::Settle,
+                task.id.as_str(),
+                &[(Some(head), false, 0.75)],
+                "cancelled_continuation",
+                reflexes.learn,
+            );
+        }
+    }
+
+    /// The configured reflex modes, or the defaults when the config is
+    /// missing or unreadable, so feedback never blocks a user's request.
+    fn config_reflexes(&self) -> ReflexConfig {
+        self.root
+            .parent()
+            .and_then(|root| Config::load(root).ok())
+            .map(|(config, _)| config.extensions.reflexes)
+            .unwrap_or_default()
     }
 
     async fn record_route_observation(
@@ -1688,10 +1812,40 @@ impl ManagedStore {
     async fn transition_habitat(
         &self,
         expected: &ManagedTask,
+        next: ManagedTask,
+        message: Option<Message>,
+        additional: &[(Id, Message)],
+        mutation: Option<&habitat::WorkerMutation>,
+    ) -> Result<ManagedTask> {
+        self.transition_project(expected, next, message, additional, mutation, None)
+            .await
+    }
+
+    async fn transition_project(
+        &self,
+        expected: &ManagedTask,
+        next: ManagedTask,
+        message: Option<Message>,
+        additional: &[(Id, Message)],
+        mutation: Option<&habitat::WorkerMutation>,
+        admission: Option<&project::ProjectAdmission>,
+    ) -> Result<ManagedTask> {
+        self.transition_inbox(
+            expected, next, message, additional, mutation, admission, None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn transition_inbox(
+        &self,
+        expected: &ManagedTask,
         mut next: ManagedTask,
         message: Option<Message>,
         additional: &[(Id, Message)],
         mutation: Option<&habitat::WorkerMutation>,
+        admission: Option<&project::ProjectAdmission>,
+        inbox_change: Option<&inbox::Change<'_>>,
     ) -> Result<ManagedTask> {
         next.validate()?;
         if !next.same_identity(expected) || next.revision != expected.revision + 1 {
@@ -1718,6 +1872,12 @@ impl ManagedStore {
         {
             return Err(Error::Conflict("managed task revision changed"));
         }
+        if next.state == TaskState::Running && expected.state != TaskState::Running {
+            project::check_dispatch(&tx, &next, now_ms())?;
+        }
+        if let Some(admission) = admission {
+            admission.check_and_record(&tx, expected)?;
+        }
         if tx.execute("UPDATE tasks SET state=?1,revision=?2,updated_at=?3,payload=?4 WHERE id=?5 AND revision=?6", params![next.state.as_str(), sql(next.revision)?, sql(next.updated_at_ms)?, serde_json::to_string(&next)?, next.id.as_str(), sql(expected.revision)?])? != 1 {
             return Err(Error::Conflict("managed task revision changed"));
         }
@@ -1734,6 +1894,7 @@ impl ManagedStore {
         if let Some(mutation) = mutation {
             mutation.record(&tx, &next)?;
         }
+        inbox::transition(&tx, expected, &next, inbox_change)?;
         tx.commit()?;
         Ok(next)
     }
@@ -1773,8 +1934,20 @@ impl ManagedStore {
         if attachments.len() > 8 {
             return Err(xcb_core::Error::Limit("attachments").into());
         }
-        let (provider_preference, provider_required) =
+        let (mut provider_preference, mut provider_required) =
             self.initial_route_preferences(workspace, &text)?;
+        let schedule_requirement = if options.occurrence.is_some() && options.program.is_none() {
+            self.project_policy(conversation)?
+                .and_then(|policy| policy.required_provider)
+        } else {
+            None
+        };
+        let routing_question = schedule_requirement
+            .is_some_and(|required| provider_required && provider_preference != Some(required));
+        if let Some(required) = schedule_requirement {
+            provider_preference = Some(required);
+            provider_required = true;
+        }
         let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
         let current = self
             .conversation(conversation)?
@@ -1840,18 +2013,37 @@ impl ManagedStore {
             provider_required,
             tried_routes: vec![],
             failed_accounts: vec![],
-            state: TaskState::Queued,
+            state: if routing_question {TaskState::NeedsInput}else{TaskState::Queued},
             deferred: options.deferred,
             priority: options.priority,
-            attention: None,
+            attention: routing_question.then_some(State::NeedsAnswer),
             backlog_prompt: None,
-            detail: if options.deferred {
+            routing_question,
+            project_proposal: options
+                .worker
+                .and_then(|worker| worker.proposal.clone())
+                .or_else(|| options.proposal.clone()),
+            program: options.program.cloned(),
+            program_generation: if options.program.is_some() {
+                self.project_policy(conversation)?
+                    .filter(|p| p.enabled && p.expires_at_ms > now)
+                    .map(|p| p.generation)
+            } else {
+                None
+            },
+            program_receipt: None,
+            schedule: options.occurrence.map(|o| o.schedule_id().clone()),
+            detail: if routing_question {
+                "This scheduled prompt requests a different provider from the project requirement. Reply with a revised task for the required provider, or cancel this occurrence."
+            } else if options.deferred {
                 "saved in backlog; release when ready"
             } else {
                 "waiting for an eligible worker"
             }
             .into(),
             settle: None,
+            acted: None,
+            inbox_continuation: false,
             attempts: 0,
             max_attempts: MAX_TASK_ATTEMPTS,
             message_count_before: 0,
@@ -1879,7 +2071,9 @@ impl ManagedStore {
             provenance: None,
         };
         let ack = Self::assistant(
-            if task.deferred {
+            if task.routing_question {
+                task.detail.clone()
+            } else if task.deferred {
                 format!(
                     "Saved **{}** in the backlog. Release it when ready.",
                     task.title
@@ -1903,6 +2097,25 @@ impl ManagedStore {
         }
         if let Some(occurrence) = options.occurrence {
             occurrence.check(&tx)?;
+            if options.program.is_none()
+                && project::policy_from(&tx, conversation)?
+                    .and_then(|policy| policy.required_provider)
+                    != schedule_requirement
+            {
+                return Err(Error::Conflict("project provider requirement changed"));
+            }
+        }
+        if let Some(parent) = options.program_parent {
+            let current =
+                task_from(&tx, &parent.id)?.ok_or(Error::Conflict("program parent missing"))?;
+            if current.revision != parent.revision
+                || current.state != TaskState::Running
+                || current.cancel_requested
+                || current.program.is_none()
+                || current.conversation != task.conversation
+            {
+                return Err(Error::Conflict("program parent changed"));
+            }
         }
         if let Some(saved) = task_from(&tx, &task.id)? {
             if saved.goal != task.goal
@@ -1993,11 +2206,39 @@ impl ManagedStore {
             }
         }
         next.attempts = 0;
+        next.inbox_continuation = false;
         next.input_at_ms = Some(now);
         next.last_output = None;
         next.failed_accounts.clear();
         next.tried_routes.clear();
         next.detail = "your answer is queued for the worker".into();
+        if task.routing_question {
+            habitat::validate_prompt(&text)?;
+            if task
+                .project_proposal
+                .as_ref()
+                .and_then(|p| p.required_provider)
+                .or_else(|| {
+                    task.provider_required
+                        .then_some(task.provider_preference)
+                        .flatten()
+                })
+                .is_some_and(|required| route_hint(&text).is_some_and(|hint| hint != required))
+            {
+                return Err(Error::Conflict(
+                    "reply still conflicts with the required provider",
+                ));
+            }
+            next.routing_question = false;
+            next.deferred = task.project_proposal.is_some();
+            next.backlog_prompt = Some(text.clone());
+            next.detail = if next.deferred {
+                "routing clarification saved; awaiting project admission"
+            } else {
+                "routing clarification saved; waiting for an eligible worker"
+            }
+            .into();
+        }
         next.cancel_requested = false;
         next.revision += 1;
         next.updated_at_ms = now;
@@ -2253,7 +2494,10 @@ impl ManagedStore {
                     .transition_records(&task, next, user, &additional)
                     .await
                 {
-                    Ok(_) => return Ok(()),
+                    Ok(_) => {
+                        self.label_cancelled_continuation(&task);
+                        return Ok(());
+                    }
                     Err(Error::Conflict(_)) => {
                         task = self
                             .task(&task.id)?
@@ -2322,53 +2566,62 @@ impl ManagedStore {
         // Implicit feedback: what the user says right after a task finished
         // labels how that task was categorized and routed.
         let root = self.root.parent().ok_or(Error::PrivateState)?;
-        let reflexes = Config::load(root)
-            .ok()
-            .map(|(config, _)| config.extensions.reflexes)
-            .unwrap_or_default();
+        let reflexes = self.config_reflexes();
         let finished = if force_new {
             None
         } else {
             self.recently_completed(conversation)?
         };
         if let Some(task) = &finished {
-            let learn = |reflex: Reflex, label: bool, weight: f64, source: &str| {
-                if reflexes.mode(reflex) == ReflexMode::Off {
+            let learn = |reflex: Reflex, labels: &[(Option<&str>, bool, f64)], source: &str| {
+                if reflexes.mode(reflex) == ReflexMode::Off || labels.is_empty() {
                     return;
                 }
                 if let Ok(store) = reflex::ReflexStore::open(root) {
                     let _ = store.label_and_learn(
                         reflex,
                         task.id.as_str(),
-                        label,
-                        weight,
+                        labels,
                         source,
                         reflexes.learn,
                     );
                 }
             };
             if let Some(frontier) = escalation_cue(trimmed) {
-                learn(Reflex::Route, frontier, 1.0, "user_model_request");
+                learn(
+                    Reflex::Route,
+                    &[(None, frontier, 1.0)],
+                    "user_model_request",
+                );
             }
-            if continue_like(trimmed) {
-                learn(Reflex::Settle, true, 1.0, "user_continue");
-                if attachments.is_empty()
-                    && task.session.is_some()
-                    && reflexes.settle == ReflexMode::Active
-                {
-                    return match self.reply(task, conversation, id.clone(), text.clone(), attachments).await {
-                        Ok(_) => Ok(()),
-                        Err(Error::Conflict(_)) => self.record_pair(
-                            conversation,
-                            id,
-                            text,
-                            "That task changed before it could be continued; check `/tasks` and send it again if still needed.".into(),
-                        ),
-                        Err(error) => Err(error),
-                    };
-                }
-            } else {
-                learn(Reflex::Settle, false, 0.5, "user_moved_on");
+            let reply = xcb_core::reflex::categorize_reply(trimmed);
+            let labels: Vec<_> = reply
+                .settle_labels()
+                .iter()
+                .map(|(head, label, weight)| (Some(*head), *label, *weight))
+                .collect();
+            learn(Reflex::Settle, &labels, &format!("user_{}", reply.as_str()));
+            // "yes" to a turn that asked for the go-ahead, like "continue" to
+            // one that stopped short, belongs in that task's session rather
+            // than in a new task that lacks its context.
+            let approves_request = reply == xcb_core::reflex::Reply::Approve
+                && trimmed.chars().count() <= 80
+                && task.settle.as_deref() == Some("confirm");
+            if (continue_like(trimmed) || approves_request)
+                && attachments.is_empty()
+                && task.session.is_some()
+                && matches!(reflexes.settle, ReflexMode::Active | ReflexMode::Auto)
+            {
+                return match self.reply(task, conversation, id.clone(), text.clone(), attachments).await {
+                    Ok(_) => Ok(()),
+                    Err(Error::Conflict(_)) => self.record_pair(
+                        conversation,
+                        id,
+                        text,
+                        "That task changed before it could be continued; check `/tasks` and send it again if still needed.".into(),
+                    ),
+                    Err(error) => Err(error),
+                };
             }
         }
         let text = if force_new {
@@ -2390,14 +2643,14 @@ impl ManagedStore {
         if self
             .active_tasks(128)?
             .iter()
-            .any(|task| &task.conversation == conversation)
+            .any(|task| &task.conversation == conversation && !task.deferred)
         {
             return Ok(None);
         }
         Ok(self
-            .tasks(64)?
+            .backlog(Some(conversation), 256)?
             .into_iter()
-            .filter(|task| &task.conversation == conversation)
+            .filter(|task| !task.deferred)
             .max_by_key(|task| (task.created_at_ms, task.id.as_str().to_owned()))
             .filter(|task| {
                 task.state == TaskState::Completed
@@ -2544,6 +2797,7 @@ impl ManagedStore {
         self.transition(task, next, Some(message)).await
     }
 
+    #[cfg(test)]
     async fn prepare(
         &self,
         task: &ManagedTask,
@@ -2553,7 +2807,35 @@ impl ManagedStore {
         message_count: usize,
         delivered_preferences: String,
     ) -> Result<ManagedTask> {
+        self.prepare_inbox(
+            task,
+            session,
+            route,
+            route_reason,
+            message_count,
+            delivered_preferences,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_inbox(
+        &self,
+        task: &ManagedTask,
+        session: Id,
+        route: String,
+        route_reason: String,
+        message_count: usize,
+        delivered_preferences: String,
+        batch: Option<&inbox::Batch>,
+    ) -> Result<ManagedTask> {
         let mut next = task.clone();
+        if let Some(batch) = batch
+            && !batch.events.is_empty()
+        {
+            inbox::append_batch(&mut next, &batch.events);
+        }
         if next.session.as_ref() != Some(&session) {
             // A replacement session starts with an empty transcript: nothing
             // it never received can be treated as carried.
@@ -2586,7 +2868,9 @@ impl ManagedStore {
         next.cancel_requested = false;
         next.revision += 1;
         next.updated_at_ms = now_ms();
-        self.transition(task, next, None).await
+        let change = batch.map(inbox::Change::Prepare);
+        self.transition_inbox(task, next, None, &[], None, None, change.as_ref())
+            .await
     }
 
     async fn finish(&self, store: &Store, id: &Id, result: Result<Outcome>) -> Result<ManagedTask> {
@@ -2635,7 +2919,19 @@ impl ManagedStore {
         } else {
             (false, 0, None)
         };
-        let dispatch_unstarted = !unsettled && message_count == task.message_count_before;
+        let prepared_batch = self.inbox_batch(&task.id)?;
+        let submission = match &prepared_batch {
+            Some(batch) => store.settled_input_submission(&batch.session, batch.message_count)?,
+            None => None,
+        };
+        let known_unsubmitted = submission == Some(false)
+            && result.as_ref().is_ok_and(|outcome| {
+                outcome.facts.joined
+                    && outcome.facts.effects == EffectState::None
+                    && !outcome.facts.pending_attention
+            });
+        let dispatch_unstarted =
+            !unsettled && (message_count == task.message_count_before || known_unsubmitted);
         let cancellation_settled =
             !unsettled && (dispatch_unstarted || session_state == Some(State::Cancelled));
         let config = Config::load(store.root())?.0;
@@ -2676,12 +2972,50 @@ impl ManagedStore {
             Ok(outcome) if !unsettled => settle_decision(store, &config, outcome).await,
             _ => None,
         };
-        let continue_task = match result {
-            Ok(outcome) if !unsettled => {
-                task_should_continue(store, &task, outcome, settle.as_ref()).await?
-            }
-            _ => false,
+        let inbox_stamp = self.inbox_stamp(&task.id)?;
+        let pending_inbox = self.inbox_pending(&task)?;
+        let inbox_input_present = match &prepared_batch {
+            Some(batch) => store.input_matches_digest(
+                &batch.session,
+                batch.message_count,
+                &batch.prompt_digest,
+            )?,
+            None => false,
         };
+        let inbox_delivered = if let Some(batch) = &prepared_batch {
+            !unsettled
+                && result.as_ref().is_ok_and(|outcome| {
+                    outcome.facts.joined && outcome.facts.effects != EffectState::Uncertain
+                })
+                && inbox_input_present
+                && submission == Some(true)
+                && store
+                    .settled_outcome(&batch.session, batch.message_count)?
+                    .is_some_and(|outcome| {
+                        outcome.facts.joined && outcome.facts.effects != EffectState::Uncertain
+                    })
+        } else {
+            false
+        };
+        let inbox_requested = !pending_inbox.is_empty()
+            && result
+                .as_ref()
+                .is_ok_and(|outcome| inbox::may_wake(&config, &task, outcome))
+            && self.project_dispatch_block(&task)?.is_none();
+        let acted = match result {
+            Ok(outcome) if !unsettled => continuation_outcome(&task, outcome),
+            _ => None,
+        };
+        let continuation = match result {
+            Ok(outcome) if !unsettled => {
+                task_should_continue_inbox(store, &task, outcome, settle.as_ref(), inbox_requested)
+                    .await?
+            }
+            _ => None,
+        };
+        let inbox_continue = inbox_requested && continuation.is_some();
+        let continue_task = continuation.is_some();
+        let acting_head = continuation.flatten();
         let budget_exhausted = match result {
             Ok(outcome) if !unsettled && !continue_task => {
                 continuation_budget_exhausted(&config, &task, outcome)
@@ -2695,9 +3029,14 @@ impl ManagedStore {
         // neither, and without a recorded session there is no transcript to
         // carry the context, so the next prompt conservatively resends
         // everything.
-        if result.is_ok() && next.session.is_some() {
+        if result.is_ok()
+            && next.session.is_some()
+            && (prepared_batch.is_none() || (inbox_input_present && submission == Some(true)))
+        {
             next.context_carried = true;
-            next.delivered_inputs = next.user_inputs.len();
+            next.delivered_inputs = prepared_batch
+                .as_ref()
+                .map_or(next.user_inputs.len(), |batch| batch.input_count);
         }
         if let Some(account) = failed_account
             && !next.failed_accounts.contains(&account)
@@ -2708,11 +3047,13 @@ impl ManagedStore {
         next.revision += 1;
         next.updated_at_ms = now_ms();
         next.settle = settle.as_ref().map(|decision| decision.value.clone());
+        next.acted = acting_head.map(str::to_owned);
         let (state, detail, output) = match result {
             Ok(outcome)
                 if unsettled
                     || !outcome.facts.joined
-                    || outcome.facts.effects == EffectState::Uncertain =>
+                    || outcome.facts.effects == EffectState::Uncertain
+                    || (prepared_batch.as_ref().is_some_and(|b| !b.events.is_empty()) && !inbox_delivered && !dispatch_unstarted) =>
             {
                 (
                     TaskState::Uncertain,
@@ -2734,7 +3075,17 @@ impl ManagedStore {
             ),
             Ok(outcome) if continue_task => (
                 TaskState::Queued,
-                "the supervisor is continuing unfinished work in the same session".into(),
+                if inbox_continue { "queued inbox events request the next authorized turn" } else { "the supervisor is continuing unfinished work in the same session" }.into(),
+                Some(outcome.text.clone()),
+            ),
+            Ok(outcome) if dispatch_unstarted && prepared_batch.is_some() => (
+                if next.attempts < task.max_attempts { TaskState::Queued } else { TaskState::NeedsInput },
+                if next.attempts < task.max_attempts { "dispatch did not cross the provider boundary; inbox input is queued again within the existing attempt budget" } else { "inbox delivery did not cross the provider boundary; repair the route and reply to retry" }.into(),
+                Some(outcome.text.clone()),
+            ),
+            Ok(outcome) if !pending_inbox.is_empty() && settled_completion(outcome) && !task.cancel_requested => (
+                TaskState::NeedsInput,
+                "inbox guidance is held: automatic continuation is disabled, its budget is exhausted, project authority is unavailable, or continuation was vetoed; reply explicitly to resume".into(),
                 Some(outcome.text.clone()),
             ),
             Ok(outcome) => {
@@ -2793,6 +3144,20 @@ impl ManagedStore {
             ),
         };
         next.state = state;
+        next.inbox_continuation = state == TaskState::Queued
+            && (inbox_continue || (failover_route && task.inbox_continuation));
+        // A failed/unadmitted dispatch cannot consume its accepted inputs.
+        // Remove the staged batch text before it is rebuilt from queued rows.
+        if dispatch_unstarted
+            && !inbox_delivered
+            && let Some(batch) = &prepared_batch
+            && !batch.events.is_empty()
+            && next.user_inputs.last() == Some(&inbox::render(&batch.events))
+        {
+            next.user_inputs.pop();
+            next.delivered_inputs = next.delivered_inputs.min(next.user_inputs.len());
+            next.delivered_preferences.clear();
+        }
         next.attention = if state == TaskState::NeedsInput {
             Some(match result {
                 Ok(outcome)
@@ -2843,11 +3208,11 @@ impl ManagedStore {
                 )
             );
         } else if state == TaskState::Queued && continue_task {
-            next.next_prompt = continuation_prompt(
-                settle
-                    .as_ref()
-                    .filter(|_| config.extensions.reflexes.settle == ReflexMode::Active),
-            );
+            next.next_prompt = if inbox_continue {
+                inbox::CONTINUATION_PROMPT.into()
+            } else {
+                continuation_prompt(acting_head)
+            };
         } else if state.terminal() {
             next.next_prompt.clear();
             next.attachments.clear();
@@ -2866,14 +3231,40 @@ impl ManagedStore {
                 next.revision,
             ))
         };
-        let finished = self.transition(&task, next, message).await?;
+        let finished = self
+            .transition_inbox(
+                &task,
+                next,
+                message,
+                &[],
+                None,
+                None,
+                Some(&inbox::Change::Finish {
+                    delivered: inbox_delivered,
+                    unstarted: dispatch_unstarted,
+                    stamp: Some(inbox_stamp),
+                }),
+            )
+            .await?;
         let _ = self
             .record_route_observation(&finished, failover_route.then_some("failed"))
             .await;
-        if let Some(decision) = &settle
-            && let Ok(reflexes) = reflex::ReflexStore::open(store.root())
-        {
-            let _ = reflexes.observe(&settle_subject(&finished.id, finished.revision), decision);
+        if let Ok(reflexes) = reflex::ReflexStore::open(store.root()) {
+            // Label the decision that caused this run before observing the
+            // new one, which becomes the task's latest.
+            if let Some((head, label)) = acted {
+                let _ = reflexes.label_and_learn(
+                    Reflex::Settle,
+                    finished.id.as_str(),
+                    &[(Some(head), label, 0.5)],
+                    "continuation_outcome",
+                    config.extensions.reflexes.learn,
+                );
+            }
+            if let Some(decision) = &settle {
+                let _ =
+                    reflexes.observe(&settle_subject(&finished.id, finished.revision), decision);
+            }
         }
         Ok(finished)
     }
@@ -2959,7 +3350,20 @@ impl ManagedStore {
             next.context_carried = false;
             next.revision += 1;
             next.updated_at_ms = now_ms();
-            self.transition(task, next, None).await?;
+            self.transition_inbox(
+                task,
+                next,
+                None,
+                &[],
+                None,
+                None,
+                Some(&inbox::Change::Finish {
+                    delivered: false,
+                    unstarted: true,
+                    stamp: None,
+                }),
+            )
+            .await?;
             return Ok(());
         };
         if unsettled
@@ -2990,7 +3394,27 @@ impl ManagedStore {
             next.detail = "dispatch stopped before provider admission; queued again".into();
             next.revision += 1;
             next.updated_at_ms = now_ms();
-            self.transition(task, next, None).await?;
+            if let Some(batch) = self.inbox_batch(&task.id)?
+                && !batch.events.is_empty()
+                && next.user_inputs.last() == Some(&inbox::render(&batch.events))
+            {
+                next.user_inputs.pop();
+                next.delivered_inputs = next.delivered_inputs.min(next.user_inputs.len());
+            }
+            self.transition_inbox(
+                task,
+                next,
+                None,
+                &[],
+                None,
+                None,
+                Some(&inbox::Change::Finish {
+                    delivered: false,
+                    unstarted: true,
+                    stamp: None,
+                }),
+            )
+            .await?;
             return Ok(());
         }
         if let Some(outcome) = store.settled_outcome(session_id, task.message_count_before)? {
@@ -3239,6 +3663,109 @@ fn settle_subject(task: &Id, revision: u64) -> String {
     format!("{}#{revision}", task.as_str())
 }
 
+/// A `confirm` decision the runtime may answer: the request carries no risk
+/// cue (deletion, spending, credentials, publication) and hands nothing off
+/// to the user. The veto lives here, not in the replaceable program.
+fn confirmable(decision: &reflex::Decision, text: &str) -> bool {
+    decision.value == "confirm"
+        && decision.features.get("risk") == Some(&0.0)
+        && decision.features.get("user_act") == Some(&0.0)
+        && !xcb_core::reflex::confirm_vetoed(text)
+}
+
+/// Whether this settled turn's `confirm` decision may be answered "yes":
+/// only a completed idle turn, whatever a custom program categorized.
+fn answers_confirm(
+    config: &Config,
+    root: &Path,
+    decision: &reflex::Decision,
+    outcome: &Outcome,
+) -> bool {
+    outcome.state == State::Idle
+        && outcome.facts.terminal == Terminal::Completed
+        && confirmable(decision, &outcome.text)
+        && head_acts(
+            root,
+            &config.extensions.reflexes,
+            xcb_core::reflex::SETTLE_CONFIRM,
+            &decision.features,
+        )
+}
+
+/// The mode that governs one settle head. `confirm` never answers while
+/// settle is off or only observing.
+fn head_mode(reflexes: &ReflexConfig, head: &str) -> ReflexMode {
+    match (reflexes.settle, head == xcb_core::reflex::SETTLE_CONFIRM) {
+        (ReflexMode::Off, _) => ReflexMode::Off,
+        (ReflexMode::Observe, true) if reflexes.confirm != ReflexMode::Off => ReflexMode::Observe,
+        (_, true) => reflexes.confirm,
+        (mode, false) => mode,
+    }
+}
+
+/// Whether a settle head acts on a turn: always when active; under `auto`
+/// only once the operator's labels certified it and the turn scores at or
+/// above the certified threshold. An unreadable ledger never acts.
+fn head_acts(
+    root: &Path,
+    reflexes: &ReflexConfig,
+    head: &str,
+    features: &xcb_core::reflex::Features,
+) -> bool {
+    match head_mode(reflexes, head) {
+        ReflexMode::Active => true,
+        ReflexMode::Auto => reflex::ReflexStore::open(root)
+            .and_then(|store| store.certified(Reflex::Settle, head, features))
+            .unwrap_or(false),
+        ReflexMode::Off | ReflexMode::Observe => false,
+    }
+}
+
+/// Under `auto`, about one turn in ten that a certified head would act on
+/// is left for the operator instead. Their replies are the only unbiased
+/// evidence a head keeps earning once it acts, and they are what can
+/// withdraw its certificate. Deterministic per task turn.
+fn held_for_operator(reflexes: &ReflexConfig, head: &str, task: &ManagedTask) -> bool {
+    head_mode(reflexes, head) == ReflexMode::Auto && held_turn(head, &task.id, task.revision)
+}
+
+fn held_turn(head: &str, task: &Id, revision: u64) -> bool {
+    u8::from_str_radix(
+        &digest(format!(
+            "xcb-reflex-explore-v1\0{head}\0{}\0{revision}",
+            task.as_str()
+        ))[..2],
+        16,
+    )
+    .is_ok_and(|byte| byte < 26)
+}
+
+/// The settle head whose decision started the task's current run. A run is
+/// automatic while `attempts` is non-zero, since a user reply resets it.
+fn acted_continuation(task: &ManagedTask) -> Option<&'static str> {
+    if task.inbox_continuation || task.attempts == 0 {
+        return None;
+    }
+    [
+        xcb_core::reflex::SETTLE_UNFINISHED,
+        xcb_core::reflex::SETTLE_CONFIRM,
+    ]
+    .into_iter()
+    .find(|head| task.acted.as_deref() == Some(*head))
+}
+
+/// How an acted-on continuation turned out labels the decision behind it.
+/// Active reflexes would otherwise starve of labels, since the user no longer
+/// has to type "continue". A continued turn that did real work confirms the
+/// decision. One that made no tool call suggests nothing was left to do. A
+/// failed or cancelled run says nothing about the decision.
+fn continuation_outcome(task: &ManagedTask, outcome: &Outcome) -> Option<(&'static str, bool)> {
+    let head = acted_continuation(task)?;
+    let tool_calls = outcome.tool_calls?;
+    (outcome.facts.failure.is_none() && outcome.facts.terminal == Terminal::Completed)
+        .then_some((head, tool_calls > 0))
+}
+
 /// Categorizes a settled worker turn with the settle reflex. Returns `None`
 /// when reflexes are off or the reflex cannot run; categorization is
 /// evidence and never blocks settlement.
@@ -3250,7 +3777,11 @@ async fn settle_decision(
     if config.extensions.reflexes.settle == ReflexMode::Off {
         return None;
     }
-    let features = xcb_core::reflex::settle_features(&outcome.text, &outcome.facts);
+    // A turn reconciled after a restart has no tool-call count; scoring it
+    // as zero would both skew the decision and teach the ledger a false
+    // feature, so it is left uncategorized.
+    let features =
+        xcb_core::reflex::settle_features(&outcome.text, &outcome.facts, outcome.tool_calls?);
     let evidence = reflex::settle_evidence(outcome.state, &features);
     reflex::ReflexStore::open(store.root())
         .ok()?
@@ -3259,22 +3790,42 @@ async fn settle_decision(
         .ok()
 }
 
-fn continuation_prompt(settle: Option<&reflex::Decision>) -> String {
+/// The prompt for an automatic run, worded for the settle head that
+/// started it, if any.
+fn continuation_prompt(head: Option<&str>) -> String {
     const SCOPE: &str = "Do not repeat completed effects or expand scope. Stop and ask one specific question if input or approval is required.";
-    match settle.map(|decision| decision.value.as_str()) {
-        Some("stopped_short") => format!(
+    match head {
+        Some(xcb_core::reflex::SETTLE_UNFINISHED) => format!(
             "Your last turn ended before the original task was finished. Carry out the next step you described, then continue until the task is complete. {SCOPE}"
+        ),
+        Some(xcb_core::reflex::SETTLE_CONFIRM) => format!(
+            "Yes, go ahead with the step you proposed, within the original task. If it would delete data, spend money, publish, or use new credentials, stop and ask instead. {SCOPE}"
         ),
         _ => format!("Continue the original task from the last confirmed checkpoint. {SCOPE}"),
     }
 }
 
+#[cfg(test)]
 async fn task_should_continue(
     store: &Store,
     task: &ManagedTask,
     outcome: &Outcome,
     settle: Option<&reflex::Decision>,
-) -> Result<bool> {
+) -> Result<Option<Option<&'static str>>> {
+    task_should_continue_inbox(store, task, outcome, settle, false).await
+}
+
+/// Whether a settled turn continues automatically: `None` leaves it with the
+/// operator, and `Some(head)` continues it, naming the settle head whose
+/// decision started the run when one did. A turn woken by queued inbox input
+/// is never credited to a head.
+async fn task_should_continue_inbox(
+    store: &Store,
+    task: &ManagedTask,
+    outcome: &Outcome,
+    settle: Option<&reflex::Decision>,
+    inbox_requested: bool,
+) -> Result<Option<Option<&'static str>>> {
     let repeated =
         task.last_output.as_deref() == Some(xcb_core::display_text(&outcome.text, 8192).as_str());
     if task.cancel_requested
@@ -3284,9 +3835,9 @@ async fn task_should_continue(
         || outcome.facts.effects == EffectState::Uncertain
         || outcome.facts.pending_attention
         || outcome.facts.failure.is_some()
-        || repeated
+        || (repeated && !inbox_requested)
     {
-        return Ok(false);
+        return Ok(None);
     }
     let config = Config::load(store.root())?.0;
     let elapsed = now_ms().saturating_sub(task.input_at_ms.unwrap_or(task.created_at_ms));
@@ -3301,30 +3852,74 @@ async fn task_should_continue(
         && config.extensions.auto_continue.enabled
         && task.attempts < config.extensions.auto_continue.max_consecutive
         && elapsed < config.extensions.auto_continue.max_elapsed_ms;
-    if !deterministic && !semantic {
-        return Ok(false);
+    if !deterministic && !semantic && !inbox_requested {
+        return Ok(None);
     }
-    // In active mode, a completed turn the settle reflex categorizes as
-    // stopped short is continued like an interrupted one. Every deterministic
-    // gate above still applies, and a configured judge keeps its veto.
-    let stopped_short = semantic
-        && config.extensions.reflexes.settle == ReflexMode::Active
-        && settle.is_some_and(|decision| decision.value == "stopped_short");
-    let verdict = deterministic || stopped_short;
+    // When the settle head acts (see `head_acts`), a completed turn the
+    // reflex categorizes as stopped short is continued like an interrupted
+    // one, and one waiting for a go-ahead is answered when nothing in the
+    // request is risky. Every deterministic gate above still applies, and a
+    // configured judge keeps its veto.
+    let reflexes = &config.extensions.reflexes;
+    let unfinished = semantic
+        && settle.is_some_and(|decision| {
+            decision.value == "stopped_short"
+                && head_acts(
+                    store.root(),
+                    reflexes,
+                    xcb_core::reflex::SETTLE_UNFINISHED,
+                    &decision.features,
+                )
+        });
+    let unfinished_held =
+        unfinished && held_for_operator(reflexes, xcb_core::reflex::SETTLE_UNFINISHED, task);
+    let answerable = semantic
+        && settle.is_some_and(|decision| answers_confirm(&config, store.root(), decision, outcome));
+    let confirm_held =
+        answerable && held_for_operator(reflexes, xcb_core::reflex::SETTLE_CONFIRM, task);
+    let head = if unfinished && !unfinished_held {
+        Some(xcb_core::reflex::SETTLE_UNFINISHED)
+    } else if answerable && !confirm_held {
+        Some(xcb_core::reflex::SETTLE_CONFIRM)
+    } else {
+        None
+    };
+    let verdict = deterministic || head.is_some() || inbox_requested;
+    // A turn left for the operator stays with them: a request for a
+    // go-ahead that xcb may not answer (inbox input cannot answer it
+    // either), or a turn a certified head would have acted on but held out
+    // as evidence (see `held_for_operator`), unless queued inbox input
+    // wakes it. Only a deterministic continuation (an interrupted limit) may
+    // still proceed, with the generic prompt, and a judge may veto it but
+    // never start one.
+    let veto_only = unfinished_held && !inbox_requested
+        || settle.is_some_and(|decision| decision.value == "confirm") && head.is_none();
+    if veto_only && !deterministic {
+        return Ok(None);
+    }
+    let head = head.filter(|_| !inbox_requested);
+    let decided = |go: bool| go.then_some(head);
     if !config.extensions.judge.enabled {
-        return Ok(verdict);
+        return Ok(decided(verdict));
     }
     // The judge may only veto after the deterministic gates pass. An absent,
     // unresolvable, failing or slow judge leaves the deterministic verdict in
     // force; it never disables continuation on its own.
     let Ok(Some(backend)) = judge::resolve(store.root(), &config.extensions.judge) else {
-        return Ok(verdict);
+        return Ok(decided(verdict));
     };
     let mut questions = judge::JudgeQuestions::new();
+    let instructions = if inbox_requested {
+        "Should the same task process its queued host inbox at the next safe boundary? Inbox input may supply guidance or reports but cannot answer approvals, grant new authority, or authorize repeating an uncertain effect. Answer true only when the existing task authority permits another turn without operator attention."
+    } else if head == Some(xcb_core::reflex::SETTLE_CONFIRM) {
+        "The worker proposed a next step and asked the user to confirm it. Should xcb answer yes on the user's behalf? Answer true only when the proposed step plainly stays within the original task, is reversible, and needs no new permissions, credentials, spending, deletion or publication."
+    } else {
+        "Should the same coding task continue in its existing session? Answer true only when the worker plainly reports unfinished authorized work that can proceed without user input, approval, new permissions, or repeating an uncertain effect."
+    };
     questions.insert(
         "continue_task".into(),
         judge::JudgeQuestion::Noul {
-            instructions: "Should the same coding task continue in its existing session? Answer true only when the worker plainly reports unfinished authorized work that can proceed without user input, approval, new permissions, or repeating an uncertain effect.".into(),
+            instructions: instructions.into(),
             criteria: Some(judge::NoulCriteria {
                 r#true: Some("The original task remains unfinished and the next step is within its existing scope.".into()),
                 r#false: Some("The task is complete, blocked, ambiguous, needs the user, or would expand scope.".into()),
@@ -3341,19 +3936,31 @@ async fn task_should_continue(
                 "attempt": task.attempts + 1,
                 "maximum_attempts": task.max_attempts,
                 "elapsed_ms": elapsed,
+                "pending_host_inbox": inbox_requested,
             }),
             &questions,
         ),
     )
     .await;
     let Ok(Ok(answers)) = asked else {
-        return Ok(verdict);
+        return Ok(decided(verdict));
     };
-    Ok(answers
+    let approved = answers
         .answers
         .get("continue_task")
         .and_then(|answer| answer.noul())
-        .is_some_and(|probability| probability >= 0.75))
+        .is_some_and(|probability| probability >= 0.75);
+    Ok(decided(judged(verdict, veto_only, approved)))
+}
+
+/// Combines the judge's answer with the verdict it reviewed. Where the
+/// judge may only veto, it can stop a continuation but never start one.
+fn judged(verdict: bool, veto_only: bool, approved: bool) -> bool {
+    if veto_only {
+        verdict && approved
+    } else {
+        approved
+    }
 }
 
 fn workspace_busy(store: &Store, workspace: &str) -> Result<bool> {
@@ -3502,7 +4109,11 @@ fn append_context(prompt: &mut String, context: &str) {
 
 struct Completion {
     id: Id,
-    result: Result<Outcome>,
+    result: CompletionResult,
+}
+enum CompletionResult {
+    Provider(Result<Outcome>),
+    Program(Result<crate::managed_program::ProgramReport>),
 }
 
 /// Dispatch backoff for a task the supervisor could not launch. The wait
@@ -3806,11 +4417,17 @@ impl Supervisor {
     /// backoff; after the bound the task is marked uncertain so custody is
     /// retained without an automatic retry.
     async fn record(&mut self, completion: Completion, failures: u32) {
-        match self
-            .managed
-            .finish_ref(&self.store, &completion.id, &completion.result)
-            .await
-        {
+        let result = match &completion.result {
+            CompletionResult::Provider(result) => {
+                self.managed
+                    .finish_ref(&self.store, &completion.id, result)
+                    .await
+            }
+            CompletionResult::Program(result) => {
+                self.managed.finish_program(&completion.id, result).await
+            }
+        };
+        match result {
             Ok(finished) => {
                 if finished.state == TaskState::Queued
                     && finished.detail.starts_with("dispatch did not cross")
@@ -3940,6 +4557,7 @@ impl Supervisor {
             );
         }
         if !draining {
+            self.managed.tick_projects(now_ms()).await?;
             self.managed.tick_schedules(now_ms()).await?;
         }
         let mut tasks = self.managed.active_tasks(128)?;
@@ -4022,6 +4640,9 @@ impl Supervisor {
     async fn launch(&mut self, task: &ManagedTask) -> Result<Dispatch> {
         let managed = self.managed.clone();
         let store = self.store.clone();
+        if let Some(reason) = managed.project_dispatch_block(task)? {
+            return Ok(Dispatch::Deferred(reason.into()));
+        }
         if workspace_busy(&store, &task.workspace)? {
             return Ok(Dispatch::Deferred(
                 "waiting for an eligible worker: the workspace has an active turn".into(),
@@ -4046,6 +4667,49 @@ impl Supervisor {
                 Err(error) => Err(error),
             };
         }
+        if let Some(program) = &task.program {
+            let mut next = task.clone();
+            next.state = TaskState::Running;
+            next.detail = "running pinned ALGAL planner".into();
+            next.revision += 1;
+            next.updated_at_ms = now_ms().max(task.updated_at_ms);
+            let prepared = match managed.transition(task, next, None).await {
+                Ok(task) => task,
+                Err(Error::Conflict(_)) => return Ok(Dispatch::Settled),
+                Err(error) => return Err(error),
+            };
+            let id = prepared.id.clone();
+            let program = program.clone();
+            let (cancel, cancelled) = watch::channel(false);
+            self.active.insert(id.clone(), cancel);
+            self.active_workspaces
+                .insert(id.clone(), prepared.workspace);
+            self.joins.spawn(async move {
+                Completion {
+                    id,
+                    result: CompletionResult::Program(program.run(cancelled).await),
+                }
+            });
+            return Ok(Dispatch::Started);
+        }
+        let pending_events = managed.inbox_pending(task)?;
+        let preferences = managed.preferences(Path::new(&task.workspace))?;
+        let (events, prompt_task) = inbox::fit(task, pending_events.clone(), &preferences);
+        if !pending_events.is_empty() && events.is_empty() {
+            let mut next = task.clone();
+            next.state = TaskState::NeedsInput;
+            next.attention = Some(State::NeedsAction);
+            next.detail = "inbox context limit reached; accepted guidance is held intact. Start a new task with the needed context.".into();
+            next.revision += 1;
+            next.updated_at_ms = now_ms();
+            let notice =
+                ManagedStore::assistant(next.detail.clone(), Some(&task.id), next.revision);
+            return match managed.transition(task, next, Some(notice)).await {
+                Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
+                Err(error) => Err(error),
+            };
+        }
+        let routing_prompt = worker_prompt(&prompt_task, &preferences, &[], false);
         let config = Config::load(store.root())?.0;
         let created_session = task.session.is_none();
         let mut route_reason = task
@@ -4090,7 +4754,7 @@ impl Supervisor {
                 &store,
                 &config,
                 routing::RouteRequest {
-                    task: task.effective_prompt(),
+                    task: &routing_prompt,
                     required_provider,
                     preferred_provider: provider_preference,
                     required_model: None,
@@ -4186,13 +4850,8 @@ impl Supervisor {
         let carried = task.session.is_some()
             && task.context_carried
             && message_count > task.message_count_before;
-        let preferences = managed.preferences(Path::new(&task.workspace))?;
-        let mut prompt = worker_prompt(
-            task,
-            &preferences,
-            &managed.mailbox_tail(&task.id, 16)?,
-            carried,
-        );
+        let mut prompt = worker_prompt(&prompt_task, &preferences, &[], carried);
+        append_context(&mut prompt, &managed.project_context(&task.conversation)?);
         if !carried {
             append_context(
                 &mut prompt,
@@ -4216,14 +4875,22 @@ impl Supervisor {
                 Err(error) => Err(error),
             };
         }
+        let batch = inbox::Batch {
+            events,
+            session: session.id.clone(),
+            message_count,
+            input_count: prompt_task.user_inputs.len(),
+            prompt_digest: digest(&prompt),
+        };
         let prepared = match managed
-            .prepare(
+            .prepare_inbox(
                 task,
                 session.id.clone(),
                 route,
                 route_reason,
                 message_count,
                 preferences_fingerprint(&preferences),
+                (!batch.events.is_empty()).then_some(&batch),
             )
             .await
         {
@@ -4291,7 +4958,10 @@ impl Supervisor {
                     "managed worker task aborted inside the supervisor",
                 )),
             };
-            Completion { id, result }
+            Completion {
+                id,
+                result: CompletionResult::Provider(result),
+            }
         });
         Ok(Dispatch::Started)
     }
@@ -4559,6 +5229,8 @@ fn managed_view(
         .iter()
         .map(habitat::backlog_row)
         .collect();
+    view.projects = managed.project_rows()?;
+    view.inbox = managed.inbox_rows()?;
     view.schedules = managed
         .schedules(None)?
         .into_iter()
@@ -5029,6 +5701,7 @@ mod tests {
             running.updated_at_ms = now_ms();
             let running = managed.transition(&task, running, None).await.unwrap();
             let outcome = Outcome {
+                tool_calls: Some(0),
                 diagnostic: None,
                 text: text.into(),
                 state: State::Failed,
@@ -5474,7 +6147,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 4);
         let count: i64 = migrated
             .db()
             .unwrap()
@@ -5926,6 +6599,7 @@ mod tests {
             .await
             .unwrap();
         let outcome = Outcome {
+            tool_calls: Some(0),
             diagnostic: None,
             text: "This route reached its quota.".into(),
             facts: xcb_core::policy::TurnFacts {
@@ -6085,6 +6759,7 @@ mod tests {
             .await
             .unwrap();
         let limited = Outcome {
+            tool_calls: Some(0),
             diagnostic: None,
             text: "I reached the turn limit after making progress.".into(),
             facts: xcb_core::policy::TurnFacts {
@@ -6096,12 +6771,14 @@ mod tests {
             },
             state: State::Idle,
         };
-        assert!(
+        assert_eq!(
             task_should_continue(&xcb, &task, &limited, None)
                 .await
-                .unwrap()
+                .unwrap(),
+            Some(None)
         );
         let completed = Outcome {
+            tool_calls: Some(0),
             diagnostic: None,
             text: "The task is complete.".into(),
             facts: xcb_core::policy::TurnFacts {
@@ -6111,9 +6788,10 @@ mod tests {
             state: State::Idle,
         };
         assert!(
-            !task_should_continue(&xcb, &task, &completed, None)
+            task_should_continue(&xcb, &task, &completed, None)
                 .await
                 .unwrap()
+                .is_none()
         );
     }
 
@@ -6189,8 +6867,16 @@ mod tests {
             priority: 0,
             attention: None,
             backlog_prompt: None,
+            routing_question: false,
+            project_proposal: None,
+            program: None,
+            program_generation: None,
+            program_receipt: None,
+            schedule: None,
             detail: "x".into(),
             settle: None,
+            acted: None,
+            inbox_continuation: false,
             attempts: 0,
             max_attempts: 8,
             message_count_before: 0,
@@ -6354,6 +7040,7 @@ mod tests {
 
     fn idle_outcome(terminal: Terminal, text: &str) -> Outcome {
         Outcome {
+            tool_calls: Some(0),
             diagnostic: None,
             text: text.into(),
             state: State::Idle,
@@ -6364,6 +7051,15 @@ mod tests {
                 pending_attention: false,
                 failure: None,
             },
+        }
+    }
+
+    /// A completed idle turn that made `tool_calls` tool calls, the settle
+    /// reflex's strongest single signal.
+    fn worked_outcome(text: &str, tool_calls: u32) -> Outcome {
+        Outcome {
+            tool_calls: Some(tool_calls),
+            ..idle_outcome(Terminal::Completed, text)
         }
     }
 
@@ -6714,6 +7410,7 @@ mod tests {
             )
             .await
             .unwrap()
+            .is_some()
         );
     }
 
@@ -7037,9 +7734,9 @@ mod tests {
             .finish(
                 &xcb,
                 &running.id,
-                Ok(idle_outcome(
-                    Terminal::Completed,
+                Ok(worked_outcome(
                     "Parser updated. Next, I'll wire the CLI:",
+                    60,
                 )),
             )
             .await
@@ -7047,6 +7744,12 @@ mod tests {
         assert_eq!(done.state, TaskState::Completed);
         // Default settle mode observes: categorized, not continued.
         assert_eq!(done.settle.as_deref(), Some("stopped_short"));
+        // A saved future idea is not an active turn and must not swallow
+        // explicit continuation feedback for the worker that just settled.
+        let deferred = managed
+            .enqueue_backlog(&chat, new_id("m"), "Future idea".into(), true, 5)
+            .await
+            .unwrap();
         let mut config = Config::default();
         config.extensions.reflexes.settle = ReflexMode::Active;
         config.save(&state, None).unwrap();
@@ -7070,7 +7773,8 @@ mod tests {
                 .unwrap()
                 .contains("Worker's last report")
         );
-        assert_eq!(managed.tasks(16).unwrap().len(), 1);
+        assert_eq!(managed.tasks(16).unwrap().len(), 2);
+        assert!(managed.task(&deferred.id).unwrap().unwrap().deferred);
         let reflexes = reflex::ReflexStore::open(&state).unwrap();
         let status = reflexes
             .status(Reflex::Settle, ReflexMode::Observe, true)
@@ -7089,6 +7793,9 @@ mod tests {
         let workspace = workspace_root.path().canonicalize().unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
+        let mut config = Config::default();
+        config.extensions.reflexes.settle = ReflexMode::Observe;
+        config.save(&state, None).unwrap();
         let chat = conversation(&managed, &workspace).await;
         let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_first").await;
         let running = mark_running(&managed, &task).await;
@@ -7096,9 +7803,9 @@ mod tests {
             .finish(
                 &xcb,
                 &running.id,
-                Ok(idle_outcome(
-                    Terminal::Completed,
+                Ok(worked_outcome(
                     "Parser updated. Next, I'll wire the CLI:",
+                    60,
                 )),
             )
             .await
@@ -7126,6 +7833,174 @@ mod tests {
         assert_eq!((status.observations, status.labeled), (1, 1));
     }
 
+    /// Under the default `auto`, a head acts only once it holds a
+    /// certificate and the turn scores at or above the certified threshold,
+    /// and about one acting turn in ten is still left for the operator.
+    #[tokio::test]
+    async fn auto_settle_acts_only_once_certified() {
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        assert_eq!(
+            Config::default().extensions.reflexes.settle,
+            ReflexMode::Auto
+        );
+        let chat = conversation(&managed, &workspace).await;
+        let text = "Schema migrated. Next, I'll update the callers:";
+        // No certificate yet: auto observes.
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_uncertified").await;
+        let running = mark_running(&managed, &task).await;
+        let held = managed
+            .finish(&xcb, &running.id, Ok(worked_outcome(text, 60)))
+            .await
+            .unwrap();
+        assert_eq!(
+            (held.state, held.settle.as_deref()),
+            (TaskState::Completed, Some("stopped_short"))
+        );
+        // Auto still routes the operator's "continue" into that session.
+        managed
+            .submit(
+                &chat,
+                message("m_go"),
+                "continue".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            managed.task(&held.id).unwrap().unwrap().state,
+            TaskState::Queued
+        );
+        let reflexes = reflex::ReflexStore::open(&state).unwrap();
+        let certificate = |threshold: f64| xcb_core::reflex::Certificate {
+            certified: true,
+            threshold,
+            floor: 0.75,
+            window: 200,
+            fired: 60.0,
+            precision: Some(0.9),
+            lower: Some(0.8),
+            reason: "test".into(),
+            head: xcb_core::reflex::prior(Reflex::Settle)
+                .head("unfinished")
+                .unwrap()
+                .clone(),
+        };
+        // Certified above anything this turn scores: still observes.
+        reflexes
+            .put_certificate(Reflex::Settle, "unfinished", certificate(0.999))
+            .unwrap();
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_high").await;
+        let running = mark_running(&managed, &task).await;
+        let held = managed
+            .finish(&xcb, &running.id, Ok(worked_outcome(text, 60)))
+            .await
+            .unwrap();
+        assert_eq!(held.state, TaskState::Completed);
+        // Certified at the head's own threshold: it acts, except on turns
+        // held for the operator.
+        reflexes
+            .put_certificate(Reflex::Settle, "unfinished", certificate(0.65))
+            .unwrap();
+        let mut continued = 0;
+        for index in 0..12 {
+            let task = prepared_task(
+                &managed,
+                &xcb,
+                &chat,
+                &workspace,
+                &format!("m_auto_{index}"),
+            )
+            .await;
+            let running = mark_running(&managed, &task).await;
+            let held_back = held_turn("unfinished", &running.id, running.revision);
+            let next = managed
+                .finish(&xcb, &running.id, Ok(worked_outcome(text, 60)))
+                .await
+                .unwrap();
+            if held_back {
+                assert_eq!((next.state, next.acted), (TaskState::Completed, None));
+            } else {
+                assert_eq!(next.state, TaskState::Queued);
+                assert_eq!(next.acted.as_deref(), Some("unfinished"));
+                assert!(next.next_prompt.contains("next step you described"));
+                continued += 1;
+            }
+        }
+        assert!(continued >= 6, "{continued}");
+        // A withdrawn certificate stops it again.
+        reflexes
+            .put_certificate(
+                Reflex::Settle,
+                "unfinished",
+                xcb_core::reflex::Certificate {
+                    certified: false,
+                    ..certificate(0.65)
+                },
+            )
+            .unwrap();
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_withdrawn").await;
+        let running = mark_running(&managed, &task).await;
+        let held = managed
+            .finish(&xcb, &running.id, Ok(worked_outcome(text, 60)))
+            .await
+            .unwrap();
+        assert_eq!(held.state, TaskState::Completed);
+    }
+
+    #[test]
+    fn confirm_never_acts_while_settle_only_observes() {
+        use xcb_core::reflex::{SETTLE_CONFIRM, SETTLE_UNFINISHED};
+        let mut reflexes = ReflexConfig {
+            settle: ReflexMode::Observe,
+            ..ReflexConfig::default()
+        };
+        assert_eq!(head_mode(&reflexes, SETTLE_CONFIRM), ReflexMode::Observe);
+        assert_eq!(head_mode(&reflexes, SETTLE_UNFINISHED), ReflexMode::Observe);
+        reflexes.confirm = ReflexMode::Off;
+        assert_eq!(head_mode(&reflexes, SETTLE_CONFIRM), ReflexMode::Off);
+        reflexes.settle = ReflexMode::Auto;
+        reflexes.confirm = ReflexMode::Active;
+        assert_eq!(head_mode(&reflexes, SETTLE_CONFIRM), ReflexMode::Active);
+        reflexes.settle = ReflexMode::Off;
+        assert_eq!(head_mode(&reflexes, SETTLE_CONFIRM), ReflexMode::Off);
+        // Routing has no certificate, so `auto` there is refused.
+        let mut config = Config::default();
+        config.extensions.reflexes.route = ReflexMode::Auto;
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn about_one_acting_turn_in_ten_is_held_for_the_operator() {
+        let task = Id::new("t_explore").unwrap();
+        let held = (0..2000)
+            .filter(|revision| held_turn("unfinished", &task, *revision))
+            .count();
+        assert!((140..=260).contains(&held), "{held}");
+        // Heads are held independently.
+        assert!(
+            (0..200).any(|revision| held_turn("unfinished", &task, revision)
+                != held_turn("confirm", &task, revision))
+        );
+    }
+
+    /// Where the judge may only veto (a go-ahead xcb may not give, on a turn
+    /// that continues deterministically), it can stop the continuation but
+    /// never start one.
+    #[test]
+    fn a_veto_only_judge_cannot_start_a_continuation() {
+        assert!(!judged(false, true, true));
+        assert!(!judged(true, true, false));
+        assert!(judged(true, true, true));
+        assert!(judged(false, false, true));
+    }
+
     /// In active mode a completed turn categorized as stopped short passes
     /// the same deterministic gates as an interrupted one and continues.
     #[tokio::test]
@@ -7147,9 +8022,9 @@ mod tests {
             .finish(
                 &xcb,
                 &running.id,
-                Ok(idle_outcome(
-                    Terminal::Completed,
+                Ok(worked_outcome(
                     "Schema migrated. Next, I'll update the callers:",
+                    60,
                 )),
             )
             .await
@@ -7161,16 +8036,135 @@ mod tests {
             .finish(
                 &xcb,
                 &running.id,
-                Ok(idle_outcome(
-                    Terminal::Completed,
-                    "All callers updated and tests pass.",
-                )),
+                Ok(worked_outcome("All callers updated and tests pass.", 14)),
             )
             .await
             .unwrap();
         assert_eq!(
             (done.state, done.settle.as_deref()),
             (TaskState::Completed, Some("done"))
+        );
+        // The continued run did real work, which labels the decision that
+        // continued it.
+        let reflexes = reflex::ReflexStore::open(&state).unwrap();
+        let status = reflexes
+            .status(Reflex::Settle, ReflexMode::Active, true)
+            .unwrap();
+        assert_eq!(status.heads["unfinished"].labeled, 1);
+        assert_eq!(status.heads["unfinished"].positives, 1);
+    }
+
+    /// With confirmation active, a turn that asks for a go-ahead on a safe
+    /// step is answered; one that names a risky step never is.
+    #[tokio::test]
+    async fn active_confirm_answers_safe_requests_and_vetoes_risky_ones() {
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let mut config = Config::default();
+        config.extensions.reflexes.settle = ReflexMode::Active;
+        config.save(&state, None).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let ask = "The fix is ready on the branch. Should I open the PR and merge it?";
+        // Settle alone categorizes the request but does not answer it.
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_observe").await;
+        let running = mark_running(&managed, &task).await;
+        let held = managed
+            .finish(&xcb, &running.id, Ok(worked_outcome(ask, 12)))
+            .await
+            .unwrap();
+        assert_eq!(
+            (held.state, held.settle.as_deref()),
+            (TaskState::Completed, Some("confirm"))
+        );
+        // The operator's "yes" answers that request in the same session and
+        // labels the confirm head.
+        managed
+            .submit(&chat, message("m_yes"), "yes".into(), vec![], &workspace)
+            .await
+            .unwrap();
+        let reopened = managed.task(&held.id).unwrap().unwrap();
+        assert_eq!(
+            (reopened.state, reopened.session.as_ref()),
+            (TaskState::Queued, held.session.as_ref())
+        );
+        let status = reflex::ReflexStore::open(&state)
+            .unwrap()
+            .status(Reflex::Settle, ReflexMode::Active, true)
+            .unwrap();
+        assert_eq!(status.heads["confirm"].positives, 1);
+        assert_eq!(status.heads["unfinished"].positives, 0);
+        config.extensions.reflexes.confirm = ReflexMode::Active;
+        let revision = Config::load(&state).unwrap().1;
+        config.save(&state, revision.as_deref()).unwrap();
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_safe").await;
+        let running = mark_running(&managed, &task).await;
+        let next = managed
+            .finish(&xcb, &running.id, Ok(worked_outcome(ask, 12)))
+            .await
+            .unwrap();
+        assert_eq!(next.state, TaskState::Queued);
+        assert!(
+            next.next_prompt
+                .contains("go ahead with the step you proposed")
+        );
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_risky").await;
+        let running = mark_running(&managed, &task).await;
+        let held = managed
+            .finish(
+                &xcb,
+                &running.id,
+                Ok(worked_outcome(
+                    "The old tables are unused. Should I drop the production database tables now?",
+                    12,
+                )),
+            )
+            .await
+            .unwrap();
+        assert_eq!(held.state, TaskState::Completed);
+        // Inflections and a risky plan above the question are vetoed too.
+        let plan = format!(
+            "Plan: start deleting the stale rows.\n\n{}\n\nShall I go ahead?",
+            "Checked the indexes and the callers. ".repeat(12)
+        );
+        for text in [
+            "Should I go ahead with deleting the stale rows?",
+            plan.as_str(),
+        ] {
+            let task = prepared_task(
+                &managed,
+                &xcb,
+                &chat,
+                &workspace,
+                &format!("m_{}", text.len()),
+            )
+            .await;
+            let running = mark_running(&managed, &task).await;
+            let held = managed
+                .finish(&xcb, &running.id, Ok(worked_outcome(text, 12)))
+                .await
+                .unwrap();
+            assert_eq!(held.state, TaskState::Completed, "{text}");
+        }
+        // A turn reconciled after a restart has no tool-call count, so it is
+        // neither categorized nor continued.
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_recovered").await;
+        let running = mark_running(&managed, &task).await;
+        let recovered = Outcome {
+            tool_calls: None,
+            ..worked_outcome(ask, 0)
+        };
+        let held = managed
+            .finish(&xcb, &running.id, Ok(recovered))
+            .await
+            .unwrap();
+        assert_eq!(
+            (held.state, held.settle.as_deref()),
+            (TaskState::Completed, None)
         );
     }
 }

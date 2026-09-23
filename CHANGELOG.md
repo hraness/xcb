@@ -4,6 +4,24 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.5.0
+
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.5.0)
+for macOS ARM64 and Linux x86_64.
+
+- Durable task steering and explicit completion subscriptions through
+  `xcb steer`, `xcb watch`, and their TUI commands. Stable identities make
+  retries idempotent; inter-agent messages share the same bounded inbox.
+- `xcb inbox` and `/inbox` expose delivery history, full event inspection,
+  pagination, and distinct waiting, queued, prepared, delivered, held and closed
+  states. Delivery requires the exact submitted prompt and a settled receipt.
+- Coalesced input batches survive restarts and late arrivals. Inbox-driven
+  continuation preserves approval, authority, cancellation and budget gates,
+  uses a neutral handoff, and does not train the continuation reflex.
+- Reflexes v2 adds fitted unfinished-work and confirmation heads, live metrics,
+  and challenger promotion through forward trials. The settle reflex observes
+  by default; acting and routine confirmation require separate opt-ins.
+
 ## 0.4.0
 
 First native release line. Earlier `v0.1.0`–`v0.3.0` releases are AgentMixer

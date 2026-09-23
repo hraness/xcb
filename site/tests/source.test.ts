@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { parsePublishedRelease, publishedRelease, type NativeAsset } from "../app/publication";
+import { parsePublishedRelease, publicationMarkdown, publishedRelease, type NativeAsset } from "../app/publication";
 
 const site = join(import.meta.dir, "..");
 const read = async (path: string): Promise<string> => await readFile(join(site, path), "utf8");
@@ -95,7 +95,10 @@ describe("xcb site source contract", () => {
     expect(llms).toContain("https://xcb.sh/README.md");
     expect(llms).not.toContain("http://");
     if (publishedRelease === null) expect(llms).toContain("No native xcb binary");
-    else expect(llms).toContain(`v${publishedRelease.version}`);
+    else {
+      expect(llms).toContain(`v${publishedRelease.version}`);
+      expect(llms).toContain(publicationMarkdown(publishedRelease));
+    }
     expect(docs).toContain('siteName: "xcb"');
     expect(docs).toContain('card: "summary_large_image"');
   });
@@ -146,6 +149,26 @@ test("publication metadata fails closed without an exact xcb artifact and verifi
   // The shipped fixture exercises the full published state without claiming one.
   const fixture = JSON.parse(await read("tests/fixtures/published-release.json")) as unknown;
   expect(parsePublishedRelease(fixture)).toEqual(valid);
+});
+
+test("publication Markdown includes only verified native and compatibility artifacts", async () => {
+  const release = parsePublishedRelease(JSON.parse(await read("tests/fixtures/published-release.json")));
+  if (release === null) throw new Error("published fixture required");
+  expect(publicationMarkdown(null)).toBe("");
+  const markdown = publicationMarkdown(release);
+  expect(markdown).toContain(`**v${release.version}**`);
+  expect(markdown).toContain(release.verificationRun);
+  for (const asset of release.native) {
+    expect(markdown).toContain(asset.url);
+    expect(markdown).toContain(asset.sha256Url);
+  }
+  expect(markdown).toContain(release.archiveUrl!);
+  expect(markdown).not.toContain("npm");
+  expect(publicationMarkdown({ ...release, archiveUrl: null })).not.toContain(release.archiveUrl!);
+  const compatibilityOnly = publicationMarkdown({ ...release, native: [] });
+  expect(compatibilityOnly).toContain(release.archiveUrl!);
+  expect(compatibilityOnly).not.toContain("SHA-256");
+  expect(compatibilityOnly).not.toContain("darwin-aarch64");
 });
 
 

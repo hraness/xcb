@@ -156,6 +156,41 @@ enum Commands {
         #[arg(long)]
         conversation: Option<Id>,
     },
+    /// Queue guidance for a task's next safe turn without interrupting its worker.
+    Steer {
+        /// Existing nonclosed task from `xcb backlog`; attention gates still apply.
+        task: Id,
+        /// Guidance to include within the task's existing authority and budget.
+        text: String,
+        /// Stable event identity for an idempotent retry; generated when omitted.
+        #[arg(long)]
+        id: Option<Id>,
+    },
+    /// Request a task's completion report in another task's durable inbox.
+    Watch {
+        /// Task that will receive the report at an authorized turn boundary.
+        target: Id,
+        /// Task to observe in the same conversation and workspace.
+        source: Id,
+        /// Stable subscription identity for an idempotent retry.
+        #[arg(long)]
+        id: Option<Id>,
+    },
+    /// Inspect accepted guidance and reports, with their delivery evidence.
+    Inbox {
+        /// Filter by target task; otherwise show all targets.
+        #[arg(long, conflicts_with = "conversation")]
+        task: Option<Id>,
+        /// Filter by conversation; cannot be combined with --task.
+        #[arg(long)]
+        conversation: Option<Id>,
+        /// Read older events before this sequence from the previous page.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=i64::MAX as u64))]
+        before: Option<u64>,
+        /// Maximum events, newest first, from 1 to 256.
+        #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u16).range(1..=256))]
+        limit: u16,
+    },
     /// Manage local recurring wake-ups for persistent conversations.
     Schedules {
         #[command(subcommand)]
@@ -166,6 +201,21 @@ enum Commands {
     },
     /// Show questions, approvals and actions requiring attention across conversations.
     Attention,
+    /// Configure bounded project autonomy and inspect remaining grants.
+    Projects {
+        #[command(subcommand)]
+        command: Option<habitat::ProjectCommand>,
+    },
+    /// Opt-in habitat startup at macOS login; scoped to this state root.
+    Service {
+        #[command(subcommand)]
+        command: Option<ServiceCommand>,
+    },
+    /// Bind, search and explicitly promote notes to a project's local Wordcell vault.
+    Memory {
+        #[command(subcommand)]
+        command: habitat::MemoryCommand,
+    },
     /// List installed panes; subcommands inspect, validate, and install them.
     Panes {
         #[command(subcommand)]
@@ -388,23 +438,23 @@ enum ModelCommand {
 }
 #[derive(Subcommand)]
 enum ReflexCommand {
-    /// Show the active generation, program digest, evidence and holdout metrics.
+    /// Show the active generation, program digest, live metrics and open trials.
     Status {
         /// Only this reflex (route or settle).
         reflex: Option<ReflexName>,
     },
-    /// Fit candidates on local labels and promote any that beat the active generation on holdout.
+    /// Decide finished trials and fit new challengers; a challenger is promoted only after it beats the active generation on labels that arrived after it was fitted.
     Train {
         /// Reflex to train (route or settle).
         reflex: ReflexName,
     },
-    /// Label a task's latest decision: route frontier|standard, settle unfinished|done.
+    /// Label a task's latest decision: route frontier|standard, settle unfinished|confirm|done.
     Label {
         /// Reflex the label is for (route or settle).
         reflex: ReflexName,
         /// Managed task id.
         task: Id,
-        /// frontier or standard (route); unfinished or done (settle).
+        /// frontier or standard (route); unfinished, confirm or done (settle).
         label: String,
     },
     /// Reactivate an earlier generation; 0 restores the shipped prior.
@@ -414,12 +464,17 @@ enum ReflexCommand {
         /// Generation to activate.
         version: u32,
     },
-    /// Import labeled JSONL ({id,text,label[,weight][,judge]}); only derived features are stored.
+    /// Import labeled JSONL ({id,text,label[,weight][,judge|head,tool_calls]}), oldest first.
+    /// The examples are replayed as a forward trial from the shipped prior; heads that won
+    /// promotion in the replay are adopted. Only derived features are stored.
     Import {
         /// Reflex the examples are for (route or settle).
         reflex: ReflexName,
         /// JSONL file to import.
         file: PathBuf,
+        /// Replay and report without storing or adopting anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Check that a reflex program file is admissible and print its digest.
     Check {
@@ -462,6 +517,18 @@ enum SessionCommand {
         yes: bool,
     },
 }
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Register startup and one-minute restart checks for this habitat.
+    Install,
+    /// Inspect registration and supervisor liveness without changing it.
+    Status,
+    /// Remove an idle service; never terminate active workers.
+    Uninstall,
+    /// Print the exact launchd declaration without installing it.
+    Plan,
+}
+
 #[derive(Subcommand)]
 enum CommandJobs {
     /// Move joined, acknowledged command jobs older than --days into
@@ -622,6 +689,46 @@ fn human_age(now_ms: u64, then_ms: u64) -> String {
     } else {
         format!("{}d ago", minutes / (60 * 24))
     }
+}
+
+/// Whether a settle head may act under `auto`, and the evidence.
+fn certificate_line(certificate: &xcb_core::reflex::Certificate) -> String {
+    let evidence = match (certificate.precision, certificate.lower) {
+        (Some(precision), Some(lower)) => format!(
+            "precision {precision:.2} (at least {lower:.2}) over {:.0} of {} operator-labeled turns at p ≥ {:.2}; floor {:.2}",
+            certificate.fired, certificate.window, certificate.threshold, certificate.floor
+        ),
+        _ => format!(
+            "no turns at p ≥ {:.2} among {} operator-labeled; floor {:.2}",
+            certificate.threshold, certificate.window, certificate.floor
+        ),
+    };
+    format!(
+        "{} · {} · {evidence}",
+        if certificate.certified {
+            "certified to act under auto"
+        } else {
+            "observing under auto"
+        },
+        certificate.reason
+    )
+}
+
+/// One line of reflex metrics: examples, accuracy, precision and recall at
+/// the head's threshold, and AUC when both classes are present.
+fn metrics_line(metrics: &xcb_core::reflex::Metrics) -> String {
+    let rate = |value: Option<f64>| value.map_or_else(|| "–".into(), |value| format!("{value:.2}"));
+    format!(
+        "{} labels · accuracy {:.3} · precision {} · recall {}{}",
+        metrics.n,
+        metrics.accuracy,
+        rate(metrics.precision),
+        rate(metrics.recall),
+        metrics
+            .auc
+            .map(|auc| format!(" · AUC {auc:.3}"))
+            .unwrap_or_default(),
+    )
 }
 
 fn print_json(value: impl serde::Serialize) -> Result<()> {
@@ -1580,36 +1687,40 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                                 println!("  ! {fault}");
                             }
                             for (head, row) in status.heads {
-                                match row.holdout {
-                                    Some(metrics) => println!(
-                                        "  {head}: {} labels ({} positive) · holdout {} · accuracy {:.3} · log loss {:.3}{}",
-                                        row.labeled,
-                                        row.positives,
-                                        metrics.n,
-                                        metrics.accuracy,
-                                        metrics.log_loss,
-                                        metrics
-                                            .auc
-                                            .map(|auc| format!(" · AUC {auc:.3}"))
-                                            .unwrap_or_default(),
-                                    ),
-                                    None => println!(
-                                        "  {head}: {} labels, none held out yet",
-                                        row.labeled
-                                    ),
+                                println!(
+                                    "  {head}: {} labels ({} positive) · live {}",
+                                    row.labeled,
+                                    row.positives,
+                                    row.live
+                                        .as_ref()
+                                        .map(metrics_line)
+                                        .unwrap_or_else(|| "none since activation".into()),
+                                );
+                                if let Some(trial) = row.trial {
+                                    println!("    challenger {}", trial.reason);
+                                }
+                                if let Some(certificate) = &row.certificate {
+                                    println!("    {}", certificate_line(certificate));
                                 }
                             }
                         }
                     }
                 }
                 ReflexCommand::Train { reflex } => {
-                    let report =
-                        reflexes.train(reflex.into(), xcb_core::reflex::FitOptions::default())?;
+                    let options = xcb_core::reflex::FitOptions::default();
+                    let mut report = reflexes.train(reflex.into(), options)?;
+                    report.certificates = reflexes.certify(reflex.into(), options)?;
                     if cli.json {
                         print_json(report)?;
                     } else {
                         for (head, comparison) in &report.heads {
                             println!("{head}: {}", comparison.reason);
+                        }
+                        for head in &report.started {
+                            println!("{head}: fitted a challenger; it trials on the next labels");
+                        }
+                        for (head, certificate) in &report.certificates {
+                            println!("{head}: {}", certificate_line(certificate));
                         }
                         match report.promoted_version {
                             Some(version) => println!(
@@ -1634,13 +1745,28 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let value = reflex::parse_label(reflex, &label).ok_or(Error::Unavailable(
                         match reflex {
                             Reflex::Route => "route labels are frontier or standard",
-                            Reflex::Settle => "settle labels are unfinished or done",
+                            Reflex::Settle => "settle labels are unfinished, confirm or done",
                         },
                     ))?;
-                    if !reflexes.label(reflex, task.as_str(), value, 1.0, "explicit")? {
+                    if reflexes.latest(reflex, task.as_str())?.is_none() {
                         return Err(Error::Unavailable("no decision recorded for that task"));
                     }
-                    println!("labeled {task} {label} for {}", reflex.as_str());
+                    let mut changed = false;
+                    for (head, value) in value {
+                        changed |= reflexes.label(
+                            reflex,
+                            task.as_str(),
+                            *head,
+                            *value,
+                            1.0,
+                            "explicit",
+                        )?;
+                    }
+                    if changed {
+                        println!("labeled {task} {label} for {}", reflex.as_str());
+                    } else {
+                        println!("{task} was already labeled {label} for {}", reflex.as_str());
+                    }
                 }
                 ReflexCommand::Rollback { reflex, version } => {
                     reflexes.rollback(reflex.into(), version)?;
@@ -1649,15 +1775,79 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         Reflex::from(reflex).as_str()
                     );
                 }
-                ReflexCommand::Import { reflex, file } => {
+                ReflexCommand::Import {
+                    reflex: name,
+                    file,
+                    dry_run,
+                } => {
+                    let reflex = Reflex::from(name);
                     let source = std::fs::read_to_string(&file)?;
-                    let rows = reflex::parse_import(reflex.into(), &source)?;
-                    let inserted = reflexes.import(reflex.into(), &rows)?;
-                    println!(
-                        "imported {inserted} of {} examples; run `xcb reflex train {}`",
-                        rows.len(),
-                        Reflex::from(reflex).as_str()
-                    );
+                    let rows = reflex::parse_import(reflex, &source)?;
+                    let active = reflexes.active(reflex)?;
+                    let replays = reflex::replay_import(&active, &rows)?;
+                    let certificates = reflex::certify_import(reflex, &rows)?;
+                    if cli.json && dry_run {
+                        print_json(serde_json::json!({
+                            "replays": replays,
+                            "certificates": certificates,
+                        }))?;
+                        return Ok(0);
+                    }
+                    if !cli.json {
+                        for (head, replay) in &replays {
+                            println!(
+                                "{head}: replayed {} · {} trial{}, {} promoted",
+                                metrics_line(&replay.prequential),
+                                replay.trials,
+                                if replay.trials == 1 { "" } else { "s" },
+                                replay.promotions,
+                            );
+                        }
+                        for (head, certificate) in &certificates {
+                            println!(
+                                "{head}: this history alone {}",
+                                certificate_line(certificate)
+                            );
+                        }
+                    }
+                    if dry_run {
+                        println!("dry run: nothing stored");
+                        return Ok(0);
+                    }
+                    let inserted = reflexes.import(reflex, &rows)?;
+                    // Adopt only for new history: re-importing the same file
+                    // must not append another generation.
+                    let won = replays
+                        .into_iter()
+                        .filter(|(_, replay)| inserted > 0 && replay.promotions > 0)
+                        .filter_map(|(head, replay)| Some((head, (replay.head, replay.evidence?))))
+                        .collect();
+                    let adopted = reflexes.adopt(reflex, won, inserted)?;
+                    let certificates =
+                        reflexes.certify(reflex, xcb_core::reflex::FitOptions::default())?;
+                    if cli.json {
+                        print_json(serde_json::json!({
+                            "inserted": inserted,
+                            "examples": rows.len(),
+                            "adopted_version": adopted,
+                            "certificates": certificates,
+                        }))?;
+                    } else {
+                        println!("imported {inserted} of {} examples", rows.len());
+                        match adopted {
+                            Some(version) => println!(
+                                "adopted the replay's promoted heads as generation {version}; `xcb reflex rollback {} {}` restores the previous one",
+                                reflex.as_str(),
+                                active.version
+                            ),
+                            None => println!(
+                                "no head won a replayed trial; the active generation is unchanged"
+                            ),
+                        }
+                        for (head, certificate) in &certificates {
+                            println!("{head}: {}", certificate_line(certificate));
+                        }
+                    }
                 }
                 ReflexCommand::Check { file } => {
                     let source: serde_json::Value = serde_json::from_slice(&std::fs::read(&file)?)?;
@@ -1793,11 +1983,85 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             command,
             conversation,
         }) => habitat::backlog(store.root(), command, conversation.as_ref(), cli.json).await,
+        Some(Commands::Steer { task, text, id }) => {
+            habitat::steer(store.root(), &task, id, text, cli.json)
+        }
+        Some(Commands::Watch { target, source, id }) => {
+            habitat::watch(store.root(), &target, &source, id, cli.json)
+        }
+        Some(Commands::Inbox {
+            task,
+            conversation,
+            before,
+            limit,
+        }) => habitat::inbox(
+            store.root(),
+            task.as_ref(),
+            conversation.as_ref(),
+            before,
+            usize::from(limit),
+            cli.json,
+        ),
         Some(Commands::Schedules {
             command,
             conversation,
         }) => habitat::schedules(store.root(), command, conversation.as_ref(), cli.json).await,
         Some(Commands::Attention) => habitat::attention(store.root(), cli.json),
+        Some(Commands::Projects { command }) => habitat::projects(store.root(), command, cli.json),
+        Some(Commands::Memory { command }) => {
+            habitat::memory(store.root(), command, cli.json).await
+        }
+        Some(Commands::Service { command }) => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or(Error::PrivateState)?;
+            let executable = std::env::current_exe()?;
+            if matches!(command, Some(ServiceCommand::Plan)) {
+                let plan =
+                    xcb_runtime::habitat_service::Service::plan(store.root(), &executable, &home)?;
+                if cli.json {
+                    print_json(&plan)?;
+                } else {
+                    print!("{}", plan.render()?);
+                }
+                return Ok(0);
+            }
+            let status = match command {
+                Some(ServiceCommand::Install) => {
+                    xcb_runtime::habitat_service::install(store.root(), &executable, &home)?
+                }
+                Some(ServiceCommand::Uninstall) => {
+                    xcb_runtime::habitat_service::uninstall(store.root(), &home)?
+                }
+                _ => xcb_runtime::habitat_service::status(store.root(), &home)?,
+            };
+            if cli.json {
+                print_json(status)?;
+            } else {
+                println!(
+                    "Habitat startup: {} · login registration: {} · supervisor: {}",
+                    if status.installed {
+                        "installed"
+                    } else {
+                        "absent"
+                    },
+                    if status.registered {
+                        "loaded"
+                    } else {
+                        "unloaded"
+                    },
+                    if status.supervisor_running {
+                        "running"
+                    } else {
+                        "idle"
+                    }
+                );
+                if let Some(service) = status.service {
+                    println!("{}", service.manifest.display());
+                }
+            }
+            Ok(0)
+        }
         Some(Commands::Conversations) => {
             let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
             let conversations = managed.conversations(256)?;
@@ -2481,6 +2745,56 @@ fn automatic_route_notice(reason: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn project_memory_and_program_commands_require_explicit_scope() {
+        use clap::Parser;
+        assert!(
+            super::Cli::try_parse_from([
+                "xcb",
+                "projects",
+                "configure",
+                "project_a",
+                "Maintain parser",
+                "--tasks",
+                "10",
+                "--hours",
+                "24"
+            ])
+            .is_ok()
+        );
+        for invalid in ["0", "101"] {
+            assert!(
+                super::Cli::try_parse_from([
+                    "xcb",
+                    "projects",
+                    "configure",
+                    "project_a",
+                    "Goal",
+                    "--tasks",
+                    invalid,
+                    "--hours",
+                    "24"
+                ])
+                .is_err()
+            );
+        }
+        assert!(super::Cli::try_parse_from(["xcb", "projects", "resume", "project_a"]).is_err());
+        assert!(super::Cli::try_parse_from(["xcb", "memory", "promote", "task_a"]).is_err());
+        assert!(
+            super::Cli::try_parse_from([
+                "xcb",
+                "schedules",
+                "program",
+                "project_a",
+                "planner.json",
+                "--every",
+                "3600"
+            ])
+            .is_ok()
+        );
+        assert!(super::Cli::try_parse_from(["xcb", "service", "plan"]).is_ok());
+    }
+
+    #[test]
     fn automatic_route_notice_does_not_echo_route_record_data() {
         assert_eq!(
             automatic_route_notice("Warning: usage limits block private-provider-metadata"),
@@ -2768,6 +3082,7 @@ mod tests {
     #[test]
     fn json_run_output_includes_its_resumable_session_id() {
         let mut result = runner::Outcome {
+            tool_calls: Some(0),
             diagnostic: None,
             text: "Completed response".into(),
             facts: xcb_core::policy::TurnFacts {
@@ -2804,6 +3119,7 @@ mod tests {
             session::State,
         };
         let mut result = runner::Outcome {
+            tool_calls: Some(0),
             diagnostic: None,
             text: "Provider said done".into(),
             facts: TurnFacts {
@@ -3068,6 +3384,75 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn inbox_controls_preserve_explicit_target_and_retry_identity() {
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "steer",
+            "task_target",
+            "Keep the existing interface",
+            "--id",
+            "event_retry",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Steer { task, text, id: Some(id) })
+            if task.as_str() == "task_target" && text == "Keep the existing interface" && id.as_str() == "event_retry")
+        );
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "watch",
+            "task_target",
+            "task_source",
+            "--id",
+            "watch_retry",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Watch { target, source, id: Some(id) })
+            if target.as_str() == "task_target" && source.as_str() == "task_source" && id.as_str() == "watch_retry")
+        );
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "inbox",
+            "--task",
+            "task_target",
+            "--before",
+            "42",
+            "--limit",
+            "3",
+            "--json",
+        ])
+        .unwrap();
+        assert!(cli.json);
+        assert!(
+            matches!(cli.command, Some(Commands::Inbox { task: Some(task), conversation: None, before: Some(42), limit: 3 })
+            if task.as_str() == "task_target")
+        );
+    }
+
+    #[test]
+    fn inbox_filters_and_pagination_fail_closed() {
+        for args in [
+            vec![
+                "xcb",
+                "inbox",
+                "--task",
+                "task_a",
+                "--conversation",
+                "conv_a",
+            ],
+            vec!["xcb", "inbox", "--before", "0"],
+            vec!["xcb", "inbox", "--before", "9223372036854775808"],
+            vec!["xcb", "inbox", "--limit", "0"],
+            vec!["xcb", "inbox", "--limit", "257"],
+            vec!["xcb", "steer", "task_a"],
+            vec!["xcb", "watch", "task_a"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 
     #[test]

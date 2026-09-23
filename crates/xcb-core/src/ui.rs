@@ -112,7 +112,68 @@ pub struct ScheduleRow {
     pub revision: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProjectRow {
+    pub conversation: Id,
+    pub goal: String,
+    pub enabled: bool,
+    pub remaining_tasks: u32,
+    pub expires_at_ms: u64,
+    pub required_provider: Option<Provider>,
+    pub revision: u64,
+    pub status: String,
+}
+
+/// A durable host event and its honest delivery evidence, not model obedience.
+#[derive(Debug, Clone)]
+pub struct InboxRow {
+    pub id: Id,
+    pub task: Id,
+    pub conversation: Id,
+    pub sequence: u64,
+    pub kind: String,
+    pub text: String,
+    pub status: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub receipt: Option<String>,
+}
+
 pub enum HabitatCommand {
+    Steer {
+        task: Id,
+        event: Id,
+        text: String,
+    },
+    WatchTask {
+        task: Id,
+        source: Id,
+        event: Id,
+    },
+    ConfigureProject {
+        expected_revision: Option<u64>,
+        goal: String,
+        max_tasks: u32,
+        expires_at_ms: u64,
+        required_provider: Option<Provider>,
+    },
+    ProjectEnabled {
+        conversation: Id,
+        expected_revision: u64,
+        enabled: bool,
+    },
+    CompleteBacklog {
+        id: Id,
+        expected_revision: u64,
+        summary: String,
+    },
+    ReconcileTask {
+        id: Id,
+        expected_revision: u64,
+    },
+    MemorySearch {
+        query: String,
+    },
     Enqueue {
         prompt: String,
         deferred: bool,
@@ -155,6 +216,8 @@ pub struct View {
     pub tasks: Vec<TaskRow>,
     pub backlog: Vec<BacklogRow>,
     pub schedules: Vec<ScheduleRow>,
+    pub projects: Vec<ProjectRow>,
+    pub inbox: Vec<InboxRow>,
     pub subagents: Vec<Subagent>,
     pub activity: Vec<String>,
     pub extensions: Vec<(String, String)>,
@@ -190,6 +253,8 @@ impl Default for View {
             tasks: vec![],
             backlog: vec![],
             schedules: vec![],
+            projects: vec![],
+            inbox: vec![],
             subagents: vec![],
             activity: vec![],
             extensions: vec![],
