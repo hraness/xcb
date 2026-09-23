@@ -240,7 +240,7 @@ xcb reflex status route    # generation, program digest, labels, holdout metrics
       <p>The shipped parameters reproduce xcb&apos;s behavior before reflexes, so nothing changes until your own evidence earns a promotion.</p>
       <h2 id="learning">How it learns from you</h2>
       <ul>
-        <li>Reply <code>continue</code>, <code>keep going</code>, or <code>proceed</code> right after a task completes, and xcb reopens that task in its session and records that the turn stopped short.</li>
+        <li>Reply <code>continue</code>, <code>keep going</code>, or <code>proceed</code> right after a task completes, and xcb records that the turn stopped short. With settle active, it also reopens that task in its session.</li>
         <li>Start something else after a task completes, and that turn is recorded as finished, at half weight.</li>
         <li>Ask for a stronger or lighter model (&ldquo;use opus&rdquo;, &ldquo;cheaper model&rdquo;) and the previous task&apos;s route is labeled.</li>
         <li>Label anything explicitly. Explicit labels always win over inferred ones.</li>

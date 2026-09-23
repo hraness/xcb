@@ -660,7 +660,8 @@ async fn route_reflex(
         .await
         .ok()?;
     if mode == ReflexMode::Active {
-        classification.frontier = decision.value == "frontier";
+        // A replaced program cannot demote the substantial-prompt floor.
+        classification.frontier = decision.value == "frontier" || classification.substantial;
     }
     Some(decision)
 }

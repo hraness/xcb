@@ -42,7 +42,7 @@ export default function Reflexes() {
             <div className="xcb-readiness">
               <div><h3>Which tier this task deserves</h3><p>The route reflex reads the shape of your request (an imperative opening, resume language, how many different actions it asks for) and, if configured, a judge&apos;s assessment. It chooses frontier or standard among routes that are already eligible. Large prompts always get the highest tier.</p></div>
               <div><h3>Whether the worker actually finished</h3><p>The settle reflex categorizes how each turn ended: done, stopped short, asked a question, needs approval, blocked, interrupted. A promised next step, a worker waiting on an external event, or an open checklist count against “done”.</p></div>
-              <div><h3>What you do next is the label</h3><p>Reply “continue” after a completed task and xcb reopens that task in its session and learns the turn stopped short. Ask for “opus” after a task and the route learns you wanted more. Move on, and the turn counts as finished.</p></div>
+              <div><h3>What you do next is the label</h3><p>Reply “continue” after a completed task and xcb learns the turn stopped short; with continuation on, it reopens that task in its session. Ask for “opus” after a task and the route learns you wanted more. Move on, and the turn counts as finished.</p></div>
             </div>
           </MarketingSection>
 

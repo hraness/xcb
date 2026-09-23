@@ -66,7 +66,9 @@ Decisions are observed; your behavior labels them.
 | You ask for a lighter model ("use sonnet", "cheaper model") | route | standard | 1.0 |
 | `xcb reflex label <reflex> <task> <label>` | either | explicit | 1.0 |
 
-An inferred label never overwrites an explicit one. After every 16 labels, and
+With settle `active`, a `continue` reply also reopens the completed task in
+its session instead of starting a new task; in `observe` it only labels. An
+inferred label never overwrites an explicit one. After every 16 labels, and
 whenever you run `xcb reflex train`, xcb fits a candidate for each head:
 
 1. Labeled examples are split by a stable hash of their id: one fifth is a
@@ -79,8 +81,8 @@ whenever you run `xcb reflex train`, xcb fits a candidate for each head:
    with at least 5 of each class, and on it the candidate lowers log loss by
    at least 0.002 without losing more than 0.02 accuracy or 0.02 AUC.
 
-Promotion appends a generation that records its parent, how many labels it
-was trained on, and the holdout comparison that justified it.
+Promotion appends a generation that records its parent, how many labels were
+available when it was fitted, and the holdout comparison that justified it.
 `xcb reflex rollback <reflex> <version>` reactivates any recorded generation,
 and version 0 restores the prior.
 
@@ -165,7 +167,8 @@ you trust, set it to `active`.
 
 - A reflex refines a decision already inside the safety envelope; it never
   widens it. Route decisions only choose between admitted, eligible routes, and
-  the substantial-prompt quality floor cannot be demoted. Settle continuation
+  the substantial-prompt quality floor cannot be demoted, even by a replaced
+  program. Settle continuation
   still requires a joined, settled, idle worker with no pending attention,
   failure or uncertain effect, a non-repeating response and remaining
   attempt/time budget. A configured judge keeps its veto.

@@ -2354,7 +2354,7 @@ impl ManagedStore {
                 learn(Reflex::Settle, true, 1.0, "user_continue");
                 if attachments.is_empty()
                     && task.session.is_some()
-                    && reflexes.settle != ReflexMode::Off
+                    && reflexes.settle == ReflexMode::Active
                 {
                     return match self.reply(task, conversation, id.clone(), text.clone(), attachments).await {
                         Ok(_) => Ok(()),
@@ -2387,16 +2387,17 @@ impl ManagedStore {
     /// The conversation's most recent task when it completed within
     /// [`CONTINUE_WINDOW_MS`] and no other task in the conversation is active.
     fn recently_completed(&self, conversation: &Id) -> Result<Option<ManagedTask>> {
-        let local: Vec<_> = self
+        if self
+            .active_tasks(128)?
+            .iter()
+            .any(|task| &task.conversation == conversation)
+        {
+            return Ok(None);
+        }
+        Ok(self
             .tasks(64)?
             .into_iter()
             .filter(|task| &task.conversation == conversation)
-            .collect();
-        if local.iter().any(|task| !task.state.terminal()) {
-            return Ok(None);
-        }
-        Ok(local
-            .into_iter()
             .max_by_key(|task| (task.created_at_ms, task.id.as_str().to_owned()))
             .filter(|task| {
                 task.state == TaskState::Completed
@@ -2842,7 +2843,11 @@ impl ManagedStore {
                 )
             );
         } else if state == TaskState::Queued && continue_task {
-            next.next_prompt = continuation_prompt(settle.as_ref());
+            next.next_prompt = continuation_prompt(
+                settle
+                    .as_ref()
+                    .filter(|_| config.extensions.reflexes.settle == ReflexMode::Active),
+            );
         } else if state.terminal() {
             next.next_prompt.clear();
             next.attachments.clear();
@@ -2868,7 +2873,7 @@ impl ManagedStore {
         if let Some(decision) = &settle
             && let Ok(reflexes) = reflex::ReflexStore::open(store.root())
         {
-            let _ = reflexes.observe(&settle_subject(&finished.id, finished.attempts), decision);
+            let _ = reflexes.observe(&settle_subject(&finished.id, finished.revision), decision);
         }
         Ok(finished)
     }
@@ -3227,10 +3232,11 @@ fn continuation_budget_exhausted(config: &Config, task: &ManagedTask, outcome: &
             || elapsed >= policy.max_elapsed_ms)
 }
 
-/// Observation subject for one settled turn of a task. Labels address the
-/// task id and apply to its latest turn.
-fn settle_subject(task: &Id, attempt: u32) -> String {
-    format!("{}#{attempt}", task.as_str())
+/// Observation subject for one settled turn of a task. The task revision is
+/// unique per transition, unlike attempts, which reset on every reply. Labels
+/// address the task id and apply to its latest turn.
+fn settle_subject(task: &Id, revision: u64) -> String {
+    format!("{}#{revision}", task.as_str())
 }
 
 /// Categorizes a settled worker turn with the settle reflex. Returns `None`
@@ -7041,6 +7047,9 @@ mod tests {
         assert_eq!(done.state, TaskState::Completed);
         // Default settle mode observes: categorized, not continued.
         assert_eq!(done.settle.as_deref(), Some("stopped_short"));
+        let mut config = Config::default();
+        config.extensions.reflexes.settle = ReflexMode::Active;
+        config.save(&state, None).unwrap();
         managed
             .submit(
                 &chat,
@@ -7064,6 +7073,54 @@ mod tests {
         assert_eq!(managed.tasks(16).unwrap().len(), 1);
         let reflexes = reflex::ReflexStore::open(&state).unwrap();
         let status = reflexes
+            .status(Reflex::Settle, ReflexMode::Observe, true)
+            .unwrap();
+        assert_eq!((status.observations, status.labeled), (1, 1));
+    }
+
+    /// In observe mode "continue" after completion labels the turn but does
+    /// not reopen the task; it becomes a new task as before reflexes.
+    #[tokio::test]
+    async fn observed_settle_does_not_reopen_on_continue() {
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_first").await;
+        let running = mark_running(&managed, &task).await;
+        let done = managed
+            .finish(
+                &xcb,
+                &running.id,
+                Ok(idle_outcome(
+                    Terminal::Completed,
+                    "Parser updated. Next, I'll wire the CLI:",
+                )),
+            )
+            .await
+            .unwrap();
+        assert_eq!(done.settle.as_deref(), Some("stopped_short"));
+        managed
+            .submit(
+                &chat,
+                message("m_continue"),
+                "continue".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            managed.task(&task.id).unwrap().unwrap().state,
+            TaskState::Completed
+        );
+        assert_eq!(managed.tasks(16).unwrap().len(), 2);
+        let status = reflex::ReflexStore::open(&state)
+            .unwrap()
             .status(Reflex::Settle, ReflexMode::Observe, true)
             .unwrap();
         assert_eq!((status.observations, status.labeled), (1, 1));
