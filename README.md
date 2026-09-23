@@ -1,10 +1,12 @@
 <!-- hraness:xcb-landing:start -->
 # xcb
 
-Excalibur (`xcb`) is one local terminal for your Claude Code, Codex, and Devin
-accounts. Prompts become durable managed tasks routed by usage-aware policy to
-an eligible account, project commands run in an isolated command runner, and
-every conversation and session can be resumed later.
+Excalibur (`xcb`) is a subscription router for coding agents. It selects an
+eligible account/model route across your own Claude, Codex, and Devin
+accounts, runs one bounded turn, and proves account custody when the work
+settles. Another agent calls `xcb --json route`; an application embeds the
+TypeScript SDK. The terminal workspace is the reference host, and the managed
+harness — being rebuilt as a self-evolving ALGAL harness — is experimental.
 
 It is for developers who work with more than one coding agent and want one
 workflow around them. The native Rust app is a source preview for supported
@@ -16,7 +18,7 @@ replacement for every feature of the original provider tools.
 
 [Project site](https://xcb.sh) · [Getting started](https://xcb.sh/docs/getting-started) ·
 [Compare tools](https://xcb.sh/compare) · [Source](https://github.com/hraness/xcb) ·
-[Application API](docs/application-api.md) · [Compatibility reference](docs/compatibility.md) · [Contributing](CONTRIBUTING.md)
+[Route contract](docs/route.md) · [Application API](docs/application-api.md) · [Compatibility reference](docs/compatibility.md) · [Contributing](CONTRIBUTING.md)
 
 ## Readiness
 
@@ -332,6 +334,12 @@ xcb panes
 xcb doctor
 xcb completions zsh > /path/to/completions/_xcb
 ```
+
+For another program — typically a coding agent — `xcb --json route` is the
+closed machine contract: one JSON task document on stdin selects an eligible
+account/model route and runs exactly one bounded turn, returning the selected
+route, saved session id, and settled outcome facts as bounded JSON. See
+[the route contract](docs/route.md).
 
 `xcb chat --resume` reopens a control conversation; `xcb resume` opens a saved
 direct provider session and its workspace. Neither is a headless continuation
