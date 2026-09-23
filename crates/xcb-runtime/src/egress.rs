@@ -1,6 +1,7 @@
 use crate::{Error, Result};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -10,7 +11,7 @@ use std::{
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream, UnixListener, UnixStream},
+    net::{TcpListener, TcpStream, UnixListener, UnixStream, lookup_host},
     task::JoinSet,
 };
 
@@ -308,12 +309,21 @@ pub async fn run_forwarder(
     Ok(code.unwrap_or(1))
 }
 
+/// A synthetic dialer for boundary fixtures. The production bridge always
+/// uses [`dial_public`], which resolves each CONNECT host once and connects
+/// only to globally routable addresses.
+pub type EgressDialer = Arc<dyn Fn(String, u16) -> EgressDialFuture + Send + Sync>;
+pub type EgressDialFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<TcpStream>> + Send>>;
+
 pub struct EgressBridgeOptions {
     pub socket_path: PathBuf,
     pub allowlist: Option<BTreeSet<String>>,
     pub max_connections: usize,
     pub idle_timeout: Duration,
     pub allowed_port: u16,
+    /// Test and qualification seam; `None` dials only vetted public addresses.
+    pub dialer: Option<EgressDialer>,
 }
 impl EgressBridgeOptions {
     pub fn new(socket_path: PathBuf) -> Self {
@@ -323,6 +333,7 @@ impl EgressBridgeOptions {
             max_connections: MAX_CONNECTIONS,
             idle_timeout: Duration::from_millis(IDLE_MS),
             allowed_port: 443,
+            dialer: None,
         }
     }
 }
@@ -388,6 +399,7 @@ impl EgressBridge {
         let max_connections = options.max_connections;
         let allowed_port = options.allowed_port;
         let idle_timeout = options.idle_timeout;
+        let dialer = options.dialer;
         let accept_task = {
             let counters = counters.clone();
             let connections = connections.clone();
@@ -407,12 +419,14 @@ impl EgressBridge {
                                     let counters = counters.clone();
                                     let connections = connections.clone();
                                     let allowlist = allowlist.clone();
+                                    let dialer = dialer.clone();
                                     conns.spawn(async move {
                                         let _guard = ConnGuard(connections);
                                         if serve_conn(
                                             inbound,
                                             allowed_port,
                                             allowlist.as_deref(),
+                                            dialer.as_ref(),
                                             idle_timeout,
                                             &counters,
                                         )
@@ -502,6 +516,7 @@ async fn serve_conn(
     mut inbound: UnixStream,
     allowed_port: u16,
     allowlist: Option<&BTreeSet<String>>,
+    dialer: Option<&EgressDialer>,
     idle_timeout: Duration,
     counters: &Counters,
 ) -> Result<()> {
@@ -517,9 +532,18 @@ async fn serve_conn(
             .await?;
         return Err(Error::Protocol("egress host not allowed"));
     }
-    let dial = TcpStream::connect((host.as_str(), port));
+    let dial: EgressDialFuture = match dialer {
+        Some(dialer) => dialer(host.clone(), port),
+        None => Box::pin(dial_public(host, port)),
+    };
     let mut upstream = match tokio::time::timeout(Duration::from_millis(DIAL_MS), dial).await {
         Ok(Ok(stream)) => stream,
+        Ok(Err(error @ Error::Protocol(_))) => {
+            inbound
+                .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+                .await?;
+            return Err(error);
+        }
         _ => {
             inbound
                 .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
@@ -533,6 +557,92 @@ async fn serve_conn(
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await?;
     relay(&mut inbound, &mut upstream, idle_timeout, counters).await
+}
+
+/// The production dialer: one resolution whose answers are all verified
+/// globally routable before any connect. A confined provider must never
+/// reach loopback, link-local, unique-local, multicast, shared/CGNAT,
+/// reserved or RFC1918 destinations through this bridge.
+async fn dial_public(host: String, port: u16) -> Result<TcpStream> {
+    let addrs = vetted_addrs(&host, port).await?;
+    TcpStream::connect(addrs.as_slice())
+        .await
+        .map_err(|_| Error::Unavailable("egress dial failed"))
+}
+async fn vetted_addrs(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    let lowered = bare.to_ascii_lowercase();
+    if lowered == "localhost" || lowered.ends_with(".localhost") {
+        return Err(Error::Protocol("egress host not allowed"));
+    }
+    let resolved: Vec<SocketAddr> = if let Ok(ip) = bare.parse::<IpAddr>() {
+        vec![SocketAddr::new(ip, port)]
+    } else {
+        lookup_host((bare, port))
+            .await
+            .map_err(|_| Error::Unavailable("egress resolve failed"))?
+            .collect()
+    };
+    // The resolved set feeds connect directly: a single lookup cannot be
+    // rebound between resolve and dial, and one private answer refuses all.
+    if resolved.is_empty() || resolved.iter().any(|addr| !public_ip(&addr.ip())) {
+        return Err(Error::Protocol("egress host not allowed"));
+    }
+    Ok(resolved)
+}
+/// `IpAddr::is_global` is unstable on this toolchain, so the IANA
+/// special-purpose registries are applied directly: only an address outside
+/// every non-global block may be dialed. Rejecting an exotic global range is
+/// a closed failure, never an open one.
+fn public_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => public_ipv4(*v4),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            // An IPv4-mapped answer inherits the IPv4 registry.
+            Some(v4) => public_ipv4(v4),
+            None => public_ipv6(*v6),
+        },
+    }
+}
+fn public_ipv4(v4: std::net::Ipv4Addr) -> bool {
+    let [a, b, c, _] = v4.octets();
+    !(a == 0                                    // 0.0.0.0/8 "this network"
+        || a == 10                              // RFC1918
+        || a == 127                             // loopback
+        || (a == 100 && (64..=127).contains(&b))    // shared/CGNAT
+        || (a == 169 && b == 254)               // link-local
+        || (a == 172 && (16..=31).contains(&b)) // RFC1918
+        || (a == 192 && b == 0 && c == 0)       // IETF assignments
+        || (a == 192 && b == 0 && c == 2)       // TEST-NET-1
+        || (a == 192 && b == 88 && c == 99)     // 6to4 relay
+        || (a == 192 && b == 168)               // RFC1918
+        || (a == 198 && (b == 18 || b == 19))   // benchmarking
+        || (a == 198 && b == 51 && c == 100)    // TEST-NET-2
+        || (a == 203 && b == 0 && c == 113)     // TEST-NET-3
+        || a >= 224) // multicast, reserved, broadcast
+}
+fn public_ipv6(v6: std::net::Ipv6Addr) -> bool {
+    if v6.is_unspecified() || v6.is_loopback() || v6.is_multicast() {
+        return false;
+    }
+    let segments = v6.segments();
+    let first = segments[0];
+    !(first & 0xff00 == 0                       // ::/8, incl. deprecated compat
+        || first & 0xffc0 == 0xfe80             // fe80::/10 link-local
+        || first & 0xfe00 == 0xfc00             // fc00::/7 unique local
+        || first & 0xff00 == 0xff00             // ff00::/8 multicast
+        || (first == 0x0064 && segments[1] == 0xff9b)     // 64:ff9b::/96
+        || (first == 0x0100 && segments[1..4] == [0, 0, 0]) // 100::/64 discard
+        || (first == 0x2001 && segments[1] == 0x0000)     // 2001::/32 Teredo
+        || (first == 0x2001 && segments[1] == 0x0002)     // 2001:2::/48 bench
+        || (first == 0x2001 && (0x0010..=0x002f).contains(&segments[1])) // ORCHID
+        || (first == 0x2001 && segments[1] == 0x0db8)     // 2001:db8::/32 docs
+        || first == 0x2002                                // 2002::/16 6to4
+        || first == 0x3fff && segments[1] & 0xf000 == 0   // 3fff::/20 docs
+        || first & 0xff00 == 0x5f00) // 5f00::/16 SRv6 SIDs
 }
 
 async fn relay(
@@ -647,6 +757,15 @@ mod tests {
         let socket_path = root.path().canonicalize().unwrap().join("e.sock");
         let mut opts = EgressBridgeOptions::new(socket_path.clone());
         opts.allowed_port = echo_port;
+        // The production dialer refuses loopback destinations; the echo
+        // fixture reaches it through the synthetic-dialer seam instead.
+        opts.dialer = Some(Arc::new(move |_, port| {
+            Box::pin(async move {
+                TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .map_err(Error::from)
+            })
+        }));
         let bridge = EgressBridge::start(opts).await.unwrap();
         let mut client = UnixStream::connect(&socket_path).await.unwrap();
         client
@@ -685,12 +804,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bridge_dials_only_globally_routable_destinations() {
+        // Vetted answers: only globally routable addresses may be dialed.
+        assert!(!vetted_addrs("127.0.0.1", 443).await.is_ok());
+        assert!(!vetted_addrs("10.1.2.3", 443).await.is_ok());
+        assert!(!vetted_addrs("172.16.0.1", 443).await.is_ok());
+        assert!(!vetted_addrs("192.168.1.1", 443).await.is_ok());
+        assert!(!vetted_addrs("169.254.169.254", 443).await.is_ok());
+        assert!(!vetted_addrs("100.64.0.1", 443).await.is_ok());
+        assert!(!vetted_addrs("0.0.0.0", 443).await.is_ok());
+        assert!(!vetted_addrs("224.0.0.1", 443).await.is_ok());
+        assert!(!vetted_addrs("192.0.2.1", 443).await.is_ok());
+        assert!(!vetted_addrs("[::1]", 443).await.is_ok());
+        assert!(!vetted_addrs("[fe80::1]", 443).await.is_ok());
+        assert!(!vetted_addrs("[fd00::1]", 443).await.is_ok());
+        assert!(!vetted_addrs("[ff02::1]", 443).await.is_ok());
+        assert!(!vetted_addrs("[::ffff:127.0.0.1]", 443).await.is_ok());
+        assert!(!vetted_addrs("localhost", 443).await.is_ok());
+        assert!(!vetted_addrs("anything.localhost", 443).await.is_ok());
+        // A globally routable literal passes without resolution.
+        assert_eq!(
+            vetted_addrs("8.8.8.8", 443).await.unwrap(),
+            vec![SocketAddr::new("8.8.8.8".parse().unwrap(), 443)]
+        );
+        // The production path answers 403 without dialing.
+        let root = private_root();
+        let socket_path = root.path().canonicalize().unwrap().join("e.sock");
+        let bridge = EgressBridge::start(EgressBridgeOptions::new(socket_path.clone()))
+            .await
+            .unwrap();
+        for target in ["127.0.0.1", "localhost", "192.168.0.1", "[::1]"] {
+            let mut client = UnixStream::connect(&socket_path).await.unwrap();
+            client
+                .write_all(format!("CONNECT {target}:443 HTTP/1.1\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut reply = vec![0u8; 64];
+            let n = client.read(&mut reply).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&reply[..n]).contains("403"),
+                "{target} must be refused before dialing"
+            );
+        }
+        let receipt = bridge.close().await;
+        assert_eq!(receipt.connections_accepted, 0);
+    }
+
+    #[tokio::test]
     async fn forwarder_connects_loopback_to_bridge() {
         let echo_port = echo_server().await;
         let root = private_root();
         let socket_path = root.path().canonicalize().unwrap().join("e.sock");
         let mut opts = EgressBridgeOptions::new(socket_path.clone());
         opts.allowed_port = echo_port;
+        opts.dialer = Some(Arc::new(move |_, port| {
+            Box::pin(async move {
+                TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .map_err(Error::from)
+            })
+        }));
         let _bridge = EgressBridge::start(opts).await.unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let fwd_port = listener.local_addr().unwrap().port();

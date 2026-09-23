@@ -1,6 +1,12 @@
-use crate::{Error, Result, digest, process::Pin};
+use crate::{Error, Result, digest, private, process::Pin};
+use base64::Engine;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, io::Read, path::Path};
+use std::{
+    collections::BTreeSet,
+    io::Read,
+    path::{Path, PathBuf},
+};
 use xcb_core::Provider;
 
 pub const VERSION: &str = "0.155.0-alpha.2.6";
@@ -77,8 +83,23 @@ pub struct StaticCatalog {
     pub admission: Admission,
 }
 
-fn catalog_from_bytes(binary: &[u8], selected: Option<&str>) -> Result<StaticCatalog> {
-    if binary.len() > 512 * 1024 * 1024 || digest(binary) != BINARY_SHA256 {
+#[cfg(test)]
+fn catalog_from_bytes(
+    binary: &[u8],
+    selected: Option<&str>,
+    expected_sha256: &str,
+) -> Result<StaticCatalog> {
+    transform_catalog(
+        catalog_source_from_bytes(binary, expected_sha256)?,
+        selected,
+    )
+}
+
+/// Locate and parse the bundled catalog inside the admitted executable. The
+/// byte digest check stays here so every caller — cached or not — still
+/// proves the exact installed bytes produced the catalog.
+fn catalog_source_from_bytes(binary: &[u8], expected_sha256: &str) -> Result<Value> {
+    if binary.len() > 512 * 1024 * 1024 || digest(binary) != expected_sha256 {
         return Err(Error::Unavailable(
             "Codex executable changed during catalog extraction",
         ));
@@ -98,10 +119,10 @@ fn catalog_from_bytes(binary: &[u8], selected: Option<&str>) -> Result<StaticCat
     let end = (offset + 4 * 1024 * 1024).min(binary.len());
     let mut stream =
         serde_json::Deserializer::from_slice(&binary[offset..end]).into_iter::<Value>();
-    let source = stream
+    stream
         .next()
-        .ok_or(Error::Protocol("Codex model catalog absent"))??;
-    transform_catalog(source, selected)
+        .ok_or(Error::Protocol("Codex model catalog absent"))?
+        .map_err(Error::from)
 }
 
 fn transform_catalog(source: Value, selected: Option<&str>) -> Result<StaticCatalog> {
@@ -179,18 +200,117 @@ fn transform_catalog(source: Value, selected: Option<&str>) -> Result<StaticCata
     })
 }
 
+/// The extracted bundled catalog kept under the private providers state dir
+/// as `codex-catalog-<binary sha256>.json`, with the digests recorded inside.
+/// The file is derived state: it is used only when the recorded executable
+/// digest equals the verified pin's, and is otherwise re-derived.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CachedCatalog {
+    binary_sha256: String,
+    source_sha256: String,
+    source_base64: String,
+}
+
+fn catalog_cache_path(root: &Path, expected_sha256: &str) -> Result<PathBuf> {
+    if !xcb_core::hex64(expected_sha256) {
+        return Err(Error::Unavailable("executable digest is invalid"));
+    }
+    Ok(private::directory(&root.join("providers"))?
+        .join(format!("codex-catalog-{expected_sha256}.json")))
+}
+
+fn cached_catalog_source(path: &Path, expected_sha256: &str) -> Option<Value> {
+    let record: CachedCatalog =
+        serde_json::from_slice(&private::read(path, 8 * 1024 * 1024).ok()?).ok()?;
+    if record.binary_sha256 != expected_sha256 {
+        return None;
+    }
+    let source = base64::engine::general_purpose::STANDARD
+        .decode(record.source_base64.as_bytes())
+        .ok()?;
+    if source.len() > 4 * 1024 * 1024 || digest(&source) != record.source_sha256 {
+        return None;
+    }
+    serde_json::from_slice(&source).ok()
+}
+
+fn store_catalog_source(path: &Path, expected_sha256: &str, source: &Value) -> Result<()> {
+    let source = serde_json::to_vec(source)?;
+    let record = CachedCatalog {
+        binary_sha256: expected_sha256.to_owned(),
+        source_sha256: digest(&source),
+        source_base64: base64::engine::general_purpose::STANDARD.encode(source),
+    };
+    let bytes = serde_json::to_vec_pretty(&record)?;
+    match private::read(path, 8 * 1024 * 1024) {
+        Ok(old) => private::replace(path, &bytes, &digest(old)),
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            private::create(path, &bytes)
+        }
+        // A cache file that fails custody is left alone and skipped; the
+        // catalog is always re-derivable from the executable.
+        Err(_) => Ok(()),
+    }
+}
+
 /// Reads only the admitted executable, never the owner's model cache or auth.
 /// No copied prompts or catalog from another Codex version are shipped by xcb.
-pub fn static_catalog(pin: &Pin, selected: Option<&str>) -> Result<StaticCatalog> {
+/// The extracted catalog is cached under `root/providers/` keyed by the exact
+/// executable digest, so a turn does not re-scan the binary.
+pub fn static_catalog(root: &Path, pin: &Pin, selected: Option<&str>) -> Result<StaticCatalog> {
     runtime_admitted(pin)?;
+    static_catalog_bound(root, pin, selected, BINARY_SHA256)
+}
+
+/// The extraction path, bound to an explicit expected executable digest so a
+/// synthetic build can exercise it in tests. Production admission always
+/// passes `BINARY_SHA256` through `static_catalog`.
+pub(crate) fn static_catalog_bound(
+    root: &Path,
+    pin: &Pin,
+    selected: Option<&str>,
+    expected_sha256: &str,
+) -> Result<StaticCatalog> {
+    if pin.provider != Provider::Codex || pin.sha256 != expected_sha256 {
+        return Err(Error::Unavailable("Codex build is not the admitted build"));
+    }
     pin.verify()?;
+    let cache = catalog_cache_path(root, expected_sha256).ok();
+    if let Some(source) = cache
+        .as_deref()
+        .and_then(|path| cached_catalog_source(path, expected_sha256))
+    {
+        return transform_catalog(source, selected);
+    }
     let mut bytes = Vec::new();
     std::fs::File::open(&pin.executable)?
         .take(512 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)?;
-    let result = catalog_from_bytes(&bytes, selected)?;
+    let source = catalog_source_from_bytes(&bytes, expected_sha256)?;
     pin.verify()?;
-    Ok(result)
+    if let Some(path) = cache {
+        let _ = store_catalog_source(&path, expected_sha256, &source);
+    }
+    #[cfg(test)]
+    CATALOG_EXTRACTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    transform_catalog(source, selected)
+}
+
+/// Binary scans that produced a catalog, for cache tests.
+#[cfg(test)]
+static CATALOG_EXTRACTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn catalog_extractions() -> usize {
+    CATALOG_EXTRACTIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The bundled-catalog shape the extraction tests and the launch-path
+/// benchmark embed in a synthetic executable.
+#[cfg(test)]
+pub(crate) fn fixture_catalog_source() -> Value {
+    json!({"models":[{"slug":"gpt-6-astra","display_name":"Astra","supported_reasoning_levels":[],"shell_type":"unified_exec","visibility":"list","priority":0,"supported_in_api":true,"support_verbosity":true,"truncation_policy":{},"experimental_supported_tools":["native"],"use_responses_lite":true,"model_messages":{"instructions_template":"retained"}}]})
 }
 
 /// The host protects both this file and the catalog against provider writes.
@@ -343,7 +463,7 @@ mod tests {
     use super::*;
     #[test]
     fn catalog_preserves_native_protocol_and_metadata() {
-        let source = json!({"models":[{"slug":"gpt-6-astra","display_name":"Astra","supported_reasoning_levels":[],"shell_type":"unified_exec","visibility":"list","priority":0,"supported_in_api":true,"support_verbosity":true,"truncation_policy":{},"experimental_supported_tools":["native"],"use_responses_lite":true,"model_messages":{"instructions_template":"retained"}}]});
+        let source = fixture_catalog_source();
         let catalog = transform_catalog(source, Some("gpt-6-astra")).unwrap();
         let row: Value = serde_json::from_slice(&catalog.bytes).unwrap();
         assert_eq!(
@@ -360,6 +480,46 @@ mod tests {
     fn untested_builds_and_forged_catalogs_are_not_admitted() {
         assert!(version_admitted(VERSION));
         assert!(!version_admitted("0.155.1"));
-        assert!(catalog_from_bytes(b"{\n  \"models\":[]}", None).is_err());
+        assert!(catalog_from_bytes(b"{\n  \"models\":[]}", None, BINARY_SHA256).is_err());
+    }
+
+    #[test]
+    fn catalog_cache_is_keyed_by_the_exact_executable_digest() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = root.join("codex");
+        let mut bytes = b"synthetic codex binary\n".to_vec();
+        bytes.extend(serde_json::to_vec_pretty(&fixture_catalog_source()).unwrap());
+        bytes.push(0);
+        std::fs::write(&executable, &bytes).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let executable = executable.canonicalize().unwrap();
+        let sha256 = crate::process::executable_digest(&executable).unwrap();
+        let (_, host_sha256) = crate::process::host_identity().unwrap();
+        let pin = Pin {
+            provider: Provider::Codex,
+            executable,
+            sha256: sha256.clone(),
+            version: VERSION.into(),
+            host_sha256,
+            observed_at_ms: crate::now_ms(),
+        };
+        let cache = root
+            .join("providers")
+            .join(format!("codex-catalog-{sha256}.json"));
+        let extracted = catalog_extractions();
+        let first = static_catalog_bound(&root, &pin, Some("gpt-6-astra"), &sha256).unwrap();
+        assert!(cache.is_file());
+        let second = static_catalog_bound(&root, &pin, Some("gpt-6-astra"), &sha256).unwrap();
+        assert_eq!(first.sha256, second.sha256);
+        assert_eq!(first.bytes, second.bytes);
+        assert_eq!(catalog_extractions() - extracted, 1);
+        // A corrupted cache file is derived state: it is ignored, re-extracted,
+        // and republished, never admitted.
+        std::fs::write(&cache, b"not a catalog").unwrap();
+        let third = static_catalog_bound(&root, &pin, Some("gpt-6-astra"), &sha256).unwrap();
+        assert_eq!(third.sha256, first.sha256);
+        assert_eq!(catalog_extractions() - extracted, 2);
     }
 }

@@ -36,11 +36,7 @@ impl Record {
                 .executable
                 .components()
                 .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-            || self.sha256.len() != 64
-            || !self
-                .sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || !xcb_core::hex64(&self.sha256)
             || self.package_version.is_empty()
             || self.package_version.len() > 64
             || !self

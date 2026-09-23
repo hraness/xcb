@@ -7,11 +7,7 @@ use std::{
 
 fn canonical(path: &Path) -> Result<String> {
     let text = path.to_str().ok_or(Error::PrivateState)?;
-    if !path.is_absolute()
-        || text.len() > 4096
-        || text.chars().any(char::is_control)
-        || path.canonicalize()? != path
-    {
+    if !path.is_absolute() || !xcb_core::bounded_path(text) || path.canonicalize()? != path {
         return Err(Error::PrivateState);
     }
     Ok(text.to_owned())
@@ -28,7 +24,7 @@ fn canonical_child(path: &Path) -> Result<String> {
 
 fn canonical_len(path: &Path) -> Result<String> {
     let text = path.to_str().ok_or(Error::PrivateState)?;
-    if !path.is_absolute() || text.len() > 4096 || text.chars().any(char::is_control) {
+    if !path.is_absolute() || !xcb_core::bounded_path(text) {
         return Err(Error::PrivateState);
     }
     Ok(text.to_owned())
@@ -38,15 +34,8 @@ fn canonical_len(path: &Path) -> Result<String> {
 /// `canonical` the declared target may cross symlinks — bwrap mounts the
 /// resolved source at this literal location inside the namespace.
 fn mount_target(path: &Path) -> Result<String> {
-    use std::path::Component;
     let text = path.to_str().ok_or(Error::PrivateState)?;
-    if !path.is_absolute()
-        || text.len() > 4096
-        || text.chars().any(char::is_control)
-        || path
-            .components()
-            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
-    {
+    if !xcb_core::absolute_clean(path) || !xcb_core::bounded_path(text) {
         return Err(Error::PrivateState);
     }
     Ok(text.to_owned())

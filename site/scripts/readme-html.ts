@@ -132,3 +132,18 @@ export function readmeLanding(source: string): Readonly<{ title: string; lead: s
   if (lead === "") throw new Error("README landing block has no lead paragraph");
   return { lead, markdown: rest, title: heading.slice(2).trim() };
 }
+
+/**
+ * The README as Markdown for machine readers, with the landing markers removed
+ * and repository-relative links rooted at the public repository so they
+ * resolve from xcb.sh as they do on GitHub.
+ */
+export function renderReadmeMarkdown(source: string): string {
+  const document = source.replaceAll(LANDING_START, "").replaceAll(LANDING_END, "").replace(/^\n+/u, "");
+  return document.replace(/(!?)\[([^\]\n]*)\]\(([^)\s]+)\)/gu, (match, image: string, text: string, target: string) => {
+    assertSafeTarget(target);
+    if (target.startsWith("#") || target.startsWith("/") || /^[a-z][a-z0-9+.-]*:/iu.test(target)) return match;
+    const root = image === "!" ? REPOSITORY_RAW_ROOT : REPOSITORY_BLOB_ROOT;
+    return `${image}[${text}](${root}${target})`;
+  });
+}

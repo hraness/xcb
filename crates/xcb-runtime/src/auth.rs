@@ -696,12 +696,7 @@ pub(crate) fn recover_codex_auth(
         .as_ref()
         .ok_or(Error::Conflict("credential recovery owner missing"))?;
     let runs = root.join("runs");
-    let hex_digest = |value: &str| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    };
+    let hex_digest = xcb_core::hex64;
     if metadata.version != 1
         || metadata.run != run.id
         || metadata.account != run.account

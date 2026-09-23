@@ -78,6 +78,11 @@ fn help_and_tail_navigation_do_not_modify_the_draft() {
         &tx,
     );
     assert!(app.modal.is_none(), "? must close help as advertised");
+    assert_eq!(
+        app.composer.text(),
+        "?",
+        "a second ? types the character it could not send while help was open"
+    );
 
     app.composer.set_text("draft stays");
     // With no rendered geometry yet, PageUp pins the viewport at line 0.
@@ -97,13 +102,36 @@ fn help_and_tail_navigation_do_not_modify_the_draft() {
     assert_eq!(app.scroll.get(), 0);
     app.paused.set(true);
     app.scroll.set(30);
+    // Plain End belongs to the composer while a draft exists: it moves the
+    // cursor to the end of the line and leaves the transcript untouched.
+    app.composer
+        .textarea
+        .move_cursor(ratatui_textarea::CursorMove::Head);
+    app.handle(
+        Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+        &tx,
+    );
+    assert!(app.paused.get());
+    assert_eq!(app.scroll.get(), 30);
+    assert_eq!(app.composer.textarea.cursor(), (0, "draft stays".len()));
+    assert_eq!(app.composer.text(), "draft stays");
+    // Shift-End (or Ctrl-End) resumes tail-following even with a draft.
+    app.handle(
+        Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::SHIFT)),
+        &tx,
+    );
+    assert!(!app.paused.get());
+    assert_eq!(app.scroll.get(), 0);
+    // An empty composer leaves plain End to the transcript.
+    app.paused.set(true);
+    app.scroll.set(30);
+    app.composer.set_text("");
     app.handle(
         Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
         &tx,
     );
     assert!(!app.paused.get());
     assert_eq!(app.scroll.get(), 0);
-    assert_eq!(app.composer.text(), "draft stays");
 }
 
 #[test]
@@ -148,6 +176,151 @@ fn ctrl_c_cancels_the_run_even_while_a_dialog_is_open() {
     );
     assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
     assert!(matches!(app.modal, Some(Modal::Picker { .. })));
+}
+
+#[test]
+fn ctrl_c_in_an_idle_dialog_closes_it_and_quits_on_a_second_press() {
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    app.modal = Some(Modal::Help);
+    let ctrl_c = || Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    // Idle: the first Ctrl-C closes the dialog instead of quitting, so an
+    // editor or help screen never silently drops state on the way out.
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(app.modal.is_none());
+    assert_eq!(app.notice, "Dialog closed. Press Ctrl-C again to quit.");
+    assert!(rx.try_recv().is_err());
+
+    assert!(!app.handle(ctrl_c(), &tx));
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Quit)));
+}
+
+#[test]
+fn ctrl_c_in_the_prompt_editor_returns_its_text_to_the_composer() {
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    app.modal = Some(Modal::Editor {
+        title: "Prompt editor".into(),
+        textarea: Box::new(ratatui_textarea::TextArea::from(vec![
+            "edited in the dialog".to_owned(),
+        ])),
+        kind: xcb_tui::EditorKind::Prompt,
+        error: None,
+    });
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &tx
+    ));
+    assert!(app.modal.is_none());
+    assert_eq!(app.composer.text(), "edited in the dialog");
+    assert!(app.notice.contains("Ctrl-C again"));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn an_oversized_paste_is_rejected_with_a_notice() {
+    let (tx, _rx) = sync_channel(4);
+    let mut app = App::default();
+    let huge = "x".repeat(256 * 1024 + 1);
+    assert!(app.handle(Event::Paste(huge), &tx));
+    assert!(app.composer.text().is_empty());
+    assert_eq!(
+        app.notice,
+        "Paste exceeds 256 KiB; attach a file or trim it"
+    );
+
+    // A paste that pushes an existing draft over the bound is refused whole.
+    let mut composer = Composer::default();
+    composer.handle(Event::Paste("seed".into()));
+    let too_much = "y".repeat(256 * 1024);
+    assert!(matches!(
+        composer.handle(Event::Paste(too_much)),
+        ComposerAction::Rejected(_)
+    ));
+    assert_eq!(composer.text(), "seed");
+}
+
+#[test]
+fn ctrl_c_moves_the_draft_to_ctrl_r_history() {
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    app.composer.set_text("precious draft");
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &tx
+    ));
+    assert!(app.composer.text().is_empty());
+    assert_eq!(
+        app.notice,
+        "Draft cleared (Ctrl-R restores). Press Ctrl-C again to quit."
+    );
+    assert!(rx.try_recv().is_err());
+
+    // Ctrl-R opens the history picker with the cleared draft on top.
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+        &tx
+    ));
+    match &app.modal {
+        Some(Modal::Picker { title, items, .. }) => {
+            assert_eq!(title, "Prompt history");
+            assert_eq!(items[0].label, "precious draft");
+        }
+        _ => panic!("history picker"),
+    }
+    // Enter restores it into the composer.
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &tx
+    ));
+    assert_eq!(app.composer.text(), "precious draft");
+    assert!(app.modal.is_none());
+}
+
+#[test]
+fn mouse_capture_is_off_until_slash_mouse_toggles_it() {
+    let (tx, _rx) = sync_channel(4);
+    let mut app = App::default();
+    assert!(!app.mouse_capture);
+    assert_eq!(app.take_mouse_toggle(), None);
+
+    app.composer.set_text("/mouse");
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &tx
+    ));
+    assert!(app.mouse_capture);
+    assert_eq!(app.take_mouse_toggle(), Some(true));
+    assert!(app.notice.contains("Mouse capture on"));
+    assert_eq!(app.take_mouse_toggle(), None, "consumed once");
+
+    app.composer.set_text("/mouse");
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &tx
+    ));
+    assert!(!app.mouse_capture);
+    assert_eq!(app.take_mouse_toggle(), Some(false));
+    assert!(app.notice.contains("Mouse capture off"));
+}
+
+#[test]
+fn the_next_keypress_dismisses_a_notice() {
+    let (tx, _rx) = sync_channel(4);
+    let mut app = App::default();
+    app.composer.set_text("/zzz");
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &tx
+    ));
+    assert!(app.notice.contains("Unknown command"));
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+        &tx
+    ));
+    assert!(app.notice.is_empty());
+    assert_eq!(app.composer.text(), "x");
 }
 
 #[test]
@@ -219,6 +392,7 @@ fn view_for(session: &str) -> xcb_core::ui::View {
             title: format!("Session {session}"),
             pane: xcb_core::Id::new("focus").unwrap(),
             state: xcb_core::session::State::Idle,
+            managed_task: None,
             revision: 1,
             created_at_ms: 1,
             last_active_at_ms: 2,
@@ -419,6 +593,51 @@ fn unchanged_views_and_foreign_deltas_do_not_mark_a_repaint() {
     changed.state = xcb_core::session::State::Working;
     assert!(app.apply(xcb_core::ui::Update::View(Box::new(changed))));
     assert!(app.take_dirty());
+
+    // Pointer motion, drags, and focus notifications cannot change the view —
+    // they must not schedule a repaint.
+    let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+    for event in [
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 4,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        }),
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        }),
+        Event::FocusGained,
+        Event::FocusLost,
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            crossterm::event::KeyEventKind::Release,
+        )),
+    ] {
+        let label = format!("{event:?}");
+        assert!(app.handle(event, &tx), "event must not quit");
+        assert!(!app.take_dirty(), "{label} must not mark a repaint");
+    }
+    // A wheel turn scrolls the transcript and a key press types — both paint.
+    assert!(app.handle(
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &tx,
+    ));
+    assert!(app.take_dirty(), "a wheel scroll repaints the viewport");
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+        &tx,
+    ));
+    assert!(app.take_dirty(), "a key press repaints");
 }
 
 fn picker_account(
@@ -841,8 +1060,10 @@ fn single_letter_aliases_dispatch_the_full_command() {
         id: xcb_core::Id::new("t_one").unwrap(),
         title: "Fix login".into(),
         state: xcb_core::session::State::Working,
+        status: Some("running".into()),
         detail: "worker is running".into(),
         route: Some("claude/default/high".into()),
+        route_reason: None,
         workspace: "/project".into(),
         updated_at_ms: 1,
     }];
@@ -873,6 +1094,7 @@ fn global_command_menu_only_shows_conversation_and_task_controls() {
             "/attach",
             "/exit",
             "/help",
+            "/mouse",
             "/new",
             "/quit",
             "/sessions",
@@ -914,6 +1136,76 @@ fn managed_session_picker_switches_control_conversations() {
     assert!(
         matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Conversation(id)) if id.as_str() == "c_second")
     );
+}
+
+#[test]
+fn task_inspect_opens_a_scrollable_modal_with_the_full_route() {
+    let (tx, _rx) = sync_channel(4);
+    let mut app = App::default();
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    app.view.tasks = vec![xcb_core::ui::TaskRow {
+        id: xcb_core::Id::new("t_one").unwrap(),
+        title: "Fix login".into(),
+        state: xcb_core::session::State::Working,
+        status: Some("running".into()),
+        detail: "worker is running · quota leader".into(),
+        route: Some("devin/swe-2-high · a_01234567".into()),
+        route_reason: Some("learned workspace preference for devin".into()),
+        workspace: "/project".into(),
+        updated_at_ms: display_now_ms_minus(60_000),
+    }];
+    app.composer.set_text("/tasks");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    // The picker label itself carries the wire phase and the route.
+    match &app.modal {
+        Some(Modal::Picker { items, .. }) => {
+            assert!(items[0].label.contains("running"), "{}", items[0].label);
+            assert!(
+                items[0].label.contains("devin/swe-2-high · a_01234567"),
+                "{}",
+                items[0].label
+            );
+        }
+        _ => panic!("task picker"),
+    }
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let (lines, scroll) = match &mut app.modal {
+        Some(Modal::Inspect {
+            title,
+            lines,
+            scroll,
+        }) => {
+            assert!(title.contains("t_one"));
+            (lines.clone(), scroll)
+        }
+        _ => panic!("task inspect modal"),
+    };
+    let body = lines.join("\n");
+    assert!(body.contains("Fix login"));
+    assert!(body.contains("running"));
+    assert!(body.contains("devin/swe-2-high · a_01234567"));
+    assert!(body.contains("learned workspace preference for devin"));
+    assert!(body.contains("/project"));
+    assert!(body.contains("worker is running · quota leader"));
+    // A one-line notice would have dropped all of this; nothing was posted.
+    assert!(app.notice.is_empty());
+    assert_eq!(*scroll, 0);
+    picker_key(&mut app, &tx, KeyCode::End);
+    match &app.modal {
+        Some(Modal::Inspect { scroll, .. }) => assert_eq!(*scroll, u16::MAX),
+        _ => panic!("inspect modal"),
+    }
+    picker_key(&mut app, &tx, KeyCode::Home);
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert!(app.modal.is_none());
+}
+
+fn display_now_ms_minus(ms: u64) -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+        .saturating_sub(ms)
 }
 
 #[test]

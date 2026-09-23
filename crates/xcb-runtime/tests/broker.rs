@@ -568,3 +568,90 @@ fn workspace_mutations_refuse_a_replaced_root_without_touching_either_tree() {
     assert_eq!(fs::read_dir(root).unwrap().count(), 1);
     assert_eq!(fs::read_dir(base.join("moved")).unwrap().count(), 1);
 }
+
+#[test]
+fn workspace_list_truncates_at_the_entry_bound_instead_of_failing() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let root = base.join("work");
+    fs::create_dir(&root).unwrap();
+    for index in 0..513 {
+        fs::write(root.join(format!("f-{index:04}")), "x").unwrap();
+    }
+    fs::create_dir(root.join("nested")).unwrap();
+    let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
+    let listing = workspace.list(".").unwrap();
+    assert_eq!(listing.entries.len(), 512);
+    assert!(listing.truncated);
+    // The page is the sorted prefix and includes directory kinds.
+    assert_eq!(listing.entries[0].name, "f-0000");
+    assert_eq!(listing.entries[0].kind, "file");
+    assert_eq!(listing.entries[511].name, "f-0511");
+    let small = workspace.list("nested").unwrap();
+    assert_eq!(small.entries.len(), 0);
+    assert!(!small.truncated);
+    // The tool-level call returns the same {entries, truncated} object.
+    let value = workspace
+        .call("workspace_list", &serde_json::json!({"path":"."}))
+        .unwrap();
+    assert_eq!(value["truncated"], true);
+    assert_eq!(value["entries"].as_array().unwrap().len(), 512);
+}
+
+#[test]
+fn workspace_search_matches_truncates_and_skips_binary_and_vendor_dirs() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let root = base.join("work");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("needle.txt"), "first needle\nsecond needle\n").unwrap();
+    fs::write(root.join("binary.bin"), b"\xff\xfe needle \x00").unwrap();
+    for skipped in [".git", "node_modules", "target"] {
+        fs::create_dir(root.join(skipped)).unwrap();
+        fs::write(root.join(skipped).join("hidden.txt"), "needle").unwrap();
+    }
+    let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
+    let result = workspace.search(".", "needle").unwrap();
+    assert_eq!(result["truncated"], false);
+    let matches = result["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 2);
+    assert_eq!(matches[0]["path"], "needle.txt");
+    assert_eq!(matches[0]["line"], 1);
+    assert_eq!(matches[1]["line"], 2);
+    // A tree with a >512-entry directory truncates rather than failing.
+    fs::create_dir(root.join("bulk")).unwrap();
+    for index in 0..513 {
+        fs::write(root.join("bulk").join(format!("f-{index:04}")), "plain").unwrap();
+    }
+    let result = workspace.search(".", "needle").unwrap();
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["matches"].as_array().unwrap().len(), 2);
+    // A query absent everywhere is a settled empty result.
+    let result = workspace.search(".", "absent-everywhere").unwrap();
+    assert_eq!(result["matches"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn workspace_read_rejects_oversized_files_with_a_guided_tool_error() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let root = base.join("work");
+    fs::create_dir(&root).unwrap();
+    fs::write(root.join("big.txt"), "\n".repeat(256 * 1024)).unwrap();
+    let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
+    let error = workspace.read("big.txt").expect_err("oversized read");
+    assert!(
+        error.to_string().contains("exceeds the 128 KiB read limit"),
+        "{error}"
+    );
+    // A file at the read bound still succeeds and reports a revision.
+    fs::write(root.join("edge.txt"), "x".repeat(128 * 1024)).unwrap();
+    let edge = workspace.read("edge.txt").unwrap();
+    assert_eq!(edge.text.len(), 128 * 1024);
+    assert_eq!(edge.revision.len(), 64);
+    // The tool-level call returns the same guided error.
+    let error = workspace
+        .call("workspace_read", &serde_json::json!({"path":"big.txt"}))
+        .expect_err("oversized call");
+    assert!(error.to_string().contains("exceeds the 128 KiB read limit"));
+}

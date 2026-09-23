@@ -25,9 +25,10 @@ The retained application package provides:
 ## Build from source
 
 This reference describes the TypeScript compatibility source, whose CLI differs
-from the native Rust CLI in the [quick start](../README.md). No `@hraness/xcb`
-registry package or xcb release archive is currently published. The existing
-`v0.3.0` release is AgentMixer and retains its original package identity.
+from the native Rust CLI in the [quick start](../README.md). Check the
+[release assets](https://github.com/hraness/xcb/releases) for a verified
+`hraness-xcb-<version>.tgz` package archive before installing one; releases
+tagged `v0.3.0` and earlier are AgentMixer and retain that package identity.
 
 With Bun 1.3.14, run from the repository root:
 
@@ -68,10 +69,11 @@ contract.
 
 ## Command-line interface
 
-The compatibility package installs its executable as `xcb-compat`, so a global
-`npm install` can never shadow the native `xcb` binary. These commands describe
-that executable, not the native Rust CLI. Use the source invocation above until
-a verified xcb package is published:
+The compatibility build installs an `xcb-compat` executable that drives the
+library task runtime, so a global `npm install` can never shadow the native
+`xcb` binary. These commands describe that executable, not the native Rust
+CLI. Use the source invocation above when no verified xcb package is
+installed:
 
 ```sh
 xcb-compat doctor            # inspect provider binaries, admit this runtime
@@ -100,7 +102,9 @@ The chat keeps the model's entire tool surface inside the opened directory:
 `workspace.list`, `workspace.read`, `workspace.search`, `workspace.write`, and
 bounded public `web.fetch`. There is no shell, process, or arbitrary-path
 operation. Writes are atomic and require the file's current revision, so a
-stale or speculative edit fails instead of clobbering. `/help` lists the
+stale or speculative edit fails instead of clobbering. Reads are limited to
+128 KiB per file with a guided error, and listings or searches that reach
+their bounds report `truncated` instead of failing. `/help` lists the
 in-session commands; Ctrl-C cancels a running turn and Ctrl-D exits.
 
 State lives under `~/.xcb` (mode `0700`, override with
@@ -206,10 +210,10 @@ bound remain verbatim.
 
 ## Migrating from AgentMixer
 
-The unreleased 0.4.0 source renames the compatibility package's public identifiers from
+The 0.4.0 line renames the compatibility package's public identifiers from
 AgentMixer to xcb: `@hraness/agentmixer` → `@hraness/xcb`, the `agentmixer`
-executable → `xcb-compat` (the name `xcb` belongs to the native binary),
-`~/.agentmixer` → `~/.xcb`, `AGENTMIXER_*` environment
+executable → `xcb-compat` (the bare `xcb` name belongs to the native Rust
+CLI), `~/.agentmixer` → `~/.xcb`, `AGENTMIXER_*` environment
 variables → `XCB_*`, `agentmixer.*` schema ids → `xcb.*`, `agentmixer_*`
 SQLite tables → `xcb_*`, and the `AgentMixer` runtime class → `Xcb`.
 
