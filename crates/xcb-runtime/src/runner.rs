@@ -50,6 +50,11 @@ impl Diagnostic {
         &self.0
     }
 
+    /// A host-authored notice; provider text never enters here.
+    pub(crate) fn notice(text: &'static str) -> Self {
+        Self::bounded(text.to_owned())
+    }
+
     pub(crate) fn from_error(error: &Error) -> Self {
         let text = match error {
             Error::Protocol(_)
@@ -66,6 +71,10 @@ impl Diagnostic {
             Error::Json(_) => "invalid local record".into(),
             Error::PrivateState => "local state failed private-file validation".into(),
         };
+        Self::bounded(text)
+    }
+
+    fn bounded(text: String) -> Self {
         let mut text: String = text
             .chars()
             .map(|character| {
@@ -1533,7 +1542,7 @@ pub(crate) async fn handshake(
     system: &str,
 ) -> Result<Vec<ModelChoice>> {
     process.send(&initialize(tools, system)).await?;
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(crate::protocol::INIT_DEADLINE, async {
         for _ in 0..256 {
             let frame = process
                 .frame()
@@ -1558,7 +1567,17 @@ pub(crate) async fn handshake(
                 {
                     if value.pointer("/response/subtype").and_then(Value::as_str) != Some("success")
                     {
-                        return Err(Error::Protocol("initialization failed"));
+                        // The error text is the provider's; only its fixed
+                        // classification crosses into host state.
+                        let detail = value
+                            .pointer("/response/error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        return Err(if claude::authentication_cue(detail) {
+                            Error::Unavailable(crate::category::AUTHENTICATION)
+                        } else {
+                            Error::Protocol("initialization failed")
+                        });
                     }
                     return parse_models(
                         value
@@ -1567,6 +1586,10 @@ pub(crate) async fn handshake(
                         now_ms(),
                     );
                 }
+                Event::Result {
+                    failure: Some(Failure::Authentication),
+                    ..
+                } => return Err(Error::Unavailable(crate::category::AUTHENTICATION)),
                 Event::Notice => (),
                 _ => return Err(Error::Protocol("unexpected frame before initialization")),
             }
@@ -1979,10 +2002,23 @@ pub(crate) async fn run_prepared<P: Protocol>(
         // serialize every parallel terminal on one writer, so stream samples
         // are decimated and the true total is written once at the result.
         let mut last_velocity_ms = started;
-        for _ in 0..16_384 {
+        let mut frames = 0usize;
+        loop {
             if *cancel.borrow() {
                 return Ok((Terminal::Cancelled, vec![]));
             }
+            if frames >= crate::protocol::MAX_TURN_FRAMES {
+                // Volume is not a protocol violation: the tools that already
+                // ran are settled and the partial answer is kept. The turn
+                // ends like any other provider turn limit.
+                let detail = Diagnostic::notice(
+                    "provider frame count reached the per-turn limit; the turn was ended as a turn limit",
+                );
+                observer(Progress::Notice(detail.as_str().to_owned()));
+                diagnostic = Some(detail);
+                return Ok((Terminal::TurnLimit, vec![]));
+            }
+            frames += 1;
             let batch = tokio::select! {
                 _ = cancel.changed() => return Ok((Terminal::Cancelled, vec![])),
                 batch = protocol.next(&mut process) => batch?,
@@ -2046,12 +2082,15 @@ pub(crate) async fn run_prepared<P: Protocol>(
                     }
                     TurnEvent::Assistant(text) if admitted => answer.completed(text)?,
                     TurnEvent::Attention => pending_attention = true,
+                    // Quota is an observation, not provider work: an account
+                    // rejected before admission still settles as a quota or
+                    // authentication failure rather than an unknown one.
                     TurnEvent::Quota {
                         window,
                         used_percent,
                         resets_at_ms,
                         failure,
-                    } if admitted => {
+                    } => {
                         // A subsequent quota meter update is not evidence
                         // that an explicit provider failure was rescinded.
                         quota_failure = failure.or(quota_failure);
@@ -2232,7 +2271,6 @@ pub(crate) async fn run_prepared<P: Protocol>(
                 }
             }
         }
-        Err(Error::Protocol("provider frame count limit"))
     };
     let deadline = Duration::from_millis(input.config.turn_timeout_ms);
     let result = tokio::select! {
@@ -2247,6 +2285,14 @@ pub(crate) async fn run_prepared<P: Protocol>(
         effects = combine_effects(effects, command.effects);
     }
     let process_joined = process.join().await;
+    if let Some(bytes) = process.stderr_overflow() {
+        // Volume is reported, never retained: provider stderr is not a
+        // bounded host diagnostic and may carry credentials or paths.
+        observer(Progress::Notice(format!(
+            "provider wrote {bytes} bytes to stderr (notice threshold {} bytes); the stream was drained to EOF but not retained",
+            crate::process::STDERR_NOTICE_BYTES
+        )));
+    }
     let protocol_joined = protocol.shutdown().await;
     let bridge_joined = close_bridge(bridge).await;
     let joined = process_joined && protocol_joined && bridge_joined && commands_joined;
@@ -2264,7 +2310,13 @@ pub(crate) async fn run_prepared<P: Protocol>(
             let detail = Diagnostic::from_error(&error);
             observer(Progress::Notice(detail.as_str().to_owned()));
             diagnostic = Some(detail);
-            (Terminal::Failed, vec![], Some(Failure::Unknown))
+            // The codec's fixed category names the account failure; an
+            // earlier explicit provider rejection is the next best evidence.
+            let failure = match error.failure() {
+                Failure::Unknown => quota_failure.unwrap_or(Failure::Unknown),
+                failure => failure,
+            };
+            (Terminal::Failed, vec![], Some(failure))
         }
         Err(_) => {
             let detail = Diagnostic::from_error(&Error::Unavailable("provider deadline reached"));
@@ -2828,11 +2880,16 @@ mod tests {
         before_ready: bool,
         mailbox_failure: bool,
         passive_after_quota: bool,
+        initialize_failure: Option<Error>,
+        receive_failure: Option<Error>,
         step: u8,
         block_initialize: Option<tokio::sync::oneshot::Sender<()>>,
     }
     impl Protocol for FixtureProtocol {
         async fn initialize(&mut self, _: &mut StreamProcess, _: &str) -> Result<Vec<ModelChoice>> {
+            if let Some(error) = self.initialize_failure.take() {
+                return Err(error);
+            }
             if let Some(started) = self.block_initialize.take() {
                 let _ = started.send(());
                 std::future::pending::<()>().await;
@@ -2844,6 +2901,9 @@ mod tests {
         }
         async fn receive(&mut self, _: &mut StreamProcess, _: &[u8]) -> Result<Vec<TurnEvent>> {
             self.step += 1;
+            if let Some(error) = self.receive_failure.take() {
+                return Err(error);
+            }
             if self.step == 1 {
                 let mut events = vec![];
                 if !self.before_ready {
@@ -2987,6 +3047,8 @@ mod tests {
                         before_ready,
                         mailbox_failure,
                         passive_after_quota,
+                        initialize_failure: None,
+                        receive_failure: None,
                         step: 0,
                         block_initialize: None,
                     },
@@ -3106,6 +3168,8 @@ mod tests {
                     before_ready: false,
                     mailbox_failure: false,
                     passive_after_quota: false,
+                    initialize_failure: None,
+                    receive_failure: None,
                     step: 0,
                     block_initialize: Some(started),
                 },
@@ -3217,6 +3281,257 @@ mod tests {
             assert_eq!(store.unsettled_runs().unwrap().is_empty(), joined);
             assert_eq!(launch_path.exists(), !joined);
         }
+    }
+
+    /// The codec's fixed error category, not Unknown, settles account state
+    /// when initialize or the turn RPCs fail before an answer exists.
+    #[tokio::test]
+    async fn codec_failure_categories_settle_account_state_not_unknown() {
+        async fn run(
+            provider: Provider,
+            initialize_failure: Option<Error>,
+            receive_failure: Option<Error>,
+        ) -> (Outcome, Arc<Store>, Id) {
+            let root = tempfile::tempdir().unwrap();
+            let base = root.path().canonicalize().unwrap();
+            let workspace = base.join("work");
+            std::fs::create_dir(&workspace).unwrap();
+            let store = Arc::new(Store::open(&base.join("state")).unwrap());
+            let account = store
+                .add_account(provider, "Fixture", now_ms(), None)
+                .unwrap();
+            let model = ModelChoice {
+                provider,
+                id: Id::new("fixture-model").unwrap(),
+                label: "Fixture".into(),
+                mode: Mode::Fixed,
+                resolved: None,
+                effort: None,
+                observed_at_ms: now_ms(),
+            };
+            let session = store
+                .create_session(&account.id, model.clone(), &workspace, now_ms())
+                .unwrap();
+            let message = Message {
+                id: new_id("message"),
+                role: Role::User,
+                text: "Create a file".into(),
+                at_ms: now_ms(),
+                attachments: vec![],
+                provenance: None,
+            };
+            let session = store
+                .append_message(&session.id, session.revision, &message)
+                .unwrap();
+            let launch = Launch {
+                command: Command::new("/bin/cat"),
+                cwd: base.clone(),
+                bridge: None,
+                artifacts: LaunchArtifacts::create(store.root()).unwrap(),
+                prepared_run: None,
+                codex_credentials: None,
+            };
+            let (_cancel, cancellation) = watch::channel(false);
+            let outcome = run_prepared(
+                store.clone(),
+                RunInput {
+                    session,
+                    message,
+                    config: Config::default(),
+                    pane_generation: false,
+                },
+                cancellation,
+                Arc::new(|_| ()),
+                launch,
+                FixtureProtocol {
+                    model,
+                    before_ready: false,
+                    mailbox_failure: false,
+                    passive_after_quota: false,
+                    initialize_failure,
+                    receive_failure,
+                    step: 0,
+                    block_initialize: None,
+                },
+                Workspace::open_with_coordination(&workspace, &base.join("coordination")).unwrap(),
+            )
+            .await
+            .unwrap();
+            (outcome, store, account.id)
+        }
+
+        let (outcome, store, account) = run(
+            Provider::Codex,
+            Some(Error::CodexRpc {
+                method: "turn/start",
+                code: -32000,
+                category: crate::category::AUTHENTICATION,
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(outcome.facts.terminal, Terminal::Failed);
+        assert_eq!(outcome.facts.failure, Some(Failure::Authentication));
+        assert_eq!(outcome.state, State::NeedsAction);
+        assert!(outcome.facts.joined);
+        assert!(store.authentication_required(&account).unwrap());
+        assert!(store.unsettled_runs().unwrap().is_empty());
+
+        let (outcome, store, account) = run(
+            Provider::Codex,
+            None,
+            Some(Error::CodexRpc {
+                method: "turn/start",
+                code: -32000,
+                category: crate::category::CODEX_USAGE_LIMIT,
+            }),
+        )
+        .await;
+        assert_eq!(outcome.facts.failure, Some(Failure::AccountQuota));
+        assert_eq!(outcome.state, State::Limited);
+        assert!(!store.authentication_required(&account).unwrap());
+
+        let (outcome, store, account) = run(
+            Provider::Devin,
+            None,
+            Some(Error::DevinRpc {
+                method: "session/prompt",
+                code: -32002,
+                category: crate::category::NETWORK,
+            }),
+        )
+        .await;
+        assert_eq!(outcome.facts.failure, Some(Failure::Transport));
+        assert_eq!(outcome.state, State::Failed);
+        assert!(!store.authentication_required(&account).unwrap());
+
+        let (outcome, store, account) = run(
+            Provider::Devin,
+            None,
+            Some(Error::DevinRpc {
+                method: "session/prompt",
+                code: -32002,
+                category: "provider rejected the operation",
+            }),
+        )
+        .await;
+        assert_eq!(outcome.facts.failure, Some(Failure::Unknown));
+        assert_eq!(outcome.state, State::Failed);
+        assert!(!store.authentication_required(&account).unwrap());
+    }
+
+    /// Streaming providers emit one frame per delta, so frame volume is
+    /// bounded by the byte budget and deadline, not a fixture-sized count: a
+    /// flooded turn ends gracefully as a turn limit, never a protocol error.
+    #[tokio::test]
+    async fn frame_volume_ends_turn_as_turn_limit_not_protocol_failure() {
+        struct FloodProtocol {
+            model: ModelChoice,
+        }
+        impl Protocol for FloodProtocol {
+            async fn initialize(
+                &mut self,
+                _: &mut StreamProcess,
+                _: &str,
+            ) -> Result<Vec<ModelChoice>> {
+                Ok(vec![self.model.clone()])
+            }
+            async fn start(&mut self, _: &mut StreamProcess, _: Prompt) -> Result<()> {
+                Ok(())
+            }
+            async fn next(&mut self, _: &mut StreamProcess) -> Result<crate::protocol::Batch> {
+                Ok(crate::protocol::Batch {
+                    bytes: 0,
+                    events: vec![],
+                })
+            }
+            async fn receive(&mut self, _: &mut StreamProcess, _: &[u8]) -> Result<Vec<TurnEvent>> {
+                unreachable!()
+            }
+            async fn reply(&mut self, _: &mut StreamProcess, _: &str, _: Value) -> Result<()> {
+                unreachable!()
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let workspace = base.join("work");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Arc::new(Store::open(&base.join("state")).unwrap());
+        let account = store
+            .add_account(Provider::Claude, "Fixture", now_ms(), None)
+            .unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("fixture-model").unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: now_ms(),
+        };
+        let session = store
+            .create_session(&account.id, model.clone(), &workspace, now_ms())
+            .unwrap();
+        let message = Message {
+            id: new_id("message"),
+            role: Role::User,
+            text: "Write a long answer".into(),
+            at_ms: now_ms(),
+            attachments: vec![],
+            provenance: None,
+        };
+        let session = store
+            .append_message(&session.id, session.revision, &message)
+            .unwrap();
+        let launch = Launch {
+            command: Command::new("/bin/cat"),
+            cwd: base.clone(),
+            bridge: None,
+            artifacts: LaunchArtifacts::create(store.root()).unwrap(),
+            prepared_run: None,
+            codex_credentials: None,
+        };
+        let (_cancel, cancellation) = watch::channel(false);
+        let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = notices.clone();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(120),
+            run_prepared(
+                store.clone(),
+                RunInput {
+                    session,
+                    message,
+                    config: Config::default(),
+                    pane_generation: false,
+                },
+                cancellation,
+                Arc::new(move |event| {
+                    if let Progress::Notice(text) = event {
+                        seen.lock().unwrap().push(text);
+                    }
+                }),
+                launch,
+                FloodProtocol { model },
+                Workspace::open_with_coordination(&workspace, &base.join("coordination")).unwrap(),
+            ),
+        )
+        .await
+        .expect("the frame limit lands far before the turn deadline")
+        .unwrap();
+        assert_eq!(outcome.facts.terminal, Terminal::TurnLimit);
+        assert_eq!(outcome.facts.failure, None);
+        assert!(outcome.facts.joined);
+        assert_eq!(outcome.state, State::Idle);
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert!(
+            notices
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|text| text.contains("frame count")),
+            "the turn limit is reported as a bounded diagnostic notice"
+        );
     }
 
     /// Parent liveness and provider settlement are independent facts.
