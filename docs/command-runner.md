@@ -206,6 +206,12 @@ unmounted scratch image only after the joined result and changes are durable on
 the host; custody and result receipts remain. A cleanup-pending diagnostic is
 not permission to delete those records manually.
 
+Retention is an archive, never a deletion. `xcb command prune` reports how many
+retained jobs qualify, and `xcb command prune --yes` moves joined, acknowledged
+jobs whose newest receipt is older than `--days` (default 30) into
+`jobs-archive/` under the same private root. Unjoined jobs, jobs whose guest
+scratch cleanup is still pending, and recent jobs are always retained.
+
 ## Cancellation, concurrency and recovery
 
 Ctrl-C and SIGTERM request cancellation of a headless run. Installed SIGTERM
@@ -221,6 +227,11 @@ session; cancel it in the terminal that owns the turn. Different accounts may
 run provider turns concurrently, but the shared command backend admits only one
 command at a time. A second command receives a proven unstarted/busy result.
 Uncertain jobs block command admission until their exact receipt is reconciled.
+Admission checks a `jobs/pending/` marker directory rather than every retained
+job, so its cost follows the number of unjoined commands. A command is marked
+before guest work can start and the marker is unlinked only after a joined
+receipt is durable; durable receipts clear stale markers, and roots created
+before markers migrate once on the next admission.
 
 Use `xcb recover` to inspect retained runs. `xcb recover RUN --yes` requires the
 original host owner to be gone and independently verifies any pending command
