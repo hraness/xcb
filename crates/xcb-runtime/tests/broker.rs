@@ -158,9 +158,18 @@ fn workspace_writes_on_a_full_filesystem_fail_without_false_settlement() {
         }
     }
     assert!(full, "the test volume never filled");
+    // A failed 64 KiB write can leave nearly a whole chunk of slack; drain
+    // with small writes so less than one KiB remains before the broker write.
+    let tail = vec![0xabu8; 1024];
+    for index in 0..4096 {
+        if fs::write(root.join(format!("tail-{index}")), &tail).is_err() {
+            break;
+        }
+    }
+    let payload = "payload".repeat(1024);
     let (result, effects) = workspace.call_observed(
         "workspace_write",
-        &serde_json::json!({"path": "tight.txt", "text": "payload"}),
+        &serde_json::json!({"path": "tight.txt", "text": payload}),
     );
     let failed = result.is_err();
     let contents = fs::read_to_string(root.join("tight.txt")).ok();
@@ -180,7 +189,7 @@ fn workspace_writes_on_a_full_filesystem_fail_without_false_settlement() {
     // No staging residue is left behind, whatever the outcome was.
     assert!(!residue);
     if let Some(contents) = contents {
-        assert_eq!(contents, "payload");
+        assert_eq!(contents, "payload".repeat(1024));
     }
 }
 
