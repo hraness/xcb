@@ -28,7 +28,8 @@ use xcb_core::{
     Id, Provider, bounded_text, label,
     policy::{EffectState, Failure, Terminal, should_continue},
     session::{Attachment, Message, Role, State},
-    ui::{ConversationRow, Intent, TaskRow, Update, View},
+    ui::{AccountRow, ConversationRow, Intent, TaskRow, Update, View},
+    usage::Estimate,
 };
 
 const MAX_CONVERSATIONS: i64 = 4096;
@@ -731,6 +732,55 @@ impl ManagedStore {
             Ok(conversation)
         })
         .transpose()
+    }
+
+    /// Most recently updated conversation rooted at `workspace` (the canonical
+    /// path `create_conversation` records), used by the ambient launch path to
+    /// reopen the current thread instead of spawning one per invocation.
+    pub fn latest_conversation_for_workspace(
+        &self,
+        workspace: &Path,
+    ) -> Result<Option<ManagedConversation>> {
+        let workspace = fs::canonicalize(workspace)?;
+        let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
+        let db = self.db()?;
+        let row: Option<(String, i64)> = db
+            .query_row(
+                "SELECT payload,updated_at FROM conversations \
+                 WHERE json_extract(payload,'$.workspace')=?1 \
+                 ORDER BY updated_at DESC,id LIMIT 1",
+                [workspace],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(payload, updated)| {
+            let mut conversation: ManagedConversation = decode(&payload)?;
+            conversation.updated_at_ms = u64::try_from(updated)
+                .map_err(|_| xcb_core::Error::Invalid("conversation timestamp"))?;
+            conversation.validate()?;
+            Ok(conversation)
+        })
+        .transpose()
+    }
+
+    /// Durable message counts per conversation, one grouped query for picker
+    /// metadata — rows are bounded by `MAX_CONVERSATIONS`.
+    pub fn message_counts(&self) -> Result<BTreeMap<Id, usize>> {
+        let db = self.db()?;
+        let mut query =
+            db.prepare("SELECT conversation,count(*) FROM messages GROUP BY conversation")?;
+        let rows = query.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut counts = BTreeMap::new();
+        for row in rows {
+            let (id, count) = row?;
+            counts.insert(
+                Id::new(&id).map_err(|_| xcb_core::Error::Invalid("message conversation"))?,
+                usize::try_from(count).map_err(|_| xcb_core::Error::Invalid("message count"))?,
+            );
+        }
+        Ok(counts)
     }
 
     pub fn conversations(&self, limit: usize) -> Result<Vec<ManagedConversation>> {
@@ -4021,16 +4071,50 @@ fn managed_view(
         ..View::default()
     };
     view.conversation = Some(conversation.clone());
+    let message_counts = managed.message_counts()?;
     view.conversations = managed
         .conversations(64)?
         .into_iter()
         .map(|conversation| ConversationRow {
+            messages: message_counts
+                .get(&conversation.id)
+                .copied()
+                .unwrap_or_default(),
             id: conversation.id,
             title: conversation.title,
             workspace: conversation.workspace,
             updated_at_ms: conversation.updated_at_ms,
         })
         .collect();
+    // Account identity and any recorded quota signal are real; runway is
+    // honestly unknown because managed workers do not feed the direct-mode
+    // velocity estimator.
+    let now = now_ms();
+    let busy: BTreeSet<_> = store
+        .unsettled_runs()?
+        .into_iter()
+        .map(|run| run.account)
+        .collect();
+    view.accounts = store
+        .accounts()?
+        .iter()
+        .map(|account| {
+            Ok(AccountRow {
+                id: account.id.clone(),
+                provider: account.provider,
+                name: account.name(),
+                email: account.email.clone(),
+                subscription: account.subscription.clone(),
+                remaining_percent: store.remaining_percent(&account.quota_pool, now)?,
+                resets_at_ms: None,
+                quota_blocked_until_ms: store.quota_blocked_until(&account.id, now)?,
+                runway: Estimate::unknown("runway is not estimated for managed accounts"),
+                busy: busy.contains(&account.id),
+                enabled: account.enabled,
+                authentication_required: store.authentication_required(&account.id)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     view.messages = managed.messages(conversation, 256)?;
     let mut tasks = managed.active_tasks(128)?;
     let active_ids: BTreeSet<_> = tasks.iter().map(|task| task.id.clone()).collect();
@@ -4126,6 +4210,13 @@ pub async fn serve_ui(
         .conversation(&conversation)?
         .ok_or(Error::Unavailable("managed conversation not found"))?;
     let mut workspace = PathBuf::from(selected.workspace);
+    if store.accounts()?.is_empty() {
+        output
+            .try_send(Update::Notice(
+                "No provider accounts are configured; work queues until one is added — `xcb accounts add <provider>`, then `xcb doctor`.".into(),
+            ))
+            .ok();
+    }
     ensure_daemon(store.root(), &executable)?;
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     let mut quit = false;
@@ -4205,6 +4296,19 @@ pub async fn serve_ui(
                             .ok();
                     }
                 },
+                Intent::NewSession => match managed.create_conversation(&workspace).await {
+                    Ok(created) => {
+                        conversation = created.id;
+                        last_stamp = None;
+                    }
+                    Err(error) => {
+                        output
+                            .try_send(Update::Notice(format!(
+                                "New conversation was not created: {error}"
+                            )))
+                            .ok();
+                    }
+                },
                 Intent::AttachPath(path) => {
                     match attachments::from_path(store.root(), Path::new(&path)) {
                         Ok(attachment) => {
@@ -4234,7 +4338,6 @@ pub async fn serve_ui(
                 Intent::Account(_)
                 | Intent::Model(_)
                 | Intent::SetDefault
-                | Intent::NewSession
                 | Intent::Resume(_)
                 | Intent::Pane(_)
                 | Intent::SavePane { .. }
@@ -6381,5 +6484,40 @@ mod tests {
         );
         commands.send(Intent::Quit).unwrap();
         ui.await.unwrap().unwrap();
+    }
+
+    /// The ambient launch lookup returns the newest conversation for the
+    /// exact canonical workspace and ignores conversations rooted elsewhere.
+    #[tokio::test]
+    async fn latest_conversation_for_workspace_matches_canonical_root() {
+        let state_root = root();
+        let work_root = root();
+        let other_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let work = work_root.path().canonicalize().unwrap();
+        let other = other_root.path().canonicalize().unwrap();
+
+        let first = conversation(&managed, &work).await;
+        let _foreign = conversation(&managed, &other).await;
+        let latest = managed
+            .latest_conversation_for_workspace(&work)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, first);
+        let second = conversation(&managed, &work).await;
+        let latest = managed
+            .latest_conversation_for_workspace(&work)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, second);
+        assert!(
+            managed
+                .latest_conversation_for_workspace(&state_root.path().join("missing"))
+                .is_err()
+        );
+        let counts = managed.message_counts().unwrap();
+        assert!(counts.values().all(|count| *count == 0));
     }
 }

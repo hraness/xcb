@@ -46,6 +46,8 @@ pub struct ConversationRow {
     pub id: Id,
     pub title: String,
     pub workspace: String,
+    /// Durable messages recorded in the conversation.
+    pub messages: usize,
     pub updated_at_ms: u64,
 }
 

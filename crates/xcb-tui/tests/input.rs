@@ -512,6 +512,7 @@ fn drafts_are_scoped_across_concurrent_control_conversations() {
             id: xcb_core::Id::new(id).unwrap(),
             title: id.into(),
             workspace: "/project".into(),
+            messages: 0,
             updated_at_ms: 1,
         }],
         extensions: vec![("algal supervisor".into(), "on".into())],
@@ -1116,12 +1117,14 @@ fn managed_session_picker_switches_control_conversations() {
             id: xcb_core::Id::new("c_first").unwrap(),
             title: "First".into(),
             workspace: "/one".into(),
+            messages: 0,
             updated_at_ms: 2,
         },
         xcb_core::ui::ConversationRow {
             id: xcb_core::Id::new("c_second").unwrap(),
             title: "Second".into(),
             workspace: "/two".into(),
+            messages: 0,
             updated_at_ms: 1,
         },
     ];
@@ -1132,10 +1135,39 @@ fn managed_session_picker_switches_control_conversations() {
         _ => panic!("conversation picker"),
     }
     picker_key(&mut app, &tx, KeyCode::Down);
+    picker_key(&mut app, &tx, KeyCode::Down);
     picker_key(&mut app, &tx, KeyCode::Enter);
     assert!(
         matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Conversation(id)) if id.as_str() == "c_second")
     );
+}
+
+#[test]
+fn managed_session_picker_offers_a_new_conversation() {
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    app.view.conversations = vec![xcb_core::ui::ConversationRow {
+        id: xcb_core::Id::new("c_first").unwrap(),
+        title: "First".into(),
+        workspace: "/one".into(),
+        messages: 3,
+        updated_at_ms: 2,
+    }];
+    app.composer.set_text("/s");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    match &app.modal {
+        Some(Modal::Picker { items, .. }) => {
+            assert_eq!(items[0].label, "＋ new conversation");
+            assert!(items[1].label.contains("First · 3 msgs"));
+        }
+        _ => panic!("conversation picker"),
+    }
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(xcb_core::ui::Intent::NewSession)
+    ));
 }
 
 #[test]
