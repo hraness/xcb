@@ -28,13 +28,18 @@ use xcb_runtime::{
 #[command(
     name = "xcb",
     version,
-    about = "Excalibur — a local, composable terminal workspace for coding agents"
+    about = "Excalibur — a local, composable terminal workspace for coding agents",
+    after_help = "Plain `xcb` opens a persistent managed conversation in the terminal UI.\n\nFirst run:\n  xcb accounts add <provider> --plan <label>\n  xcb doctor --provider <provider>\n  xcb accounts login <account-id>\n  xcb accounts refresh <account-id>\n  xcb"
 )]
 struct Cli {
+    /// State root for accounts, sessions, and tasks (default:
+    /// ~/.local/share/xcb, or $XCB_STATE).
     #[arg(long, global = true)]
     state: Option<PathBuf>,
+    /// Emit machine-readable JSON where a command supports it.
     #[arg(long, global = true)]
     json: bool,
+    /// Workspace the command applies to (run, chat, models route).
     #[arg(long, global = true, default_value = ".")]
     cwd: PathBuf,
     #[command(subcommand)]
@@ -45,58 +50,76 @@ struct Cli {
 enum Commands {
     /// Open a persistent control conversation; workers continue after detach.
     Chat {
+        /// Reopen this control conversation instead of starting a new one.
         #[arg(long)]
         resume: Option<Id>,
     },
     /// Bounded, ephemeral application inference with no tools or hooks.
     Generate {
+        /// Print capability rows and exit without running inference.
         #[arg(long)]
         capabilities: bool,
     },
     /// Read bounded private failure metadata for one exact application request.
     ApplicationDiagnostic {
+        /// Account that ran the request.
         #[arg(long)]
         account: Id,
+        /// Request identifier to inspect.
         #[arg(long)]
         request: Id,
     },
     /// Run a fixed application qualification challenge using private gate evidence.
     QualifyApplication {
+        /// Account the qualification runs under.
         #[arg(long)]
         account: Id,
+        /// Model the qualification runs under.
         #[arg(long)]
         model: String,
+        /// Evidence bundle produced by the private qualification gate.
         #[arg(long, required_unless_present = "inspect", conflicts_with = "inspect")]
         evidence: Option<PathBuf>,
         /// Renew only if this existing credential generation still matches.
         #[arg(long, conflicts_with = "inspect", value_parser = parse_expected_generation)]
         expected_generation: Option<String>,
+        /// Report the stored qualification state without running a challenge.
         #[arg(long)]
         inspect: bool,
     },
+    /// Run one headless task in the current workspace and print the result.
     Run {
+        /// Task text; piped stdin is used when omitted.
         #[arg(short = 'p', long)]
         prompt: Option<String>,
+        /// Account name or id to run on; the configured default otherwise.
         #[arg(long)]
         account: Option<String>,
+        /// Model key (provider/model[/effort]); "auto" asks the judge to route.
         #[arg(long)]
         model: Option<String>,
+        /// Attach an image file to the prompt; repeatable, up to 8.
         #[arg(long = "image")]
         images: Vec<PathBuf>,
     },
+    /// Reopen a direct provider session in the terminal UI.
     Resume {
+        /// Session to reopen; the latest session when omitted.
         id: Option<Id>,
     },
+    /// List accounts; subcommands add, connect, and manage them.
     Accounts {
         #[command(subcommand)]
         command: Option<AccountCommand>,
     },
+    /// List observed models; subcommands refresh catalogs and set the default.
     Models {
         #[command(subcommand)]
         command: Option<ModelCommand>,
     },
     /// Inspect conditional public offers; observations do not verify account entitlement.
     Offers {
+        /// Re-check the published offers before listing them.
         #[arg(long)]
         refresh: bool,
     },
@@ -112,28 +135,37 @@ enum Commands {
     },
     /// List persistent managed control conversations.
     Conversations,
+    /// List installed panes; subcommands inspect, validate, and install them.
     Panes {
         #[command(subcommand)]
         command: Option<PaneCommand>,
     },
+    /// Toggle product extensions (auto-continue, gobstopper, usage, hooks).
     Plugins {
         #[command(subcommand)]
         command: Option<PluginCommand>,
     },
+    /// Manage user hook executables bound to lifecycle events.
     Hooks {
         #[command(subcommand)]
         command: Option<HookCommand>,
     },
+    /// Configure the optional routing judge (key, policy, status).
     Judge {
         #[command(subcommand)]
         command: Option<JudgeCommand>,
     },
+    /// Check provider binaries, accounts, and recent unsettled runs.
     Doctor {
+        /// Check only this provider (claude, codex, or devin).
         #[arg(long)]
         provider: Option<Provider>,
+        /// Provider binary to qualify instead of the discovered one;
+        /// requires --provider.
         #[arg(long)]
         executable: Option<PathBuf>,
     },
+    /// Print the effective configuration as JSON.
     Config,
     /// Check for a verified native release, configure update policy, or run
     /// the background update check used by a user-level scheduler.
@@ -143,12 +175,17 @@ enum Commands {
     },
     /// Install the latest verified native release (alias: `xcb update install`).
     Upgrade {
+        /// Version tag to install; the latest verified release when omitted.
         version: Option<String>,
+        /// Suppress progress output (used by the updater itself).
         #[arg(long, hide = true)]
         quiet: bool,
     },
+    /// Inspect or clean up unsettled runs and disposable launch artifacts.
     Recover {
+        /// Recover this run; lists unsettled runs when omitted.
         run: Option<Id>,
+        /// Apply the recovery instead of only reporting what would change.
         #[arg(long)]
         yes: bool,
         /// Inventory disposable launch snapshots; --yes removes only snapshots
@@ -156,22 +193,33 @@ enum Commands {
         #[arg(long = "launch-artifacts")]
         launch_artifacts: bool,
     },
+    /// Internal: run the managed supervisor (spawned by xcb, not for users).
     #[command(name = "managed-daemon", hide = true)]
     ManagedDaemon,
+    /// Internal: stdio bridge used by a provider's MCP helper.
     #[command(name = "broker-stdio", hide = true)]
     BrokerStdio,
+    /// Internal: in-namespace loopback CONNECT forwarder for sandboxed children.
     #[command(name = "egress-forward", hide = true)]
     EgressForward {
+        /// Host bridge socket to dial.
         socket: PathBuf,
+        /// Loopback port the forwarder listens on inside the namespace.
         port: u16,
+        /// Loopback address of the in-namespace HTTP listener, or "-".
         lo_up: String,
+        /// File holding the environment for the supervised child, or "-".
         env_file: String,
+        /// Remote port CONNECT requests target.
         #[arg(long, default_value_t = 443)]
         target_port: u16,
+        /// Command to supervise, after `--`.
         #[arg(last = true, required = true)]
         child: Vec<String>,
     },
+    /// Print shell completions for xcb.
     Completions {
+        /// Shell to generate completions for (bash, zsh, fish, …).
         shell: clap_complete::Shell,
     },
 }
@@ -184,6 +232,7 @@ enum UpdateCommand {
     Status,
     /// Set the user-level policy. The default is notify.
     Enable {
+        /// Update policy: notify, auto, or disable.
         #[arg(long, default_value = "notify", value_parser = parse_update_policy)]
         policy: xcb_runtime::update::Policy,
     },
@@ -191,12 +240,15 @@ enum UpdateCommand {
     Disable,
     /// Install a verified release using the recorded global installer.
     Install {
+        /// Version tag to install; the latest verified release when omitted.
         version: Option<String>,
+        /// Suppress progress output (used by the updater itself).
         #[arg(long, hide = true)]
         quiet: bool,
     },
     /// Run one scheduled check; intended for LaunchAgent/systemd user timers.
     Daemon {
+        /// Suppress progress output.
         #[arg(long, hide = true)]
         quiet: bool,
     },
@@ -207,80 +259,115 @@ enum AccountCommand {
     /// Add an account. Its name is fixed: the provider account email once
     /// observed, otherwise `provider/<id>` — there are no custom labels.
     Add {
+        /// Provider to add: claude, codex, or devin.
         provider: Provider,
+        /// Plan label shown by `xcb accounts`; a display label only, never
+        /// verified against the provider's entitlement.
         #[arg(long, default_value = "Subscription")]
         plan: String,
     },
+    /// Sign in to an account through the provider's own login flow.
     Login {
+        /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
+    /// Store a provider API token piped on stdin for this account.
     Token {
+        /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
+    /// Make an account the default for new direct sessions.
     Default {
+        /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
+    /// Stop routing work to an account without removing it.
     Disable {
+        /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
+    /// Re-enable a disabled account.
     Enable {
+        /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
+    /// Refresh an account's observed identity, plan, and usage window.
     Refresh {
+        /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
+    /// Copy agentmixer-era accounts and sessions from a legacy state root.
     ImportAgentmixer {
+        /// Absolute path to the legacy .agentmixer state directory.
         #[arg(long)]
         source: PathBuf,
     },
+    /// Copy an existing Codex CLI sign-in (auth.json) into a new account.
     ImportCodex {
+        /// Absolute path to the Codex auth.json to copy.
         #[arg(long)]
         source: PathBuf,
     },
     /// Copy one existing Devin sign-in into a private xcb account.
     ImportDevin {
+        /// Absolute path to the Devin credentials.toml to copy.
         #[arg(long)]
         source: PathBuf,
     },
 }
 #[derive(Subcommand)]
 enum ModelCommand {
+    /// Discover the provider's current model catalog through an account.
     Refresh {
+        /// Provider whose catalog is refreshed: claude, codex, or devin.
         provider: Provider,
+        /// Account whose credentials run the discovery (required for devin).
         #[arg(long)]
         account: Option<String>,
         /// Legacy discovery flag; use an explicit credential import and --account.
         #[arg(long)]
         from_native: bool,
     },
+    /// Make an observed model the default, e.g. `xcb models default claude/sonnet/high`.
     Default {
+        /// Full observed model key (provider/model[/effort]) from `xcb models`.
         key: String,
     },
     /// Inspect relative model profiles, including models without an eligible account.
     Tiers {
+        /// Task description used to rank the model profiles.
         #[arg(long, default_value = "general coding task")]
         task: String,
     },
     /// Preview managed routing for --cwd without reserving an account.
     /// Uses the configured judge when enabled; selection may change before execution.
     Route {
+        /// Task description the route is previewed for.
         #[arg(long)]
         task: String,
+        /// Restrict the preview to one provider (claude, codex, or devin).
         #[arg(long)]
         provider: Option<Provider>,
     },
 }
 #[derive(Subcommand)]
 enum SessionCommand {
+    /// Write local aiCharts session observations to an export file.
     Export,
+    /// Remove one session and its transcript.
     Rm {
+        /// Session id (listed by `xcb sessions`).
         id: Id,
+        /// Apply the removal; without it the command only reports the plan.
         #[arg(long)]
         yes: bool,
     },
+    /// Remove idle sessions older than a number of days.
     Prune {
+        /// Age threshold in days (1–3650, default 30).
         #[arg(default_value_t = 30, value_parser = clap::value_parser!(u16).range(1..=3650))]
         days: u16,
+        /// Apply the prune; without it the command only reports candidates.
         #[arg(long)]
         yes: bool,
     },
@@ -289,35 +376,54 @@ enum SessionCommand {
 enum TaskCommand {
     /// Replay local ALGAL transition receipts and verify their chain and task record.
     Verify {
+        /// Managed task id (listed by `xcb tasks`).
         id: Id,
     },
+    /// Print one managed task's durable record as JSON.
     Show {
+        /// Managed task id (listed by `xcb tasks`).
         id: Id,
     },
     /// Read up to 64 messages; pass the last sequence as --after for the next page.
     Messages {
+        /// Managed task id (listed by `xcb tasks`).
         id: Id,
+        /// Only messages after this sequence number (default 0).
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(..=i64::MAX as u64))]
         after: u64,
     },
 }
 #[derive(Subcommand)]
 enum PaneCommand {
+    /// Print one pane's definition as JSON.
     Show {
+        /// Pane id (default "focus").
         #[arg(default_value = "focus")]
         id: Id,
     },
+    /// Validate a pane file without installing it.
     Check {
+        /// Path to the pane definition file.
         path: PathBuf,
     },
+    /// Install a pane definition file.
     Install {
+        /// Path to the pane definition file.
         path: PathBuf,
     },
 }
 #[derive(Subcommand)]
 enum PluginCommand {
-    Enable { name: String },
-    Disable { name: String },
+    /// Turn an extension on (auto-continue, gobstopper, usage, hooks).
+    Enable {
+        /// Extension name.
+        name: String,
+    },
+    /// Turn an extension off.
+    Disable {
+        /// Extension name.
+        name: String,
+    },
 }
 #[derive(Subcommand)]
 enum JudgeCommand {
@@ -336,16 +442,24 @@ enum JudgeCommand {
 }
 #[derive(Subcommand)]
 enum HookCommand {
+    /// Bind an executable to a lifecycle event.
     Add {
+        /// Lifecycle event: session_start, session_end, turn_start, or turn_end.
         event: String,
+        /// Executable the event runs.
         executable: PathBuf,
+        /// Kill the hook after this many milliseconds (default 5000).
         #[arg(long, default_value_t = 5_000)]
         timeout_ms: u64,
     },
+    /// Re-enable a disabled hook.
     Enable {
+        /// Hook id.
         id: Id,
     },
+    /// Disable a hook without removing it.
     Disable {
+        /// Hook id.
         id: Id,
     },
 }
@@ -2540,5 +2654,46 @@ mod tests {
                 launch_artifacts: true
             })
         ));
+    }
+
+    /// `--help` is part of the product surface: every subcommand must carry
+    /// an `about` line and every argument a `help` line, recursively, so no
+    /// bare name ever ships undocumented. Hidden internal commands count too.
+    #[test]
+    fn every_command_and_argument_is_documented() {
+        fn check(command: &clap::Command, path: &str) {
+            for sub in command.get_subcommands() {
+                let name = format!("{path} {}", sub.get_name());
+                assert!(
+                    sub.get_about()
+                        .is_some_and(|about| !about.to_string().trim().is_empty()),
+                    "{name} has no about text"
+                );
+                for arg in sub.get_arguments() {
+                    assert!(
+                        arg.get_help()
+                            .is_some_and(|help| !help.to_string().trim().is_empty()),
+                        "{name} argument '{}' has no help text",
+                        arg.get_id()
+                    );
+                }
+                check(sub, &name);
+            }
+        }
+        let cli = Cli::command();
+        assert!(
+            cli.get_after_help()
+                .is_some_and(|text| text.to_string().contains("Plain `xcb`")),
+            "xcb --help must explain what plain `xcb` does"
+        );
+        for arg in cli.get_arguments() {
+            assert!(
+                arg.get_help()
+                    .is_some_and(|help| !help.to_string().trim().is_empty()),
+                "global argument '{}' has no help text",
+                arg.get_id()
+            );
+        }
+        check(&cli, "xcb");
     }
 }
