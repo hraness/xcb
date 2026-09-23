@@ -1065,6 +1065,7 @@ fn single_letter_aliases_dispatch_the_full_command() {
         detail: "worker is running".into(),
         route: Some("claude/default/high".into()),
         route_reason: None,
+        settle: None,
         workspace: "/project".into(),
         updated_at_ms: 1,
     }];
@@ -1212,6 +1213,7 @@ fn task_inspect_opens_a_scrollable_modal_with_the_full_route() {
         detail: "worker is running · quota leader".into(),
         route: Some("devin/swe-2-high · a_01234567".into()),
         route_reason: Some("learned workspace preference for devin".into()),
+        settle: None,
         workspace: "/project".into(),
         updated_at_ms: display_now_ms_minus(60_000),
     }];

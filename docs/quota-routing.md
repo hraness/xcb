@@ -91,6 +91,12 @@ The fit predicts one operator's historical model choices, not measured model
 quality. Its implementation and provenance are in `task_classifier.rs` and
 [ALGAL's model-router documentation](https://github.com/hraness/algal/blob/main/docs/model-router.md).
 
+The fitted head is generation 0 of the `route` [reflex](reflexes.md). The
+reflex runs it as an effect-free ALGAL program, records the decision, and
+learns later generations from your explicit and implicit tier choices. A
+generation is promoted only when it improves on a fixed holdout, and
+`xcb reflex rollback route 0` restores the fitted head.
+
 Score answers use zero-based criterion indices, as specified by the
 [TypeSafe API](https://docs.typesafe.ai/api#score-answer). Five criteria therefore
 admit indices 0–4; their text labels do not change the numeric scale. The ALGAL

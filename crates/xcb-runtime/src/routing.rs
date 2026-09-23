@@ -1,6 +1,12 @@
 use crate::{
-    Error, Result, auth, config::Config, judge, now_ms, offers::OfferState, process::Pin, runner,
-    store::Store, summary, task_classifier,
+    Error, Result, auth,
+    config::{Config, ReflexMode},
+    judge, now_ms,
+    offers::OfferState,
+    process::Pin,
+    reflex, runner,
+    store::Store,
+    summary, task_classifier,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -44,6 +50,10 @@ pub struct RouteDecision {
     pub model: ModelChoice,
     pub profile: ModelProfile,
     pub reason: String,
+    /// The route reflex decision behind the tier choice, when reflexes run.
+    /// Callers that own a durable subject record it as an observation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reflex: Option<reflex::Decision>,
 }
 
 /// No admitted, enabled, credentialed account exists for the request; waiting
@@ -92,42 +102,55 @@ fn effort(model: &ModelChoice) -> String {
         .unwrap_or_else(|| "medium".into())
 }
 
-fn base_profile(model: &ModelChoice, offers: &OfferState, now: u64) -> ModelProfile {
-    // A display label is not model identity. Resolved aliases take precedence
-    // over their requested name, and family matching must respect boundaries.
-    let identity = model
+fn identity(model: &ModelChoice) -> String {
+    model
         .resolved
         .as_ref()
         .map(Id::as_str)
         .unwrap_or(model.id.as_str())
         .to_ascii_lowercase()
-        .replace('.', "-");
+        .replace('.', "-")
+}
+
+/// Base (effort-independent) quality of a recognized model family.
+pub(crate) fn family_quality(model: &ModelChoice) -> Option<u16> {
+    let (quality, _, _, recognized) = family_profile(&identity(model));
+    recognized.then_some(quality)
+}
+
+fn family_profile(identity: &str) -> (u16, u16, u16, bool) {
     let family = |name: &str| {
         identity == name
             || identity
                 .strip_prefix(name)
                 .is_some_and(|suffix| suffix.starts_with('-') || suffix.starts_with('['))
     };
-    let (mut quality, mut cost, mut latency, recognized): (u16, u16, u16, bool) =
-        if family("gpt-6-astra") {
-            (100, 92, 72, true)
-        } else if family("claude-opus-5") || family("opus-5") {
-            (98, 96, 82, true)
-        } else if family("claude-fable-5-1") || family("fable-5-1") {
-            (97, 82, 68, true)
-        } else if family("swe-2") {
-            (96, 28, 45, true)
-        } else if family("claude-sonnet-5") || family("sonnet-5") {
-            (92, 55, 50, true)
-        } else if family("gpt-5-6-sol") {
-            (89, 45, 52, true)
-        } else if family("swe-1-7") {
-            (82, 22, 30, true)
-        } else if family("claude-haiku") || family("haiku") || family("gpt-5-6-luna") {
-            (68, 10, 12, true)
-        } else {
-            (72, 60, 55, false)
-        };
+    if family("gpt-6-astra") {
+        (100, 92, 72, true)
+    } else if family("claude-opus-5") || family("opus-5") {
+        (98, 96, 82, true)
+    } else if family("claude-fable-5-1") || family("fable-5-1") {
+        (97, 82, 68, true)
+    } else if family("swe-2") {
+        (96, 28, 45, true)
+    } else if family("claude-sonnet-5") || family("sonnet-5") {
+        (92, 55, 50, true)
+    } else if family("gpt-5-6-sol") {
+        (89, 45, 52, true)
+    } else if family("swe-1-7") {
+        (82, 22, 30, true)
+    } else if family("claude-haiku") || family("haiku") || family("gpt-5-6-luna") {
+        (68, 10, 12, true)
+    } else {
+        (72, 60, 55, false)
+    }
+}
+
+fn base_profile(model: &ModelChoice, offers: &OfferState, now: u64) -> ModelProfile {
+    // A display label is not model identity. Resolved aliases take precedence
+    // over their requested name, and family matching must respect boundaries.
+    let identity = identity(model);
+    let (mut quality, mut cost, mut latency, recognized) = family_profile(&identity);
     match effort(model).as_str() {
         "ultra" => {
             quality += 6;
@@ -483,8 +506,14 @@ async fn route_with_admitted(
     } else {
         None
     };
-    let classification =
-        task_classifier::classify(task, backend.as_deref(), class == TaskClass::Complex).await;
+    let mut classification = task_classifier::classify(
+        task,
+        backend.as_deref(),
+        class == TaskClass::Complex,
+        class == TaskClass::Routine,
+    )
+    .await;
+    let reflex = route_reflex(store.root(), config, &mut classification).await;
     let profile_by_key = eligible_profiles(
         &models,
         &offers,
@@ -565,9 +594,23 @@ async fn route_with_admitted(
         excluded_accounts,
     );
     let reason = format!(
-        "{}{} · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}",
+        "{}{}{} · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}",
         warning.unwrap_or_default(),
         classification.reason(),
+        reflex
+            .as_ref()
+            .map(|decision| format!(
+                " · route reflex g{} {} ({}{})",
+                decision.params_version,
+                decision.value,
+                decision.gate,
+                if config.extensions.reflexes.route == ReflexMode::Active {
+                    ""
+                } else {
+                    ", observed"
+                }
+            ))
+            .unwrap_or_default(),
         match class {
             TaskClass::Routine => "routine",
             TaskClass::Balanced => "balanced",
@@ -589,7 +632,38 @@ async fn route_with_admitted(
         model: candidate.model,
         profile: candidate.profile,
         reason,
+        reflex,
     })
+}
+
+/// Runs the route reflex over the classifier's evidence. In `active` mode its
+/// decision sets the tier; in `observe` mode it is recorded beside the
+/// unchanged classifier decision. Any reflex failure keeps the classifier's
+/// decision: learned policy can refine routing, never break it.
+async fn route_reflex(
+    root: &std::path::Path,
+    config: &Config,
+    classification: &mut task_classifier::Classification,
+) -> Option<reflex::Decision> {
+    let mode = config.extensions.reflexes.route;
+    if mode == ReflexMode::Off {
+        return None;
+    }
+    let store = reflex::ReflexStore::open(root).ok()?;
+    let decision = store
+        .decide(
+            xcb_core::reflex::Reflex::Route,
+            &classification.features,
+            classification.evidence(),
+            false,
+        )
+        .await
+        .ok()?;
+    if mode == ReflexMode::Active {
+        // A replaced program cannot demote the substantial-prompt floor.
+        classification.frontier = decision.value == "frontier" || classification.substantial;
+    }
+    Some(decision)
 }
 
 /// Unknown identities never acquire an invented frontier rank. When none of

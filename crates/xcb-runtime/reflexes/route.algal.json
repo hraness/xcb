@@ -1,0 +1,348 @@
+{
+  "contract": "algal.organism.v1",
+  "key": "organism:xcb-route-reflex",
+  "name": "XCB route reflex",
+  "note": "Frontier or standard tier for a new task. Features and typed judge evidence arrive as inputs; parameters are versioned data fitted from local outcomes. Large prompts always route frontier; judged questions and capability probes route standard.",
+  "budgets": {
+    "maxSteps": 6,
+    "maxAgentCalls": 0,
+    "maxWork": 60000,
+    "maxContextBytes": 65536,
+    "maxOutputBytes": 16384,
+    "maxDepth": 1
+  },
+  "interface": {
+    "inputs": {
+      "features": {
+        "cell": "src",
+        "port": "features"
+      },
+      "params": {
+        "cell": "src",
+        "port": "params"
+      },
+      "evidence": {
+        "cell": "src",
+        "port": "evidence"
+      }
+    },
+    "outputs": {
+      "decision": {
+        "cell": "decide",
+        "port": "out"
+      }
+    }
+  },
+  "cells": [
+    {
+      "id": "src",
+      "kind": "input",
+      "outputs": {
+        "features": "json",
+        "params": "json",
+        "evidence": "json"
+      }
+    },
+    {
+      "id": "head",
+      "kind": "expr",
+      "inputs": {
+        "features": "json",
+        "params": "json",
+        "evidence": "json"
+      },
+      "expr": {
+        "contract": "algal.expr.v1",
+        "program": [
+          "let",
+          "judged",
+          [
+            "get",
+            "evidence",
+            "judged"
+          ],
+          [
+            "let",
+            "h",
+            [
+              "if",
+              [
+                "get",
+                "judged"
+              ],
+              [
+                "get",
+                "params",
+                "judged"
+              ],
+              [
+                "get",
+                "params",
+                "plain"
+              ]
+            ],
+            {
+              "head": [
+                "if",
+                [
+                  "get",
+                  "judged"
+                ],
+                "judged",
+                "plain"
+              ],
+              "z": [
+                "fold",
+                [
+                  "get",
+                  "h",
+                  "terms"
+                ],
+                [
+                  "get",
+                  "h",
+                  "bias"
+                ],
+                "acc",
+                "t",
+                [
+                  "add",
+                  [
+                    "get",
+                    "acc"
+                  ],
+                  [
+                    "mul",
+                    [
+                      "get",
+                      "t",
+                      "w"
+                    ],
+                    [
+                      "let",
+                      "v",
+                      [
+                        "get",
+                        "features",
+                        [
+                          "get",
+                          "t",
+                          "f"
+                        ]
+                      ],
+                      [
+                        "if",
+                        [
+                          "isNum",
+                          [
+                            "get",
+                            "v"
+                          ]
+                        ],
+                        [
+                          "get",
+                          "v"
+                        ],
+                        0
+                      ]
+                    ]
+                  ]
+                ]
+              ],
+              "cut": [
+                "get",
+                "h",
+                "cut"
+              ]
+            }
+          ]
+        ]
+      },
+      "output": {
+        "kind": "json",
+        "schema": {}
+      }
+    },
+    {
+      "id": "decide",
+      "kind": "expr",
+      "inputs": {
+        "scored": "json",
+        "evidence": "json"
+      },
+      "expr": {
+        "contract": "algal.expr.v1",
+        "program": [
+          "if",
+          [
+            "get",
+            "evidence",
+            "substantial"
+          ],
+          {
+            "route": "frontier",
+            "gate": "substantial",
+            "head": [
+              "get",
+              "scored",
+              "head"
+            ],
+            "score": [
+              "round",
+              [
+                "mul",
+                [
+                  "get",
+                  "scored",
+                  "z"
+                ],
+                1000
+              ]
+            ]
+          },
+          [
+            "if",
+            [
+              "and",
+              [
+                "get",
+                "evidence",
+                "judged"
+              ],
+              [
+                "contains",
+                [
+                  "quote",
+                  [
+                    "question",
+                    "probe"
+                  ]
+                ],
+                [
+                  "get",
+                  "evidence",
+                  "kind"
+                ]
+              ]
+            ],
+            {
+              "route": "standard",
+              "gate": "kind",
+              "head": [
+                "get",
+                "scored",
+                "head"
+              ],
+              "score": [
+                "round",
+                [
+                  "mul",
+                  [
+                    "get",
+                    "scored",
+                    "z"
+                  ],
+                  1000
+                ]
+              ]
+            },
+            {
+              "route": [
+                "if",
+                [
+                  "gte",
+                  [
+                    "get",
+                    "scored",
+                    "z"
+                  ],
+                  [
+                    "get",
+                    "scored",
+                    "cut"
+                  ]
+                ],
+                "frontier",
+                "standard"
+              ],
+              "gate": "score",
+              "head": [
+                "get",
+                "scored",
+                "head"
+              ],
+              "score": [
+                "round",
+                [
+                  "mul",
+                  [
+                    "get",
+                    "scored",
+                    "z"
+                  ],
+                  1000
+                ]
+              ]
+            }
+          ]
+        ]
+      },
+      "output": {
+        "kind": "json",
+        "schema": {}
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from": {
+        "cell": "src",
+        "port": "features"
+      },
+      "to": {
+        "cell": "head",
+        "port": "features"
+      }
+    },
+    {
+      "from": {
+        "cell": "src",
+        "port": "params"
+      },
+      "to": {
+        "cell": "head",
+        "port": "params"
+      }
+    },
+    {
+      "from": {
+        "cell": "src",
+        "port": "evidence"
+      },
+      "to": {
+        "cell": "head",
+        "port": "evidence"
+      }
+    },
+    {
+      "from": {
+        "cell": "head",
+        "port": "out"
+      },
+      "to": {
+        "cell": "decide",
+        "port": "scored"
+      }
+    },
+    {
+      "from": {
+        "cell": "src",
+        "port": "evidence"
+      },
+      "to": {
+        "cell": "decide",
+        "port": "evidence"
+      }
+    }
+  ]
+}

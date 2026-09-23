@@ -125,6 +125,11 @@ enum Commands {
         #[command(subcommand)]
         command: Option<ModelCommand>,
     },
+    /// Inspect and teach the learned reflexes: model routing and turn categorization.
+    Reflex {
+        #[command(subcommand)]
+        command: Option<ReflexCommand>,
+    },
     /// Inspect conditional public offers; observations do not verify account entitlement.
     Offers {
         /// Re-check the published offers before listing them.
@@ -380,6 +385,60 @@ enum ModelCommand {
         #[arg(long)]
         provider: Option<Provider>,
     },
+}
+#[derive(Subcommand)]
+enum ReflexCommand {
+    /// Show the active generation, program digest, evidence and holdout metrics.
+    Status {
+        /// Only this reflex (route or settle).
+        reflex: Option<ReflexName>,
+    },
+    /// Fit candidates on local labels and promote any that beat the active generation on holdout.
+    Train {
+        /// Reflex to train (route or settle).
+        reflex: ReflexName,
+    },
+    /// Label a task's latest decision: route frontier|standard, settle unfinished|done.
+    Label {
+        /// Reflex the label is for (route or settle).
+        reflex: ReflexName,
+        /// Managed task id.
+        task: Id,
+        /// frontier or standard (route); unfinished or done (settle).
+        label: String,
+    },
+    /// Reactivate an earlier generation; 0 restores the shipped prior.
+    Rollback {
+        /// Reflex to roll back (route or settle).
+        reflex: ReflexName,
+        /// Generation to activate.
+        version: u32,
+    },
+    /// Import labeled JSONL ({id,text,label[,weight][,judge]}); only derived features are stored.
+    Import {
+        /// Reflex the examples are for (route or settle).
+        reflex: ReflexName,
+        /// JSONL file to import.
+        file: PathBuf,
+    },
+    /// Check that a reflex program file is admissible and print its digest.
+    Check {
+        /// Program file (an ALGAL organism).
+        file: PathBuf,
+    },
+}
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ReflexName {
+    Route,
+    Settle,
+}
+impl From<ReflexName> for xcb_core::reflex::Reflex {
+    fn from(name: ReflexName) -> Self {
+        match name {
+            ReflexName::Route => Self::Route,
+            ReflexName::Settle => Self::Settle,
+        }
+    }
 }
 #[derive(Subcommand)]
 enum SessionCommand {
@@ -1477,6 +1536,134 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 println!(
                     "* preferred route per provider (xcb models default <key> changes it); automatic routing may select a stronger model"
                 );
+            }
+            Ok(0)
+        }
+        Some(Commands::Reflex { command }) => {
+            use xcb_core::reflex::Reflex;
+            use xcb_runtime::reflex::{self, ReflexStore};
+            let reflexes = ReflexStore::open(store.root())?;
+            let settings = Config::load(store.root())?.0.extensions.reflexes;
+            match command.unwrap_or(ReflexCommand::Status { reflex: None }) {
+                ReflexCommand::Status { reflex: only } => {
+                    let rows = Reflex::ALL
+                        .into_iter()
+                        .filter(|reflex| only.is_none_or(|only| Reflex::from(only) == *reflex))
+                        .map(|reflex| {
+                            reflexes.status(reflex, settings.mode(reflex), settings.learn)
+                        })
+                        .collect::<xcb_runtime::Result<Vec<_>>>()?;
+                    if cli.json {
+                        print_json(rows)?;
+                    } else {
+                        for status in rows {
+                            println!(
+                                "{} · {:?} · generation {}{} · {} observed · {} labeled · program {}{}",
+                                status.reflex.as_str(),
+                                status.mode,
+                                status.version,
+                                status
+                                    .params
+                                    .parent
+                                    .map(|parent| format!(" (from {parent})"))
+                                    .unwrap_or_default(),
+                                status.observations,
+                                status.labeled,
+                                &status.program[..status.program.len().min(19)],
+                                if status.custom_program {
+                                    " (custom)"
+                                } else {
+                                    ""
+                                },
+                            );
+                            if let Some(fault) = status.program_fault {
+                                println!("  ! {fault}");
+                            }
+                            for (head, row) in status.heads {
+                                match row.holdout {
+                                    Some(metrics) => println!(
+                                        "  {head}: {} labels ({} positive) · holdout {} · accuracy {:.3} · log loss {:.3}{}",
+                                        row.labeled,
+                                        row.positives,
+                                        metrics.n,
+                                        metrics.accuracy,
+                                        metrics.log_loss,
+                                        metrics
+                                            .auc
+                                            .map(|auc| format!(" · AUC {auc:.3}"))
+                                            .unwrap_or_default(),
+                                    ),
+                                    None => println!(
+                                        "  {head}: {} labels, none held out yet",
+                                        row.labeled
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                }
+                ReflexCommand::Train { reflex } => {
+                    let report =
+                        reflexes.train(reflex.into(), xcb_core::reflex::FitOptions::default())?;
+                    if cli.json {
+                        print_json(report)?;
+                    } else {
+                        for (head, comparison) in &report.heads {
+                            println!("{head}: {}", comparison.reason);
+                        }
+                        match report.promoted_version {
+                            Some(version) => println!(
+                                "promoted generation {version} (from {}); `xcb reflex rollback {} {}` restores it",
+                                report.from_version,
+                                report.reflex.as_str(),
+                                report.from_version
+                            ),
+                            None => println!(
+                                "kept generation {} ({} labels)",
+                                report.from_version, report.labeled
+                            ),
+                        }
+                    }
+                }
+                ReflexCommand::Label {
+                    reflex: name,
+                    task,
+                    label,
+                } => {
+                    let reflex = Reflex::from(name);
+                    let value = reflex::parse_label(reflex, &label).ok_or(Error::Unavailable(
+                        match reflex {
+                            Reflex::Route => "route labels are frontier or standard",
+                            Reflex::Settle => "settle labels are unfinished or done",
+                        },
+                    ))?;
+                    if !reflexes.label(reflex, task.as_str(), value, 1.0, "explicit")? {
+                        return Err(Error::Unavailable("no decision recorded for that task"));
+                    }
+                    println!("labeled {task} {label} for {}", reflex.as_str());
+                }
+                ReflexCommand::Rollback { reflex, version } => {
+                    reflexes.rollback(reflex.into(), version)?;
+                    println!(
+                        "{} now uses generation {version}",
+                        Reflex::from(reflex).as_str()
+                    );
+                }
+                ReflexCommand::Import { reflex, file } => {
+                    let source = std::fs::read_to_string(&file)?;
+                    let rows = reflex::parse_import(reflex.into(), &source)?;
+                    let inserted = reflexes.import(reflex.into(), &rows)?;
+                    println!(
+                        "imported {inserted} of {} examples; run `xcb reflex train {}`",
+                        rows.len(),
+                        Reflex::from(reflex).as_str()
+                    );
+                }
+                ReflexCommand::Check { file } => {
+                    let source: serde_json::Value = serde_json::from_slice(&std::fs::read(&file)?)?;
+                    let (_, digest) = reflex::admit(&source)?;
+                    println!("admissible reflex program {digest}");
+                }
             }
             Ok(0)
         }
@@ -2808,6 +2995,14 @@ mod tests {
             Some(Commands::Tasks {
                 command: Some(TaskCommand::Messages { id, after: 4 })
             }) if id.as_str() == "t_example"
+        ));
+        let cli = Cli::try_parse_from(["xcb", "reflex", "label", "route", "t_example", "frontier"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Reflex {
+                command: Some(ReflexCommand::Label { reflex: ReflexName::Route, ref label, .. })
+            }) if label == "frontier"
         ));
         let cli = Cli::try_parse_from(["xcb", "offers", "--refresh"]).unwrap();
         assert!(matches!(

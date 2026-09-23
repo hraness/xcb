@@ -198,7 +198,7 @@ xcb panes check /absolute/path/to/pane.json
 xcb panes install /absolute/path/to/pane.json`}</Code>
       <p>Use the built-in pane as a starting point and validate a declaration before installing it. The terminal’s <code>/help</code> lists the interactive controls.</p>
       <h2 id="continuation">Continuation and context</h2>
-      <p>Auto-continue and Gobstopper context management are enabled by default. Continuation is bounded and requires a safely settled turn. Context management reduces retained context according to the configured policy.</p>
+      <p>Auto-continue and Gobstopper context management are enabled by default. Continuation is bounded and requires a safely settled turn. Context management reduces retained context according to the configured policy. To continue turns that ended before the work was done, see <a href="/docs/reflexes#continuation">learned continuation</a>.</p>
       <Code>{`xcb plugins disable auto-continue
 xcb plugins disable gobstopper
 # Enable them again:
@@ -218,6 +218,49 @@ xcb judge test
 xcb judge disable
 xcb judge logout`}</Code>
       <p>The input is an existing private credential file. Keys are stored outside the workspace; do not put a key in a command-line argument. See the <a href="/docs/reference#optional-behavior">complete reference</a> for environment and custom-endpoint behavior.</p>
+    </>
+  );
+}
+
+function Reflexes() {
+  return (
+    <>
+      <p>A reflex is a small decision xcb makes many times a day and can learn from how you respond. Two ship today: <strong>route</strong> picks the frontier or standard model tier for a new task, and <strong>settle</strong> categorizes how a worker&apos;s turn ended, including whether it stopped before the task was done.</p>
+      <Code>{`xcb reflex                 # status of both reflexes
+xcb reflex status route    # generation, program digest, labels, holdout metrics`}</Code>
+      <h2 id="shape">How a decision is made</h2>
+      <p>Each decision is a small ALGAL program applied to deterministic features, learned parameters, and typed evidence. The program has no effects and makes no model calls, so every decision is a replayable receipt. Parameters are data: learning adds a generation and never edits the program.</p>
+      <div className="xcb-docs-table-wrap" role="region" aria-label="Reflexes" tabIndex={0}><table>
+        <thead><tr><th scope="col">Reflex</th><th scope="col">Reads</th><th scope="col">Decides</th><th scope="col">Default</th></tr></thead>
+        <tbody>
+          <tr><th scope="row">route</th><td>Prompt shape (imperative opening, resume language, action verbs, length), keyword cues, and the optional judge&apos;s answers</td><td>frontier or standard</td><td>active</td></tr>
+          <tr><th scope="row">settle</th><td>The end of the worker&apos;s last message (a promised next step, waiting on CI, open checklist items, completion claims) and the turn&apos;s settlement facts</td><td>done, stopped short, question, needs approval, blocked, interrupted, …</td><td>observe</td></tr>
+        </tbody>
+      </table></div>
+      <p>The shipped parameters reproduce xcb&apos;s behavior before reflexes, so nothing changes until your own evidence earns a promotion.</p>
+      <h2 id="learning">How it learns from you</h2>
+      <ul>
+        <li>Reply <code>continue</code>, <code>keep going</code>, or <code>proceed</code> right after a task completes, and xcb records that the turn stopped short. With settle active, it also reopens that task in its session.</li>
+        <li>Start something else after a task completes, and that turn is recorded as finished, at half weight.</li>
+        <li>Ask for a stronger or lighter model (&ldquo;use opus&rdquo;, &ldquo;cheaper model&rdquo;) and the previous task&apos;s route is labeled.</li>
+        <li>Label anything explicitly. Explicit labels always win over inferred ones.</li>
+      </ul>
+      <Code>{`xcb reflex label route t_… frontier
+xcb reflex label settle t_… unfinished
+xcb reflex train settle`}</Code>
+      <p>Every 16 labels, xcb fits a candidate anchored on the shipped prior. One fifth of your labels is a fixed holdout that training never sees. A candidate replaces the active generation only if the holdout has at least five examples of each class and the candidate lowers log loss there without losing accuracy or ranking quality. Every generation records its parent and the evidence that promoted it.</p>
+      <h2 id="continuation">Continuing work that stopped short</h2>
+      <p>With <code>settle</code> set to <code>active</code>, a completed turn categorized as stopped short is continued in its existing session with a prompt to carry out the step it described. The same gates as any automatic continuation apply first: a joined and settled worker, no pending question or approval, no failure or uncertain effect, a response that is not a repeat, and remaining attempt and time budget. A configured judge can still veto it.</p>
+      <Note>Settle ships in observe mode. Its categories appear on tasks and it learns from your replies, but it does not continue work until you turn it on.</Note>
+      <h2 id="configure">Configure, roll back, or replace</h2>
+      <Code>{`# config.json → extensions.reflexes
+{ "route": "active", "settle": "observe", "learn": true }
+
+xcb reflex rollback route 0          # back to the shipped prior
+xcb reflex import route history.jsonl
+xcb reflex check my-route.algal.json`}</Code>
+      <p>Each reflex can be <code>off</code>, <code>observe</code>, or <code>active</code>. To change the decision logic itself, put an organism at <code>reflexes/route.algal.json</code> or <code>reflexes/settle.algal.json</code> in the state directory. xcb admits it only if it has no effectful cells and no agent calls; otherwise status reports the rejection and the shipped program runs.</p>
+      <p>The ledger stores numeric features, decisions, and labels, never prompt or response text. A learned route predicts the tier you would pick, not measured model quality. It only chooses between routes that are already eligible and cannot demote the quality floor for large prompts. See the <a href="https://github.com/hraness/xcb/blob/main/docs/reflexes.md">reflex reference</a> for the full contract.</p>
     </>
   );
 }
@@ -309,6 +352,7 @@ export function TopicContent({ slug }: { slug: DocsSlug }) {
     case "providers": return <Providers />;
     case "workspace": return <Workspace />;
     case "customization": return <Customization />;
+    case "reflexes": return <Reflexes />;
     case "application-api": return <ApplicationApi />;
     case "reference": return <><p className="xcb-docs-eyebrow">Repository reference</p><p>This page is generated from the current <a href="https://github.com/hraness/xcb/blob/main/README.md">repository README</a>. For a shorter path, start with the <a href="/docs/getting-started">setup guide</a>.</p><div dangerouslySetInnerHTML={{ __html: accessibleReferenceHtml(readmeHtml) }} /></>;
   }

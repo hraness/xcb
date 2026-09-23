@@ -15,12 +15,17 @@ original goal, explicit follow-ups, worker history, and transition receipts.
 | Kernel and runner | Workspace/account custody, provider admission, effects, settlement |
 | ALGAL | Deterministic, replayable recording of bounded transition records |
 | Optional judge | Classify task capability demand or evaluate continuation after safety gates |
+| Reflexes | Learned, replayable route tier and turn-settlement decisions ([reflexes.md](reflexes.md)) |
 
 The pinned ALGAL program records its input. Rust enforces the state machine,
 admission and custody contracts. Receipt replay proves consistency of these
 local records; it does not prove task correctness, provider attestation, or
 that an external effect occurred. This implementation does not execute
-self-modifying orchestration policies.
+self-modifying orchestration policies. [Reflexes](reflexes.md) learn
+parameters for two bounded decisions (model tier and whether a completed turn
+stopped short) from operator behavior; their programs are effect-free, never
+rewrite themselves, and a learned generation is promoted only on held-out
+evidence.
 
 ## Task lifecycle
 

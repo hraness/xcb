@@ -68,6 +68,8 @@ pub struct TaskRow {
     pub route: Option<String>,
     /// Why the supervisor picked `route`, when it recorded one.
     pub route_reason: Option<String>,
+    /// How the last settled worker turn ended (settle reflex category).
+    pub settle: Option<String>,
     pub workspace: String,
     pub updated_at_ms: u64,
 }
