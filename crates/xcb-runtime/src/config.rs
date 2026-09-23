@@ -57,7 +57,8 @@ pub enum ReflexMode {
 /// parameters reproduce the prior classifier exactly. Continuing a
 /// stopped-short report and answering a worker's request for confirmation
 /// are `auto` by default: each acts only once the operator's own replies
-/// certify its precision, and `confirm` acts only while settle is not off.
+/// certify its precision. `confirm` never acts while settle is off or only
+/// observing, and routing has no `auto` mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReflexConfig {
@@ -158,6 +159,7 @@ impl Config {
             || !(1000..=3_600_000).contains(&context.min_interval_ms)
             || !(1..=16).contains(&continuation.max_consecutive)
             || !(1000..=3_600_000).contains(&continuation.max_elapsed_ms)
+            || self.extensions.reflexes.route == ReflexMode::Auto
             || self
                 .extensions
                 .judge

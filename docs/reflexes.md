@@ -136,7 +136,9 @@ it became active), the open trial's progress and its certificate.
 
 `auto`, the default for settle and confirm, observes until your own replies
 show that a head is precise enough to act for you, then acts, and goes back
-to observing if it gets worse. After every training pass and every import:
+to observing if it gets worse. After every training pass (in the
+background, so labeling never waits for the replay), after `xcb reflex train`
+and after every import:
 
 1. The head's retained labels are replayed from the shipped prior through the
    same learning loop, so every turn is scored by a head that had not yet
@@ -151,15 +153,26 @@ to observing if it gets worse. After every training pass and every import:
    least 30 turns and the one-sided 99% lower bound on its precision reaches
    the floor: **0.75** for `unfinished` and **0.85** for `confirm`, since
    answering "yes" for you is the bigger step.
-4. A certified head keeps its certificate while its precision stays within
-   0.05 of the floor. Below that it goes back to observing.
+4. A certified head keeps its certificate while its measured precision stays
+   within 0.05 of the floor (0.70 for `unfinished`, 0.80 for `confirm`).
+   Below that it goes back to observing.
 
-While certified, a head acts only on turns that the active generation scores
-at or above the certified threshold. The runtime computes that probability
-itself, so a custom program cannot raise it. About one such turn in ten,
-chosen by a hash of the task and turn, is still left for you. Your replies to
-those turns are the only unbiased evidence a head keeps getting once it acts,
-and they are what can withdraw its certificate.
+The certificate stores the head the replay ended with, and a certified head
+acts only on turns that head scores at or above the certified threshold, so
+the head that acts is the one that was measured, whichever generation is
+active or was rolled back to. The runtime computes that probability itself,
+so a custom program cannot raise it. About one such turn in ten, chosen by a
+hash of the task and turn, is still left for you, and a judge cannot continue
+it either. Your replies to those turns are the only unbiased evidence a head
+keeps getting once it acts, and they are what can withdraw its certificate.
+Only runs a head actually started are labeled by how they turned out.
+
+Treat the floor as a guardrail rather than a guarantee. The 99% bound holds
+for one threshold on one pass; up to seven thresholds are tried and the test
+repeats as labels arrive, so the real chance of certifying a head below its
+floor is somewhat higher. Once a head acts, fresh evidence arrives only from
+the held-out turns, so withdrawal lags a real decline by a few hundred
+turns.
 
 `xcb reflex status settle` shows each certificate and its evidence.
 `xcb reflex import settle <file> --dry-run` shows whether that history alone
@@ -266,9 +279,10 @@ reports without storing anything. Only the derived features are stored.
   `stopped_short` completed turn is continued.
 - `auto` (settle and confirm): observe until the head is certified, then act
   as `active` does on turns scored at or above the certified threshold,
-  leaving about one in ten to you.
+  leaving about one in ten to you. Routing has no `auto`; a config that sets
+  it is refused.
 - `confirm`: whether a `confirm` turn is answered "yes, go ahead". It acts
-  only when `settle` is not `off`, the `confirm` head acts (`active`, or
+  only when `settle` is `active` or `auto`, the `confirm` head acts (`active`, or
   `auto` and certified), the turn completed,
   nothing is handed to the user, the report never mentions deletion, secrets,
   production or spending, the asking paragraph proposes no deploy, release,
@@ -284,7 +298,11 @@ reports without storing anything. Only the derived features are stored.
   regardless.
 
 Set `observe` to keep a head from ever acting, or `active` to let it act
-without a certificate. `off` disables settle entirely, including `confirm`.
+without a certificate. `off` disables settle entirely, and `observe` keeps
+`confirm` observing too.
+
+Configs are read strictly, so an older xcb refuses a config that says `auto`
+until the value is edited back to `observe` or `active`.
 
 ## Safety contract
 

@@ -656,8 +656,6 @@ fn human_age(now_ms: u64, then_ms: u64) -> String {
     }
 }
 
-/// One line of reflex metrics: examples, accuracy, precision and recall at
-/// the head's threshold, and AUC when both classes are present.
 /// Whether a settle head may act under `auto`, and the evidence.
 fn certificate_line(certificate: &xcb_core::reflex::Certificate) -> String {
     let evidence = match (certificate.precision, certificate.lower) {
@@ -681,6 +679,8 @@ fn certificate_line(certificate: &xcb_core::reflex::Certificate) -> String {
     )
 }
 
+/// One line of reflex metrics: examples, accuracy, precision and recall at
+/// the head's threshold, and AUC when both classes are present.
 fn metrics_line(metrics: &xcb_core::reflex::Metrics) -> String {
     let rate = |value: Option<f64>| value.map_or_else(|| "–".into(), |value| format!("{value:.2}"));
     format!(
@@ -1672,8 +1672,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     }
                 }
                 ReflexCommand::Train { reflex } => {
-                    let report =
-                        reflexes.train(reflex.into(), xcb_core::reflex::FitOptions::default())?;
+                    let options = xcb_core::reflex::FitOptions::default();
+                    let mut report = reflexes.train(reflex.into(), options)?;
+                    report.certificates = reflexes.certify(reflex.into(), options)?;
                     if cli.json {
                         print_json(report)?;
                     } else {

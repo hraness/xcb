@@ -1357,8 +1357,11 @@ fn prequential(predicted: &[(f64, &Example)], threshold: f64) -> Metrics {
 pub const CERTIFY_WINDOW: usize = 1500;
 /// Label weight the head must have fired on inside the window.
 pub const CERTIFY_MIN_FIRED: f64 = 30.0;
-/// One-sided z for the precision lower bound. About 99%, which also covers
-/// the handful of thresholds tried.
+/// One-sided z for the precision lower bound: 99% for any one threshold.
+/// Up to seven nested thresholds are tried and the test repeats on every
+/// training pass, so the chance of certifying a head whose true precision is
+/// under the floor is higher than 1%; the floor is a guardrail, and the
+/// held-out turns keep testing it (see [`certify`]).
 const CERTIFY_Z: f64 = 2.33;
 /// How far a certified head's precision may sag before it is withdrawn.
 const CERTIFY_MARGIN: f64 = 0.05;
@@ -1377,7 +1380,11 @@ pub fn precision_floor(head: &str) -> Option<f64> {
 
 /// Whether a head could act on a turn with these features at all. The
 /// runtime never answers a request that carries a risk or hand-off cue, so
-/// such turns say nothing about the precision of the answers it gives.
+/// such turns say nothing about the precision of the answers it gives. The
+/// runtime also vetoes requests by their text ([`confirm_vetoed`]), which the
+/// ledger does not keep, so certification still scores some requests the
+/// runtime would decline; that only makes the estimate conservative when
+/// those requests are the ones operators decline too.
 pub fn actionable(head: &str, features: &Features) -> bool {
     head != SETTLE_CONFIRM
         || (features.get("risk") == Some(&0.0) && features.get("user_act") == Some(&0.0))
@@ -1408,6 +1415,10 @@ pub struct Certificate {
     /// Lower confidence bound on `precision`.
     pub lower: Option<f64>,
     pub reason: String,
+    /// The head the replay ended with. Acting scores turns with this head,
+    /// so the head that acts is the one whose precision was measured,
+    /// whatever generation is active or was rolled back to.
+    pub head: Head,
 }
 
 /// Decides whether a head has earned the right to act. The retained history
@@ -1416,8 +1427,10 @@ pub struct Certificate {
 /// newest [`CERTIFY_WINDOW`] operator-labeled examples it could act on (see
 /// [`actionable`]), the lowest acting
 /// threshold whose precision is confidently above the head's floor wins. A
-/// head that was certified keeps its threshold while its precision stays
-/// within [`CERTIFY_MARGIN`] of the floor, so the verdict does not flap.
+/// head that was certified keeps its threshold while its measured precision
+/// stays within [`CERTIFY_MARGIN`] of the floor, so the verdict does not
+/// flap; below that it is withdrawn. Once a head acts, only the turns held
+/// for the operator add fired evidence, so withdrawal lags a real decline.
 pub fn certify(
     name: &str,
     prior: &Head,
@@ -1465,6 +1478,7 @@ pub fn certify(
             precision: (fired > 0.0).then(|| hits / fired),
             lower: (fired > 0.0).then(|| wilson_lower(hits, fired, CERTIFY_Z)),
             reason,
+            head: replayed.head.clone(),
         }
     };
     let base = prior.threshold;

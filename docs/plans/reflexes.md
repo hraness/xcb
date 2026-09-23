@@ -54,10 +54,10 @@ pre-reflex behavior.
 
 ## Next
 
-- Enable settle `active` by default once operators' live precision holds at
-  the shipped threshold across trials.
-- Enable `confirm` only after settle has been active widely, with the judge
-  configured.
+- Watch live certificates across operators; raise or lower the per-head
+  precision floors only with out-of-sample evidence.
+- `confirm` stays observing until it certifies at its 0.85 floor; revisit
+  its features if it never does.
 - Add reflexes for context elision and account preference using the same
   ledger and trial rule.
 - Consider proposing program variants (not only parameters) and evaluating
