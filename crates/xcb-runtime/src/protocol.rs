@@ -8,6 +8,18 @@ use xcb_core::{
     usage::Counters,
 };
 
+/// Per-request deadline for provider initialization RPCs and handshakes. A
+/// stalled provider fails fast here instead of holding the account lease
+/// until the whole turn deadline.
+pub(crate) const INIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Frames one turn may deliver before the host ends it as a turn limit.
+/// Streaming providers emit one frame per content delta, so this is sized for
+/// hours of output; the 64 MiB byte budget and the turn deadline bound
+/// resource use, and codec backstops sit above it so overflow is always the
+/// host's graceful `Terminal::TurnLimit`, never a protocol failure.
+pub(crate) const MAX_TURN_FRAMES: usize = 1 << 20;
+
 pub(crate) struct ImageInput {
     pub media_type: String,
     pub base64: String,

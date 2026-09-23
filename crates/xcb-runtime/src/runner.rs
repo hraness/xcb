@@ -50,6 +50,11 @@ impl Diagnostic {
         &self.0
     }
 
+    /// A host-authored notice; provider text never enters here.
+    pub(crate) fn notice(text: &'static str) -> Self {
+        Self::bounded(text.to_owned())
+    }
+
     pub(crate) fn from_error(error: &Error) -> Self {
         let text = match error {
             Error::Protocol(_)
@@ -66,6 +71,10 @@ impl Diagnostic {
             Error::Json(_) => "invalid local record".into(),
             Error::PrivateState => "local state failed private-file validation".into(),
         };
+        Self::bounded(text)
+    }
+
+    fn bounded(text: String) -> Self {
         let mut text: String = text
             .chars()
             .map(|character| {
@@ -1529,7 +1538,7 @@ pub(crate) async fn handshake(
     system: &str,
 ) -> Result<Vec<ModelChoice>> {
     process.send(&initialize(tools, system)).await?;
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(crate::protocol::INIT_DEADLINE, async {
         for _ in 0..256 {
             let frame = process
                 .frame()
