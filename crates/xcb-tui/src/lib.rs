@@ -351,6 +351,10 @@ pub struct App {
     slash_dismissed: Cell<bool>,
     /// Composer text the menu state belongs to; any edit resets selection.
     slash_text: std::cell::RefCell<String>,
+    /// Per-frame render state: wrapped transcript rows per message, the
+    /// streaming tail's last wrap, and textarea viewport mirrors. Interior
+    /// mutability lets the render tree read `&App` while refreshing it.
+    pub(crate) render_cache: std::cell::RefCell<render::RenderCache>,
     dirty: bool,
     view_fingerprint: u64,
 }
