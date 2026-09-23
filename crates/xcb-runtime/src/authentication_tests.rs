@@ -84,6 +84,7 @@ pub(crate) fn fail_authentication(store: &Store, account: &Id) -> Id {
         .prepare_run(&session.id, current.revision, now)
         .unwrap();
     let outcome = Outcome {
+        tool_calls: 0,
         text: String::new(),
         diagnostic: None,
         state: State::NeedsAction,
