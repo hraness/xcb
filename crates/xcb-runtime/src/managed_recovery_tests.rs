@@ -51,6 +51,7 @@ async fn prepared_with_goal(goal: String) -> Fixture {
             "claude/fixture-model".into(),
             "fixture route".into(),
             0,
+            String::new(),
         )
         .await
         .unwrap();
@@ -782,6 +783,7 @@ async fn startup_sweeps_only_proven_marked_orphan_sessions() {
             "claude/fixture".into(),
             "test".into(),
             0,
+            String::new(),
         )
         .await
         .unwrap();
