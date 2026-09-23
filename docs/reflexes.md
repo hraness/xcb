@@ -301,8 +301,10 @@ Set `observe` to keep a head from ever acting, or `active` to let it act
 without a certificate. `off` disables settle entirely, and `observe` keeps
 `confirm` observing too.
 
-Configs are read strictly, so an older xcb refuses a config that says `auto`
-until the value is edited back to `observe` or `active`.
+Configs and tasks are read strictly, so an older xcb refuses a config that
+says `auto` until the value is edited back to `observe` or `active`, and a
+task a reflex continued (it records which head started the run) until that
+task settles again under the newer build.
 
 ## Safety contract
 
