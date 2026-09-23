@@ -30,7 +30,7 @@ export default function Reflexes() {
             headingId="reflexes-title"
             summary="Workers end turns early: “Waiting on CI; I’ll merge on green.” “Should I open the PR?” And you pick a bigger model for the hard tasks. xcb learns all of it from what you already do, and shows its evidence."
             actions={[{ href: "/docs/reflexes", label: "Read how it works" }, { href: "/docs/getting-started", label: "Try the source preview" }]}
-            boundary="Learning is local, stores numeric features rather than text, and never widens what a route or a continuation is allowed to do."
+            boundary="Auto-certification is available in current main source builds. Published v0.5.0 downloads default settle and confirm to observe and require explicit opt-in to act. Learning stays local and never widens a route or continuation's authority."
           />
 
           <MarketingSection
@@ -77,7 +77,7 @@ export default function Reflexes() {
             <div className="xcb-readiness">
               <div><h3>Replace a program</h3><p>Drop an organism at <code>reflexes/route.algal.json</code> in the state directory to add a gate or combine heads differently. xcb admits it only if it has no effects and no agent calls. Every observation records the digest of the program that made it.</p></div>
               <div><h3>Bootstrap from history</h3><p><code>xcb reflex import</code> replays your own labeled history in order, reports how the reflex would have done, and adopts only heads that won a trial. It keeps derived features, not text.</p></div>
-              <div><h3>Acts once it has earned it</h3><p>Continuing a stopped-short turn and answering a go-ahead ship on <code>auto</code>. Each acts only after your own replies certify its precision (0.75 and 0.85 as a 99% lower bound), leaves about one turn in ten to you, and goes back to observing if it slips. The deterministic safety gates, a risk veto for deletion, deployment, spending and credentials, and a configured judge&apos;s veto still apply.</p></div>
+              <div><h3>Acts once it has earned it</h3><p>In current source builds, continuing a stopped-short turn and answering a go-ahead default to <code>auto</code>. Each acts only after your own replies certify its precision (0.75 and 0.85 as a 99% lower bound), leaves about one turn in ten to you, and goes back to observing if it slips. The deterministic safety gates, a risk veto for deletion, deployment, spending and credentials, and a configured judge&apos;s veto still apply. Published v0.5.0 downloads use <code>observe</code> defaults and do not accept <code>auto</code>.</p></div>
               <a className="xcb-compare-guide-link" href="/docs/reflexes">Read the reflex guide ↗</a>
             </div>
           </MarketingSection>

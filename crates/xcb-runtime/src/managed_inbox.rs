@@ -642,9 +642,13 @@ pub(super) fn append_batch(task: &mut ManagedTask, events: &[InboxEvent]) {
         return;
     }
     if task.attempts > 0
-        && [None, Some("stopped_short"), Some("confirm")]
-            .into_iter()
-            .any(|kind| task.next_prompt == continuation_prompt(kind))
+        && [
+            None,
+            Some(xcb_core::reflex::SETTLE_UNFINISHED),
+            Some(xcb_core::reflex::SETTLE_CONFIRM),
+        ]
+        .into_iter()
+        .any(|kind| task.next_prompt == continuation_prompt(kind))
     {
         task.next_prompt = CONTINUATION_PROMPT.into();
     }

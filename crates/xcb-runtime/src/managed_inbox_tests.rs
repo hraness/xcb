@@ -982,53 +982,75 @@ async fn cancelling_pending_or_prepared_inbox_work_does_not_train_reflex() {
 }
 
 #[tokio::test]
-async fn late_guidance_neutralizes_queued_confirm_but_preserves_explicit_context() {
-    let f = fixture().await;
-    let mut config = Config::default();
-    config.extensions.reflexes.settle = ReflexMode::Active;
-    config.extensions.reflexes.confirm = ReflexMode::Active;
-    config.save(f.store.root(), None).unwrap();
-    let (running, prompt) = prepare(&f, &f.task).await;
-    let ask = Outcome {
-        text: "The fix is ready on the branch. Should I open the PR and merge it?".into(),
-        tool_calls: Some(12),
-        ..outcome()
-    };
-    record(&f, &prompt, &ask);
-    let queued = f
-        .managed
-        .finish(&f.store, &running.id, Ok(ask))
-        .await
-        .unwrap();
-    assert!(queued.next_prompt.contains("Yes, go ahead"));
-    let accepted = guidance(&f, "Actually, stop at the review and report what is ready");
-    let (events, projected) = fit(&queued, f.managed.inbox_pending(&queued).unwrap(), &[]);
-    assert_eq!(projected.next_prompt, CONTINUATION_PROMPT);
-    assert!(!worker_prompt(&projected, &[], &[], false).contains("Yes, go ahead"));
-    let (running, prompt) = prepare(&f, &queued).await;
-    assert_eq!(running.next_prompt, projected.next_prompt);
-    assert!(running.inbox_continuation);
-    assert!(prompt.contains(&accepted.text));
-    assert!(!prompt.contains("Yes, go ahead"));
-    assert_eq!(
-        digest(&prompt),
-        f.managed
-            .inbox_batch(&running.id)
-            .unwrap()
-            .unwrap()
-            .prompt_digest
-    );
-    for (attempts, checkpoint) in [
-        (0, "Yes, go ahead with the tests I explicitly approved."),
+async fn late_guidance_neutralizes_automatic_checkpoints_but_preserves_explicit_context() {
+    use xcb_core::reflex::{SETTLE_CONFIRM, SETTLE_UNFINISHED};
+
+    for (head, text, tool_calls, terminal) in [
         (
-            1,
-            "Continue the original task on a new eligible route. Previous settled route report: preserve these changes.",
+            Some(SETTLE_CONFIRM),
+            "The fix is ready on the branch. Should I open the PR and merge it?",
+            12,
+            Terminal::Completed,
         ),
+        (
+            Some(SETTLE_UNFINISHED),
+            "Schema migrated. Next, I'll update the callers:",
+            60,
+            Terminal::Completed,
+        ),
+        (None, "Progress checkpoint saved.", 12, Terminal::TurnLimit),
     ] {
-        let mut retained = queued.clone();
-        retained.attempts = attempts;
-        retained.next_prompt = checkpoint.into();
-        let (_, projected) = fit(&retained, events.clone(), &[]);
-        assert_eq!(projected.next_prompt, checkpoint);
+        let f = fixture().await;
+        let mut config = Config::default();
+        config.extensions.reflexes.settle = ReflexMode::Active;
+        config.extensions.reflexes.confirm = ReflexMode::Active;
+        config.save(f.store.root(), None).unwrap();
+        let (running, prompt) = prepare(&f, &f.task).await;
+        let mut result = Outcome {
+            text: text.into(),
+            tool_calls: Some(tool_calls),
+            ..outcome()
+        };
+        result.facts.terminal = terminal;
+        record(&f, &prompt, &result);
+        let queued = f
+            .managed
+            .finish(&f.store, &running.id, Ok(result))
+            .await
+            .unwrap();
+        assert_eq!(queued.state, TaskState::Queued, "{head:?}");
+        assert_eq!(queued.acted.as_deref(), head);
+        let automatic = continuation_prompt(head);
+        assert_eq!(queued.next_prompt, automatic);
+        let accepted = guidance(&f, "Actually, stop at the review and report what is ready");
+        let (events, projected) = fit(&queued, f.managed.inbox_pending(&queued).unwrap(), &[]);
+        assert_eq!(projected.next_prompt, CONTINUATION_PROMPT, "{head:?}");
+        assert!(!worker_prompt(&projected, &[], &[], false).contains(&automatic));
+        let (running, prompt) = prepare(&f, &queued).await;
+        assert_eq!(running.next_prompt, projected.next_prompt);
+        assert!(running.inbox_continuation);
+        assert!(prompt.contains(&accepted.text));
+        assert!(!prompt.contains(&automatic));
+        assert_eq!(
+            digest(&prompt),
+            f.managed
+                .inbox_batch(&running.id)
+                .unwrap()
+                .unwrap()
+                .prompt_digest
+        );
+        for (attempts, checkpoint) in [
+            (0, "Yes, go ahead with the tests I explicitly approved."),
+            (
+                1,
+                "Continue the original task on a new eligible route. Previous settled route report: preserve these changes.",
+            ),
+        ] {
+            let mut retained = queued.clone();
+            retained.attempts = attempts;
+            retained.next_prompt = checkpoint.into();
+            let (_, projected) = fit(&retained, events.clone(), &[]);
+            assert_eq!(projected.next_prompt, checkpoint);
+        }
     }
 }

@@ -225,13 +225,14 @@ xcb judge logout`}</Code>
 function Reflexes() {
   return (
     <>
+      <Note>This guide describes the current main source build. Auto-certification is not in the published v0.5.0 downloads: they default settle and confirm to <code>observe</code>, require explicit <code>active</code> settings for them to act, and do not accept <code>auto</code>. See the <a href="https://github.com/hraness/xcb/blob/v0.5.0/docs/reflexes.md">v0.5.0 reference</a> for those binaries.</Note>
       <p>A reflex is a small decision xcb makes many times a day and can learn from how you respond. Two ship today: <strong>route</strong> picks the frontier or standard model tier for a new task, and <strong>settle</strong> categorizes how a worker&apos;s turn ended, including whether it stopped before the task was done.</p>
       <Code>{`xcb reflex                 # status of both reflexes
 xcb reflex status settle   # generation, live precision and recall, open trials`}</Code>
       <h2 id="shape">How a decision is made</h2>
       <p>Each decision is a small ALGAL program applied to deterministic features, learned parameters, and typed evidence. The program has no effects and makes no model calls, so every decision is a replayable receipt. Parameters are data: learning adds a generation and never edits the program.</p>
       <div className="xcb-docs-table-wrap" role="region" aria-label="Reflexes" tabIndex={0}><table>
-        <thead><tr><th scope="col">Reflex</th><th scope="col">Reads</th><th scope="col">Decides</th><th scope="col">Default</th></tr></thead>
+        <thead><tr><th scope="col">Reflex</th><th scope="col">Reads</th><th scope="col">Decides</th><th scope="col">Source default</th></tr></thead>
         <tbody>
           <tr><th scope="row">route</th><td>Prompt shape (imperative opening, resume language, action verbs, length), keyword cues, and the optional judge&apos;s answers</td><td>frontier or standard</td><td>active</td></tr>
           <tr><th scope="row">settle</th><td>How much work the turn did (tool calls), the end of the worker&apos;s report (in progress, waiting on CI, asking for a go-ahead, handing you a step, naming a risky action, a structured final summary) and the turn&apos;s settlement facts</td><td>done, stopped short, confirm, question, needs approval, blocked, interrupted, …</td><td>auto</td></tr>
@@ -254,9 +255,9 @@ xcb reflex train settle`}</Code>
       <h2 id="continuation">Continuing work that stopped short</h2>
       <p>When the <code>settle</code> head acts (always under <code>active</code>, and under <code>auto</code> once certified), a completed turn categorized as stopped short is continued in its existing session with a prompt to carry out the step it described. The same gates as any automatic continuation apply first: a joined and settled worker, no pending question or approval, no failure or uncertain effect, a response that is not a repeat, and remaining attempt and time budget. A configured judge can still veto it, and a turn held out for you is never continued by the judge.</p>
       <p>A turn categorized as confirm (&ldquo;Should I open the PR and merge it?&rdquo;) is answered &ldquo;yes, go ahead&rdquo; only when the <code>confirm</code> head acts too, and never while settle only observes. xcb never answers a request whose report mentions deleting, dropping, deploying, releasing, production, spending, credentials, or sending something, or that hands a step to you. That check is in the runtime, so a replaced program cannot remove it. A vetoed request is never answered; if its turn was cut off by a limit it may still continue with the generic prompt, and a judge can only veto that.</p>
-      <Note>Settle and confirm ship in auto mode. Categories appear on tasks and xcb learns from your replies. A head acts only once a replay of your own replies certifies its precision: at least 0.75 for continuing a stopped-short turn and 0.85 for answering a go-ahead, as a 99% lower bound. It returns to observing if that precision falls. About one acting turn in ten is still left for you, so the evidence stays honest.</Note>
+      <Note>Current source builds default settle and confirm to auto mode. Categories appear on tasks and xcb learns from your replies. A head acts only once a replay of your own replies certifies its precision: at least 0.75 for continuing a stopped-short turn and 0.85 for answering a go-ahead, as a 99% lower bound. It returns to observing if that precision falls. About one acting turn in ten is still left for you, so the evidence stays honest.</Note>
       <h2 id="configure">Configure, roll back, or replace</h2>
-      <Code>{`# config.json → extensions.reflexes
+      <Code>{`# Current source build: config.json → extensions.reflexes
 { "route": "active", "settle": "auto", "confirm": "auto", "learn": true }
 
 xcb reflex rollback route 0          # back to the shipped prior
