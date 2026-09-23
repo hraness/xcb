@@ -102,6 +102,14 @@ pub(crate) trait Protocol: Send {
         async { true }
     }
 
+    /// A cooperative cancellation frame this provider understands, if any.
+    /// The runner sends it once on host cancellation before stdin closes;
+    /// codecs without a wire interrupt return `None` and the provider still
+    /// gets the same bounded stdin-close grace and kill.
+    fn interruption(&mut self) -> Option<Value> {
+        None
+    }
+
     fn initialize(
         &mut self,
         process: &mut StreamProcess,
