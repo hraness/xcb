@@ -778,11 +778,24 @@ fn stem_matches(text: &str, stem: &str) -> bool {
 /// over-inclusive; a veto only leaves the question for the operator.
 pub fn confirm_vetoed(text: &str) -> bool {
     let text = tail(text, 16 * 1024);
-    let ask = last_paragraph(&text);
+    let last = last_paragraph(&text);
+    // A question followed by a list of options asks in the question's
+    // paragraph, not the list's, so both are read as the ask.
+    let asks = [last, question_paragraph(&text).unwrap_or(last)];
     VETO_ANYWHERE.iter().any(|stem| stem_matches(&text, stem))
-        || VETO_IN_ASK.iter().any(|stem| stem_matches(ask, stem))
-        || any(ask, RISK)
-        || any(ask, USER_ACT)
+        || asks.iter().any(|ask| {
+            VETO_IN_ASK.iter().any(|stem| stem_matches(ask, stem))
+                || any(ask, RISK)
+                || any(ask, USER_ACT)
+        })
+}
+
+/// The last paragraph that contains a question mark.
+fn question_paragraph(text: &str) -> Option<&str> {
+    paragraphs(text)
+        .into_iter()
+        .rev()
+        .find(|paragraph| paragraph.contains('?'))
 }
 
 fn flag(value: bool) -> f64 {
@@ -791,13 +804,18 @@ fn flag(value: bool) -> f64 {
 
 /// The last paragraph, separated by a blank line.
 fn last_paragraph(text: &str) -> &str {
-    let mut last = "";
+    paragraphs(text).pop().unwrap_or("")
+}
+
+/// Paragraphs in order, separated by lines that are blank or whitespace.
+fn paragraphs(text: &str) -> Vec<&str> {
+    let mut found = Vec::new();
     let mut current_start = None;
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
         if line.trim().is_empty() {
             if let Some(start) = current_start.take() {
-                last = &text[start..offset];
+                found.push(&text[start..offset]);
             }
         } else if current_start.is_none() {
             current_start = Some(offset);
@@ -805,9 +823,9 @@ fn last_paragraph(text: &str) -> &str {
         offset += line.len();
     }
     if let Some(start) = current_start {
-        last = &text[start..];
+        found.push(&text[start..]);
     }
-    last
+    found
 }
 
 /// "I'm running…", "we're waiting…", "now building…": the worker describes
@@ -1251,6 +1269,9 @@ pub struct Replay {
     pub head: Head,
     /// The trial that produced the final head, when any promoted.
     pub evidence: Option<Comparison>,
+    /// Each example's probability from the head active when it arrived.
+    #[serde(skip)]
+    pub predicted: Vec<f64>,
 }
 
 /// Replays labeled history in order through the same learning loop the
@@ -1299,6 +1320,7 @@ pub fn replay(
         trials,
         head,
         evidence,
+        predicted: predicted.iter().map(|(p, _)| *p).collect(),
     })
 }
 
@@ -1323,6 +1345,173 @@ fn prequential(predicted: &[(f64, &Example)], threshold: f64) -> Metrics {
         threshold,
     };
     evaluate(&identity, &examples)
+}
+
+// ---------------------------------------------------------------------------
+// Certification
+// ---------------------------------------------------------------------------
+
+/// Operator-labeled turns a certificate is judged on, newest first. At the
+/// fire rates seen in practice (one turn in six), this many turns bound
+/// precision to within about 0.05.
+pub const CERTIFY_WINDOW: usize = 1500;
+/// Label weight the head must have fired on inside the window.
+pub const CERTIFY_MIN_FIRED: f64 = 30.0;
+/// One-sided z for the precision lower bound. About 99%, which also covers
+/// the handful of thresholds tried.
+const CERTIFY_Z: f64 = 2.33;
+/// How far a certified head's precision may sag before it is withdrawn.
+const CERTIFY_MARGIN: f64 = 0.05;
+const CERTIFY_STEP: f64 = 0.05;
+
+/// The precision a settle head must show before `auto` lets it act, or
+/// `None` for heads that never act on their own. Answering "yes" for the
+/// operator is held to a higher bar than asking a worker to carry on.
+pub fn precision_floor(head: &str) -> Option<f64> {
+    match head {
+        SETTLE_UNFINISHED => Some(0.75),
+        SETTLE_CONFIRM => Some(0.85),
+        _ => None,
+    }
+}
+
+/// Whether a head could act on a turn with these features at all. The
+/// runtime never answers a request that carries a risk or hand-off cue, so
+/// such turns say nothing about the precision of the answers it gives.
+pub fn actionable(head: &str, features: &Features) -> bool {
+    head != SETTLE_CONFIRM
+        || (features.get("risk") == Some(&0.0) && features.get("user_act") == Some(&0.0))
+}
+
+/// Whether a label came from the operator (a reply, an explicit label or
+/// imported history) rather than from xcb watching its own action. Only
+/// these can certify a head: once a head acts, the labels its own
+/// continuations earn would confirm it.
+pub fn operator_label(source: &str) -> bool {
+    source.starts_with("user_") || ["explicit", "import", "v1"].contains(&source)
+}
+
+/// Evidence that a head may act without the operator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Certificate {
+    pub certified: bool,
+    /// Probability the head must reach before it acts; at least its own
+    /// decision threshold.
+    pub threshold: f64,
+    pub floor: f64,
+    /// Operator-labeled examples scored.
+    pub window: u32,
+    /// Label weight of the examples the head would have acted on.
+    pub fired: f64,
+    pub precision: Option<f64>,
+    /// Lower confidence bound on `precision`.
+    pub lower: Option<f64>,
+    pub reason: String,
+}
+
+/// Decides whether a head has earned the right to act. The retained history
+/// is replayed from `prior` through the live learning loop (see [`replay`]),
+/// so every example is scored by a head that had not learned from it. On the
+/// newest [`CERTIFY_WINDOW`] operator-labeled examples it could act on (see
+/// [`actionable`]), the lowest acting
+/// threshold whose precision is confidently above the head's floor wins. A
+/// head that was certified keeps its threshold while its precision stays
+/// within [`CERTIFY_MARGIN`] of the floor, so the verdict does not flap.
+pub fn certify(
+    name: &str,
+    prior: &Head,
+    examples: &[Example],
+    operator: &[bool],
+    previous: Option<&Certificate>,
+    options: FitOptions,
+) -> Result<Certificate> {
+    let Some(floor) = precision_floor(name) else {
+        return Err(Error::Invalid("reflex head"));
+    };
+    if examples.len() != operator.len() {
+        return Err(Error::Invalid("certification evidence"));
+    }
+    let replayed = replay(prior, prior, examples, options)?;
+    let mut scored: Vec<(f64, &Example)> = replayed
+        .predicted
+        .iter()
+        .zip(examples)
+        .zip(operator)
+        .filter(|((_, example), counted)| **counted && actionable(name, &example.features))
+        .map(|((p, example), _)| (*p, example))
+        .collect();
+    scored.drain(..scored.len().saturating_sub(CERTIFY_WINDOW));
+    let at = |threshold: f64| {
+        let (mut fired, mut hits) = (0.0, 0.0);
+        for (p, example) in &scored {
+            if *p >= threshold {
+                fired += example.weight;
+                if example.label {
+                    hits += example.weight;
+                }
+            }
+        }
+        (fired, hits)
+    };
+    let verdict = |threshold: f64, certified: bool, reason: String| {
+        let (fired, hits) = at(threshold);
+        Certificate {
+            certified,
+            threshold,
+            floor,
+            window: scored.len() as u32,
+            fired,
+            precision: (fired > 0.0).then(|| hits / fired),
+            lower: (fired > 0.0).then(|| wilson_lower(hits, fired, CERTIFY_Z)),
+            reason,
+        }
+    };
+    let base = prior.threshold;
+    let mut threshold = base;
+    while threshold < 1.0 - CERTIFY_STEP / 2.0 {
+        let (fired, hits) = at(threshold);
+        if fired < CERTIFY_MIN_FIRED {
+            break;
+        }
+        if wilson_lower(hits, fired, CERTIFY_Z) >= floor {
+            return Ok(verdict(
+                threshold,
+                true,
+                format!("precision confidently at or above {floor:.2}"),
+            ));
+        }
+        threshold += CERTIFY_STEP;
+    }
+    if let Some(previous) = previous.filter(|previous| previous.certified) {
+        let (fired, hits) = at(previous.threshold);
+        if fired >= CERTIFY_MIN_FIRED && hits / fired >= floor - CERTIFY_MARGIN {
+            return Ok(verdict(
+                previous.threshold,
+                true,
+                "certified; precision still within the margin".to_owned(),
+            ));
+        }
+    }
+    let (fired, _) = at(base);
+    let reason = if fired < CERTIFY_MIN_FIRED {
+        format!("collecting evidence: fired on {fired:.0} of {CERTIFY_MIN_FIRED:.0} labeled turns")
+    } else {
+        format!("precision not yet confidently at {floor:.2}")
+    };
+    Ok(verdict(base, false, reason))
+}
+
+/// Wilson score lower bound for `hits` of `n` (weights allowed).
+fn wilson_lower(hits: f64, n: f64, z: f64) -> f64 {
+    if n <= 0.0 {
+        return 0.0;
+    }
+    let p = hits / n;
+    let z2 = z * z;
+    let centre = p + z2 / (2.0 * n);
+    let spread = z * (p * (1.0 - p) / n + z2 / (4.0 * n * n)).sqrt();
+    ((centre - spread) / (1.0 + z2 / n)).max(0.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -1745,6 +1934,125 @@ mod tests {
         ] {
             assert!(!confirm_vetoed(safe), "{safe}");
         }
+        // A question followed by its options asks in the question's
+        // paragraph, which is read as the ask too.
+        assert!(confirm_vetoed(
+            "Ready. Should I deploy it now?\n\n- yes\n- wait for review"
+        ));
+        assert!(!confirm_vetoed(
+            "Ready. Should I open the PR?\n\n- yes\n- wait for review"
+        ));
+    }
+
+    fn stopped_short(id: usize, label: bool) -> Example {
+        example(
+            id,
+            settle_features(
+                "Parser updated. Next, I'll wire the CLI:",
+                &facts(Terminal::Completed, EffectState::None),
+                60,
+            ),
+            label,
+        )
+    }
+
+    #[test]
+    fn certification_needs_confident_operator_precision() {
+        let prior = prior(Reflex::Settle);
+        let head = &prior.heads[SETTLE_UNFINISHED];
+        assert!(head.probability(&stopped_short(0, true).features) >= head.threshold);
+        let precise: Vec<_> = (0..400).map(|i| stopped_short(i, i % 10 != 0)).collect();
+        let everyone = vec![true; precise.len()];
+        let options = FitOptions::default();
+        let certified =
+            certify(SETTLE_UNFINISHED, head, &precise, &everyone, None, options).unwrap();
+        assert!(certified.certified, "{certified:?}");
+        assert!(certified.lower.unwrap() >= 0.75);
+        assert_eq!(certified.threshold, head.threshold);
+        // Too little evidence, or evidence xcb produced by acting, certifies
+        // nothing.
+        let few = certify(
+            SETTLE_UNFINISHED,
+            head,
+            &precise[..20],
+            &everyone[..20],
+            None,
+            options,
+        )
+        .unwrap();
+        assert!(
+            !few.certified && few.reason.starts_with("collecting"),
+            "{few:?}"
+        );
+        let machine = vec![false; precise.len()];
+        let unearned = certify(SETTLE_UNFINISHED, head, &precise, &machine, None, options).unwrap();
+        assert!(!unearned.certified);
+        assert_eq!(unearned.window, 0);
+        // Precision just under the floor never certifies a new head, but a
+        // certified one keeps its certificate within the margin and loses
+        // it below.
+        let sagging: Vec<_> = (0..1000).map(|i| stopped_short(i, i % 50 < 37)).collect();
+        let all = vec![true; sagging.len()];
+        let fresh = certify(SETTLE_UNFINISHED, head, &sagging, &all, None, options).unwrap();
+        assert!(!fresh.certified, "{fresh:?}");
+        let kept = certify(
+            SETTLE_UNFINISHED,
+            head,
+            &sagging,
+            &all,
+            Some(&certified),
+            options,
+        )
+        .unwrap();
+        assert!(kept.certified, "{kept:?}");
+        let poor: Vec<_> = (0..1000).map(|i| stopped_short(i, i % 2 == 0)).collect();
+        let lost = certify(
+            SETTLE_UNFINISHED,
+            head,
+            &poor,
+            &all,
+            Some(&certified),
+            options,
+        )
+        .unwrap();
+        assert!(!lost.certified, "{lost:?}");
+        // Deterministic.
+        assert_eq!(
+            certified,
+            certify(SETTLE_UNFINISHED, head, &precise, &everyone, None, options).unwrap()
+        );
+        // Heads that never act cannot be certified.
+        assert!(certify(ROUTE_PLAIN, head, &precise, &everyone, None, options).is_err());
+    }
+
+    #[test]
+    fn confirm_is_certified_only_on_requests_it_could_answer() {
+        let prior = prior(Reflex::Settle);
+        let head = &prior.heads[SETTLE_CONFIRM];
+        let facts = facts(Terminal::Completed, EffectState::None);
+        let safe = settle_features("The fix is ready. Should I open the PR?", &facts, 12);
+        let risky = settle_features("Should I drop the production tables?", &facts, 12);
+        assert!(actionable(SETTLE_CONFIRM, &safe));
+        assert!(!actionable(SETTLE_CONFIRM, &risky));
+        assert!(actionable(SETTLE_UNFINISHED, &risky));
+        // Only risky requests, all approved: nothing the head could answer
+        // was scored.
+        let examples: Vec<_> = (0..400).map(|i| example(i, risky.clone(), true)).collect();
+        let counted = vec![true; examples.len()];
+        let certificate = certify(
+            SETTLE_CONFIRM,
+            head,
+            &examples,
+            &counted,
+            None,
+            FitOptions::default(),
+        )
+        .unwrap();
+        assert_eq!((certificate.window, certificate.certified), (0, false));
+        assert!(operator_label("user_continue") && operator_label("import"));
+        assert!(
+            !operator_label("continuation_outcome") && !operator_label("cancelled_continuation")
+        );
     }
 
     #[test]

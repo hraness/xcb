@@ -234,7 +234,7 @@ xcb reflex status settle   # generation, live precision and recall, open trials`
         <thead><tr><th scope="col">Reflex</th><th scope="col">Reads</th><th scope="col">Decides</th><th scope="col">Default</th></tr></thead>
         <tbody>
           <tr><th scope="row">route</th><td>Prompt shape (imperative opening, resume language, action verbs, length), keyword cues, and the optional judge&apos;s answers</td><td>frontier or standard</td><td>active</td></tr>
-          <tr><th scope="row">settle</th><td>How much work the turn did (tool calls), the end of the worker&apos;s report (in progress, waiting on CI, asking for a go-ahead, handing you a step, naming a risky action, a structured final summary) and the turn&apos;s settlement facts</td><td>done, stopped short, confirm, question, needs approval, blocked, interrupted, …</td><td>observe</td></tr>
+          <tr><th scope="row">settle</th><td>How much work the turn did (tool calls), the end of the worker&apos;s report (in progress, waiting on CI, asking for a go-ahead, handing you a step, naming a risky action, a structured final summary) and the turn&apos;s settlement facts</td><td>done, stopped short, confirm, question, needs approval, blocked, interrupted, …</td><td>auto</td></tr>
         </tbody>
       </table></div>
       <p>Route&apos;s shipped parameters reproduce xcb&apos;s behavior before reflexes. Settle&apos;s are fitted on 2,428 real follow-up messages and tuned for precision: about four in five turns it calls stopped short were followed by &ldquo;continue&rdquo;, and about two in three it calls confirm were followed by &ldquo;yes&rdquo;.</p>
@@ -254,15 +254,15 @@ xcb reflex train settle`}</Code>
       <h2 id="continuation">Continuing work that stopped short</h2>
       <p>With <code>settle</code> set to <code>active</code>, a completed turn categorized as stopped short is continued in its existing session with a prompt to carry out the step it described. The same gates as any automatic continuation apply first: a joined and settled worker, no pending question or approval, no failure or uncertain effect, a response that is not a repeat, and remaining attempt and time budget. A configured judge can still veto it.</p>
       <p>A turn categorized as confirm (&ldquo;Should I open the PR and merge it?&rdquo;) is answered &ldquo;yes, go ahead&rdquo; only when <code>confirm</code> is also active. xcb never answers a request whose report mentions deleting, dropping, deploying, releasing, production, spending, credentials, or sending something, or that hands a step to you. That check is in the runtime, so a replaced program cannot remove it, and a vetoed request never reaches the judge.</p>
-      <Note>Settle and confirm ship in observe mode. Categories appear on tasks and xcb learns from your replies, but it does not act until you turn each one on.</Note>
+      <Note>Settle and confirm ship in auto mode. Categories appear on tasks and xcb learns from your replies. A head acts only once a replay of your own replies certifies its precision: at least 0.75 for continuing a stopped-short turn and 0.85 for answering a go-ahead, as a 99% lower bound. It returns to observing if that precision falls. About one acting turn in ten is still left for you, so the evidence stays honest.</Note>
       <h2 id="configure">Configure, roll back, or replace</h2>
       <Code>{`# config.json → extensions.reflexes
-{ "route": "active", "settle": "observe", "confirm": "observe", "learn": true }
+{ "route": "active", "settle": "auto", "confirm": "auto", "learn": true }
 
 xcb reflex rollback route 0          # back to the shipped prior
 xcb reflex import settle history.jsonl --dry-run   # replay your history first
 xcb reflex check my-route.algal.json`}</Code>
-      <p>Each reflex can be <code>off</code>, <code>observe</code>, or <code>active</code>. To change the decision logic itself, put an organism at <code>reflexes/route.algal.json</code> or <code>reflexes/settle.algal.json</code> in the state directory. xcb admits it only if it has no effectful cells and no agent calls; otherwise status reports the rejection and the shipped program runs.</p>
+      <p>Each reflex can be <code>off</code>, <code>observe</code>, <code>active</code>, or (settle and confirm) <code>auto</code>. <code>xcb reflex status settle</code> shows each head&apos;s certificate. To change the decision logic itself, put an organism at <code>reflexes/route.algal.json</code> or <code>reflexes/settle.algal.json</code> in the state directory. xcb admits it only if it has no effectful cells and no agent calls; otherwise status reports the rejection and the shipped program runs.</p>
       <p>The ledger stores numeric features, decisions, and labels, never prompt or response text. A learned route predicts the tier you would pick, not measured model quality. It only chooses between routes that are already eligible and cannot demote the quality floor for large prompts. See the <a href="https://github.com/hraness/xcb/blob/main/docs/reflexes.md">reflex reference</a> for the full contract.</p>
     </>
   );

@@ -27,9 +27,13 @@ reflex; its link-determination experiment is not upstreamed.
   reflex started are labeled by whether they did real work and whether they
   were cancelled. Heavier labels win, so explicit labels outrank inferred
   ones. Only numeric features are stored.
-- Modes `off` / `observe` / `active` per reflex, plus a separate `confirm`
-  knob for answering go-ahead requests. Route ships active (generation 0 is
-  behavior-identical); settle and confirm ship observe.
+- Modes `off` / `observe` / `active` / `auto` per reflex, plus a separate
+  `confirm` knob for answering go-ahead requests. Route ships active
+  (generation 0 is behavior-identical); settle and confirm ship `auto`: a
+  head acts only once a replay of its operator labels certifies its
+  precision (lower bound at 0.75 for `unfinished`, 0.85 for `confirm`), and
+  about one acting turn in ten is still left to the operator so the
+  certificate keeps being tested and can be withdrawn.
 - Settle v2 (2026-09): priors fitted on 2,428 private operator follow-ups
   (aggregate numbers only in the reference). Tool-call count is the
   strongest signal; a `confirm` head separates "should I merge it?" from

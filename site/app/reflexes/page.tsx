@@ -59,6 +59,8 @@ export default function Reflexes() {
                 <div className="xcb-evolve-step"><strong>label</strong><span>from your next move</span></div>
                 <span className="xcb-evolve-arrow" aria-hidden="true">→</span>
                 <div className="xcb-evolve-step"><strong>trial</strong><span>win on unseen labels</span></div>
+                <span className="xcb-evolve-arrow" aria-hidden="true">→</span>
+                <div className="xcb-evolve-step"><strong>certify</strong><span>act once your replies prove it</span></div>
               </div>
               <p>A challenger is promoted only if, on held-out labels that arrived after it was fitted, it lowers log loss without losing accuracy or ranking quality. Each generation records its parent and the trial that promoted it. <code>xcb reflex rollback settle 0</code> returns to the defaults.</p>
               <p>Replaying real operator history from a weak starting point, forward trials reached an AUC of 0.77, against 0.75 for a fixed one-in-five holdout and 0.58 for not learning at all, and none of your labels is withheld from learning forever. From a good starting point, trials mostly leave it alone.</p>
@@ -75,7 +77,7 @@ export default function Reflexes() {
             <div className="xcb-readiness">
               <div><h3>Replace a program</h3><p>Drop an organism at <code>reflexes/route.algal.json</code> in the state directory to add a gate or combine heads differently. xcb admits it only if it has no effects and no agent calls. Every observation records the digest of the program that made it.</p></div>
               <div><h3>Bootstrap from history</h3><p><code>xcb reflex import</code> replays your own labeled history in order, reports how the reflex would have done, and adopts only heads that won a trial. It keeps derived features, not text.</p></div>
-              <div><h3>Turn it up gradually</h3><p>Each reflex is off, observing, or active, and answering a go-ahead request has its own switch. Both ship observing. The deterministic safety gates, a risk veto for deletion, deployment, spending and credentials, and a configured judge&apos;s veto still apply.</p></div>
+              <div><h3>Acts once it has earned it</h3><p>Continuing a stopped-short turn and answering a go-ahead ship on <code>auto</code>. Each acts only after your own replies certify its precision (0.75 and 0.85 as a 99% lower bound), leaves about one turn in ten to you, and goes back to observing if it slips. The deterministic safety gates, a risk veto for deletion, deployment, spending and credentials, and a configured judge&apos;s veto still apply.</p></div>
               <a className="xcb-compare-guide-link" href="/docs/reflexes">Read the reflex guide ↗</a>
             </div>
           </MarketingSection>

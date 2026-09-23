@@ -1552,8 +1552,10 @@ impl ManagedStore {
     /// cancellation.
     fn label_cancelled_continuation(&self, task: &ManagedTask) {
         let reflexes = self.config_reflexes();
-        let (Some(head), Some(root)) = (acted_continuation(&reflexes, task), self.root.parent())
-        else {
+        let Some(root) = self.root.parent() else {
+            return;
+        };
+        let Some(head) = acted_continuation(root, &reflexes, task) else {
             return;
         };
         if let Ok(store) = reflex::ReflexStore::open(root) {
@@ -2566,7 +2568,7 @@ impl ManagedStore {
             if (continue_like(trimmed) || approves_request)
                 && attachments.is_empty()
                 && task.session.is_some()
-                && reflexes.settle == ReflexMode::Active
+                && matches!(reflexes.settle, ReflexMode::Active | ReflexMode::Auto)
             {
                 return match self.reply(task, conversation, id.clone(), text.clone(), attachments).await {
                     Ok(_) => Ok(()),
@@ -2886,7 +2888,9 @@ impl ManagedStore {
             _ => None,
         };
         let acted = match result {
-            Ok(outcome) if !unsettled => continuation_outcome(&config, &task, outcome),
+            Ok(outcome) if !unsettled => {
+                continuation_outcome(&config, store.root(), &task, outcome)
+            }
             _ => None,
         };
         let continue_task = match result {
@@ -2896,7 +2900,9 @@ impl ManagedStore {
             _ => false,
         };
         let answer = match (result, &settle) {
-            (Ok(outcome), Some(decision)) => answers_confirm(&config, decision, outcome),
+            (Ok(outcome), Some(decision)) => {
+                answers_confirm(&config, store.root(), decision, outcome)
+            }
             _ => false,
         };
         let budget_exhausted = match result {
@@ -3064,7 +3070,12 @@ impl ManagedStore {
                 continuation_prompt(settle.as_ref().filter(
                     |decision| match decision.value.as_str() {
                         "confirm" => answer,
-                        _ => config.extensions.reflexes.settle == ReflexMode::Active,
+                        _ => head_acts(
+                            store.root(),
+                            &config.extensions.reflexes,
+                            xcb_core::reflex::SETTLE_UNFINISHED,
+                            &decision.features,
+                        ),
                     },
                 ));
         } else if state.terminal() {
@@ -3482,30 +3493,99 @@ fn confirmable(decision: &reflex::Decision, text: &str) -> bool {
 
 /// Whether this settled turn's `confirm` decision may be answered "yes":
 /// only a completed idle turn, whatever a custom program categorized.
-fn answers_confirm(config: &Config, decision: &reflex::Decision, outcome: &Outcome) -> bool {
-    config.extensions.reflexes.settle != ReflexMode::Off
-        && config.extensions.reflexes.confirm == ReflexMode::Active
-        && outcome.state == State::Idle
+fn answers_confirm(
+    config: &Config,
+    root: &Path,
+    decision: &reflex::Decision,
+    outcome: &Outcome,
+) -> bool {
+    outcome.state == State::Idle
         && outcome.facts.terminal == Terminal::Completed
         && confirmable(decision, &outcome.text)
+        && head_acts(
+            root,
+            &config.extensions.reflexes,
+            xcb_core::reflex::SETTLE_CONFIRM,
+            &decision.features,
+        )
 }
 
-/// The settle head whose active decision started the task's current run: a
-/// run is automatic while `attempts` is non-zero, since a user reply resets
-/// it, and the task's last category says which decision continued it.
-fn acted_continuation(reflexes: &ReflexConfig, task: &ManagedTask) -> Option<&'static str> {
-    if task.attempts == 0 || reflexes.settle == ReflexMode::Off {
+/// The mode that governs one settle head. `confirm` never answers while
+/// settle is off.
+fn head_mode(reflexes: &ReflexConfig, head: &str) -> ReflexMode {
+    match reflexes.settle {
+        ReflexMode::Off => ReflexMode::Off,
+        _ if head == xcb_core::reflex::SETTLE_CONFIRM => reflexes.confirm,
+        mode => mode,
+    }
+}
+
+/// Whether a settle head acts on a turn: always when active; under `auto`
+/// only once the operator's labels certified it and the turn scores at or
+/// above the certified threshold. An unreadable ledger never acts.
+fn head_acts(
+    root: &Path,
+    reflexes: &ReflexConfig,
+    head: &str,
+    features: &xcb_core::reflex::Features,
+) -> bool {
+    match head_mode(reflexes, head) {
+        ReflexMode::Active => true,
+        ReflexMode::Auto => reflex::ReflexStore::open(root)
+            .and_then(|store| store.certified(Reflex::Settle, head, features))
+            .unwrap_or(false),
+        ReflexMode::Off | ReflexMode::Observe => false,
+    }
+}
+
+/// Whether a settle head may be acting at all, for labeling the runs it
+/// started.
+fn head_enabled(root: &Path, reflexes: &ReflexConfig, head: &str) -> bool {
+    match head_mode(reflexes, head) {
+        ReflexMode::Active => true,
+        ReflexMode::Auto => reflex::ReflexStore::open(root)
+            .and_then(|store| store.certificate(Reflex::Settle, head))
+            .is_ok_and(|certificate| certificate.is_some_and(|certificate| certificate.certified)),
+        ReflexMode::Off | ReflexMode::Observe => false,
+    }
+}
+
+/// Under `auto`, about one turn in ten that a certified head would act on
+/// is left for the operator instead. Their replies are the only unbiased
+/// evidence a head keeps earning once it acts, and they are what can
+/// withdraw its certificate. Deterministic per task turn.
+fn held_for_operator(reflexes: &ReflexConfig, head: &str, task: &ManagedTask) -> bool {
+    head_mode(reflexes, head) == ReflexMode::Auto && held_turn(head, &task.id, task.revision)
+}
+
+fn held_turn(head: &str, task: &Id, revision: u64) -> bool {
+    u8::from_str_radix(
+        &digest(format!(
+            "xcb-reflex-explore-v1\0{head}\0{}\0{revision}",
+            task.as_str()
+        ))[..2],
+        16,
+    )
+    .is_ok_and(|byte| byte < 26)
+}
+
+/// The settle head whose decision started the task's current run: a run is
+/// automatic while `attempts` is non-zero, since a user reply resets it, and
+/// the task's last category says which decision continued it.
+fn acted_continuation(
+    root: &Path,
+    reflexes: &ReflexConfig,
+    task: &ManagedTask,
+) -> Option<&'static str> {
+    if task.attempts == 0 {
         return None;
     }
-    match task.settle.as_deref()? {
-        "stopped_short" if reflexes.settle == ReflexMode::Active => {
-            Some(xcb_core::reflex::SETTLE_UNFINISHED)
-        }
-        "confirm" if reflexes.confirm == ReflexMode::Active => {
-            Some(xcb_core::reflex::SETTLE_CONFIRM)
-        }
-        _ => None,
-    }
+    let head = match task.settle.as_deref()? {
+        "stopped_short" => xcb_core::reflex::SETTLE_UNFINISHED,
+        "confirm" => xcb_core::reflex::SETTLE_CONFIRM,
+        _ => return None,
+    };
+    head_enabled(root, reflexes, head).then_some(head)
 }
 
 /// How an acted-on continuation turned out labels the decision behind it.
@@ -3515,10 +3595,11 @@ fn acted_continuation(reflexes: &ReflexConfig, task: &ManagedTask) -> Option<&'s
 /// failed or cancelled run says nothing about the decision.
 fn continuation_outcome(
     config: &Config,
+    root: &Path,
     task: &ManagedTask,
     outcome: &Outcome,
 ) -> Option<(&'static str, bool)> {
-    let head = acted_continuation(&config.extensions.reflexes, task)?;
+    let head = acted_continuation(root, &config.extensions.reflexes, task)?;
     let tool_calls = outcome.tool_calls?;
     (outcome.facts.failure.is_none() && outcome.facts.terminal == Terminal::Completed)
         .then_some((head, tool_calls > 0))
@@ -3596,22 +3677,34 @@ async fn task_should_continue(
     if !deterministic && !semantic {
         return Ok(false);
     }
-    // In active mode, a completed turn the settle reflex categorizes as
-    // stopped short is continued like an interrupted one, and one waiting
-    // for a go-ahead is answered when confirmation is active too and nothing
-    // in the request is risky. Every deterministic gate above still applies,
-    // and a configured judge keeps its veto.
+    // When the settle head acts (see `head_acts`), a completed turn the
+    // reflex categorizes as stopped short is continued like an interrupted
+    // one, and one waiting for a go-ahead is answered when nothing in the
+    // request is risky. Every deterministic gate above still applies, and a
+    // configured judge keeps its veto.
+    let reflexes = &config.extensions.reflexes;
     let stopped_short = semantic
-        && config.extensions.reflexes.settle == ReflexMode::Active
-        && settle.is_some_and(|decision| decision.value == "stopped_short");
-    let confirm =
-        semantic && settle.is_some_and(|decision| answers_confirm(&config, decision, outcome));
+        && settle.is_some_and(|decision| {
+            decision.value == "stopped_short"
+                && head_acts(
+                    store.root(),
+                    reflexes,
+                    xcb_core::reflex::SETTLE_UNFINISHED,
+                    &decision.features,
+                )
+        })
+        && !held_for_operator(reflexes, xcb_core::reflex::SETTLE_UNFINISHED, task);
+    let confirm = semantic
+        && settle.is_some_and(|decision| answers_confirm(&config, store.root(), decision, outcome))
+        && !held_for_operator(reflexes, xcb_core::reflex::SETTLE_CONFIRM, task);
     let verdict = deterministic || stopped_short || confirm;
     // A turn asking for a go-ahead that xcb may not answer stays with the
-    // operator: the judge is not consulted, so it cannot turn a vetoed
-    // request into a "yes".
-    if settle.is_some_and(|decision| decision.value == "confirm") && !confirm {
-        return Ok(deterministic);
+    // operator. Only a deterministic continuation (an interrupted limit) may
+    // still proceed, with the generic prompt, and a judge may veto it but
+    // never turn the request into a "yes".
+    let veto_only = settle.is_some_and(|decision| decision.value == "confirm") && !confirm;
+    if veto_only && !deterministic {
+        return Ok(false);
     }
     if !config.extensions.judge.enabled {
         return Ok(verdict);
@@ -3656,11 +3749,22 @@ async fn task_should_continue(
     let Ok(Ok(answers)) = asked else {
         return Ok(verdict);
     };
-    Ok(answers
+    let approved = answers
         .answers
         .get("continue_task")
         .and_then(|answer| answer.noul())
-        .is_some_and(|probability| probability >= 0.75))
+        .is_some_and(|probability| probability >= 0.75);
+    Ok(judged(verdict, veto_only, approved))
+}
+
+/// Combines the judge's answer with the verdict it reviewed. Where the
+/// judge may only veto, it can stop a continuation but never start one.
+fn judged(verdict: bool, veto_only: bool, approved: bool) -> bool {
+    if veto_only {
+        verdict && approved
+    } else {
+        approved
+    }
 }
 
 fn workspace_busy(store: &Store, workspace: &str) -> Result<bool> {
@@ -7467,6 +7571,9 @@ mod tests {
         let workspace = workspace_root.path().canonicalize().unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
+        let mut config = Config::default();
+        config.extensions.reflexes.settle = ReflexMode::Observe;
+        config.save(&state, None).unwrap();
         let chat = conversation(&managed, &workspace).await;
         let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_first").await;
         let running = mark_running(&managed, &task).await;
@@ -7502,6 +7609,147 @@ mod tests {
             .status(Reflex::Settle, ReflexMode::Observe, true)
             .unwrap();
         assert_eq!((status.observations, status.labeled), (1, 1));
+    }
+
+    /// Under the default `auto`, a head acts only once it holds a
+    /// certificate and the turn scores at or above the certified threshold,
+    /// and about one acting turn in ten is still left for the operator.
+    #[tokio::test]
+    async fn auto_settle_acts_only_once_certified() {
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        assert_eq!(
+            Config::default().extensions.reflexes.settle,
+            ReflexMode::Auto
+        );
+        let chat = conversation(&managed, &workspace).await;
+        let text = "Schema migrated. Next, I'll update the callers:";
+        // No certificate yet: auto observes.
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_uncertified").await;
+        let running = mark_running(&managed, &task).await;
+        let held = managed
+            .finish(&xcb, &running.id, Ok(worked_outcome(text, 60)))
+            .await
+            .unwrap();
+        assert_eq!(
+            (held.state, held.settle.as_deref()),
+            (TaskState::Completed, Some("stopped_short"))
+        );
+        // Auto still routes the operator's "continue" into that session.
+        managed
+            .submit(
+                &chat,
+                message("m_go"),
+                "continue".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            managed.task(&held.id).unwrap().unwrap().state,
+            TaskState::Queued
+        );
+        let reflexes = reflex::ReflexStore::open(&state).unwrap();
+        let certificate = |threshold: f64| xcb_core::reflex::Certificate {
+            certified: true,
+            threshold,
+            floor: 0.75,
+            window: 200,
+            fired: 60.0,
+            precision: Some(0.9),
+            lower: Some(0.8),
+            reason: "test".into(),
+        };
+        // Certified above anything this turn scores: still observes.
+        reflexes
+            .put_certificate(Reflex::Settle, "unfinished", certificate(0.999))
+            .unwrap();
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_high").await;
+        let running = mark_running(&managed, &task).await;
+        let held = managed
+            .finish(&xcb, &running.id, Ok(worked_outcome(text, 60)))
+            .await
+            .unwrap();
+        assert_eq!(held.state, TaskState::Completed);
+        // Certified at the head's own threshold: it acts, except on turns
+        // held for the operator.
+        reflexes
+            .put_certificate(Reflex::Settle, "unfinished", certificate(0.65))
+            .unwrap();
+        let mut continued = 0;
+        for index in 0..12 {
+            let task = prepared_task(
+                &managed,
+                &xcb,
+                &chat,
+                &workspace,
+                &format!("m_auto_{index}"),
+            )
+            .await;
+            let running = mark_running(&managed, &task).await;
+            let held_back = held_turn("unfinished", &running.id, running.revision);
+            let next = managed
+                .finish(&xcb, &running.id, Ok(worked_outcome(text, 60)))
+                .await
+                .unwrap();
+            if held_back {
+                assert_eq!(next.state, TaskState::Completed);
+            } else {
+                assert_eq!(next.state, TaskState::Queued);
+                assert!(next.next_prompt.contains("next step you described"));
+                continued += 1;
+            }
+        }
+        assert!(continued >= 6, "{continued}");
+        // A withdrawn certificate stops it again.
+        reflexes
+            .put_certificate(
+                Reflex::Settle,
+                "unfinished",
+                xcb_core::reflex::Certificate {
+                    certified: false,
+                    ..certificate(0.65)
+                },
+            )
+            .unwrap();
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_withdrawn").await;
+        let running = mark_running(&managed, &task).await;
+        let held = managed
+            .finish(&xcb, &running.id, Ok(worked_outcome(text, 60)))
+            .await
+            .unwrap();
+        assert_eq!(held.state, TaskState::Completed);
+    }
+
+    #[test]
+    fn about_one_acting_turn_in_ten_is_held_for_the_operator() {
+        let task = Id::new("t_explore").unwrap();
+        let held = (0..2000)
+            .filter(|revision| held_turn("unfinished", &task, *revision))
+            .count();
+        assert!((140..=260).contains(&held), "{held}");
+        // Heads are held independently.
+        assert!(
+            (0..200).any(|revision| held_turn("unfinished", &task, revision)
+                != held_turn("confirm", &task, revision))
+        );
+    }
+
+    /// Where the judge may only veto (a go-ahead xcb may not give, on a turn
+    /// that continues deterministically), it can stop the continuation but
+    /// never start one.
+    #[test]
+    fn a_veto_only_judge_cannot_start_a_continuation() {
+        assert!(!judged(false, true, true));
+        assert!(!judged(true, true, false));
+        assert!(judged(true, true, true));
+        assert!(judged(false, false, true));
     }
 
     /// In active mode a completed turn categorized as stopped short passes
