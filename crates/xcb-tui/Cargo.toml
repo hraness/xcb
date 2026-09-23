@@ -16,4 +16,4 @@ ratatui = { version = "=0.30.2", default-features = false, features = ["crosster
 ratatui-textarea = "=0.8.0"
 serde_json = "=1.0.151"
 uuid = { version = "=1.26.1", features = ["v4"] }
-xcb-core = { version = "0.4.0", path = "../xcb-core" }
+xcb-core = { version = "0.5.0", path = "../xcb-core" }

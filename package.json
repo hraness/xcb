@@ -1,6 +1,6 @@
 {
   "name": "@hraness/xcb",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Excalibur: a metaharness and SDK for AI subscriptions, with a customizable terminal workspace, account custody, and token observability. Native xcb is in development.",
   "type": "module",
   "license": "MIT",

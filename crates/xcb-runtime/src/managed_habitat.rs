@@ -310,6 +310,24 @@ impl ManagedStore {
     ) -> Result<String> {
         use xcb_core::ui::HabitatCommand;
         match command {
+            HabitatCommand::Steer { task, event, text } => {
+                let event = self.steer_task(&task, event, text)?;
+                Ok(format!(
+                    "Guidance {} saved: {}. Delivery waits for the next safe authorized turn.",
+                    event.id, event.status
+                ))
+            }
+            HabitatCommand::WatchTask {
+                task,
+                source,
+                event,
+            } => {
+                let watch = self.watch_task(&task, &source, event)?;
+                Ok(format!(
+                    "Watch {} saved: reports from {} go to {} within its existing authority.",
+                    watch.id, watch.source, watch.task
+                ))
+            }
             HabitatCommand::ConfigureProject {
                 expected_revision,
                 goal,

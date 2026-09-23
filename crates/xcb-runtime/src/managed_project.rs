@@ -477,12 +477,67 @@ impl ManagedStore {
         next.detail = "reconciled from exact settled worker evidence; no retry launched".into();
         next.revision += 1;
         next.updated_at_ms = now_ms().max(task.updated_at_ms);
+        let batch = self.inbox_batch(&task.id)?;
+        let unstarted = match &batch {
+            Some(batch) => {
+                store.settled_input_submission(&batch.session, batch.message_count)? == Some(false)
+                    && outcome.facts.effects == EffectState::None
+                    && !outcome.facts.pending_attention
+            }
+            None => false,
+        };
+        let delivered = match &batch {
+            Some(batch) => {
+                store.input_matches_digest(
+                    &batch.session,
+                    batch.message_count,
+                    &batch.prompt_digest,
+                )? && store.settled_input_submission(&batch.session, batch.message_count)?
+                    == Some(true)
+            }
+            None => false,
+        };
+        if batch.is_some() && !delivered && !unstarted {
+            return Err(Error::Conflict(
+                "exact inbox prompt evidence is unavailable",
+            ));
+        }
+        if unstarted {
+            let batch = batch.as_ref().expect("unstarted requires a batch");
+            if !batch.events.is_empty()
+                && next.user_inputs.last() == Some(&inbox::render(&batch.events))
+            {
+                next.user_inputs.pop();
+                next.delivered_inputs = next.delivered_inputs.min(next.user_inputs.len());
+                next.delivered_preferences.clear();
+            }
+            next.state = if task.cancel_requested {
+                TaskState::Cancelled
+            } else {
+                TaskState::NeedsInput
+            };
+            next.attention = (next.state == TaskState::NeedsInput).then_some(State::NeedsAction);
+            next.detail = "reconciled exact evidence that the prompt was not submitted; guidance retained, no retry launched".into();
+        }
         let message = Self::assistant(
             format!("**{}** · {}", next.title, next.detail),
             Some(id),
             next.revision,
         );
-        self.transition(&task, next, Some(message)).await
+        self.transition_inbox(
+            &task,
+            next,
+            Some(message),
+            &[],
+            None,
+            None,
+            Some(&inbox::Change::Finish {
+                delivered,
+                unstarted,
+                stamp: None,
+            }),
+        )
+        .await
     }
 }
 

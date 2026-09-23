@@ -41,6 +41,27 @@ pub struct SlashCommand {
 }
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
+        name: "/steer",
+        alias: "",
+        args: "<task-id> <guidance>",
+        summary: "queue guidance for the next authorized task turn",
+        needs_args: true,
+    },
+    SlashCommand {
+        name: "/watch",
+        alias: "",
+        args: "<target-task> <source-task>",
+        summary: "request another task's terminal report in the target inbox",
+        needs_args: true,
+    },
+    SlashCommand {
+        name: "/inbox",
+        alias: "",
+        args: "[all|task-id]",
+        summary: "inspect durable guidance and delivery receipts",
+        needs_args: false,
+    },
+    SlashCommand {
         name: "/project",
         alias: "",
         args: "[all|grant <tasks> <hours> <goal>|pause|resume]",
@@ -192,6 +213,7 @@ pub enum PickAction {
     Session(Id),
     Task(Id),
     Backlog(Id),
+    Inbox(Id),
     Schedule(Id),
     Project(Id),
     Text(String),
@@ -344,6 +366,31 @@ fn inspect_task(task: &xcb_core::ui::TaskRow) -> Modal {
     }
 }
 
+fn inspect_inbox(event: &xcb_core::ui::InboxRow) -> Modal {
+    Modal::Inspect {
+        title: format!("Inbox {}", event.id),
+        lines: vec![
+            format!("event         {}", event.id),
+            format!("task          {}", event.task),
+            format!("conversation  {}", event.conversation),
+            format!("sequence      {}", event.sequence),
+            format!("kind          {}", event.kind),
+            format!("delivery      {}", event.status),
+            format!("created       {} ms since epoch", event.created_at_ms),
+            format!("updated       {} ms since epoch", event.updated_at_ms),
+            String::new(),
+            "Content".into(),
+            event.text.clone(),
+            String::new(),
+            "Delivery receipt".into(),
+            event.receipt.clone().unwrap_or_else(|| "No settled delivery receipt yet.".into()),
+            String::new(),
+            "Delivery records inclusion in a worker turn, not proof the model followed the guidance. Guidance cannot grant approval or change project authority.".into(),
+        ],
+        scroll: 0,
+    }
+}
+
 /// Fingerprint of the rendered parts of a `View`. Used to skip repaints when a
 /// refresh publishes a snapshot identical to what is already on screen. Only
 /// fields the renderer reads participate; messages are append-only in the
@@ -444,6 +491,18 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         project.revision.hash(&mut hasher);
         project.status.hash(&mut hasher);
     }
+    for event in &view.inbox {
+        event.id.as_str().hash(&mut hasher);
+        event.task.as_str().hash(&mut hasher);
+        event.conversation.as_str().hash(&mut hasher);
+        event.sequence.hash(&mut hasher);
+        event.kind.hash(&mut hasher);
+        event.text.hash(&mut hasher);
+        event.status.hash(&mut hasher);
+        event.created_at_ms.hash(&mut hasher);
+        event.updated_at_ms.hash(&mut hasher);
+        event.receipt.hash(&mut hasher);
+    }
     for agent in &view.subagents {
         agent.id.as_str().hash(&mut hasher);
         (agent.state as u8).hash(&mut hasher);
@@ -476,6 +535,44 @@ struct PendingEcho {
     session: Option<Id>,
     text: String,
     attachments: usize,
+}
+
+enum InboxScope {
+    Current,
+    All,
+    Task(Id),
+}
+
+impl InboxScope {
+    fn title(&self) -> &'static str {
+        match self {
+            Self::Current => "This agent · inbox · recent delivery history",
+            Self::All => "All agents · inbox · recent delivery history",
+            Self::Task(_) => "Task inbox · recent delivery history",
+        }
+    }
+
+    fn items(&self, view: &View) -> Vec<PickItem> {
+        view.inbox
+            .iter()
+            .filter(|event| match self {
+                Self::Current => view.conversation.as_ref() == Some(&event.conversation),
+                Self::All => true,
+                Self::Task(task) => &event.task == task,
+            })
+            .map(|event| PickItem {
+                label: format!(
+                    "{} · {} · {} · {} · {}",
+                    event.kind,
+                    event.status,
+                    event.task,
+                    xcb_core::display_text(&event.text, 60).replace(['\n', '\t'], " "),
+                    event.id
+                ),
+                action: PickAction::Inbox(event.id.clone()),
+            })
+            .collect()
+    }
 }
 
 #[derive(Default)]
@@ -513,6 +610,11 @@ pub struct App {
     /// View confirms the message landed — submit feedback is instant while
     /// the kernel persists and the provider starts.
     pending_echoes: VecDeque<PendingEcho>,
+    /// Preserve a command's identity while its full channel retains the draft.
+    inbox_draft_event: Option<(String, Id)>,
+    /// Refresh an open receipt inspector when durable delivery changes.
+    inbox_inspect: Option<Id>,
+    inbox_scope: Option<InboxScope>,
     /// Highlighted row of the slash-command typeahead menu.
     slash_selected: Cell<usize>,
     /// Esc closes the menu without canceling the turn; typing reopens it.
@@ -643,6 +745,9 @@ impl App {
             return Vec::new();
         }
         const MANAGED: &[&str] = &[
+            "/steer",
+            "/watch",
+            "/inbox",
             "/project",
             "/memory",
             "/attention",
@@ -787,6 +892,36 @@ impl App {
                     self.dirty = true;
                 }
                 self.view = *view;
+                if let Some(scope) = &self.inbox_scope {
+                    if let Some(Modal::Picker { title, items, .. }) = &mut self.modal
+                        && title.as_str() == scope.title()
+                    {
+                        *items = scope.items(&self.view);
+                    } else {
+                        self.inbox_scope = None;
+                    }
+                }
+                if let Some(id) = &self.inbox_inspect {
+                    let title = format!("Inbox {id}");
+                    if let Some(Modal::Inspect {
+                        title: current,
+                        scroll,
+                        ..
+                    }) = &self.modal
+                        && *current == title
+                    {
+                        let scroll = *scroll;
+                        if let Some(event) = self.view.inbox.iter().find(|event| &event.id == id) {
+                            let mut modal = inspect_inbox(event);
+                            if let Modal::Inspect { scroll: next, .. } = &mut modal {
+                                *next = scroll;
+                            }
+                            self.modal = Some(modal);
+                        }
+                    } else {
+                        self.inbox_inspect = None;
+                    }
+                }
                 // The badge timer follows the run lifecycle, not session
                 // identity — a remote-owned run still counts as working.
                 if self.has_live_work() {
@@ -913,6 +1048,7 @@ impl App {
         true
     }
     fn picker(&mut self, title: &str, items: Vec<PickItem>) {
+        self.inbox_scope = None;
         self.modal = Some(Modal::Picker {
             title: title.into(),
             query: String::new(),
@@ -973,10 +1109,78 @@ impl App {
         }
     }
 
+    fn inbox_event_id(&mut self, command: &str, arguments: &str) -> Id {
+        let draft = format!("{command} {arguments}");
+        if let Some((previous, event)) = &self.inbox_draft_event
+            && previous == &draft
+        {
+            return event.clone();
+        }
+        let event = Id::new(format!("inbox_{}", uuid::Uuid::new_v4().simple()))
+            .expect("generated inbox event id");
+        self.inbox_draft_event = Some((draft, event.clone()));
+        event
+    }
+
+    fn send_inbox(
+        &mut self,
+        output: &SyncSender<Intent>,
+        intent: Intent,
+        command: &str,
+        arguments: &str,
+    ) {
+        if self.try_send(output, intent) {
+            self.inbox_draft_event = None;
+        } else {
+            self.composer.set_text(&format!("{command} {arguments}"));
+        }
+    }
+
     fn habitat_command(&mut self, command: &str, arguments: &str, output: &SyncSender<Intent>) {
         let (action, tail) = arguments.split_once(' ').unwrap_or((arguments, ""));
         let tail = tail.trim();
         match command {
+            "/steer" if !tail.is_empty() => {
+                if let Ok(task) = Id::new(action) {
+                    let event = self.inbox_event_id(command, arguments);
+                    self.send_inbox(output, Intent::Habitat(HabitatCommand::Steer {
+                        task, event, text: tail.into(),
+                    }), command, arguments);
+                } else {
+                    self.notice = "Use /steer <task-id> <guidance>. Task IDs are shown in /tasks and /backlog.".into();
+                }
+            }
+            "/steer" => self.notice = "Use /steer <task-id> <guidance>. Guidance waits for an authorized turn; approvals remain separate.".into(),
+            "/watch" => {
+                if let (Ok(task), Ok(source)) = (Id::new(action), Id::new(tail)) {
+                    let event = self.inbox_event_id(command, arguments);
+                    self.send_inbox(output, Intent::Habitat(HabitatCommand::WatchTask {
+                        task, source, event,
+                    }), command, arguments);
+                } else {
+                    self.notice = "Use /watch <target-task-id> <source-task-id>. Request a terminal report from the same project/workspace.".into();
+                }
+            }
+            "/inbox" => {
+                let scope = if arguments.is_empty() {
+                    InboxScope::Current
+                } else if arguments == "all" {
+                    InboxScope::All
+                } else if let Ok(id) = Id::new(arguments) {
+                    InboxScope::Task(id)
+                } else {
+                    self.notice = "Use /inbox for this conversation, /inbox all, or /inbox <task-id>.".into();
+                    return;
+                };
+                let items = scope.items(&self.view);
+                if items.is_empty() {
+                    self.notice = "No matching events in the current bounded inbox view. Use xcb inbox --task <task-id> to inspect task history.".into();
+                } else {
+                    self.notice = "Showing a recent global inbox snapshot. Use xcb inbox --task <task-id> for paged history beyond this bounded view.".into();
+                }
+                self.picker(scope.title(), items);
+                self.inbox_scope = Some(scope);
+            }
             "/project" if arguments.is_empty() || arguments == "all" => {
                 let all = arguments == "all";
                 self.picker("Project grants · goal / budget / status", self.view.projects.iter()
@@ -1101,7 +1305,15 @@ impl App {
         let arguments = arguments.trim();
         if matches!(
             command,
-            "/backlog" | "/attention" | "/schedule" | "/reply" | "/project" | "/memory"
+            "/backlog"
+                | "/attention"
+                | "/schedule"
+                | "/reply"
+                | "/project"
+                | "/memory"
+                | "/steer"
+                | "/watch"
+                | "/inbox"
         ) {
             if self.managed_mode() {
                 self.habitat_command(command, arguments, output);
@@ -1883,7 +2095,29 @@ impl App {
                 PickAction::Session(id) => self.send(output, Intent::Resume(id)),
                 PickAction::Task(id) => {
                     if let Some(task) = self.view.tasks.iter().find(|task| task.id == id) {
-                        self.modal = Some(inspect_task(task));
+                        let mut modal = inspect_task(task);
+                        if let Modal::Inspect { lines, .. } = &mut modal {
+                            let events = self
+                                .view
+                                .inbox
+                                .iter()
+                                .filter(|event| event.task == id)
+                                .count();
+                            lines.extend([
+                                String::new(),
+                                format!("Inbox: {events} events in the current view · /inbox {id}"),
+                                format!("/steer {id} <guidance>"),
+                            ]);
+                        }
+                        self.modal = Some(modal);
+                    }
+                }
+                PickAction::Inbox(id) => {
+                    if let Some(event) = self.view.inbox.iter().find(|event| event.id == id) {
+                        self.modal = Some(inspect_inbox(event));
+                        self.inbox_inspect = Some(id);
+                    } else {
+                        self.notice = "This event is outside the current bounded inbox view. Use xcb inbox --task <task-id> to inspect its history.".into();
                     }
                 }
                 PickAction::Backlog(id) => {
@@ -1903,6 +2137,8 @@ impl App {
                             task.summary.clone(),
                             String::new(),
                         ];
+                        lines.push(format!("/inbox {} · delivery history", task.id));
+                        lines.push(format!("/steer {} <guidance>", task.id));
                         if task.deferred {
                             lines.push(format!("/backlog run {}", task.id));
                             lines.push(format!("/backlog edit {} <new prompt>", task.id));
@@ -2125,6 +2361,150 @@ mod habitat_surface_tests {
             },
         ];
         app
+    }
+
+    fn inbox_event(id: &str, task: &str, conversation: &str) -> xcb_core::ui::InboxRow {
+        xcb_core::ui::InboxRow {
+            id: Id::new(id).unwrap(),
+            task: Id::new(task).unwrap(),
+            conversation: Id::new(conversation).unwrap(),
+            sequence: 7,
+            kind: "steering".into(),
+            text: "Preserve the existing settings\nThen check the parser".into(),
+            status: "queued".into(),
+            created_at_ms: 1,
+            updated_at_ms: 2,
+            receipt: None,
+        }
+    }
+
+    #[test]
+    fn steering_and_watch_are_explicit_task_events_not_replies_or_new_work() {
+        let (tx, rx) = sync_channel(8);
+        let mut app = app();
+        app.slash("/steer task_not_in_bounded_view retain settings", &tx);
+        let first = match rx.try_recv().unwrap() {
+            Intent::Habitat(HabitatCommand::Steer { task, event, text }) => {
+                assert_eq!(task.as_str(), "task_not_in_bounded_view");
+                assert_eq!(text, "retain settings");
+                event
+            }
+            _ => panic!("explicit steering intent"),
+        };
+        app.slash("/watch task_a task_b", &tx);
+        match rx.try_recv().unwrap() {
+            Intent::Habitat(HabitatCommand::WatchTask {
+                task,
+                source,
+                event,
+            }) => {
+                assert_eq!(task.as_str(), "task_a");
+                assert_eq!(source.as_str(), "task_b");
+                assert_ne!(event, first);
+            }
+            _ => panic!("explicit watch intent"),
+        }
+        for invalid in [
+            "/steer",
+            "/steer task_a",
+            "/steer invalid/id text",
+            "/watch task_a",
+            "/watch task_a task_b extra",
+        ] {
+            app.slash(invalid, &tx);
+            assert!(rx.try_recv().is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn full_command_queue_retains_inbox_draft_and_identity_until_sent() {
+        let (tx, rx) = sync_channel(1);
+        tx.try_send(Intent::Refresh).unwrap();
+        let mut app = app();
+        let command = "/steer task_a preserve this guidance";
+        app.slash(command, &tx);
+        assert_eq!(app.composer.text(), command);
+        let event = app.inbox_draft_event.as_ref().unwrap().1.clone();
+        app.slash(command, &tx);
+        assert_eq!(app.inbox_draft_event.as_ref().unwrap().1, event);
+        rx.try_recv().unwrap();
+        app.slash(command, &tx);
+        assert!(
+            matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::Steer { event: sent, .. })) if sent == event)
+        );
+        assert!(app.inbox_draft_event.is_none());
+    }
+
+    #[test]
+    fn inbox_scopes_and_inspection_preserve_delivery_evidence() {
+        let (tx, rx) = sync_channel(8);
+        let mut app = app();
+        app.view.inbox = vec![
+            inbox_event("event_a", "task_a", "project_a"),
+            inbox_event("event_b", "task_b", "project_b"),
+        ];
+        app.slash("/inbox", &tx);
+        assert!(matches!(&app.modal, Some(Modal::Picker { items, .. }) if items.len() == 1));
+        app.slash("/inbox all", &tx);
+        assert!(matches!(&app.modal, Some(Modal::Picker { items, .. }) if items.len() == 2));
+        app.slash("/inbox task_b", &tx);
+        assert!(
+            matches!(&app.modal, Some(Modal::Picker { items, .. }) if items.len() == 1 && items[0].label.contains("event_b"))
+        );
+        let mut view = app.view.clone();
+        view.inbox[1].status = "prepared".into();
+        app.apply(Update::View(Box::new(view)));
+        assert!(
+            matches!(&app.modal, Some(Modal::Picker { items, .. }) if items.len() == 1 && items[0].label.contains("prepared"))
+        );
+        app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &tx,
+        );
+        let Some(Modal::Inspect { lines, .. }) = &app.modal else {
+            panic!("inbox inspector")
+        };
+        let content = lines.join("\n");
+        for expected in [
+            "event_b",
+            "task_b",
+            "project_b",
+            "prepared",
+            "No settled delivery receipt yet.",
+            "not proof the model followed",
+        ] {
+            assert!(content.contains(expected), "{content}");
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "inspection cannot acknowledge or authorize work"
+        );
+        let mut view = app.view.clone();
+        view.inbox[1].status = "settled delivery".into();
+        view.inbox[1].receipt = Some("turn_123: exact batch receipt".into());
+        app.take_dirty();
+        app.apply(Update::View(Box::new(view)));
+        assert!(app.take_dirty(), "delivery changes repaint");
+        let Some(Modal::Inspect { lines, .. }) = &app.modal else {
+            panic!("inbox inspector")
+        };
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("turn_123: exact batch receipt"))
+        );
+        assert!(lines.iter().any(|line| line.contains("settled delivery")));
+    }
+
+    #[test]
+    fn receipt_only_change_invalidates_inbox_fingerprint() {
+        let mut app = app();
+        app.view
+            .inbox
+            .push(inbox_event("event_a", "task_a", "project_a"));
+        let before = fingerprint_at(&app.view, 0);
+        app.view.inbox[0].receipt = Some("receipt_1".into());
+        assert_ne!(before, fingerprint_at(&app.view, 0));
     }
 
     #[test]
