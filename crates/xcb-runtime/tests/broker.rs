@@ -1,8 +1,72 @@
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
+    path::Path,
 };
 use xcb_runtime::broker::Workspace;
+
+/// The mode a plain `File::create` takes under the test process umask —
+/// the same kernel-applied derivation workspace writes should use.
+fn default_file_mode(dir: &Path) -> u32 {
+    let probe = dir.join(".xcb-umask-probe");
+    fs::File::create(&probe).unwrap();
+    let mode = fs::metadata(&probe).unwrap().permissions().mode() & 0o777;
+    fs::remove_file(&probe).unwrap();
+    mode
+}
+
+/// The mode a plain `create_dir` takes under the test process umask.
+fn default_dir_mode(dir: &Path) -> u32 {
+    let probe = dir.join(".xcb-umask-probe-dir");
+    fs::create_dir(&probe).unwrap();
+    let mode = fs::metadata(&probe).unwrap().permissions().mode() & 0o777;
+    fs::remove_dir(&probe).unwrap();
+    mode
+}
+
+#[test]
+fn created_workspace_entries_take_the_process_umask() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let root = base.join("work");
+    fs::create_dir(&root).unwrap();
+    let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
+    let file_mode = default_file_mode(&base);
+    let dir_mode = default_dir_mode(&base);
+    workspace.write("created.txt", "new", None).unwrap();
+    workspace.mkdir("made", false).unwrap();
+    workspace.mkdir("a/b", true).unwrap();
+    assert_eq!(
+        fs::metadata(root.join("created.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        file_mode
+    );
+    for path in ["made", "a", "a/b"] {
+        assert_eq!(
+            fs::metadata(root.join(path)).unwrap().permissions().mode() & 0o777,
+            dir_mode,
+            "{path}"
+        );
+    }
+    // Replacing a file preserves its permission bits instead of
+    // re-deriving them from the umask.
+    fs::set_permissions(root.join("created.txt"), fs::Permissions::from_mode(0o640)).unwrap();
+    let read = workspace.read("created.txt").unwrap();
+    workspace
+        .write("created.txt", "again", Some(&read.revision))
+        .unwrap();
+    assert_eq!(
+        fs::metadata(root.join("created.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o640
+    );
+}
 
 #[test]
 fn workspace_tools_are_descriptor_rooted_and_revision_checked() {
@@ -81,7 +145,11 @@ fn concurrent_workspace_writers_have_one_winner_and_preserve_permissions() {
         assert_eq!(winners, 1);
         assert_eq!(
             fs::metadata(root.join(name)).unwrap().permissions().mode() & 0o777,
-            if existing { 0o755 } else { 0o600 }
+            if existing {
+                0o755
+            } else {
+                default_file_mode(&base)
+            }
         );
     }
 }

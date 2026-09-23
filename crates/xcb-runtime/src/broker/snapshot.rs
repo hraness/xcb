@@ -13,7 +13,7 @@ use std::{
     path::Path,
     sync::Arc,
 };
-use xcb_core::policy::EffectState;
+use xcb_core::{FileIdentity, policy::EffectState};
 
 pub const SNAPSHOT_FILE_LIMIT: usize = 2 * 1024 * 1024;
 pub const SNAPSHOT_BYTE_LIMIT: usize = 64 * 1024 * 1024;
@@ -136,18 +136,6 @@ pub fn command_excluded(path: &str) -> bool {
             || name.starts_with(".xcb-")
     })
 }
-fn stamp(metadata: &std::fs::Metadata) -> (u64, u64, u64, u32, i64, i64, i64, i64) {
-    (
-        metadata.dev(),
-        metadata.ino(),
-        metadata.len(),
-        metadata.mode(),
-        metadata.mtime(),
-        metadata.mtime_nsec(),
-        metadata.ctime(),
-        metadata.ctime_nsec(),
-    )
-}
 fn read_binary(parent: &File, name: &std::ffi::OsStr) -> Result<(Vec<u8>, u32)> {
     let mut file = File::from(
         rustix::fs::openat(
@@ -174,7 +162,7 @@ fn read_binary(parent: &File, name: &std::ffi::OsStr) -> Result<(Vec<u8>, u32)> 
     let opened = rustix::fs::fstat(&file).map_err(io)?;
     if bytes.len() > SNAPSHOT_FILE_LIMIT
         || bytes.len() as u64 != before.len()
-        || stamp(&before) != stamp(&after)
+        || FileIdentity::of(&before) != FileIdentity::of(&after)
         || after.nlink() != 1
         || named.st_dev != opened.st_dev
         || named.st_ino != opened.st_ino
@@ -299,7 +287,7 @@ fn walk(
             }
         }
     }
-    if stamp(&before) != stamp(&directory.metadata()?) {
+    if FileIdentity::of(&before) != FileIdentity::of(&directory.metadata()?) {
         return Err(Error::Conflict(
             "workspace directory changed during snapshot",
         ));
@@ -480,7 +468,10 @@ impl Workspace {
                     Ok(fd) => parent = File::from(fd),
                     Err(rustix::io::Errno::NOENT) if data.is_some() => {
                         *effects = EffectState::Uncertain;
-                        rustix::fs::mkdirat(&parent, *component, Mode::RWXU).map_err(io)?;
+                        // Ordinary directory create bits; the kernel applies
+                        // the process umask like any other tool's mkdir.
+                        rustix::fs::mkdirat(&parent, *component, Mode::from_raw_mode(0o777))
+                            .map_err(io)?;
                         parent.sync_all()?;
                         parent = File::from(
                             rustix::fs::openat(
@@ -505,6 +496,9 @@ impl Workspace {
             if let Some(data) = data {
                 let temp = format!(".xcb-command-{}", uuid::Uuid::new_v4().simple());
                 *effects = EffectState::Uncertain;
+                // A new path takes the ordinary create bits for its kind and
+                // the kernel applies the process umask; a replacement stages
+                // privately until the preserved mode is set.
                 let mut file = File::from(
                     rustix::fs::openat(
                         &parent,
@@ -514,20 +508,28 @@ impl Workspace {
                             | OFlags::EXCL
                             | OFlags::NOFOLLOW
                             | OFlags::CLOEXEC,
-                        Mode::RUSR | Mode::WUSR,
+                        Mode::from_raw_mode(match (old_mode.is_some(), change.executable) {
+                            (true, _) => 0o600,
+                            (false, true) => 0o777,
+                            (false, false) => 0o666,
+                        }),
                     )
                     .map_err(io)?,
                 );
-                let mode = if change.executable {
-                    old_mode.unwrap_or(0o600) | 0o100
-                } else {
-                    old_mode.unwrap_or(0o600) & !0o111
-                };
+                let mode = old_mode.map(|old| {
+                    if change.executable {
+                        old | 0o100
+                    } else {
+                        old & !0o111
+                    }
+                });
                 *effects = EffectState::Uncertain;
                 let mut publication = false;
                 let written = (|| -> Result<()> {
                     file.write_all(&data)?;
-                    file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+                    if let Some(mode) = mode {
+                        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+                    }
                     file.sync_all()?;
                     command_current_at(snapshot, &change.path, &parent, name)?;
                     self.command_parent_current(&change.path, &parent)?;
