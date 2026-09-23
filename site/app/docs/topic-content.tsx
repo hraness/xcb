@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { publishedRelease } from "../publication";
 import { readmeHtml } from "../readme.generated";
 import type { DocsSlug } from "./topics";
 
@@ -23,9 +24,11 @@ function Note({ children }: { children: ReactNode }) {
 function GettingStarted() {
   return (
     <>
-      <Note>Start with the native Rust CLI. No native XCB release or <code>@hraness/xcb</code> npm package is published yet; the source version is not a downloadable release. Check <a href="https://github.com/hraness/xcb/releases">release assets</a> before installing.</Note>
+      <Note>Start with the native Rust CLI. {publishedRelease === null
+        ? <>No native xcb release or <code>@hraness/xcb</code> npm package is published yet</>
+        : <>The latest verified release is v{publishedRelease.version}</>}; the source version is a build identity, not a downloadable release. Check <a href="https://github.com/hraness/xcb/releases">release assets</a> before installing.</Note>
       <h2 id="requirements">Before you start</h2>
-      <p>You need Git, Rust <strong>1.97.1</strong>, platform build tools, and a supported provider CLI. Claude requires macOS Seatbelt or an admitted Linux <code>bwrap</code> configuration. The Codex and Devin candidates currently require macOS. The isolated command runner is available on macOS ARM64.</p>
+      <p>You need Git, Rust <strong>1.97.1</strong>, platform build tools, and a supported provider CLI. Native release binaries are built for macOS ARM64 (<code>darwin-aarch64</code>) and Linux x86_64 (<code>linux-x86_64</code>); other hosts build from source. Claude requires macOS Seatbelt or an admitted Linux <code>bwrap</code> configuration. The Codex and Devin candidates currently require macOS. The isolated command runner is available on macOS ARM64.</p>
       <h2 id="install">1. Build and install</h2>
       <Code>{`git clone https://github.com/hraness/xcb.git
 cd xcb
@@ -34,32 +37,34 @@ rustup toolchain install 1.97.1 --profile minimal
 export PATH="$HOME/.local/bin:$PATH"
 xcb --version
 xcb --help`}</Code>
-      <p>The installer builds with the lockfile and installs <code>~/.local/bin/xcb</code>. Use <code>XCB_INSTALL_PREFIX</code> to choose another prefix. Run <code>command -v xcb</code> if you also have the older TypeScript CLI installed; both use the same command name. The installer records its method and keeps a verified helper beside the binary for future upgrades.</p>
-      <h2 id="updates">4. Keep the global install current</h2>
-      <p>Updates are user-level and release-based. XCB defaults to <code>notify</code>; choose <code>auto</code> to let the macOS user scheduler install only an exact stable archive with its adjacent SHA-256 checksum. Project settings cannot change this policy.</p>
-      <Code>{`xcb update check
-xcb update enable --policy notify   # daily check, no replacement
-xcb update enable --policy auto     # daily check and verified install
-xcb update status
-xcb upgrade
-xcb update disable`}</Code>
-      <p>No native xcb release is published yet, so checks fail closed and leave a source install untouched. After an upgrade, restart open terminals and rerun <code>xcb doctor</code>; provider and application qualification is tied to the exact version and digest of the installed executable.</p>
-      <p>A current managed supervisor detects replacement of its executable, stops starting new turns, and exits after its active workers settle. Queued tasks and tasks waiting for input remain saved. Wait for that exit before refreshing provider pins and reopening the conversation. XCB reports a different running supervisor build explicitly; a legacy supervisor without an identity record must be identified and stopped after its workers settle. Never delete its lock or trust a saved PID alone.</p>
-      <p>Older source builds may reject newer managed record fields. Restart old clients and supervisors when upgrading and preserve managed state if rolling back the binary. An installation does not establish fresh live acceptance across all three providers.</p>
+      <p>The installer builds with the lockfile and installs <code>~/.local/bin/xcb</code>. Use <code>XCB_INSTALL_PREFIX</code> to choose another prefix. The TypeScript compatibility CLI installs as <code>xcb-compat</code>, so it does not shadow the native command; if an older compatibility install still answers to <code>xcb</code>, <code>command -v xcb</code> shows which binary is active. The installer records its method and keeps a verified helper beside the binary for future upgrades.</p>
       <h2 id="connect">2. Connect Claude</h2>
-      <p>Install an admitted Claude Code binary: major version 2, version 2.1.268 or newer. Then create an account and complete the browser sign-in. XCB does not silently import an existing provider login. Replace <code>&lt;account-id&gt;</code> with the generated ID printed by account creation or import; <code>xcb accounts</code> also lists it.</p>
+      <p>Install an admitted Claude Code binary: major version 2, version 2.1.268 or newer. Then create an account and complete the browser sign-in. xcb does not silently import an existing provider login. Replace <code>&lt;account-id&gt;</code> with the generated ID printed by account creation or import; <code>xcb accounts</code> also lists it.</p>
       <Code>{`xcb accounts add claude --plan Max
 xcb doctor --provider claude
 xcb accounts login <account-id>
 xcb accounts refresh <account-id>
 xcb models`}</Code>
-      <p><code>--plan Max</code> is a display label, not subscription verification. If XCB discovers the wrong executable, select it explicitly with <code>xcb doctor --provider claude --executable /absolute/path/to/claude</code>.</p>
+      <p><code>--plan Max</code> is a display label, not subscription verification. If xcb discovers the wrong executable, select it explicitly with <code>xcb doctor --provider claude --executable /absolute/path/to/claude</code>.</p>
       <p>Using Codex or Devin? Follow the <a href="/docs/providers">provider-specific setup</a> and its exact runtime requirements.</p>
       <h2 id="first-session">3. Open your project</h2>
       <p>Managed tasks select among admitted, available accounts and observed models. Start a task with <code>Use Claude</code>, <code>Use Codex</code>, or <code>Use Devin</code> to require one provider.</p>
       <Code>{`xcb --cwd /absolute/path/to/your/project`}</Code>
       <p>Plain <code>xcb</code> creates a persistent control conversation. Closing it detaches while tasks keep running. Use <code>/tasks</code> to inspect work and <code>/sessions</code> to switch control conversations. Prompts create new work, or answer a task waiting for input; <code>new task: …</code> explicitly starts separate work.</p>
-      <p>Ask XCB to explain a file or make a small change. Use <code>/help</code> inside the terminal for interactive commands. To run tests or builds, first <a href="/docs/workspace">set up the isolated command runner</a>.</p>
+      <p>Ask xcb to explain a file or make a small change. Use <code>/help</code> inside the terminal for interactive commands. To run tests or builds, first <a href="/docs/workspace">set up the isolated command runner</a>.</p>
+      <h2 id="updates">4. Keep the global install current</h2>
+      <p>Updates are user-level and release-based. xcb defaults to <code>notify</code>; choose <code>auto</code> to let the scheduler install only an exact stable archive with its adjacent SHA-256 checksum. Scheduled checks are macOS-only: a LaunchAgent runs them daily when enabled, and on Linux you run <code>xcb update check</code> from your own timer. Project settings cannot change this policy.</p>
+      <Code>{`xcb update check
+xcb update enable --policy notify   # macOS only: daily check, no replacement
+xcb update enable --policy auto     # macOS only: daily check and verified install
+xcb update status
+xcb upgrade
+xcb update disable`}</Code>
+      <p>{publishedRelease === null
+        ? "No native xcb release is published yet, so checks fail closed and leave a source install untouched."
+        : <>The updater installs the verified v{publishedRelease.version} archive for the running host with its matching checksum.</>} After an upgrade, restart open terminals and rerun <code>xcb doctor</code>; provider and application qualification is tied to the exact version and digest of the installed executable.</p>
+      <p>A current managed supervisor detects replacement of its executable, stops starting new turns, and exits after its active workers settle. Queued tasks and tasks waiting for input remain saved. Wait for that exit before refreshing provider pins and reopening the conversation. xcb reports a different running supervisor build explicitly; a legacy supervisor without an identity record must be identified and stopped after its workers settle. Never delete its lock or trust a saved PID alone.</p>
+      <p>Older source builds may reject newer managed record fields. Restart old clients and supervisors when upgrading and preserve managed state if rolling back the binary. An installation does not establish fresh live acceptance across all three providers.</p>
       <h2 id="daily-commands">Come back to your work</h2>
       <Code>{`xcb conversations
 xcb chat --resume <conversation-id>
@@ -72,8 +77,8 @@ xcb accounts
 xcb config`}</Code>
       <p><code>resume</code> reopens the saved session and its workspace in the interactive terminal. It is not a headless continuation command. A JSON run includes the session ID for later use with <code>xcb resume</code>.</p>
       <h2 id="state-and-updates">State and updates</h2>
-      <p>Native sessions and credentials live in <code>~/.local/share/xcb</code>. Override the root with <code>--state /absolute/path</code> or <code>XCB_STATE</code>. The TypeScript compatibility CLI uses <code>~/.xcb</code>; keep their state directories separate.</p>
-      <p>After an XCB or provider upgrade, restart open XCB terminals and rerun <code>doctor</code>. A new provider version is not automatically admitted. Keep the source checkout matching your installed CLI for command-runner setup and updates.</p>
+      <p>Native sessions and credentials live in <code>~/.local/share/xcb</code>. Override the root with <code>--state /absolute/path</code> or <code>XCB_STATE</code>. The <code>xcb-compat</code> compatibility CLI uses <code>~/.xcb</code>; keep their state directories separate.</p>
+      <p>After an xcb or provider upgrade, restart open xcb terminals and rerun <code>doctor</code>. A new provider version is not automatically admitted. Keep the source checkout matching your installed CLI for command-runner setup and updates.</p>
     </>
   );
 }
@@ -81,7 +86,7 @@ xcb config`}</Code>
 function Providers() {
   return (
     <>
-      <p>XCB names your accounts, stores their credentials outside the project, and lets you select the account and model for a turn. Replace <code>&lt;account-id&gt;</code> in the setup commands with the generated ID printed by creation or import; names come from observed provider identities, not custom labels. Connecting an account, observing its models, and proving an execution route are separate steps.</p>
+      <p>xcb names your accounts, stores their credentials outside the project, and lets you select the account and model for a turn. Replace <code>&lt;account-id&gt;</code> in the setup commands with the generated ID printed by creation or import; names come from observed provider identities, not custom labels. Connecting an account, observing its models, and proving an execution route are separate steps.</p>
       <h2 id="provider-status">Provider status</h2>
       <div className="xcb-docs-table-wrap" role="region" aria-labelledby="provider-status-caption" tabIndex={0}><table>
         <caption id="provider-status-caption">Native CLI evidence and current limits</caption>
@@ -101,7 +106,7 @@ xcb accounts refresh <account-id>
 xcb models`}</Code>
       <p>Complete the browser sign-in. Refresh obtains supported model and usage metadata. The plan name is only a label.</p>
       <h2 id="codex">Codex</h2>
-      <p>XCB supervises the official CLI’s ChatGPT device sign-in in a private profile.</p>
+      <p>xcb supervises the official CLI’s ChatGPT device sign-in in a private profile.</p>
       <Code>{`xcb doctor --provider codex
 xcb accounts add codex --plan ChatGPT
 xcb accounts login <account-id>
@@ -110,7 +115,7 @@ xcb models`}</Code>
       <p>Alternatively, explicitly import one existing ChatGPT credential:</p>
       <Code>{`xcb accounts import-codex --source /absolute/path/to/auth.json
 xcb accounts refresh <account-id>`}</Code>
-      <p>The source file stays in place. XCB does not copy provider configuration, plugins, sessions, or transcripts. This route does not accept API-key credentials.</p>
+      <p>The source file stays in place. xcb does not copy provider configuration, plugins, sessions, or transcripts. This route does not accept API-key credentials.</p>
       <h2 id="devin">Devin</h2>
       <p>Sign in through Devin’s CLI first, then select its credential file explicitly.</p>
       <Code>{`devin auth login
@@ -118,7 +123,7 @@ xcb doctor --provider devin
 xcb accounts import-devin --source /absolute/path/to/credentials.toml
 xcb accounts refresh <account-id>
 xcb models`}</Code>
-      <p>Import preserves the original credentials and sessions. To refresh just the catalog, use <code>xcb models refresh devin --account &lt;account-id&gt;</code>. Native XCB currently supports fixed ACP model choices; compatibility catalog entries for Adaptive or Fusion do not establish native support. A successful <code>devin auth status</code> and populated catalog confirm provider access, not a qualified XCB coding turn. The selected model is checked against the connected account’s fresh catalog before each turn. The September 20, 2026 quota result is historical evidence, not a statement of current availability.</p>
+      <p>Import preserves the original credentials and sessions. To refresh just the catalog, use <code>xcb models refresh devin --account &lt;account-id&gt;</code>. Native xcb currently supports fixed ACP model choices; compatibility catalog entries for Adaptive or Fusion do not establish native support. A successful <code>devin auth status</code> and populated catalog confirm provider access, not a qualified xcb coding turn. The selected model is checked against the connected account’s fresh catalog before each turn. The September 20, 2026 quota result is historical evidence, not a statement of current availability.</p>
       <h2 id="selection">Select an account and model</h2>
       <p>Copy the matching full key from <code>xcb models</code>. Defaults apply to new direct sessions; a saved session keeps its account binding. Managed tasks route automatically among eligible accounts and models.</p>
       <Code>{`xcb accounts default <account>
@@ -129,7 +134,7 @@ xcb accounts enable <account>`}</Code>
       <p>One account can own one active provider turn. Managed tasks in separate workspaces can use separate accounts concurrently. Tasks sharing a workspace run one at a time, and the isolated command backend runs one command at a time. A disabled account remains stored with its history.</p>
       <h2 id="quota">Understand quota information</h2>
       <p>Known Claude account-wide exhaustion stays blocked until the provider’s reported reset. Automatic selection skips those accounts, and an explicit selection explains the block. <code>xcb accounts</code> shows a retry estimate; a reset permits another attempt but does not promise service availability.</p>
-      <p>Unknown and stale usage stays unknown. XCB does not infer an account-wide block from arbitrary Codex buckets or Devin exhaustion errors. For exact scopes and credential binding, read the <a href="https://github.com/hraness/xcb/blob/main/docs/quota-routing.md">quota routing contract</a>.</p>
+      <p>Unknown and stale usage stays unknown. xcb does not infer an account-wide block from arbitrary Codex buckets or Devin exhaustion errors. For exact scopes and credential binding, read the <a href="https://github.com/hraness/xcb/blob/main/docs/quota-routing.md">quota routing contract</a>.</p>
     </>
   );
 }
@@ -137,13 +142,13 @@ xcb accounts enable <account>`}</Code>
 function Workspace() {
   return (
     <>
-      <p>Workspace file tools can inspect and change project files through XCB’s broker. Tests and builds use a separate, explicitly provisioned Linux VM. Commands run against a staged copy of the project, without host mounts, provider credentials, or network access.</p>
+      <p>Workspace file tools can inspect and change project files through xcb’s broker. Tests and builds use a separate, explicitly provisioned Linux VM. Commands run against a staged copy of the project, without host mounts, provider credentials, or network access.</p>
       <h2 id="setup">Set up the command runner</h2>
       <p>On macOS ARM64, install Lima 2.2 or later at <code>/opt/homebrew/bin/limactl</code> and Python 3. Use the source checkout matching your installed native CLI. The dedicated VM uses an 8 GiB sparse disk, 3 GiB memory, and two CPUs. Setup also enforces an 8 GiB host free-space floor plus provisioning capacity.</p>
-      <p>Run from that XCB checkout. Where the HRA host scheduler is installed, use the scheduler-wrapped setup command in the <a href="https://github.com/hraness/xcb/blob/main/docs/command-runner.md#setup-and-admission">command-runner contract</a>.</p>
+      <p>Run from that xcb checkout. Where the HRA host scheduler is installed, use the scheduler-wrapped setup command in the <a href="https://github.com/hraness/xcb/blob/main/docs/command-runner.md#setup-and-admission">command-runner contract</a>.</p>
       <Code>{`/usr/bin/python3 scripts/setup-command-runner.py \\
   --root "$HOME/.local/share/xcb-command" --source "$PWD"`}</Code>
-      <p>Setup installs the fixed Linux toolchains and runs the required boundary suite before admitting the backend. It includes Rust 1.97.1, Node 24.18.1, and Bun 1.3.14. When setup succeeds, ask XCB to run your project’s checks.</p>
+      <p>Setup installs the fixed Linux toolchains and runs the required boundary suite before admitting the backend. It includes Rust 1.97.1, Node 24.18.1, and Bun 1.3.14. When setup succeeds, ask xcb to run your project’s checks.</p>
       <h2 id="dependencies">Prepare public dependencies</h2>
       <p>Ordinary commands are offline. Host <code>node_modules</code>, Cargo outputs, and package-manager credentials are not copied into the VM. For a cold project, first inspect a dependency plan from the same checkout:</p>
       <Code>{`/usr/bin/python3 -I scripts/prepare-command-dependencies.py \\
@@ -161,7 +166,7 @@ function Workspace() {
       </ul>
       <p>Read the <a href="https://github.com/hraness/xcb/blob/main/docs/command-runner.md">full command-runner contract</a> for snapshot, output, publication, and cache limits.</p>
       <h2 id="cancel-and-recover">Cancel and recover</h2>
-      <p>In managed chat, say <code>cancel &lt;task-id&gt;</code> from any control conversation and inspect <code>/tasks</code> for settlement. For a direct session, cancel in the terminal that owns the turn. For a headless run, Ctrl-C or SIGTERM requests cleanup. XCB must prove the owned processes have stopped before releasing the account; another terminal can view a session without owning its cancellation.</p>
+      <p>In managed chat, say <code>cancel &lt;task-id&gt;</code> from any control conversation and inspect <code>/tasks</code> for settlement. For a direct session, cancel in the terminal that owns the turn. For a headless run, Ctrl-C or SIGTERM requests cleanup. xcb must prove the owned processes have stopped before releasing the account; another terminal can view a session without owning its cancellation.</p>
       <Code>{`xcb recover
 xcb recover <run-id> --yes`}</Code>
       <p>Inspect the retained run before using <code>--yes</code>. Recovery requires the original host owner to be gone and independently checks pending command receipts. It never publishes staged edits. Do not delete lock files or infer recovery from an elapsed timeout or missing PID.</p>
@@ -171,7 +176,7 @@ xcb recover <run-id> --yes`}</Code>
   --status --cache-key CACHE_KEY_FROM_PLAN`}</Code>
       <p>Replace <code>--status</code> with <code>--recover</code> to stop, join, and reconcile that attempt without starting another download.</p>
       <h2 id="refresh">After a backend change or VM restart</h2>
-      <p>Admission binds the VM’s boot identity and exact tool bytes. Stop active commands and repeat setup with <code>--refresh</code> when fresh admission is required. Keep the backend and installed CLI matched, and restart open terminals after replacing XCB. Refresh does not clear an unsettled job; resolve that job through recovery first.</p>
+      <p>Admission binds the VM’s boot identity and exact tool bytes. Stop active commands and repeat setup with <code>--refresh</code> when fresh admission is required. Keep the backend and installed CLI matched, and restart open terminals after replacing xcb. Refresh does not clear an unsettled job; resolve that job through recovery first.</p>
     </>
   );
 }
@@ -179,7 +184,7 @@ xcb recover <run-id> --yes`}</Code>
 function Customization() {
   return (
     <>
-      <p>XCB keeps presentation, optional extensions, and execution authority separate. Inspect your current setup before changing it:</p>
+      <p>xcb keeps presentation, optional extensions, and execution authority separate. Inspect your current setup before changing it:</p>
       <Code>{`xcb config
 xcb panes
 xcb plugins`}</Code>
@@ -220,13 +225,13 @@ xcb judge logout`}</Code>
 function ApplicationApi() {
   return (
     <>
-      <p>Let XCB own provider sign-in and process custody while your application owns its data and actions. The application interface accepts a bounded prompt and returns untrusted text. It runs with no tools, hooks, session history, continuation, or account fallback.</p>
+      <p>Let xcb own provider sign-in and process custody while your application owns its data and actions. The application interface accepts a bounded prompt and returns untrusted text. It runs with no tools, hooks, session history, continuation, or account fallback.</p>
       <h2 id="discover">Discover qualified routes</h2>
       <Code>{`xcb --json generate --capabilities`}</Code>
       <p>This reads local metadata without provider refresh or inference. Select only an account with <code>available: true</code> and one of its exact model keys. <code>supported: true</code> alone does not mean an account is available.</p>
       <p>Capabilities verifies local executable bytes and can take several seconds. Give discovery a bounded timeout separate from the generation deadline; 90 seconds is a practical desktop integration recommendation, not a protocol timing guarantee.</p>
-      <p>When launching XCB from an app, preserve <code>HOME</code> or set <code>XCB_STATE</code> in the child environment, even when passing <code>--state</code>; the current CLI still resolves its default root. Close unused stdin for discovery and drain stdout and stderr while waiting for the subprocess to finish.</p>
-      <Note>Application qualification is separate from coding support. A fresh installation reports <code>supported: false</code> until the exact XCB executable, provider, account, and model have current evidence. A successful sign-in or <code>doctor</code> check is not enough. Do not substitute <code>xcb run</code> when generation is unavailable.</Note>
+      <p>When launching xcb from an app, preserve <code>HOME</code> or set <code>XCB_STATE</code> in the child environment, even when passing <code>--state</code>; the current CLI still resolves its default root. Close unused stdin for discovery and drain stdout and stderr while waiting for the subprocess to finish.</p>
+      <Note>Application qualification is separate from coding support. A fresh installation reports <code>supported: false</code> until the exact xcb executable, provider, account, and model have current evidence. A successful sign-in or <code>doctor</code> check is not enough. Do not substitute <code>xcb run</code> when generation is unavailable.</Note>
       <h2 id="generate">Generate one response</h2>
       <p>Start the admitted executable directly with <code>--json generate</code>. Write one UTF-8 JSON document to stdin, close stdin, and drain stdout and stderr while waiting for the result. Keep both streams bounded. Replace both account and model placeholders with the exact values from capabilities.</p>
       <Code>{`{
@@ -240,18 +245,66 @@ function ApplicationApi() {
       <p>All six fields are required; additional fields are rejected. The total input is limited to 1 MiB. The timeout range is 1,000–120,000 milliseconds and the output limit is 1–262,144 bytes. Prompts must be nonempty and contain no NUL.</p>
       <p>A successful response has <code>status: completed</code>, generated <code>text</code>, and an outcome proving the provider has joined with no application effects. A nonzero exit returns a closed failure object without generated text. Validate the text against your own application schema before acting on it.</p>
       <h2 id="host-responsibilities">Keep application actions in your host</h2>
-      <p>XCB performs inference, not your application’s file access, network requests, or message delivery. Your host controls recipient selection, authorization, output validation, and durable request records. <a href="https://github.com/hraness/textbutler">TextButler</a> is a reference consumer that keeps contact access and messaging approvals in its own host.</p>
+      <p>xcb performs inference, not your application’s file access, network requests, or message delivery. Your host controls recipient selection, authorization, output validation, and durable request records. <a href="https://github.com/hraness/textbutler">TextButler</a> is a reference consumer that keeps contact access and messaging approvals in its own host.</p>
       <p>Send SIGINT or SIGTERM to request cancellation, then wait for cleanup. The inference deadline does not prove that the provider has stopped. An uncertain result keeps account custody and must not be blindly retried.</p>
       <h2 id="qualification">Qualification and renewal</h2>
       <p>Qualification uses actual host boundary evidence and a separate fixed live challenge. Receipts expire no later than 24 hours after evidence collection begins. Runtime, provider, or explicit credential changes can invalidate them earlier. Reading capabilities never extends their lifetime.</p>
-      <p>Use the <a href="https://github.com/hraness/xcb/blob/main/qualification/README.md#application-qualification-prerequisites">host qualification procedure</a> before accepting application traffic. The explicit macOS <a href="https://github.com/hraness/xcb/blob/main/docs/application-renewal.md">Claude renewal helper</a> binds one previously qualified deployment and account; it is not activated by installing XCB.</p>
+      <p>Use the <a href="https://github.com/hraness/xcb/blob/main/qualification/README.md#application-qualification-prerequisites">host qualification procedure</a> before accepting application traffic. The explicit macOS <a href="https://github.com/hraness/xcb/blob/main/docs/application-renewal.md">Claude renewal helper</a> binds one previously qualified deployment and account; it is not activated by installing xcb.</p>
       <p>For the complete discovery and response schemas, error codes, expiry rules, and custody contract, read the <a href="https://github.com/hraness/xcb/blob/main/docs/application-api.md">application API reference</a>.</p>
+    </>
+  );
+}
+
+function RouteTasks() {
+  return (
+    <>
+      <Note><code>xcb --json route</code> is the machine contract for another program — typically a coding agent — to hand XCB one task and get back one settled, routed turn. For bounded tool-free text generation instead, see the <a href="/docs/application-api">application API</a>.</Note>
+      <h2 id="contract">The route contract</h2>
+      <p>Write one UTF-8 JSON document to stdin, close stdin, and read a bounded JSON document from stdout. Unknown fields are rejected; every field except <code>version</code>, <code>workspace</code>, and <code>task</code> is optional.</p>
+      <Code>{`$ xcb --json route
+{
+  "version": 1,
+  "workspace": "/absolute/path/to/project",
+  "task": "Fix the failing parser test and show the diff",
+  "provider": "claude",            // optional pin
+  "account": "<account-id>",       // optional pin
+  "model": "claude/sonnet/low",    // optional pin, exact observed key
+  "timeoutMs": 1800000,            // optional caller deadline
+  "dryRun": false                  // true selects a route without running
+}`}</Code>
+      <p><code>provider</code>, <code>account</code>, and <code>model</code> are eligibility constraints, not fallbacks. A <code>provider</code> that disagrees with the pinned account&apos;s provider is rejected. With no pins, XCB selects among admitted runtimes, credentialed enabled accounts that are idle and outside known quota windows, and observed fresh model entries — ranked by task class and relative quality, cost, and latency Pareto tiers, with an optional judge ordering only already-eligible routes.</p>
+      <p>A completed call returns <code>status: &quot;completed&quot;</code> only for a completed, joined, settled turn with no pending attention, and includes the selected <code>route</code>, the saved <code>session</code> id (reopen with <code>xcb resume</code>), the recorded <code>outcome</code> facts, and bounded <code>text</code>.</p>
+      <h2 id="failures">Failure codes</h2>
+      <p>Failures exit nonzero with a closed object: <code>invalid_request</code>, <code>unavailable</code> (no eligible route, unknown account or model), <code>busy</code> (account custody held by live work), <code>deadline</code> (the caller&apos;s <code>timeoutMs</code> expired), <code>cancelled</code>, <code>provider_error</code> (including quota failures — <code>outcome.failure</code> carries the exact detail), <code>custody_unproven</code> (process exit could not be proven; do not retry blindly), and <code>needs_input</code> (the provider stopped with a question — <code>text</code> carries it, and the saved session can be resumed by a person).</p>
+      <p>When a request provably launched no provider process, the failure carries <code>joined: true</code> and <code>effects: &quot;none&quot;</code>. SIGINT and SIGTERM request the same bounded cancellation and settlement path as <code>timeoutMs</code>; killing XCB does not prove the provider stopped.</p>
+      <h2 id="sdk">Embedding with the SDK</h2>
+      <p>The TypeScript compatibility source exports <code>createSubscriptionRouter</code>, which bundles an account lease store and qualified task adapters into one object. It is a source build — no <code>@hraness/xcb</code> package is published — and there is no bundled live adapter; the host supplies adapters and qualification evidence.</p>
+      <Code>{`import { openAccountDatabase, SqliteAccountLeases, createSubscriptionRouter } from "@hraness/xcb";
+
+const db = await openAccountDatabase("/private/path/to/router.sqlite");
+const router = createSubscriptionRouter({
+  leases: new SqliteAccountLeases(db),
+  adapters: [claudeTaskAdapter],
+});
+
+const result = await router.run({
+  provider: "claude",
+  accountId: "a_…",
+  profile: { id: profile.id, version: profile.version, digest: profile.digest },
+  model: { id: "claude-sonnet-5", reasoningEffort: "low", serviceTier: null },
+  purpose: "respond",
+  prompt: "Summarize the diff in this workspace.",
+  limits: { maxRunMs: 60_000, maxCleanupMs: 10_000, maxOutputBytes: 65_536 },
+}, broker);`}</Code>
+      <p><code>router.routes()</code> lists the adapter-registered routes a caller can dispatch to — registration is not eligibility. <code>router.run(request, broker)</code> accepts provider-plus-authentication shorthand when exactly one adapter matches, defaults <code>runId</code>/<code>workspaceId</code> to the broker&apos;s binding, and still performs every admission, lease, deadline, and stop-evidence check.</p>
+      <p>For the complete schema, custody semantics, and selection rules, read the <a href="https://github.com/hraness/xcb/blob/main/docs/route.md">route contract</a> and <a href="https://github.com/hraness/xcb/blob/main/docs/quota-routing.md">quota routing</a> references in the repository.</p>
     </>
   );
 }
 
 export function TopicContent({ slug }: { slug: DocsSlug }) {
   switch (slug) {
+    case "route": return <RouteTasks />;
     case "getting-started": return <GettingStarted />;
     case "providers": return <Providers />;
     case "workspace": return <Workspace />;

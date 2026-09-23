@@ -59,8 +59,7 @@ pub struct Hook {
 impl Hook {
     fn validate(&self) -> Result<()> {
         if !self.executable.is_absolute()
-            || self.sha256.len() != 64
-            || !self.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !xcb_core::hex64_any(&self.sha256)
             || !(100..=300_000).contains(&self.timeout_ms)
         {
             return Err(xcb_core::Error::Invalid("hook").into());

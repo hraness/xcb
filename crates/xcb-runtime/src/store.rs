@@ -129,6 +129,15 @@ fn blocked_until_from(
     ))
 }
 
+/// A quota meter update buffered during streaming. The account's pool is
+/// bound inside the recording transaction, not at observation time.
+pub(crate) struct PendingQuota {
+    pub window: Id,
+    pub used_percent: f64,
+    pub observed_at_ms: u64,
+    pub resets_at_ms: u64,
+}
+
 fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
     point.validate()?;
     let json = serde_json::to_string(point)?;
@@ -308,12 +317,7 @@ impl RunRecord {
 }
 
 fn validate_command_custody(run_id: &Id, custody: &crate::command::CommandCustody) -> Result<()> {
-    let hash = |value: &str| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    };
+    let hash = xcb_core::hex64;
     let id = custody.command_id.as_str();
     if custody.version != 1
         || custody.run_id != *run_id
@@ -346,11 +350,20 @@ pub struct UsageObservation {
 
 pub struct Store {
     root: PathBuf,
+    /// Test-only count of fsync'd observability commits, proving a batch of
+    /// N stream events lands in one transaction rather than N.
+    #[cfg(test)]
+    pub(crate) observation_commits: std::sync::atomic::AtomicUsize,
     /// Unique identity of this open handle — one per terminal process — stamped
     /// on every run this store prepares so other terminals can recognise
     /// foreign-owned live runs.
     instance: String,
     connection: Mutex<Connection>,
+    /// Lazily opened managed store: session probes reuse one connection and
+    /// its migration probe instead of paying a fresh open on every call.
+    /// `None` means not opened yet — or the managed database absent at the
+    /// last check — so a later created managed root is still discovered.
+    managed: Mutex<Option<crate::managed::ManagedStore>>,
 }
 
 fn decode<T: DeserializeOwned>(text: &str) -> Result<T> {
@@ -378,6 +391,66 @@ fn sql(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| xcb_core::Error::Invalid("database integer").into())
 }
 
+fn settle_tool_in(tx: &Transaction<'_>, run: &RunRecord, call: &str) -> Result<()> {
+    if tx.execute(
+        "UPDATE tool_effects SET settled=1 WHERE run=?1 AND call=?2 AND settled=0",
+        params![run.id.as_str(), call],
+    )? != 1
+    {
+        return Err(Error::Conflict("tool receipt changed"));
+    }
+    Ok(())
+}
+fn append_message_in(
+    tx: &Transaction<'_>,
+    id: &Id,
+    expected_revision: Option<u64>,
+    message: &Message,
+) -> Result<Session> {
+    let mut session = session_from(tx, id)?.ok_or(Error::Unavailable("session not found"))?;
+    let expected = session.revision;
+    if expected_revision.is_some_and(|expected_revision| expected_revision != expected) {
+        return Err(Error::Conflict("session revision changed"));
+    }
+    let count: i64 = tx.query_row(
+        "SELECT count(*) FROM messages WHERE session=?1",
+        [id.as_str()],
+        |row| row.get(0),
+    )?;
+    if count >= MAX_MESSAGES {
+        return Err(xcb_core::Error::Limit("session messages").into());
+    }
+    tx.execute(
+        "INSERT INTO messages VALUES(?1,?2,?3,?4)",
+        params![
+            message.id.as_str(),
+            id.as_str(),
+            count + 1,
+            serde_json::to_string(message)?
+        ],
+    )?;
+    session.revision = session
+        .revision
+        .checked_add(1)
+        .ok_or(Error::Conflict("revision overflow"))?;
+    session.last_active_at_ms = session.last_active_at_ms.max(message.at_ms);
+    if session.title == "New session" && message.role == xcb_core::session::Role::User {
+        session.title = message
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(80)
+            .collect();
+        session.title = xcb_core::display_text(&session.title, 160);
+        if session.title.is_empty() {
+            session.title = "Image message".into();
+        }
+    }
+    update_session(tx, &session, expected)?;
+    Ok(session)
+}
 fn update_session(transaction: &Transaction<'_>, session: &Session, expected: u64) -> Result<()> {
     session.validate()?;
     if transaction.execute(
@@ -425,6 +498,9 @@ impl Store {
             root,
             instance: new_id("i").to_string(),
             connection: Mutex::new(connection),
+            managed: Mutex::new(None),
+            #[cfg(test)]
+            observation_commits: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -536,6 +612,9 @@ impl Store {
             root,
             instance: new_id("i").to_string(),
             connection: Mutex::new(connection),
+            managed: Mutex::new(None),
+            #[cfg(test)]
+            observation_commits: std::sync::atomic::AtomicUsize::new(0),
         })
     }
     fn db(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -724,6 +803,30 @@ impl Store {
         workspace: &Path,
         now: u64,
     ) -> Result<Session> {
+        self.create_session_inner(account_id, model, workspace, now, None)
+    }
+    /// The same custody checks as `create_session`, with the owning managed
+    /// task recorded on the session atomically. The marker lets startup
+    /// reconciliation prove custody of an orphan if the supervisor dies
+    /// between session creation and managed `prepare`.
+    pub fn create_managed_session(
+        &self,
+        account_id: &Id,
+        model: ModelChoice,
+        workspace: &Path,
+        now: u64,
+        task: &Id,
+    ) -> Result<Session> {
+        self.create_session_inner(account_id, model, workspace, now, Some(task))
+    }
+    fn create_session_inner(
+        &self,
+        account_id: &Id,
+        model: ModelChoice,
+        workspace: &Path,
+        now: u64,
+        managed_task: Option<&Id>,
+    ) -> Result<Session> {
         let account = self.account(account_id)?;
         model.validate()?;
         let workspace = workspace.canonicalize()?;
@@ -743,6 +846,7 @@ impl Store {
             title: "New session".into(),
             pane: Id::new("focus")?,
             state: State::Idle,
+            managed_task: managed_task.cloned(),
             revision: 0,
             created_at_ms: now,
             last_active_at_ms: now,
@@ -771,6 +875,9 @@ impl Store {
         let db = self.db()?;
         session_from(&db, id)
     }
+    /// List readers tolerate one corrupt session row: it is skipped so the
+    /// summary and routing snapshot keep working. Single-row reads and every
+    /// run boundary stay strict (`session`, `session_from`).
     pub fn sessions(&self, limit: usize) -> Result<Vec<Session>> {
         if !(1..=256).contains(&limit) {
             return Err(xcb_core::Error::Invalid("session page limit").into());
@@ -781,9 +888,36 @@ impl Store {
         let rows = query.query_map([limit as i64], |row| row.get::<_, String>(0))?;
         let mut sessions = Vec::new();
         for row in rows {
-            let session: Session = decode(&row?)?;
-            session.validate()?;
+            let Ok(session) = decode::<Session>(&row?).and_then(|session| {
+                session.validate()?;
+                Ok(session)
+            }) else {
+                continue;
+            };
             sessions.push(session);
+        }
+        Ok(sessions)
+    }
+    /// Sessions carrying a managed-task ownership marker, decoded tolerantly
+    /// like `sessions`: a row that cannot be proven marked is skipped rather
+    /// than reported, so the orphan sweep never acts on unproven custody.
+    pub fn managed_marked_sessions(&self) -> Result<Vec<Session>> {
+        let db = self.db()?;
+        let mut query = db.prepare(
+            "SELECT payload FROM sessions WHERE payload LIKE '%\"managed_task\":%' ORDER BY last_active,id LIMIT ?1",
+        )?;
+        let rows = query.query_map([MAX_SESSIONS + 1], |row| row.get::<_, String>(0))?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            let Ok(session) = decode::<Session>(&row?).and_then(|session| {
+                session.validate()?;
+                Ok(session)
+            }) else {
+                continue;
+            };
+            if session.managed_task.is_some() {
+                sessions.push(session);
+            }
         }
         Ok(sessions)
     }
@@ -796,47 +930,36 @@ impl Store {
         message.validate()?;
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut session = session_from(&tx, id)?.ok_or(Error::Unavailable("session not found"))?;
-        if session.revision != expected_revision {
-            return Err(Error::Conflict("session revision changed"));
-        }
-        let count: i64 = tx.query_row(
-            "SELECT count(*) FROM messages WHERE session=?1",
-            [id.as_str()],
-            |row| row.get(0),
-        )?;
-        if count >= MAX_MESSAGES {
-            return Err(xcb_core::Error::Limit("session messages").into());
-        }
-        tx.execute(
-            "INSERT INTO messages VALUES(?1,?2,?3,?4)",
-            params![
-                message.id.as_str(),
-                id.as_str(),
-                count + 1,
-                serde_json::to_string(message)?
-            ],
-        )?;
-        session.revision = session
-            .revision
-            .checked_add(1)
-            .ok_or(Error::Conflict("revision overflow"))?;
-        session.last_active_at_ms = session.last_active_at_ms.max(message.at_ms);
-        if session.title == "New session" && message.role == xcb_core::session::Role::User {
-            session.title = message
-                .text
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(80)
-                .collect();
-            session.title = xcb_core::display_text(&session.title, 160);
-            if session.title.is_empty() {
-                session.title = "Image message".into();
-            }
-        }
-        update_session(&tx, &session, expected_revision)?;
+        let session = append_message_in(&tx, id, Some(expected_revision), message)?;
+        tx.commit()?;
+        Ok(session)
+    }
+    /// Append a tool transcript message at the session's current revision.
+    /// Tool results are appended by the run owner, so the revision read and
+    /// the append share one transaction instead of two fsync'd commits.
+    pub(crate) fn append_tool_message(&self, id: &Id, message: &Message) -> Result<Session> {
+        message.validate()?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let session = append_message_in(&tx, id, None, message)?;
+        tx.commit()?;
+        Ok(session)
+    }
+    /// Settle a tool receipt and append its transcript message in one
+    /// durable transaction. Either both land or neither does, so a settled
+    /// receipt is never separated from its recorded result.
+    pub(crate) fn settle_tool_and_append(
+        &self,
+        run: &RunRecord,
+        call: &str,
+        id: &Id,
+        message: &Message,
+    ) -> Result<Session> {
+        message.validate()?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        settle_tool_in(&tx, run, call)?;
+        let session = append_message_in(&tx, id, None, message)?;
         tx.commit()?;
         Ok(session)
     }
@@ -1552,10 +1675,13 @@ impl Store {
         Ok(settled)
     }
     pub fn remove_session(&self, id: &Id) -> Result<bool> {
-        if let Some(managed) = self.existing_managed_store()?
-            && managed.has_active_session(id)?
         {
-            return Err(Error::Conflict("session belongs to an active managed task"));
+            let managed = self.managed_guard()?;
+            if let Some(managed) = managed.as_ref()
+                && managed.has_active_session(id)?
+            {
+                return Err(Error::Conflict("session belongs to an active managed task"));
+            }
         }
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1587,25 +1713,42 @@ impl Store {
         drop(db);
         // Do not hold native database custody while inspecting the managed
         // store. Paused questions and between-turn queues still need history.
-        if let Some(managed) = self.existing_managed_store()? {
-            let mut eligible = Vec::new();
-            for id in candidates {
-                if !managed.has_active_session(&id)? {
-                    eligible.push(id);
-                }
+        // One managed handle and one active-task scan serve the whole pass.
+        let managed = self.managed_guard()?;
+        match managed.as_ref() {
+            Some(managed) => {
+                let active = managed.active_session_ids()?;
+                Ok(candidates
+                    .into_iter()
+                    .filter(|id| !active.contains(id))
+                    .collect())
             }
-            Ok(eligible)
-        } else {
-            Ok(candidates)
+            None => Ok(candidates),
         }
     }
 
-    fn existing_managed_store(&self) -> Result<Option<crate::managed::ManagedStore>> {
-        if self.root.join("managed/managed.sqlite").try_exists()? {
-            Ok(Some(crate::managed::ManagedStore::open(&self.root)?))
-        } else {
-            Ok(None)
+    /// The cached managed handle, opened on first use when
+    /// `managed/managed.sqlite` exists. A failed open is retried on the next
+    /// call rather than remembered; a still-missing database leaves `None`
+    /// and is re-probed cheaply each call.
+    fn managed_guard(&self) -> Result<MutexGuard<'_, Option<crate::managed::ManagedStore>>> {
+        let mut managed = self
+            .managed
+            .lock()
+            .map_err(|_| Error::Conflict("managed store lock poisoned"))?;
+        if managed.is_none() && self.root.join("managed/managed.sqlite").try_exists()? {
+            *managed = Some(crate::managed::ManagedStore::open(&self.root)?);
         }
+        Ok(managed)
+    }
+
+    /// The cached handle's active-task scan count, for churn regression tests.
+    #[cfg(test)]
+    pub(crate) fn managed_active_scans(&self) -> Option<u64> {
+        self.managed
+            .lock()
+            .ok()
+            .and_then(|managed| managed.as_ref().map(|m| m.active_scan_count()))
     }
     pub fn set_models(&self, provider: Provider, choices: &[ModelChoice]) -> Result<()> {
         if choices.len() > 4096 {
@@ -1758,6 +1901,102 @@ impl Store {
         Ok(())
     }
 
+    /// Batched observability checkpoint for the streaming path: pending
+    /// velocity samples and quota observations land in ONE immediate
+    /// transaction instead of a commit per event. Every check the per-event
+    /// recorders run still applies — monotonicity, bounded history, run
+    /// custody, generation stability and payload compare-and-set — so a
+    /// batch of N events costs one fsync'd commit without weakening
+    /// durability or observation semantics.
+    pub(crate) fn record_observations(
+        &self,
+        run: &RunRecord,
+        session: &Id,
+        samples: &[xcb_core::usage::VelocitySample],
+        observations: &[PendingQuota],
+    ) -> Result<()> {
+        for sample in samples {
+            if sample.output_tokens > xcb_core::usage::COUNTER_LIMIT {
+                return Err(xcb_core::Error::Limit("velocity counter").into());
+            }
+        }
+        if samples.is_empty() && observations.is_empty() {
+            return Ok(());
+        }
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !samples.is_empty() {
+            let mut previous: Option<(i64, i64)> = tx.query_row("SELECT at_ms,output_total FROM velocity WHERE session=?1 ORDER BY at_ms DESC LIMIT 1", [session.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            for sample in samples {
+                if previous.is_some_and(|(at, count)| {
+                    at > sample.at_ms as i64 || count > sample.output_tokens as i64
+                }) {
+                    return Err(Error::Conflict("velocity counter regressed"));
+                }
+                tx.execute("INSERT INTO velocity VALUES(?1,?2,?3) ON CONFLICT(session,at_ms) DO UPDATE SET output_total=excluded.output_total", params![session.as_str(), sql(sample.at_ms)?, sql(sample.output_tokens)?])?;
+                previous = Some((sample.at_ms as i64, sample.output_tokens as i64));
+            }
+            tx.execute("DELETE FROM velocity WHERE session=?1 AND at_ms NOT IN (SELECT at_ms FROM velocity WHERE session=?1 ORDER BY at_ms DESC LIMIT 2048)", [session.as_str()])?;
+        }
+        if !observations.is_empty() {
+            self.owned_run_from(&tx, run)?;
+            let payload: String = tx.query_row(
+                "SELECT payload FROM accounts WHERE id=?1",
+                [run.account.as_str()],
+                |row| row.get(0),
+            )?;
+            let mut account: Account = decode(&payload)?;
+            account.validate()?;
+            if account.id != run.account {
+                return Err(Error::Conflict("account identity changed"));
+            }
+            let pool = generation_pool(&self.root, &account)?;
+            if let Some(pool) = &pool {
+                account.quota_pool = pool.clone();
+            }
+            for observation in observations {
+                let point = QuotaPoint {
+                    pool: account.quota_pool.clone(),
+                    window: observation.window.clone(),
+                    used_percent: observation.used_percent,
+                    observed_at_ms: observation.observed_at_ms,
+                    resets_at_ms: observation.resets_at_ms,
+                };
+                // Malformed meter updates are dropped like the per-event path
+                // drops them; they never reach the table.
+                if point.validate().is_err() {
+                    continue;
+                }
+                if observation.observed_at_ms < run.created_at_ms {
+                    return Err(Error::Conflict(
+                        "quota observation predates its account lease",
+                    ));
+                }
+                insert_quota(&tx, &point)?;
+            }
+            if generation_pool(&self.root, &account)? != pool {
+                return Err(Error::Conflict("account credential generation changed"));
+            }
+            self.owned_run_from(&tx, run)?;
+            if tx.execute(
+                "UPDATE accounts SET payload=?1 WHERE id=?2 AND payload=?3",
+                params![
+                    serde_json::to_string(&account)?,
+                    account.id.as_str(),
+                    payload
+                ],
+            )? != 1
+            {
+                return Err(Error::Conflict("account identity changed"));
+            }
+        }
+        tx.commit()?;
+        #[cfg(test)]
+        self.observation_commits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
     pub fn quota_blocked_until(&self, id: &Id, now: u64) -> Result<Option<u64>> {
         let db = self.db()?;
         let payload: String = db.query_row(
@@ -1878,13 +2117,10 @@ impl Store {
         Ok(())
     }
     pub(crate) fn settle_tool(&self, run: &RunRecord, call: &str) -> Result<()> {
-        if self.db()?.execute(
-            "UPDATE tool_effects SET settled=1 WHERE run=?1 AND call=?2 AND settled=0",
-            params![run.id.as_str(), call],
-        )? != 1
-        {
-            return Err(Error::Conflict("tool receipt changed"));
-        }
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        settle_tool_in(&tx, run, call)?;
+        tx.commit()?;
         Ok(())
     }
     pub fn record_velocity(
@@ -3199,6 +3435,176 @@ mod tests {
                 .command_custody
                 .as_ref(),
             Some(&custody)
+        );
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use xcb_core::{
+        Provider,
+        models::{Mode, ModelChoice},
+        usage::VelocitySample,
+    };
+
+    fn fixture() -> (tempfile::TempDir, Store, RunRecord, Session) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("work")).unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let session = store
+            .create_session(
+                &account.id,
+                ModelChoice {
+                    provider: Provider::Codex,
+                    id: Id::new("gpt-6-astra").unwrap(),
+                    label: "Astra".into(),
+                    mode: Mode::Fixed,
+                    resolved: None,
+                    effort: None,
+                    observed_at_ms: 1,
+                },
+                &base.join("work"),
+                2,
+            )
+            .unwrap();
+        let run = store.prepare_run(&session.id, session.revision, 4).unwrap();
+        (directory, store, run, session)
+    }
+
+    #[test]
+    fn a_turns_observations_commit_once_not_once_per_event() {
+        let (_dir, store, run, session) = fixture();
+        // One streamed turn's worth of meters: a baseline, four decimated
+        // velocity samples and two quota updates all land in one commit.
+        let samples: Vec<VelocitySample> = (0..5)
+            .map(|i| VelocitySample {
+                at_ms: 1_000 + i * 250,
+                output_tokens: 40 + i * 20,
+            })
+            .collect();
+        let observations: Vec<PendingQuota> = ["primary", "secondary"]
+            .iter()
+            .enumerate()
+            .map(|(i, window)| PendingQuota {
+                window: Id::new(*window).unwrap(),
+                used_percent: 40.0 + i as f64,
+                observed_at_ms: 1_000 + i as u64,
+                resets_at_ms: 9_999_999,
+            })
+            .collect();
+        store
+            .record_observations(&run, &session.id, &samples, &observations)
+            .unwrap();
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "seven stream events must cost one fsync'd commit, not seven"
+        );
+        // Every buffered observation landed, velocity stayed monotonic and
+        // quota points were bound to the leased account's pool at record time.
+        let stored = store.velocities(&session.id, 0).unwrap();
+        assert_eq!(stored.len(), samples.len());
+        assert_eq!(stored.last().unwrap().output_tokens, 120);
+        let account = store.account(&run.account).unwrap();
+        let quotas = store.quotas(&account.quota_pool).unwrap();
+        assert_eq!(quotas.len(), 2);
+        assert_eq!(quotas[0].used_percent, 40.0);
+        // A second flush with new events is exactly one more commit; the
+        // empty flush common at turn end costs none.
+        store
+            .record_observations(&run, &session.id, &[], &[])
+            .unwrap();
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        store
+            .record_observations(
+                &run,
+                &session.id,
+                &[VelocitySample {
+                    at_ms: 2_000,
+                    output_tokens: 200,
+                }],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+    }
+
+    #[test]
+    fn a_regressed_observation_batch_is_atomic_and_uncommitted() {
+        let (_dir, store, run, session) = fixture();
+        store
+            .record_observations(
+                &run,
+                &session.id,
+                &[VelocitySample {
+                    at_ms: 1_000,
+                    output_tokens: 100,
+                }],
+                &[],
+            )
+            .unwrap();
+        // A later sample under an earlier counter regresses: the whole batch
+        // rolls back, no commit is counted and nothing partial persists.
+        let regressed = [
+            VelocitySample {
+                at_ms: 1_500,
+                output_tokens: 150,
+            },
+            VelocitySample {
+                at_ms: 1_600,
+                output_tokens: 90,
+            },
+        ];
+        assert!(
+            store
+                .record_observations(&run, &session.id, &regressed, &[])
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(store.velocities(&session.id, 0).unwrap().len(), 1);
+        // Quota observations predating their lease are rejected the same way.
+        assert!(
+            store
+                .record_observations(
+                    &run,
+                    &session.id,
+                    &[],
+                    &[PendingQuota {
+                        window: Id::new("primary").unwrap(),
+                        used_percent: 50.0,
+                        observed_at_ms: 1,
+                        resets_at_ms: 9_999_999,
+                    }],
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
         );
     }
 }

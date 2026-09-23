@@ -136,3 +136,96 @@ pub fn display_text(value: &str, max: usize) -> String {
     }
     out
 }
+
+/// ASCII lowercase hex of any length — the shape `hex::encode` produces.
+pub fn hex_lower(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Exactly 64 lowercase ASCII hex digits — the fixed SHA-256 digest shape
+/// stored records, revisions, pins and evidence fields all use.
+pub fn hex64(value: &str) -> bool {
+    value.len() == 64 && hex_lower(value)
+}
+
+/// 64 ASCII hex digits in either case. Some wire inputs and older state
+/// fields were admitted before the lowercase-only digest rule; new writers
+/// always produce `hex64`.
+pub fn hex64_any(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Bounded control-free path text — the shared prefix of every path grammar.
+pub fn bounded_path(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
+}
+
+/// `value` split into ordinary relative segments: bounded control-free text
+/// with no empty, `.`, or `..` parts. The spelling `"."` is not a relative
+/// path here; callers that accept it check it themselves.
+pub fn relative_parts(value: &str) -> Option<Vec<&str>> {
+    if !bounded_path(value) {
+        return None;
+    }
+    let parts: Vec<&str> = value.split('/').collect();
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || *part == "." || *part == "..")
+    {
+        return None;
+    }
+    Some(parts)
+}
+
+/// `value` is a bounded ordinary relative path; `"."` is not accepted.
+pub fn relative_path(value: &str) -> bool {
+    relative_parts(value).is_some()
+}
+
+/// Absolute path made only of the root and ordinary components — no `.`,
+/// `..`, or platform prefix segments. Symlinks are not resolved here.
+pub fn absolute_clean(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    path.is_absolute()
+        && path
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+}
+
+/// Exact inode identity for custody and freshness proofs, read from live
+/// metadata only. A change to any tracked field is a different file: an inode
+/// replacement changes `ino`; an in-place write, permission change or relink
+/// changes `mode`, `links`, `size`, `mtime`, or the unforgeable status-change
+/// time `ctime`. It is evidence for a comparison, never a substitute for
+/// re-proving the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub dev: u64,
+    pub ino: u64,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub links: u64,
+    pub size: u64,
+    pub mtime: (i64, i64),
+    pub ctime: (i64, i64),
+}
+
+impl FileIdentity {
+    pub fn of(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            mode: metadata.mode(),
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+            links: metadata.nlink(),
+            size: metadata.len(),
+            mtime: (metadata.mtime(), metadata.mtime_nsec()),
+            ctime: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}

@@ -1,0 +1,626 @@
+{
+ "animations": [
+  {
+   "channelId": "channel_turn",
+   "interpolation": "slerp",
+   "property": "rotation",
+   "targetId": "entity_sword",
+   "keys": [
+    {
+     "timeUs": 0,
+     "value": [
+      0,
+      0.0,
+      0,
+      1.0
+     ]
+    },
+    {
+     "timeUs": 2000000,
+     "value": [
+      0,
+      0.7071067811865475,
+      0,
+      0.7071067811865476
+     ]
+    },
+    {
+     "timeUs": 4000000,
+     "value": [
+      0,
+      1.0,
+      0,
+      6.123233995736766e-17
+     ]
+    },
+    {
+     "timeUs": 6000000,
+     "value": [
+      0,
+      0.7071067811865476,
+      0,
+      -0.7071067811865475
+     ]
+    },
+    {
+     "timeUs": 8000000,
+     "value": [
+      0,
+      1.2246467991473532e-16,
+      0,
+      -1.0
+     ]
+    }
+   ]
+  }
+ ],
+ "assets": [],
+ "cameras": [
+  {
+   "cameraId": "camera_hero",
+   "name": "Hero",
+   "pose": {
+    "position": [
+     0,
+     0.7,
+     2.1
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ]
+   },
+   "projection": {
+    "cx": 360,
+    "cy": 480,
+    "far": 100,
+    "fx": 620,
+    "fy": 620,
+    "height": 960,
+    "kind": "perspective",
+    "near": 0.1,
+    "width": 720
+   }
+  }
+ ],
+ "coordinates": "right-handed-y-up-meters",
+ "durationUs": 8000000,
+ "entities": [
+  {
+   "entityId": "entity_fill",
+   "name": "Fill",
+   "kind": "light",
+   "light": "ambient",
+   "color": "#dfe6f2",
+   "intensity": 0.85,
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": null,
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     0,
+     0,
+     0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "visible": true
+  },
+  {
+   "entityId": "entity_key",
+   "name": "Key",
+   "kind": "light",
+   "light": "directional",
+   "color": "#ffffff",
+   "intensity": 2.6,
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": null,
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     3,
+     4,
+     5
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "visible": true
+  },
+  {
+   "entityId": "entity_rim",
+   "name": "Rim",
+   "kind": "light",
+   "light": "directional",
+   "color": "#4d7fd8",
+   "intensity": 2.6,
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": null,
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     -4,
+     1.5,
+     -3
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "visible": true
+  },
+  {
+   "entityId": "entity_sword_tilt",
+   "name": "SwordTilt",
+   "kind": "group",
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": null,
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     -0.02,
+     0.68,
+     0
+    ],
+    "rotation": [
+     -0.0,
+     -0.0,
+     -0.12186934340514748,
+     0.992546151641322
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "visible": true
+  },
+  {
+   "entityId": "entity_sword",
+   "name": "Sword",
+   "kind": "group",
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": "entity_sword_tilt",
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     0,
+     -0.72,
+     0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "visible": true
+  },
+  {
+   "entityId": "entity_blade",
+   "name": "Blade",
+   "kind": "mesh",
+   "geometry": {
+    "kind": "box",
+    "size": [
+     0.105,
+     1.15,
+     0.024
+    ]
+   },
+   "material": {
+    "color": "#525c6e",
+    "kind": "standard",
+    "metalness": 0.3,
+    "opacity": 1,
+    "roughness": 0.45
+   },
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": "entity_sword",
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     0,
+     0.86,
+     0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "visible": true,
+   "castShadow": true,
+   "receiveShadow": true
+  },
+  {
+   "entityId": "entity_fuller",
+   "name": "Fuller",
+   "kind": "mesh",
+   "geometry": {
+    "kind": "box",
+    "size": [
+     0.016,
+     0.95,
+     0.028
+    ]
+   },
+   "material": {
+    "color": "#39424f",
+    "kind": "standard",
+    "metalness": 0.4,
+    "opacity": 1,
+    "roughness": 0.4
+   },
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": "entity_sword",
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     0,
+     0.8,
+     0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "visible": true,
+   "castShadow": true,
+   "receiveShadow": true
+  },
+  {
+   "entityId": "entity_tip",
+   "name": "Tip",
+   "kind": "mesh",
+   "geometry": {
+    "kind": "sphere",
+    "radius": 0.055
+   },
+   "material": {
+    "color": "#525c6e",
+    "kind": "standard",
+    "metalness": 0.3,
+    "opacity": 1,
+    "roughness": 0.45
+   },
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": "entity_sword",
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     0,
+     1.455,
+     0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     0.95,
+     1.9,
+     0.22
+    ]
+   },
+   "visible": true,
+   "castShadow": true,
+   "receiveShadow": true
+  },
+  {
+   "entityId": "entity_guard",
+   "name": "Guard",
+   "kind": "mesh",
+   "geometry": {
+    "kind": "box",
+    "size": [
+     0.46,
+     0.055,
+     0.075
+    ]
+   },
+   "material": {
+    "color": "#48536a",
+    "kind": "standard",
+    "metalness": 0.85,
+    "opacity": 1,
+    "roughness": 0.3
+   },
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": "entity_sword",
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     0,
+     0.26,
+     0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "visible": true,
+   "castShadow": true,
+   "receiveShadow": true
+  },
+  {
+   "entityId": "entity_guard_l",
+   "name": "GuardLeft",
+   "kind": "mesh",
+   "geometry": {
+    "kind": "sphere",
+    "radius": 0.038
+   },
+   "material": {
+    "color": "#48536a",
+    "kind": "standard",
+    "metalness": 0.85,
+    "opacity": 1,
+    "roughness": 0.3
+   },
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": "entity_sword",
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     -0.235,
+     0.26,
+     0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1.5,
+     0.72,
+     0.9
+    ]
+   },
+   "visible": true,
+   "castShadow": true,
+   "receiveShadow": true
+  },
+  {
+   "entityId": "entity_guard_r",
+   "name": "GuardRight",
+   "kind": "mesh",
+   "geometry": {
+    "kind": "sphere",
+    "radius": 0.038
+   },
+   "material": {
+    "color": "#48536a",
+    "kind": "standard",
+    "metalness": 0.85,
+    "opacity": 1,
+    "roughness": 0.3
+   },
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": "entity_sword",
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     0.235,
+     0.26,
+     0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1.5,
+     0.72,
+     0.9
+    ]
+   },
+   "visible": true,
+   "castShadow": true,
+   "receiveShadow": true
+  },
+  {
+   "entityId": "entity_grip",
+   "name": "Grip",
+   "kind": "mesh",
+   "geometry": {
+    "kind": "cylinder",
+    "radius": 0.052,
+    "height": 0.27
+   },
+   "material": {
+    "color": "#1d3a6b",
+    "kind": "standard",
+    "metalness": 0.15,
+    "opacity": 1,
+    "roughness": 0.6
+   },
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": "entity_sword",
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     0,
+     0.1,
+     0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "visible": true,
+   "castShadow": true,
+   "receiveShadow": true
+  },
+  {
+   "entityId": "entity_pommel",
+   "name": "Pommel",
+   "kind": "mesh",
+   "geometry": {
+    "kind": "sphere",
+    "radius": 0.075
+   },
+   "material": {
+    "color": "#48536a",
+    "kind": "standard",
+    "metalness": 0.85,
+    "opacity": 1,
+    "roughness": 0.3
+   },
+   "origin": {
+    "kind": "authored"
+   },
+   "parentId": "entity_sword",
+   "placement": {
+    "kind": "world"
+   },
+   "transform": {
+    "position": [
+     0,
+     -0.065,
+     0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     0.82,
+     1
+    ]
+   },
+   "visible": true,
+   "castShadow": true,
+   "receiveShadow": true
+  }
+ ],
+ "generators": [],
+ "kind": "slopcamera.spatial-scene",
+ "overrides": [],
+ "sceneId": "scene_starter",
+ "schemaVersion": 1
+}

@@ -1,12 +1,13 @@
 import type { Metadata } from "next";
 
 export const docsTopics = [
-  { slug: "getting-started", title: "Getting started", description: "Build XCB from source, connect an account, and start your first session.", group: "Start here" },
+  { slug: "getting-started", title: "Getting started", description: "Build xcb from source, connect an account, and start your first session.", group: "Start here" },
   { slug: "providers", title: "Accounts & models", description: "Connect Claude, Codex, or Devin and choose the account and model for your work.", group: "Daily use" },
   { slug: "workspace", title: "Tests, builds & recovery", description: "Set up the isolated command runner, prepare dependencies, and recover interrupted work.", group: "Daily use" },
   { slug: "customization", title: "Make it yours", description: "Configure panes, continuation, context management, and optional extensions.", group: "Daily use" },
-  { slug: "application-api", title: "Application API", description: "Use qualified, ephemeral inference while keeping application actions in your own host.", group: "Build with XCB" },
-  { slug: "reference", title: "Complete reference", description: "The current repository README, including CLI examples and compatibility links.", group: "Build with XCB" },
+  { slug: "route", title: "Route tasks", description: "Give a coding agent or application one bounded routed turn through the closed JSON contract or the TypeScript SDK.", group: "Build with xcb" },
+  { slug: "application-api", title: "Application API", description: "Use qualified, ephemeral inference while keeping application actions in your own host.", group: "Build with xcb" },
+  { slug: "reference", title: "Complete reference", description: "The current repository README, including CLI examples and compatibility links.", group: "Build with xcb" },
 ] as const;
 
 export type DocsTopic = (typeof docsTopics)[number];
@@ -17,7 +18,7 @@ export function findDocsTopic(slug: string): DocsTopic | undefined {
 }
 
 export function topicMetadata(topic: DocsTopic): Metadata {
-  const title = `${topic.title} · XCB docs`;
+  const title = `${topic.title} · xcb docs`;
   const url = `/docs/${topic.slug}`;
   return {
     title,

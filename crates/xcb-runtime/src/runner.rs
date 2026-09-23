@@ -10,7 +10,7 @@ use crate::{
     process::{Pin, StreamProcess},
     protocol::{Event as TurnEvent, ImageInput, Prompt, Protocol},
     sandbox,
-    store::{RunRecord, Store, UsageObservation},
+    store::{PendingQuota, RunRecord, Store, UsageObservation},
 };
 use base64::Engine;
 use serde_json::{Value, json};
@@ -50,6 +50,11 @@ impl Diagnostic {
         &self.0
     }
 
+    /// A host-authored notice; provider text never enters here.
+    pub(crate) fn notice(text: &'static str) -> Self {
+        Self::bounded(text.to_owned())
+    }
+
     pub(crate) fn from_error(error: &Error) -> Self {
         let text = match error {
             Error::Protocol(_)
@@ -66,6 +71,10 @@ impl Diagnostic {
             Error::Json(_) => "invalid local record".into(),
             Error::PrivateState => "local state failed private-file validation".into(),
         };
+        Self::bounded(text)
+    }
+
+    fn bounded(text: String) -> Self {
         let mut text: String = text
             .chars()
             .map(|character| {
@@ -199,6 +208,14 @@ async fn spawn_process(
 /// Serializes cleanup with the host owner. Its release proves neither that a
 /// provider descendant exited nor that its effects settled.
 pub(crate) const LAUNCH_OWNER_LOCK: &str = "owner.lock";
+
+/// How long a cancelled provider may exit on its own after its interruption
+/// frame and stdin close before the process group is killed.
+const CANCEL_GRACE: Duration = Duration::from_millis(1500);
+
+/// Minimum interval between fsync'd observability checkpoints during a turn.
+/// Velocity/quota events still arrive at provider pace; the commits do not.
+const OBSERVATION_FLUSH_MS: u64 = 2_000;
 
 /// Launch snapshots are disposable only before spawn or after independent
 /// process-join evidence and settled effects. Cancellation/drop alone never
@@ -797,7 +814,11 @@ pub(crate) fn prepare_codex(
     let home = private::directory(&scratch.join("home"))?;
     let profile = private::directory(&scratch.join("profile"))?;
     let tmp = private::directory(&home.join("tmp"))?;
-    let catalog = codex::static_catalog(pin, (!metadata_only).then_some(model.id.as_str()))?;
+    let catalog = codex::static_catalog(
+        store.root(),
+        pin,
+        (!metadata_only).then_some(model.id.as_str()),
+    )?;
     let catalog_path = directory.join("models.json");
     private::create(&catalog_path, &catalog.bytes)?;
     let config_path = profile.join("config.toml");
@@ -1529,7 +1550,7 @@ pub(crate) async fn handshake(
     system: &str,
 ) -> Result<Vec<ModelChoice>> {
     process.send(&initialize(tools, system)).await?;
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(crate::protocol::INIT_DEADLINE, async {
         for _ in 0..256 {
             let frame = process
                 .frame()
@@ -1554,7 +1575,17 @@ pub(crate) async fn handshake(
                 {
                     if value.pointer("/response/subtype").and_then(Value::as_str) != Some("success")
                     {
-                        return Err(Error::Protocol("initialization failed"));
+                        // The error text is the provider's; only its fixed
+                        // classification crosses into host state.
+                        let detail = value
+                            .pointer("/response/error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        return Err(if claude::authentication_cue(detail) {
+                            Error::Unavailable(crate::category::AUTHENTICATION)
+                        } else {
+                            Error::Protocol("initialization failed")
+                        });
                     }
                     return parse_models(
                         value
@@ -1563,6 +1594,10 @@ pub(crate) async fn handshake(
                         now_ms(),
                     );
                 }
+                Event::Result {
+                    failure: Some(Failure::Authentication),
+                    ..
+                } => return Err(Error::Unavailable(crate::category::AUTHENTICATION)),
                 Event::Notice => (),
                 _ => return Err(Error::Protocol("unexpected frame before initialization")),
             }
@@ -1710,20 +1745,31 @@ fn settle_tool_effects(
     Ok(())
 }
 
-fn managed_tool_call(
+/// The managed mailbox bridge is opened once per worker run instead of once
+/// per `xcb_*` tool call. A failed open is not remembered: the next call
+/// retries, preserving the original per-call error surface.
+pub(crate) fn managed_tool_call(
     store: &Store,
+    bridge: &mut Option<crate::managed::ManagedStore>,
     session: &Id,
     call: &str,
     name: &str,
     arguments: &Value,
 ) -> (Result<Value>, EffectState) {
-    match crate::managed::ManagedStore::open(store.root()) {
-        Ok(managed) => managed.worker_call(store, session, call, name, arguments),
-        // No worker effect occurred if its host mailbox could not be opened.
-        // Return a normal tool rejection so its already-written pending
-        // receipt is settled and does not strand otherwise proven custody.
-        Err(error) => (Err(error), EffectState::None),
+    if bridge.is_none() {
+        match crate::managed::ManagedStore::open(store.root()) {
+            Ok(managed) => *bridge = Some(managed),
+            // No worker effect occurred if its host mailbox could not be
+            // opened. Return a normal tool rejection so its already-written
+            // pending receipt is settled and does not strand otherwise
+            // proven custody.
+            Err(error) => return (Err(error), EffectState::None),
+        }
     }
+    bridge
+        .as_ref()
+        .expect("managed bridge opened above")
+        .worker_call(store, session, call, name, arguments)
 }
 
 pub struct RunInput {
@@ -1866,6 +1912,15 @@ pub(crate) async fn run_prepared<P: Protocol>(
     let workspace = Arc::new(workspace);
     let mut commands = crate::command_tool::CommandTools::default();
     let mut commands_joined = true;
+    // Velocity and quota observations are display meters, not custody: they
+    // accumulate in memory during the stream and land in one fsync'd commit
+    // per flush instead of one transaction per provider event.
+    let mut pending_velocity: Vec<VelocitySample> = Vec::new();
+    let mut pending_quota: Vec<PendingQuota> = Vec::new();
+    let mut last_observation_flush_ms = 0u64;
+    // One managed mailbox connection per worker run rather than one open
+    // (and migration probe) per `xcb_*` tool call.
+    let mut managed_bridge = None;
     let execution = async {
         spawned?;
         let baseline = store
@@ -1958,13 +2013,10 @@ pub(crate) async fn run_prepared<P: Protocol>(
             .await?;
         let started = now_ms();
         if input.config.extensions.usage {
-            store.record_velocity(
-                &session.id,
-                VelocitySample {
-                    at_ms: started,
-                    output_tokens: baseline,
-                },
-            )?;
+            pending_velocity.push(VelocitySample {
+                at_ms: started,
+                output_tokens: baseline,
+            });
         }
         let mut admitted = false;
         let mut seen_calls = BTreeSet::new();
@@ -1975,10 +2027,23 @@ pub(crate) async fn run_prepared<P: Protocol>(
         // serialize every parallel terminal on one writer, so stream samples
         // are decimated and the true total is written once at the result.
         let mut last_velocity_ms = started;
-        for _ in 0..16_384 {
+        let mut frames = 0usize;
+        loop {
             if *cancel.borrow() {
                 return Ok((Terminal::Cancelled, vec![]));
             }
+            if frames >= crate::protocol::MAX_TURN_FRAMES {
+                // Volume is not a protocol violation: the tools that already
+                // ran are settled and the partial answer is kept. The turn
+                // ends like any other provider turn limit.
+                let detail = Diagnostic::notice(
+                    "provider frame count reached the per-turn limit; the turn was ended as a turn limit",
+                );
+                observer(Progress::Notice(detail.as_str().to_owned()));
+                diagnostic = Some(detail);
+                return Ok((Terminal::TurnLimit, vec![]));
+            }
+            frames += 1;
             let batch = tokio::select! {
                 _ = cancel.changed() => return Ok((Terminal::Cancelled, vec![])),
                 batch = protocol.next(&mut process) => batch?,
@@ -2014,13 +2079,21 @@ pub(crate) async fn run_prepared<P: Protocol>(
                             && now.saturating_sub(last_velocity_ms) >= 250
                         {
                             last_velocity_ms = now;
-                            store.record_velocity(
+                            pending_velocity.push(VelocitySample {
+                                at_ms: now,
+                                output_tokens: baseline.saturating_add(output_tokens),
+                            });
+                        }
+                        if now.saturating_sub(last_observation_flush_ms) >= OBSERVATION_FLUSH_MS {
+                            last_observation_flush_ms = now;
+                            store.record_observations(
+                                &run,
                                 &session.id,
-                                VelocitySample {
-                                    at_ms: now,
-                                    output_tokens: baseline.saturating_add(output_tokens),
-                                },
+                                &pending_velocity,
+                                &pending_quota,
                             )?;
+                            pending_velocity.clear();
+                            pending_quota.clear();
                         }
                     }
                     TurnEvent::Delta {
@@ -2042,28 +2115,27 @@ pub(crate) async fn run_prepared<P: Protocol>(
                     }
                     TurnEvent::Assistant(text) if admitted => answer.completed(text)?,
                     TurnEvent::Attention => pending_attention = true,
+                    // Quota is an observation, not provider work: an account
+                    // rejected before admission still settles as a quota or
+                    // authentication failure rather than an unknown one.
                     TurnEvent::Quota {
                         window,
                         used_percent,
                         resets_at_ms,
                         failure,
-                    } if admitted => {
+                    } => {
                         // A subsequent quota meter update is not evidence
                         // that an explicit provider failure was rescinded.
                         quota_failure = failure.or(quota_failure);
                         if let (Some(window), Some(used_percent), Some(resets_at_ms)) =
                             (window, used_percent, resets_at_ms)
                         {
-                            let point = QuotaPoint {
-                                pool: store.account(&session.account)?.quota_pool,
+                            pending_quota.push(PendingQuota {
                                 window: Id::new(window)?,
                                 used_percent,
                                 observed_at_ms: now_ms(),
                                 resets_at_ms,
-                            };
-                            if point.validate().is_ok() {
-                                store.record_account_quota(&run, &point)?;
-                            }
+                            });
                         }
                     }
                     TurnEvent::Tool {
@@ -2078,7 +2150,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
                             &run,
                             &call_id,
                             &name,
-                            &digest(serde_json::to_vec(&arguments)?),
+                            &digest(serde_json::to_vec(&arguments).unwrap_or_default()),
                         )?;
                         observer(Progress::Tool(name.clone()));
                         if *cancel.borrow() {
@@ -2094,14 +2166,21 @@ pub(crate) async fn run_prepared<P: Protocol>(
                             )?;
                             return Ok((Terminal::Cancelled, vec![]));
                         }
-                        let output = if name == "workspace_exec" {
-                            match commands.start(
-                                store.clone(),
-                                run.clone(),
-                                workspace.clone(),
-                                call_id.clone(),
-                                &arguments,
-                            ) {
+                        // `settle` stays None for workspace_exec: the command
+                        // tool settles its own receipt inside finish_command.
+                        // Every other tool settles its receipt together with
+                        // the transcript append in one durable transaction.
+                        let (output, settle) = if name == "workspace_exec" {
+                            match commands
+                                .start(
+                                    store.clone(),
+                                    run.clone(),
+                                    workspace.clone(),
+                                    call_id.clone(),
+                                    &arguments,
+                                )
+                                .await
+                            {
                                 Ok(()) => {
                                     let command = commands.wait().await;
                                     commands_joined &= command.joined;
@@ -2111,7 +2190,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
                                             "command stop is unproven; account custody retained",
                                         ));
                                     }
-                                    command.output
+                                    (command.output, None)
                                 }
                                 Err(error) => {
                                     settle_tool_effects(
@@ -2121,62 +2200,92 @@ pub(crate) async fn run_prepared<P: Protocol>(
                                         EffectState::None,
                                         &mut effects,
                                     )?;
-                                    Err(error)
+                                    (Err(error), None)
                                 }
                             }
                         } else if name.starts_with("xcb_") {
                             let (output, call_effects) = managed_tool_call(
                                 &store,
+                                &mut managed_bridge,
                                 &session.id,
                                 &format!("{}:{call_id}", run.id),
                                 &name,
                                 &arguments,
                             );
-                            settle_tool_effects(
-                                &store,
-                                &run,
-                                &call_id,
-                                call_effects,
-                                &mut effects,
-                            )?;
-                            output
+                            (output, Some(call_effects))
                         } else {
-                            let (output, call_effects) = workspace.call_observed(&name, &arguments);
-                            settle_tool_effects(
-                                &store,
-                                &run,
-                                &call_id,
-                                call_effects,
-                                &mut effects,
-                            )?;
-                            output
+                            // Workspace tools do bounded filesystem and SQLite
+                            // work on a blocking thread; a dropped provider
+                            // wait still settles this receipt via
+                            // cancel_and_join.
+                            let (output, call_effects) = commands
+                                .workspace_call(
+                                    store.clone(),
+                                    run.clone(),
+                                    call_id.clone(),
+                                    workspace.clone(),
+                                    name.clone(),
+                                    arguments.clone(),
+                                )
+                                .await;
+                            (output, Some(call_effects))
                         };
+                        // Result shaping never aborts the turn: legal tool
+                        // output that cannot ride the transcript bound is a
+                        // tool rejection with guidance, not a protocol failure.
                         let (text, failed) = match output {
-                            Ok(output) => (serde_json::to_string(&output)?, false),
+                            Ok(output) => match serde_json::to_string(&output) {
+                                Ok(text) => (text, false),
+                                Err(_) => ("tool result could not be encoded".to_owned(), true),
+                            },
                             Err(error) => (error.to_string(), true),
                         };
-                        if text.len() > MAX_TEXT_BYTES {
-                            return Err(Error::Protocol("tool result limit"));
+                        let (text, failed) = if text.len() > MAX_TEXT_BYTES {
+                            (
+                                "tool result exceeds 256 KiB; read a smaller file or a range"
+                                    .to_owned(),
+                                true,
+                            )
+                        } else {
+                            (text, failed)
+                        };
+                        // The durable transcript carries display-safe text;
+                        // the provider still receives the exact result.
+                        let message = Message {
+                            id: new_id("tool"),
+                            role: Role::Tool,
+                            text: xcb_core::display_text(
+                                &format!("{name}: {text}"),
+                                MAX_TEXT_BYTES,
+                            ),
+                            at_ms: now_ms(),
+                            attachments: vec![],
+                            provenance: Some(MessageProvenance {
+                                account: session.account.clone(),
+                                model: session.model.clone(),
+                                run: Some(run.id.clone()),
+                            }),
+                        };
+                        if let Some(call_effects) = settle {
+                            let previous = effects;
+                            // A receipt write can fail after the tool ran.
+                            // Until that receipt is durable, retain custody
+                            // even when the filesystem result was known.
+                            effects = EffectState::Uncertain;
+                            if call_effects == EffectState::Uncertain {
+                                store.append_tool_message(&session.id, &message)?;
+                            } else {
+                                store.settle_tool_and_append(
+                                    &run,
+                                    &call_id,
+                                    &session.id,
+                                    &message,
+                                )?;
+                                effects = combine_effects(previous, call_effects);
+                            }
+                        } else {
+                            store.append_tool_message(&session.id, &message)?;
                         }
-                        let current = store
-                            .session(&session.id)?
-                            .ok_or(Error::Unavailable("session not found"))?;
-                        store.append_message(
-                            &session.id,
-                            current.revision,
-                            &Message {
-                                id: new_id("tool"),
-                                role: Role::Tool,
-                                text: format!("{name}: {text}"),
-                                at_ms: now_ms(),
-                                attachments: vec![],
-                                provenance: Some(MessageProvenance {
-                                    account: session.account.clone(),
-                                    model: session.model.clone(),
-                                    run: Some(run.id.clone()),
-                                }),
-                            },
-                        )?;
                         protocol
                             .reply(
                                 &mut process,
@@ -2194,13 +2303,10 @@ pub(crate) async fn run_prepared<P: Protocol>(
                             answer.completed(text)?;
                         }
                         if input.config.extensions.usage {
-                            store.record_velocity(
-                                &session.id,
-                                VelocitySample {
-                                    at_ms: now_ms(),
-                                    output_tokens: baseline.saturating_add(output_tokens),
-                                },
-                            )?;
+                            pending_velocity.push(VelocitySample {
+                                at_ms: now_ms(),
+                                output_tokens: baseline.saturating_add(output_tokens),
+                            });
                         }
                         return Ok((terminal, models));
                     }
@@ -2228,21 +2334,50 @@ pub(crate) async fn run_prepared<P: Protocol>(
                 }
             }
         }
-        Err(Error::Protocol("provider frame count limit"))
     };
     let deadline = Duration::from_millis(input.config.turn_timeout_ms);
-    let result = tokio::select! {
+    let (cancelled, mut result) = tokio::select! {
         biased;
-        _ = async { if !*cancel_execution.borrow() { let _ = cancel_execution.changed().await; } } => Ok(Ok((Terminal::Cancelled, vec![]))),
-        result = tokio::time::timeout(deadline, execution) => result,
+        _ = async { if !*cancel_execution.borrow() { let _ = cancel_execution.changed().await; } } =>
+            (true, Ok(Ok((Terminal::Cancelled, vec![])))),
+        result = tokio::time::timeout(deadline, execution) => (false, result),
     };
+    if cancelled {
+        // Cooperative interruption first: a provider that understands it can
+        // settle the turn and exit inside the grace period below; everything
+        // else still gets the same bounded stdin-close grace and kill.
+        if let Some(frame) = protocol.interruption() {
+            let _ = process.send(&frame).await;
+        }
+    }
+    // Everything the turn observed lands in one commit here — completion,
+    // cancellation, limit and error paths alike. A write failure fails the
+    // turn exactly as the per-event record calls it replaces.
+    if let Err(error) =
+        store.record_observations(&run, &session.id, &pending_velocity, &pending_quota)
+        && result.is_ok()
+    {
+        result = Ok(Err(error));
+    }
     // Cancellation drops only the execution future. Never cancel independent
     // process/listener joins or credential persistence and custody settlement.
     if let Some(command) = commands.cancel_and_join().await {
         commands_joined &= command.joined;
         effects = combine_effects(effects, command.effects);
     }
-    let process_joined = process.join().await;
+    let process_joined = if cancelled {
+        process.join_graceful(CANCEL_GRACE).await
+    } else {
+        process.join().await
+    };
+    if let Some(bytes) = process.stderr_overflow() {
+        // Volume is reported, never retained: provider stderr is not a
+        // bounded host diagnostic and may carry credentials or paths.
+        observer(Progress::Notice(format!(
+            "provider wrote {bytes} bytes to stderr (notice threshold {} bytes); the stream was drained to EOF but not retained",
+            crate::process::STDERR_NOTICE_BYTES
+        )));
+    }
     let protocol_joined = protocol.shutdown().await;
     let bridge_joined = close_bridge(bridge).await;
     let joined = process_joined && protocol_joined && bridge_joined && commands_joined;
@@ -2260,7 +2395,13 @@ pub(crate) async fn run_prepared<P: Protocol>(
             let detail = Diagnostic::from_error(&error);
             observer(Progress::Notice(detail.as_str().to_owned()));
             diagnostic = Some(detail);
-            (Terminal::Failed, vec![], Some(Failure::Unknown))
+            // The codec's fixed category names the account failure; an
+            // earlier explicit provider rejection is the next best evidence.
+            let failure = match error.failure() {
+                Failure::Unknown => quota_failure.unwrap_or(Failure::Unknown),
+                failure => failure,
+            };
+            (Terminal::Failed, vec![], Some(failure))
         }
         Err(_) => {
             let detail = Diagnostic::from_error(&Error::Unavailable("provider deadline reached"));
@@ -2824,11 +2965,16 @@ mod tests {
         before_ready: bool,
         mailbox_failure: bool,
         passive_after_quota: bool,
+        initialize_failure: Option<Error>,
+        receive_failure: Option<Error>,
         step: u8,
         block_initialize: Option<tokio::sync::oneshot::Sender<()>>,
     }
     impl Protocol for FixtureProtocol {
         async fn initialize(&mut self, _: &mut StreamProcess, _: &str) -> Result<Vec<ModelChoice>> {
+            if let Some(error) = self.initialize_failure.take() {
+                return Err(error);
+            }
             if let Some(started) = self.block_initialize.take() {
                 let _ = started.send(());
                 std::future::pending::<()>().await;
@@ -2840,6 +2986,9 @@ mod tests {
         }
         async fn receive(&mut self, _: &mut StreamProcess, _: &[u8]) -> Result<Vec<TurnEvent>> {
             self.step += 1;
+            if let Some(error) = self.receive_failure.take() {
+                return Err(error);
+            }
             if self.step == 1 {
                 let mut events = vec![];
                 if !self.before_ready {
@@ -2983,6 +3132,8 @@ mod tests {
                         before_ready,
                         mailbox_failure,
                         passive_after_quota,
+                        initialize_failure: None,
+                        receive_failure: None,
                         step: 0,
                         block_initialize: None,
                     },
@@ -3035,6 +3186,182 @@ mod tests {
             }
         }
     }
+    /// Legal file content and oversized tool results must produce `isError`
+    /// tool replies while the provider turn still completes; the persisted
+    /// transcript is sanitized and bounded.
+    struct ToolReadProtocol {
+        model: ModelChoice,
+        ready: bool,
+        calls: std::collections::VecDeque<(String, serde_json::Value, bool)>,
+        current: Option<(String, bool)>,
+    }
+    impl Protocol for ToolReadProtocol {
+        async fn initialize(&mut self, _: &mut StreamProcess, _: &str) -> Result<Vec<ModelChoice>> {
+            Ok(vec![self.model.clone()])
+        }
+        async fn start(&mut self, process: &mut StreamProcess, _: Prompt) -> Result<()> {
+            process.send(&json!({"step":0})).await
+        }
+        async fn receive(&mut self, _: &mut StreamProcess, _: &[u8]) -> Result<Vec<TurnEvent>> {
+            let mut events = vec![];
+            if self.ready {
+                self.ready = false;
+                events.push(TurnEvent::Ready);
+            }
+            if let Some((id, arguments, expect_error)) = self.calls.pop_front() {
+                self.current = Some((id.clone(), expect_error));
+                events.push(TurnEvent::Tool {
+                    id,
+                    name: "workspace_read".into(),
+                    arguments,
+                });
+            } else {
+                events.push(TurnEvent::Result {
+                    terminal: Terminal::Completed,
+                    text: "Done".into(),
+                    models: vec![],
+                });
+            }
+            Ok(events)
+        }
+        async fn reply(
+            &mut self,
+            process: &mut StreamProcess,
+            id: &str,
+            result: Value,
+        ) -> Result<()> {
+            let Some((expected_id, expect_error)) = self.current.take() else {
+                panic!("unexpected tool reply {id}");
+            };
+            assert_eq!(id, expected_id);
+            assert_eq!(result["isError"], expect_error, "reply for {id}");
+            let text = result["content"][0]["text"].as_str().unwrap_or_default();
+            match id {
+                // The provider sees the raw result for a successful call —
+                // including legal control characters — while the transcript
+                // carries the sanitized copy.
+                "ctrl" => assert!(text.contains('\u{0085}') && text.contains('\u{202e}')),
+                "lines" => assert_eq!(
+                    text,
+                    "tool result exceeds 256 KiB; read a smaller file or a range"
+                ),
+                "big" => assert!(text.contains("exceeds the 128 KiB read limit")),
+                _ => (),
+            }
+            process.send(&json!({"step":1})).await
+        }
+    }
+
+    #[tokio::test]
+    async fn legal_or_oversized_tool_output_is_a_tool_error_not_a_turn_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let workspace = base.join("work");
+        std::fs::create_dir(&workspace).unwrap();
+        // A legal 256 KiB file is rejected by the read limit, not the turn.
+        std::fs::write(workspace.join("big.txt"), "\n".repeat(256 * 1024)).unwrap();
+        // A legal 128 KiB file of newlines serializes past the transcript
+        // bound: the oversize result becomes an isError reply with guidance.
+        std::fs::write(workspace.join("lines.txt"), "\n".repeat(128 * 1024)).unwrap();
+        // Legal control characters ride the provider reply; only the
+        // transcript copy is sanitized.
+        std::fs::write(
+            workspace.join("ctrl.txt"),
+            "before \u{0085} nel and \u{202e} bidi after",
+        )
+        .unwrap();
+        let store = Arc::new(Store::open(&base.join("state")).unwrap());
+        let account = store
+            .add_account(Provider::Claude, "Fixture", now_ms(), None)
+            .unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("fixture-model").unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: now_ms(),
+        };
+        let session = store
+            .create_session(&account.id, model.clone(), &workspace, now_ms())
+            .unwrap();
+        let message = Message {
+            id: new_id("message"),
+            role: Role::User,
+            text: "Read the files".into(),
+            at_ms: now_ms(),
+            attachments: vec![],
+            provenance: None,
+        };
+        let session = store
+            .append_message(&session.id, session.revision, &message)
+            .unwrap();
+        let artifacts = LaunchArtifacts::create(store.root()).unwrap();
+        let launch = Launch {
+            command: Command::new("/bin/cat"),
+            cwd: base.clone(),
+            bridge: None,
+            artifacts,
+            prepared_run: None,
+            codex_credentials: None,
+        };
+        let (_cancel, cancellation) = watch::channel(false);
+        let outcome = run_prepared(
+            store.clone(),
+            RunInput {
+                session: session.clone(),
+                message,
+                config: Config::default(),
+                pane_generation: false,
+            },
+            cancellation,
+            Arc::new(|_| {}),
+            launch,
+            ToolReadProtocol {
+                model,
+                ready: true,
+                calls: [
+                    ("big", json!({"path":"big.txt"}), true),
+                    ("lines", json!({"path":"lines.txt"}), true),
+                    ("ctrl", json!({"path":"ctrl.txt"}), false),
+                ]
+                .into_iter()
+                .map(|(id, arguments, expect_error)| (id.to_owned(), arguments, expect_error))
+                .collect(),
+                current: None,
+            },
+            Workspace::open_with_coordination(&workspace, &base.join("coordination")).unwrap(),
+        )
+        .await
+        .unwrap();
+        // Every call completed the turn; nothing propagated as a turn failure.
+        assert_eq!(outcome.facts.terminal, Terminal::Completed);
+        assert_eq!(outcome.text, "Done");
+        assert!(outcome.facts.joined);
+        let db = rusqlite::Connection::open(store.root().join("xcb.sqlite")).unwrap();
+        let pending: i64 = db
+            .query_row(
+                "SELECT count(*) FROM tool_effects WHERE settled=0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 0);
+        // The durable transcript is sanitized and bounded; the raw control
+        // characters never persisted.
+        let transcript = store.messages(&session.id, 512).unwrap();
+        let tool_text: String = transcript
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .map(|message| message.text.clone())
+            .collect();
+        assert_eq!(tool_text.matches("workspace_read:").count(), 3);
+        assert!(!tool_text.contains('\u{0085}'));
+        assert!(!tool_text.contains('\u{202e}'));
+        assert!(tool_text.len() <= 4 * MAX_TEXT_BYTES);
+    }
+
     #[tokio::test]
     async fn cancellation_during_initialization_joins_and_releases_without_submitting_a_turn() {
         let root = tempfile::tempdir().unwrap();
@@ -3102,6 +3429,8 @@ mod tests {
                     before_ready: false,
                     mailbox_failure: false,
                     passive_after_quota: false,
+                    initialize_failure: None,
+                    receive_failure: None,
                     step: 0,
                     block_initialize: Some(started),
                 },
@@ -3213,6 +3542,257 @@ mod tests {
             assert_eq!(store.unsettled_runs().unwrap().is_empty(), joined);
             assert_eq!(launch_path.exists(), !joined);
         }
+    }
+
+    /// The codec's fixed error category, not Unknown, settles account state
+    /// when initialize or the turn RPCs fail before an answer exists.
+    #[tokio::test]
+    async fn codec_failure_categories_settle_account_state_not_unknown() {
+        async fn run(
+            provider: Provider,
+            initialize_failure: Option<Error>,
+            receive_failure: Option<Error>,
+        ) -> (Outcome, Arc<Store>, Id) {
+            let root = tempfile::tempdir().unwrap();
+            let base = root.path().canonicalize().unwrap();
+            let workspace = base.join("work");
+            std::fs::create_dir(&workspace).unwrap();
+            let store = Arc::new(Store::open(&base.join("state")).unwrap());
+            let account = store
+                .add_account(provider, "Fixture", now_ms(), None)
+                .unwrap();
+            let model = ModelChoice {
+                provider,
+                id: Id::new("fixture-model").unwrap(),
+                label: "Fixture".into(),
+                mode: Mode::Fixed,
+                resolved: None,
+                effort: None,
+                observed_at_ms: now_ms(),
+            };
+            let session = store
+                .create_session(&account.id, model.clone(), &workspace, now_ms())
+                .unwrap();
+            let message = Message {
+                id: new_id("message"),
+                role: Role::User,
+                text: "Create a file".into(),
+                at_ms: now_ms(),
+                attachments: vec![],
+                provenance: None,
+            };
+            let session = store
+                .append_message(&session.id, session.revision, &message)
+                .unwrap();
+            let launch = Launch {
+                command: Command::new("/bin/cat"),
+                cwd: base.clone(),
+                bridge: None,
+                artifacts: LaunchArtifacts::create(store.root()).unwrap(),
+                prepared_run: None,
+                codex_credentials: None,
+            };
+            let (_cancel, cancellation) = watch::channel(false);
+            let outcome = run_prepared(
+                store.clone(),
+                RunInput {
+                    session,
+                    message,
+                    config: Config::default(),
+                    pane_generation: false,
+                },
+                cancellation,
+                Arc::new(|_| ()),
+                launch,
+                FixtureProtocol {
+                    model,
+                    before_ready: false,
+                    mailbox_failure: false,
+                    passive_after_quota: false,
+                    initialize_failure,
+                    receive_failure,
+                    step: 0,
+                    block_initialize: None,
+                },
+                Workspace::open_with_coordination(&workspace, &base.join("coordination")).unwrap(),
+            )
+            .await
+            .unwrap();
+            (outcome, store, account.id)
+        }
+
+        let (outcome, store, account) = run(
+            Provider::Codex,
+            Some(Error::CodexRpc {
+                method: "turn/start",
+                code: -32000,
+                category: crate::category::AUTHENTICATION,
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(outcome.facts.terminal, Terminal::Failed);
+        assert_eq!(outcome.facts.failure, Some(Failure::Authentication));
+        assert_eq!(outcome.state, State::NeedsAction);
+        assert!(outcome.facts.joined);
+        assert!(store.authentication_required(&account).unwrap());
+        assert!(store.unsettled_runs().unwrap().is_empty());
+
+        let (outcome, store, account) = run(
+            Provider::Codex,
+            None,
+            Some(Error::CodexRpc {
+                method: "turn/start",
+                code: -32000,
+                category: crate::category::CODEX_USAGE_LIMIT,
+            }),
+        )
+        .await;
+        assert_eq!(outcome.facts.failure, Some(Failure::AccountQuota));
+        assert_eq!(outcome.state, State::Limited);
+        assert!(!store.authentication_required(&account).unwrap());
+
+        let (outcome, store, account) = run(
+            Provider::Devin,
+            None,
+            Some(Error::DevinRpc {
+                method: "session/prompt",
+                code: -32002,
+                category: crate::category::NETWORK,
+            }),
+        )
+        .await;
+        assert_eq!(outcome.facts.failure, Some(Failure::Transport));
+        assert_eq!(outcome.state, State::Failed);
+        assert!(!store.authentication_required(&account).unwrap());
+
+        let (outcome, store, account) = run(
+            Provider::Devin,
+            None,
+            Some(Error::DevinRpc {
+                method: "session/prompt",
+                code: -32002,
+                category: "provider rejected the operation",
+            }),
+        )
+        .await;
+        assert_eq!(outcome.facts.failure, Some(Failure::Unknown));
+        assert_eq!(outcome.state, State::Failed);
+        assert!(!store.authentication_required(&account).unwrap());
+    }
+
+    /// Streaming providers emit one frame per delta, so frame volume is
+    /// bounded by the byte budget and deadline, not a fixture-sized count: a
+    /// flooded turn ends gracefully as a turn limit, never a protocol error.
+    #[tokio::test]
+    async fn frame_volume_ends_turn_as_turn_limit_not_protocol_failure() {
+        struct FloodProtocol {
+            model: ModelChoice,
+        }
+        impl Protocol for FloodProtocol {
+            async fn initialize(
+                &mut self,
+                _: &mut StreamProcess,
+                _: &str,
+            ) -> Result<Vec<ModelChoice>> {
+                Ok(vec![self.model.clone()])
+            }
+            async fn start(&mut self, _: &mut StreamProcess, _: Prompt) -> Result<()> {
+                Ok(())
+            }
+            async fn next(&mut self, _: &mut StreamProcess) -> Result<crate::protocol::Batch> {
+                Ok(crate::protocol::Batch {
+                    bytes: 0,
+                    events: vec![],
+                })
+            }
+            async fn receive(&mut self, _: &mut StreamProcess, _: &[u8]) -> Result<Vec<TurnEvent>> {
+                unreachable!()
+            }
+            async fn reply(&mut self, _: &mut StreamProcess, _: &str, _: Value) -> Result<()> {
+                unreachable!()
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let workspace = base.join("work");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Arc::new(Store::open(&base.join("state")).unwrap());
+        let account = store
+            .add_account(Provider::Claude, "Fixture", now_ms(), None)
+            .unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("fixture-model").unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: now_ms(),
+        };
+        let session = store
+            .create_session(&account.id, model.clone(), &workspace, now_ms())
+            .unwrap();
+        let message = Message {
+            id: new_id("message"),
+            role: Role::User,
+            text: "Write a long answer".into(),
+            at_ms: now_ms(),
+            attachments: vec![],
+            provenance: None,
+        };
+        let session = store
+            .append_message(&session.id, session.revision, &message)
+            .unwrap();
+        let launch = Launch {
+            command: Command::new("/bin/cat"),
+            cwd: base.clone(),
+            bridge: None,
+            artifacts: LaunchArtifacts::create(store.root()).unwrap(),
+            prepared_run: None,
+            codex_credentials: None,
+        };
+        let (_cancel, cancellation) = watch::channel(false);
+        let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = notices.clone();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(120),
+            run_prepared(
+                store.clone(),
+                RunInput {
+                    session,
+                    message,
+                    config: Config::default(),
+                    pane_generation: false,
+                },
+                cancellation,
+                Arc::new(move |event| {
+                    if let Progress::Notice(text) = event {
+                        seen.lock().unwrap().push(text);
+                    }
+                }),
+                launch,
+                FloodProtocol { model },
+                Workspace::open_with_coordination(&workspace, &base.join("coordination")).unwrap(),
+            ),
+        )
+        .await
+        .expect("the frame limit lands far before the turn deadline")
+        .unwrap();
+        assert_eq!(outcome.facts.terminal, Terminal::TurnLimit);
+        assert_eq!(outcome.facts.failure, None);
+        assert!(outcome.facts.joined);
+        assert_eq!(outcome.state, State::Idle);
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert!(
+            notices
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|text| text.contains("frame count")),
+            "the turn limit is reported as a bounded diagnostic notice"
+        );
     }
 
     /// Parent liveness and provider settlement are independent facts.
