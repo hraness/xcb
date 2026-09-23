@@ -158,6 +158,12 @@ pub struct Session {
     pub title: String,
     pub pane: Id,
     pub state: State,
+    /// The managed task this session was created for, recorded atomically at
+    /// creation so startup reconciliation can prove managed custody of a
+    /// session that never reached `prepare` (an orphan). `None` means the
+    /// session is unmanaged/direct and must never be swept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_task: Option<Id>,
     pub revision: u64,
     pub created_at_ms: u64,
     pub last_active_at_ms: u64,

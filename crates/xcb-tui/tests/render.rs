@@ -25,6 +25,7 @@ fn app() -> App {
         title: "Example".into(),
         pane: Id::new("focus").unwrap(),
         state: State::NeedsAnswer,
+        managed_task: None,
         revision: 1,
         created_at_ms: 1,
         last_active_at_ms: 2,

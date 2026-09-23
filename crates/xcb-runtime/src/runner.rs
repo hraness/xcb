@@ -1714,20 +1714,31 @@ fn settle_tool_effects(
     Ok(())
 }
 
-fn managed_tool_call(
+/// The managed mailbox bridge is opened once per worker run instead of once
+/// per `xcb_*` tool call. A failed open is not remembered: the next call
+/// retries, preserving the original per-call error surface.
+pub(crate) fn managed_tool_call(
     store: &Store,
+    bridge: &mut Option<crate::managed::ManagedStore>,
     session: &Id,
     call: &str,
     name: &str,
     arguments: &Value,
 ) -> (Result<Value>, EffectState) {
-    match crate::managed::ManagedStore::open(store.root()) {
-        Ok(managed) => managed.worker_call(store, session, call, name, arguments),
-        // No worker effect occurred if its host mailbox could not be opened.
-        // Return a normal tool rejection so its already-written pending
-        // receipt is settled and does not strand otherwise proven custody.
-        Err(error) => (Err(error), EffectState::None),
+    if bridge.is_none() {
+        match crate::managed::ManagedStore::open(store.root()) {
+            Ok(managed) => *bridge = Some(managed),
+            // No worker effect occurred if its host mailbox could not be
+            // opened. Return a normal tool rejection so its already-written
+            // pending receipt is settled and does not strand otherwise
+            // proven custody.
+            Err(error) => return (Err(error), EffectState::None),
+        }
     }
+    bridge
+        .as_ref()
+        .expect("managed bridge opened above")
+        .worker_call(store, session, call, name, arguments)
 }
 
 pub struct RunInput {
@@ -1870,6 +1881,9 @@ pub(crate) async fn run_prepared<P: Protocol>(
     let workspace = Arc::new(workspace);
     let mut commands = crate::command_tool::CommandTools::default();
     let mut commands_joined = true;
+    // One managed mailbox connection per worker run rather than one open
+    // (and migration probe) per `xcb_*` tool call.
+    let mut managed_bridge = None;
     let execution = async {
         spawned?;
         let baseline = store
@@ -2131,6 +2145,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         } else if name.starts_with("xcb_") {
                             let (output, call_effects) = managed_tool_call(
                                 &store,
+                                &mut managed_bridge,
                                 &session.id,
                                 &format!("{}:{call_id}", run.id),
                                 &name,
