@@ -124,12 +124,13 @@ def main():
         current = task(row["id"])
         return value("backlog", "complete", row["id"], summary, "--revision", str(current["revision"]))
 
-    def terminal(name, argv, actions, redraw_at=()):
+    def terminal(name, argv, actions, redraw_at=(), durable_at=None):
         pid, fd = pty.fork()
         if pid == 0:
             os.chdir(paths["workspace"])
             os.execve(str(binary), base + argv, env)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 48, 160, 0, 0))
+        os.set_blocking(fd, False)
         capture = bytearray()
         segments = []
         wait_status = None
@@ -161,6 +162,25 @@ def main():
                 drain(.05)
             return False
 
+        def write_all(data):
+            pending = memoryview(data)
+            deadline = time.monotonic() + 8
+            while pending:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("PTY input deadline exceeded")
+                _, writable, _ = select.select([], [fd], [], .1)
+                if not writable:
+                    drain(.01)
+                    continue
+                try:
+                    written = os.write(fd, pending)
+                except BlockingIOError:
+                    continue
+                if written <= 0:
+                    raise RuntimeError("PTY input closed before complete write")
+                pending = pending[written:]
+                drain(.01)
+
         try:
             ready_by = time.monotonic() + 12
             while b"Ctrl-V" not in capture and time.monotonic() < ready_by:
@@ -169,8 +189,21 @@ def main():
             drain(.5)
             for index, (data, delay) in enumerate(actions):
                 offset = len(capture)
-                os.write(fd, data)
+                if data.startswith(b"\x1b[200~"):
+                    check(name + " bracketed paste enabled " + str(index), b"\x1b[?2004h" in capture)
+                write_all(data)
                 drain(delay)
+                if durable_at and index in durable_at:
+                    # A slow host can still be consuming input after a fixed
+                    # delay. Advance only after the exact operator write is
+                    # durable, before opening a picker or selecting its row.
+                    ready_by = time.monotonic() + 12
+                    ready = durable_at[index]()
+                    while not ready and time.monotonic() < ready_by:
+                        drain(.1)
+                        ready = durable_at[index]()
+                    check(name + " durable action checkpoint " + str(index), ready)
+                    drain(.2)
                 if index in redraw_at:
                     # Ratatui emits changed cells, not whole strings. A raw
                     # ANSI-stripped delta can omit matching letters from the
@@ -273,15 +306,37 @@ def main():
         ui_source = value("backlog", "add", conversation, "TUI watch source")
         before_tasks = value("backlog", "--conversation", conversation)
         long_text = "UI_GUIDANCE_HEAD " + "keep the existing boundary; " * 130 + "UI_GUIDANCE_TAIL"
+        # Use the same bracketed-paste protocol as a real terminal. Thousands
+        # of synthetic key events otherwise take seconds on slower CI hosts.
+        # Enter remains outside the paste, so it submits exactly once.
+        def paste_submit(text):
+            return b"\x1b[200~" + text.encode() + b"\x1b[201~\r"
+
+        def ui_watch_saved():
+            rows = events(ui_target["id"])
+            return len(rows) == 1 and rows[0]["task"] == ui_target["id"] \
+                and rows[0]["conversation"] == conversation and rows[0]["kind"] == "completion" \
+                and rows[0]["status"] == "waiting" and ui_source["id"] in rows[0]["text"]
+
+        def ui_guidance_saved():
+            rows = events(ui_target["id"])
+            return len(rows) == 2 and sum(row["text"] == long_text
+                                        and row["task"] == ui_target["id"]
+                                        and row["conversation"] == conversation
+                                        and row["kind"] == "steering"
+                                        and row["status"] == "held" for row in rows) == 1
+
         actions = [
             ((f"/watch {ui_target['id']} {ui_source['id']}\r").encode(), .7),
-            ((f"/steer {ui_target['id']} {long_text}\r").encode(), 1.0),
+            (paste_submit(f"/steer {ui_target['id']} {long_text}"), .3),
             ((f"/inbox {ui_target['id']}\r").encode(), .5),
             (b"\r", .5), (b"\x1b[F", .5), (b"\x1b", .2),
             (b"/inbox all\r", .5), (b"\x1b", .2),
             (b"/inbox\r", .5), (b"\x1b", .2), (b"\x04", .3),
         ]
-        _, segments = terminal("inbox-tui", ["chat", "--resume", conversation], actions, redraw_at=(2, 3, 4, 6, 8))
+        _, segments = terminal("inbox-tui", ["chat", "--resume", conversation], actions,
+                               redraw_at=(2, 3, 4, 6, 8),
+                               durable_at={0: ui_watch_saved, 1: ui_guidance_saved})
         task_picker = re.sub(r"\s+", "", segments[2])
         all_picker = re.sub(r"\s+", "", segments[6])
         conversation_picker = re.sub(r"\s+", "", segments[8])
