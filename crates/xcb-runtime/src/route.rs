@@ -312,6 +312,7 @@ pub async fn dispatch(
         &config,
         Some(&route.account),
         Some(&route.model),
+        None,
     )
     .map_err(|error| {
         Box::new(
