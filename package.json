@@ -30,7 +30,7 @@
     }
   },
   "bin": {
-    "xcb": "dist/cli.js"
+    "xcb-compat": "dist/cli.js"
   },
   "files": [
     "dist",

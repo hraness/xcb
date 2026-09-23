@@ -70,9 +70,10 @@ contract.
 ## Command-line interface
 
 The compatibility build installs an `xcb-compat` executable that drives the
-library task runtime; the name keeps it from shadowing the native `xcb`. These
-commands describe that executable, not the native Rust CLI. Use the source
-invocation above when no verified xcb package is installed:
+library task runtime, so a global `npm install` can never shadow the native
+`xcb` binary. These commands describe that executable, not the native Rust
+CLI. Use the source invocation above when no verified xcb package is
+installed:
 
 ```sh
 xcb-compat doctor            # inspect provider binaries, admit this runtime
@@ -156,7 +157,7 @@ that evidence. Selecting either unqualified provider fails closed.
 
 ### Judged routing, continuation, and compaction (optional)
 
-`xcb` can ask a judgment service — the jev interface — to pick among admitted
+`xcb-compat` can ask a judgment service — the jev interface — to pick among admitted
 routes, advise whether a safely stopped turn remains unfinished, or veto
 Gobstopper elision of stale tool results that remain important. The port is
 provider-neutral: `ask(state, questions)` returns typed answers (`noul`,

@@ -27,26 +27,55 @@ history is a release request. The tag version must equal `package.json`'s
    Bun and Node.
 3. **Native binary build.** On Ubuntu and macOS, checks out the verified tag
    commit, builds `xcb` with the pinned Rust toolchain through
-   `scripts/build-native.sh`, and preserves
+   `scripts/build-native.sh` with no dependency cache, and re-admits the
+   packaged archive exactly like the installer through
+   `scripts/check-native-archive.sh`: exactly one regular `xcb` member, a
+   matching `.sha256`, and the extracted binary reporting `xcb <version>`. It
+   then attests each tarball's build provenance
+   (`actions/attest-build-provenance`; this is the only job holding
+   `attestations: write` and `id-token: write`) and preserves
    `xcb-<version>-<os>-<arch>.tar.gz` plus its adjacent `.sha256` checksum as
    run-bound workflow artifacts.
 4. **Publish immutable GitHub Release.** The only job holding
-   `contents: write`. Creates the immutable Latest GitHub Release carrying the
-   exact tarball, `SHA256SUMS`, and every native archive/checksum pair, then
-   proves it back.
-5. **Pre-npm admission.** Proves the immutable GitHub Release bytes match the
-   packed artifact and admits the npm retry state: absent, or an exact same-run
-   retry only.
-6. **Publish npm.** The only job holding `id-token: write`. Downloads the exact
-   bytes and the reviewed dependency-free npm writer, rechecks the checksum,
-   and publishes through npm OIDC trusted publishing with provenance. No npm
-   token exists anywhere in the pipeline.
-7. **Admission.** Verifies the exact registry version, repository, tag,
-   ancestry, bytes, and Sigstore provenance — the provenance certificate must
-   bind this repository, this workflow, this tag, and this run.
+   `contents: write`. Re-verifies every downloaded native archive against its
+   adjacent checksum, then creates the immutable Latest GitHub Release
+   carrying the exact tarball, `SHA256SUMS`, and every native
+   archive/checksum pair, and proves it back.
+5. **GitHub parity and pre-npm admission.** Proves the immutable GitHub
+   Release bytes — tarball, `SHA256SUMS`, and the exact native asset set —
+   match the reviewed workflow artifacts. When `vars.XCB_PUBLISH_NPM` is
+   `true` it also admits the npm retry state: absent, or an exact same-run
+   retry only. When the variable is unset this parity check is the terminal
+   artifact gate and no npm state exists.
+6. **Publish npm.** Runs only when the repository variable
+   `XCB_PUBLISH_NPM` is `true`. Downloads the exact bytes and the reviewed
+   dependency-free npm writer, rechecks the checksum, and publishes through
+   npm OIDC trusted publishing with provenance. No npm token exists anywhere
+   in the pipeline.
+7. **Admission.** Runs in both modes. Always verifies the exact annotated
+   tag, reviewed-main ancestry, immutable Latest GitHub Release, exact
+   tarball/`SHA256SUMS` bytes, and every native pair's digest, size, and
+   adjacent checksum. When `XCB_PUBLISH_NPM` is `true` it additionally
+   verifies the exact npm registry version, repository, bytes, and Sigstore
+   provenance — the provenance certificate must bind this repository, this
+   workflow, this tag, and this run — and requires the npm writer's same-run
+   completion record.
 
 A failed or interrupted run leaves quarantine, not retry authority: the
-pre-npm job only admits a retry that is an exact continuation of the same run.
+pre-npm job only admits a retry that is an exact continuation of the same
+run.
+
+### npm publication mode
+
+`XCB_PUBLISH_NPM` is a repository variable, not a secret. When it is unset or
+any value other than `true`, the run is a native-only release: `publish_npm`
+and the npm retry-state admission are skipped, the GitHub Release plus its
+exact-byte parity check is the terminal artifact gate, and `admit` verifies
+only the GitHub surface (`NPM_WRITER_RESULT_REQUIRED=false`). A skipped npm
+job is not a failure, so the run stays green. Set the variable to `true`
+only after the `@hraness/xcb` trusted publisher is configured on npm; before
+that the OIDC publish would hard-fail after the immutable GitHub Release is
+already public.
 
 ## Repository protections
 
@@ -70,15 +99,27 @@ runtime and no release authority.
 
 The `native_artifact` job inside `.github/workflows/release.yml` builds `xcb`
 for Ubuntu and macOS from the verified tag commit through
-`scripts/build-native.sh`. The publish job attaches
-`xcb-<version>-<os>-<arch>.tar.gz` and its adjacent `.sha256` checksum to the
-release draft alongside the package tarball and `SHA256SUMS`; all assets become
-immutable together when the release is published. This folding is required, not
-cosmetic: a published GitHub Release is immutable, so assets cannot be added
-afterward — the former `release-native.yml` `workflow_run` follower could
-neither see the tag ref nor extend the finalized release, and has been removed.
-Native artifacts are not published to npm; they are a separate release surface
-alongside the `@hraness/xcb` compatibility package.
+`scripts/build-native.sh`. Each archive is admitted twice with the installer's
+own rules — once in `build-native.sh`, once as a separate workflow step through
+`scripts/check-native-archive.sh` — which require exactly one regular `xcb`
+member (no AppleDouble companions or extended attributes), a matching
+`.sha256`, and an extracted binary reporting `xcb <version>`. Each tarball's
+build provenance is attested with `actions/attest-build-provenance`; verify a
+downloaded archive with:
+
+```sh
+gh attestation verify xcb-<version>-<os>-<arch>.tar.gz -R hraness/xcb
+```
+
+The publish job attaches `xcb-<version>-<os>-<arch>.tar.gz` and its adjacent
+`.sha256` checksum to the release draft alongside the package tarball and
+`SHA256SUMS`; all assets become immutable together when the release is
+published. This folding is required, not cosmetic: a published GitHub Release
+is immutable, so assets cannot be added afterward — the former
+`release-native.yml` `workflow_run` follower could neither see the tag ref nor
+extend the finalized release, and has been removed. Native artifacts are not
+published to npm; they are a separate release surface alongside the
+`@hraness/xcb` compatibility package.
 
 ## Site publication datum
 
