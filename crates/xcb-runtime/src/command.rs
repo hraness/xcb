@@ -1,6 +1,6 @@
 //! Offline Linux commands in a separately owned VM. SSH exit is not worker
 //! custody: only the trusted guest's exact cgroup/stream receipt can join it.
-use crate::{Error, Result, digest, private, process};
+use crate::{Error, Result, broker::snapshot::VerifiedSnapshot, digest, private, process};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -81,7 +81,9 @@ pub struct CommandInput {
     pub run_id: Id,
     pub workspace_id: String,
     pub snapshot_path: PathBuf,
-    pub snapshot_sha256: String,
+    /// The snapshot bytes already encoded and verified by the caller; the
+    /// backend compares digests instead of re-reading the snapshot file.
+    pub snapshot: VerifiedSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -872,13 +874,10 @@ impl CommandBackend {
         if !identifier(&input.command_id)
             || !identifier(&input.run_id)
             || !hash(&input.workspace_id)
-            || !hash(&input.snapshot_sha256)
+            || !hash(input.snapshot.sha256())
+            || input.snapshot.bytes().len() > MAX_SNAPSHOT
         {
             return Err(Error::Unavailable("invalid command authority"));
-        }
-        let snapshot = private::read(&input.snapshot_path, MAX_SNAPSHOT)?;
-        if digest(&snapshot) != input.snapshot_sha256 {
-            return Err(Error::Conflict("command snapshot changed"));
         }
         // Value serializes object keys in the same canonical lexical order as
         // the guest, avoiding a dependency on struct declaration order.
@@ -888,7 +887,7 @@ impl CommandBackend {
             command_id: input.command_id.clone(),
             run_id: input.run_id.clone(),
             workspace_id: input.workspace_id.clone(),
-            snapshot_sha256: input.snapshot_sha256.clone(),
+            snapshot_sha256: input.snapshot.sha256().to_owned(),
             request_sha256: digest(request_bytes),
             backend_sha256: self.identity.clone(),
             boot_id: self.manifest.boot_id.clone(),
@@ -948,7 +947,7 @@ impl CommandBackend {
             || custody.command_id != input.command_id
             || custody.run_id != input.run_id
             || custody.workspace_id != input.workspace_id
-            || custody.snapshot_sha256 != input.snapshot_sha256
+            || custody.snapshot_sha256 != input.snapshot.sha256()
             || custody.boot_id != self.manifest.boot_id
         {
             return Err(Error::Conflict("command authority changed"));
@@ -976,13 +975,14 @@ impl CommandBackend {
                 return Err(Error::Conflict("command transport executable changed"));
             }
             self.inspect().await?;
-            let snapshot = private::read(&input.snapshot_path, MAX_SNAPSHOT)?;
-            if digest(&snapshot) != custody.snapshot_sha256 {
+            // The bytes were verified when encoded; the custody digest binds
+            // them without another read of the snapshot file.
+            if input.snapshot.sha256() != custody.snapshot_sha256 {
                 return Err(Error::Conflict("command snapshot changed"));
             }
             Ok(serde_json::to_vec(
                 &serde_json::json!({"custody":custody,"request":request,
-                "snapshotBase64":base64::engine::general_purpose::STANDARD.encode(snapshot)}),
+                "snapshotBase64":base64::engine::general_purpose::STANDARD.encode(input.snapshot.bytes())}),
             )?)
         }
         .await;
@@ -1292,7 +1292,7 @@ mod tests {
             run_id: crate::new_id("run"),
             workspace_id: "a".repeat(64),
             snapshot_path,
-            snapshot_sha256: digest(snapshot),
+            snapshot: VerifiedSnapshot::new(snapshot.to_vec()),
         };
         let request = CommandRequest {
             argv: vec!["true".into()],
@@ -1539,7 +1539,7 @@ mod tests {
             run_id: crate::new_id("run"),
             workspace_id,
             snapshot_path,
-            snapshot_sha256: digest(snapshot),
+            snapshot: VerifiedSnapshot::new(snapshot),
         };
         let request = CommandRequest {
             argv: vec![
