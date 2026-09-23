@@ -1059,8 +1059,10 @@ fn single_letter_aliases_dispatch_the_full_command() {
         id: xcb_core::Id::new("t_one").unwrap(),
         title: "Fix login".into(),
         state: xcb_core::session::State::Working,
+        status: Some("running".into()),
         detail: "worker is running".into(),
         route: Some("claude/default/high".into()),
+        route_reason: None,
         workspace: "/project".into(),
         updated_at_ms: 1,
     }];
@@ -1133,6 +1135,76 @@ fn managed_session_picker_switches_control_conversations() {
     assert!(
         matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Conversation(id)) if id.as_str() == "c_second")
     );
+}
+
+#[test]
+fn task_inspect_opens_a_scrollable_modal_with_the_full_route() {
+    let (tx, _rx) = sync_channel(4);
+    let mut app = App::default();
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    app.view.tasks = vec![xcb_core::ui::TaskRow {
+        id: xcb_core::Id::new("t_one").unwrap(),
+        title: "Fix login".into(),
+        state: xcb_core::session::State::Working,
+        status: Some("running".into()),
+        detail: "worker is running · quota leader".into(),
+        route: Some("devin/swe-2-high · a_01234567".into()),
+        route_reason: Some("learned workspace preference for devin".into()),
+        workspace: "/project".into(),
+        updated_at_ms: display_now_ms_minus(60_000),
+    }];
+    app.composer.set_text("/tasks");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    // The picker label itself carries the wire phase and the route.
+    match &app.modal {
+        Some(Modal::Picker { items, .. }) => {
+            assert!(items[0].label.contains("running"), "{}", items[0].label);
+            assert!(
+                items[0].label.contains("devin/swe-2-high · a_01234567"),
+                "{}",
+                items[0].label
+            );
+        }
+        _ => panic!("task picker"),
+    }
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let (lines, scroll) = match &mut app.modal {
+        Some(Modal::Inspect {
+            title,
+            lines,
+            scroll,
+        }) => {
+            assert!(title.contains("t_one"));
+            (lines.clone(), scroll)
+        }
+        _ => panic!("task inspect modal"),
+    };
+    let body = lines.join("\n");
+    assert!(body.contains("Fix login"));
+    assert!(body.contains("running"));
+    assert!(body.contains("devin/swe-2-high · a_01234567"));
+    assert!(body.contains("learned workspace preference for devin"));
+    assert!(body.contains("/project"));
+    assert!(body.contains("worker is running · quota leader"));
+    // A one-line notice would have dropped all of this; nothing was posted.
+    assert!(app.notice.is_empty());
+    assert_eq!(*scroll, 0);
+    picker_key(&mut app, &tx, KeyCode::End);
+    match &app.modal {
+        Some(Modal::Inspect { scroll, .. }) => assert_eq!(*scroll, u16::MAX),
+        _ => panic!("inspect modal"),
+    }
+    picker_key(&mut app, &tx, KeyCode::Home);
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert!(app.modal.is_none());
+}
+
+fn display_now_ms_minus(ms: u64) -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+        .saturating_sub(ms)
 }
 
 #[test]

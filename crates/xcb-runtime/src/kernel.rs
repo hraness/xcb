@@ -1158,6 +1158,31 @@ fn start(
     }
 }
 
+/// mtime probe for `config.json`: the kernel's own publish cadence picks up
+/// writes from sibling terminals, keeping it the single refresh path — no
+/// TUI-side `Intent::Refresh` timer is needed.
+fn config_modified(root: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(root.join("config.json"))
+        .and_then(|meta| meta.modified())
+        .ok()
+}
+
+fn reload_config(
+    root: &Path,
+    config: &mut Config,
+    stamp: &mut Option<std::time::SystemTime>,
+    outbox: &Mutex<Outbox>,
+) {
+    *stamp = config_modified(root);
+    match Config::load(root) {
+        Ok((fresh, _)) => *config = fresh,
+        Err(error) => queue(
+            outbox,
+            Update::Notice(format!("Configuration reload rejected: {error}")),
+        ),
+    }
+}
+
 pub async fn serve(
     store: Arc<Store>,
     workspace: PathBuf,
@@ -1166,6 +1191,7 @@ pub async fn serve(
     output: SyncSender<Update>,
 ) -> Result<()> {
     let mut config = Config::load(store.root())?.0;
+    let mut config_stamp = config_modified(store.root());
     let mut active: BTreeMap<Id, Active> = BTreeMap::new();
     let outbox = Arc::new(Mutex::new(Outbox::default()));
     let (completed, mut completions) = mpsc::channel::<(Id, Result<Outcome>)>(16);
@@ -1204,7 +1230,7 @@ pub async fn serve(
                     if matches!(intent, Intent::Quit) { quit = true; pending_pane = None; for task in active.values() { let _ = task.cancel.send(true); } break; }
                     let handled: Result<()> = (|| {
                         match intent {
-                            Intent::Refresh => { match Config::load(store.root()) { Ok((fresh, _)) => config = fresh, Err(error) => queue(&outbox, Update::Notice(format!("Configuration reload rejected: {error}"))) } }
+                            Intent::Refresh => reload_config(store.root(), &mut config, &mut config_stamp, &outbox),
                             Intent::Submit { text, attachments, .. } => {
                                 let prepared: Result<Id> = (|| {
                                     if current.is_none() { current = Some(new_session(&store, &workspace, &config, None, None)?.id); }
@@ -1289,6 +1315,11 @@ pub async fn serve(
                 // reset drafts, scroll positions, notices or open pickers.
                 let refresh_after = if active.is_empty() { Duration::from_secs(1) } else { Duration::from_millis(250) };
                 if activity_published.elapsed() >= refresh_after {
+                    // A config written by a sibling terminal (xcb plugins, an
+                    // edited file) lands on this same cadence.
+                    if config_modified(store.root()) != config_stamp {
+                        reload_config(store.root(), &mut config, &mut config_stamp, &outbox);
+                    }
                     publish(&store, current.as_ref(), &config, &active, &outbox)?;
                     activity_published = tokio::time::Instant::now();
                 }
@@ -2389,5 +2420,50 @@ mod tests {
             .await
             .unwrap()
         );
+    }
+
+    /// The kernel's own publish cadence is the single refresh path: a config
+    /// written by another terminal lands on it with no `Intent::Refresh` in
+    /// flight, and a quiet window never publishes twice on the same change.
+    #[tokio::test]
+    async fn the_kernel_republishes_config_writes_without_a_client_refresh() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().canonicalize().unwrap().join("state");
+        let store = Arc::new(Store::open(&state).unwrap());
+        let workspace =
+            crate::private::directory(&directory.path().canonicalize().unwrap().join("workspace"))
+                .unwrap();
+        let (commands, input) = sync_channel(8);
+        let (output, updates) = sync_channel(64);
+        let task = tokio::spawn(serve(store.clone(), workspace, None, input, output));
+        view_matching(&updates, |view| !view.reduced_motion).await;
+
+        // A sibling terminal writes config.json; no intent is sent.
+        let (mut fresh, revision) = Config::load(&state).unwrap();
+        fresh.reduced_motion = true;
+        fresh.save(&state, revision.as_deref()).unwrap();
+        view_matching(&updates, |view| view.reduced_motion).await;
+
+        // The quiet window that follows publishes only on the ~1s idle
+        // cadence: roughly once, never a duplicate burst.
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+        let mut views = 0usize;
+        while let Ok(update) = updates.try_recv() {
+            assert!(
+                matches!(update, Update::View(_)),
+                "idle polling publishes only full views"
+            );
+            views += 1;
+        }
+        assert!(
+            views <= 2,
+            "a quiet window must not duplicate publishes: {views}"
+        );
+        commands.send(Intent::Quit).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }

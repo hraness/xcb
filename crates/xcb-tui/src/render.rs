@@ -436,12 +436,26 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         .saturating_add(2)
         .clamp(3, 8)
         .min(area.height.saturating_sub(4 + attachment_height));
+    let notice = app.view.pane_error.as_deref().unwrap_or(&app.notice);
+    // Long notices wrap to the viewport instead of truncating, borrowing up
+    // to two rows from the transcript without starving the composer or chrome.
+    let notice_budget = area
+        .height
+        .saturating_sub(4 + attachment_height + input_height)
+        .max(1);
+    let notice_height = (wrap_rows(
+        &[Line::from(expand_tabs(&clean(notice)))],
+        area.width.max(1),
+    )
+    .len() as u16)
+        .clamp(1, 3)
+        .min(notice_budget);
     let parts = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(1),
+            Constraint::Length(notice_height),
             Constraint::Length(attachment_height),
             Constraint::Length(input_height),
             Constraint::Length(1),
@@ -510,9 +524,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     app.scroll_top.set(0);
     app.scroll_tail.set(0);
     render_node(frame, &app.view.pane.root, parts[1], app);
-    let notice = app.view.pane_error.as_deref().unwrap_or(&app.notice);
     frame.render_widget(
-        Paragraph::new(clean(notice)).style(Style::default().fg(Color::Yellow)),
+        Paragraph::new(expand_tabs(&clean(notice)))
+            .style(Style::default().fg(Color::Yellow))
+            .wrap(Wrap { trim: false }),
         parts[2],
     );
     if !app.attachments.is_empty() {
@@ -619,11 +634,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         })
         .or_else(|| {
             (!app.view.tasks.is_empty()).then(|| {
-                let working = app
+                // The footer speaks in wire phases: queued work is waiting
+                // for a route, only dispatched workers count as running.
+                let running = app
                     .view
                     .tasks
                     .iter()
-                    .filter(|task| task.state == State::Working)
+                    .filter(|task| task.state == State::Working && !crate::task_queued(task))
+                    .count();
+                let queued = app
+                    .view
+                    .tasks
+                    .iter()
+                    .filter(|task| crate::task_queued(task))
                     .count();
                 let waiting = app
                     .view
@@ -631,9 +654,26 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     .iter()
                     .filter(|task| task.state.attention())
                     .count();
+                // The freshest running worker's `model · account` identifies
+                // the route the swarm is actually using.
+                let routed = app
+                    .view
+                    .tasks
+                    .iter()
+                    .filter(|task| crate::task_status(task) == "running" && task.route.is_some())
+                    .max_by_key(|task| task.updated_at_ms)
+                    .and_then(|task| task.route.clone());
                 format!(
-                    "{working} working · {waiting} needs you · {} chats · /t tasks · ? help",
-                    app.view.conversations.len()
+                    "{running} running{} · {waiting} needs you · {} chats{} · /t tasks · ? help",
+                    if queued > 0 {
+                        format!(" · {queued} queued")
+                    } else {
+                        String::new()
+                    },
+                    app.view.conversations.len(),
+                    routed
+                        .map(|route| format!(" · {route}"))
+                        .unwrap_or_default(),
                 )
             })
         })
@@ -849,7 +889,7 @@ fn render_node(frame: &mut Frame<'_>, node: &Node, area: Rect, app: &App) {
         }
         Node::Widget { source, .. } => render_source(frame, *source, area, app),
         Node::Text { value } => frame.render_widget(
-            Paragraph::new(clean(value)).wrap(Wrap { trim: false }),
+            Paragraph::new(expand_tabs(&clean(value))).wrap(Wrap { trim: false }),
             area,
         ),
         Node::Spacer { .. } => (),
@@ -908,16 +948,28 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or("workspace");
+                let status = crate::task_status(task);
+                // A queued task is not running yet: a hollow marker and the
+                // wire phase keep it visibly distinct from a live worker.
+                let symbol = if crate::task_queued(task) {
+                    "◌"
+                } else {
+                    status_symbol(task.state)
+                };
+                let mut tail = format!(" · {status} · {project} · {}", clean(&task.detail));
+                if let Some(route) = &task.route {
+                    tail.push_str(&format!(" · {}", clean(route)));
+                }
                 lines.push(Line::from(vec![
                     Span::styled(
-                        format!("{} ", status_symbol(task.state)),
+                        format!("{symbol} "),
                         Style::default().fg(status_color(task.state)),
                     ),
                     Span::styled(
                         clean(&task.title),
                         Style::default().add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(format!(" · {project} · {}", clean(&task.detail)), muted()),
+                    Span::styled(tail, muted()),
                 ]));
             }
             if app.view.tasks.is_empty() && app.view.subagents.is_empty() {
@@ -1574,6 +1626,34 @@ fn render_modal(
                 inner,
                 &mut state,
             );
+        }
+        Modal::Inspect {
+            title,
+            lines,
+            scroll,
+        } => {
+            cache.editor_open = false;
+            let block = Block::bordered()
+                .title(format!(" {title} "))
+                .title_bottom(" ↑↓ scroll · PgUp/PgDn page · Home/End ends · Esc closes ");
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            let body: Vec<Line<'static>> = lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| {
+                    let style = if index == 0 {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    Line::from(Span::styled(expand_tabs(line), style))
+                })
+                .collect();
+            let rows = wrap_rows(&body, inner.width.max(1));
+            let max_scroll = rows.len().saturating_sub(inner.height as usize);
+            *scroll = (*scroll).min(u16::try_from(max_scroll).unwrap_or(u16::MAX));
+            render_rows(frame, inner, &rows, 0, *scroll as usize);
         }
         Modal::Editor {
             title,
