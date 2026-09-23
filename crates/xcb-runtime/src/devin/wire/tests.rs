@@ -942,3 +942,105 @@ fn resource_limit_failures_keep_only_fixed_diagnostics_and_exact_identity() {
         ));
     }
 }
+
+#[test]
+fn delta_bursts_beyond_legacy_frame_fixtures_are_streamed_load() {
+    // Streaming emits one frame per content chunk; the codec backstop sits
+    // far above a long turn, so 16,384+ deltas are ordinary load.
+    let mut p = protocol();
+    let frame = json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"x"}}}});
+    let bytes = serde_json::to_vec(&frame).unwrap();
+    let mut deltas = 0usize;
+    for _ in 0..17_000 {
+        let value = p.envelope(&bytes).unwrap();
+        let (events, replies) = p.accept(value).unwrap();
+        assert!(replies.is_empty());
+        deltas += events
+            .iter()
+            .filter(|event| matches!(event, Event::Delta { .. }))
+            .count();
+    }
+    assert_eq!(deltas, 17_000);
+    assert!(p.frames > 16_384 && p.frames < MAX_FRAMES);
+}
+
+#[test]
+fn non_end_turn_results_abandon_unsettled_calls_and_keep_classification() {
+    // A cancelled or refused turn no longer hides behind a protocol error:
+    // approved-but-unsettled calls are abandoned and the real terminal lands.
+    for (reason, terminal) in [
+        ("cancelled", Terminal::Cancelled),
+        ("refusal", Terminal::Failed),
+        ("max_turn_requests", Terminal::TurnLimit),
+    ] {
+        let mut p = protocol();
+        p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
+            .unwrap();
+        p.accept(permission("approve-1", "call-1")).unwrap();
+        let (events, replies) = p
+            .accept(json!({"jsonrpc":"2.0","id":7,"result":{"stopReason":reason}}))
+            .unwrap();
+        assert!(replies.is_empty());
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Diagnostic(_))),
+            "{reason} reports the abandoned calls"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Result { terminal: t, .. } if *t == terminal)),
+            "{reason} still emits its classified result"
+        );
+        assert!(p.completed && p.calls["call-1"].finished, "{reason}");
+    }
+    // A host-side pending reply is still never abandoned, and a completed
+    // turn still requires full broker settlement.
+    for reason in ["cancelled", "end_turn"] {
+        let mut p = protocol();
+        p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
+            .unwrap();
+        p.accept(permission("approve-1", "call-1")).unwrap();
+        p.mcp(mcp(1, "workspace_read", json!({"path":"a"})))
+            .unwrap();
+        assert!(
+            p.accept(json!({"jsonrpc":"2.0","id":7,"result":{"stopReason":reason}}))
+                .is_err(),
+            "{reason} with a pending host reply stays a protocol error"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stalled_initialization_fails_fast_inside_the_init_deadline() {
+    use std::time::{Duration, Instant};
+    use tokio::process::Command;
+
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("fixture.sh");
+    // Answer exactly the first request, then hold the session open silently.
+    std::fs::write(
+        &script,
+        "IFS= read -r line || exit 1\nprintf '%s\\n' \"$1\"\nwhile IFS= read -r line; do :; done\n",
+    )
+    .unwrap();
+    let mut command = Command::new("/bin/sh");
+    command.arg(&script).arg(
+        json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"affogato"}}})
+            .to_string(),
+    );
+    let mut process = StreamProcess::spawn(command).unwrap();
+    let mut options = protocol().options;
+    options.tools = false;
+    let mut codec = DevinProtocol::new(options, None).unwrap();
+    codec.init_deadline = Duration::from_millis(250);
+    let started = Instant::now();
+    let result = codec.initialize(&mut process, "fixture").await;
+    assert!(matches!(
+        result,
+        Err(Error::Unavailable("Devin initialization timed out"))
+    ));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(process.join().await);
+}
