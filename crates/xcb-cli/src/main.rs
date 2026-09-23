@@ -1577,11 +1577,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     } else {
                         for task in tasks {
                             println!(
-                                "{}  {} · {} · {}",
+                                "{}  {} · {} · {}{}",
                                 task.id,
-                                task.state.as_str(),
+                                task.state.label(),
                                 task.title,
-                                task.detail
+                                task.detail,
+                                task.route
+                                    .as_deref()
+                                    .map(|route| format!(" · {route}"))
+                                    .unwrap_or_default()
                             );
                         }
                     }
