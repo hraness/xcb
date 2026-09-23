@@ -1014,7 +1014,13 @@ mod tests {
         let (used, fault) = program(dir.path(), Reflex::Route).unwrap();
         assert!(!used.custom && fault.is_some());
         std::fs::remove_file(&path).unwrap();
-        rustix::fs::mkfifoat(rustix::fs::CWD, &path, rustix::fs::Mode::RUSR).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
         let (used, fault) = program(dir.path(), Reflex::Route).unwrap();
         assert!(!used.custom && fault.is_some());
         std::fs::remove_file(&path).unwrap();
