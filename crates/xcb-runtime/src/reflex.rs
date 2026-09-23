@@ -273,7 +273,14 @@ pub async fn run(
         "params": heads,
         "evidence": evidence,
     });
-    if !json_within_limit(&input, MAX_CONTEXT_BYTES) {
+    if !json_within_limit(
+        &input,
+        program
+            .manifest
+            .budgets
+            .max_context_bytes
+            .min(MAX_CONTEXT_BYTES),
+    ) {
         return Err(Error::Unavailable(FAILED));
     }
     let args =
@@ -299,7 +306,10 @@ pub async fn run(
         }
         let outputs =
             runtime::outputs(&manifest, &receipt).map_err(|_| Error::Unavailable(FAILED))?;
-        if !json_within_limit(&outputs, MAX_OUTPUT_BYTES) {
+        if !json_within_limit(
+            &outputs,
+            manifest.budgets.max_output_bytes.min(MAX_OUTPUT_BYTES),
+        ) {
             return Err(Error::Unavailable(FAILED));
         }
         Ok((receipt, outputs))
@@ -1059,7 +1069,11 @@ mod tests {
             .await
             .is_err()
         );
-        for (key, limit) in [("maxSteps", 1), ("maxOutputBytes", 1)] {
+        for (key, limit) in [
+            ("maxSteps", 1),
+            ("maxContextBytes", 1),
+            ("maxOutputBytes", 1),
+        ] {
             let mut limited = source.clone();
             limited["budgets"][key] = json!(limit);
             (program.manifest, program.digest) = admit(&limited).unwrap();

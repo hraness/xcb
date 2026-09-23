@@ -109,6 +109,7 @@ impl AdmittedProgram {
         {
             return Err(invalid());
         }
+        canonical_digest(&self.inputs, budgets.max_context_bytes.min(MAX_INPUT_BYTES))?;
         for cell in &manifest.cells {
             if !matches!(
                 cell["kind"].as_str(),
@@ -202,7 +203,7 @@ impl AdmittedProgram {
                 return Err(Error::Unavailable("bounded ALGAL program did not complete"));
             }
             let outputs = algal::runtime::outputs(&manifest, &receipt).map_err(|_| invalid())?;
-            canonical_digest(&outputs, 16_384)?;
+            canonical_digest(&outputs, manifest.budgets.max_output_bytes.min(16_384))?;
             let summary = outputs["summary"].as_str().ok_or_else(invalid)?;
             if summary.trim().is_empty() || summary.len() > MAX_SUMMARY_BYTES {
                 return Err(invalid());
@@ -309,6 +310,13 @@ mod tests {
             json!({"message":"a".repeat(MAX_SUMMARY_BYTES + 1)}),
         )
         .unwrap();
+        assert!(admitted.run(cancel.clone()).await.is_err());
+        let mut source = manifest();
+        source["budgets"] = json!({"maxOutputBytes":1});
+        let admitted = AdmittedProgram::admit(source, json!({"message":"ok"})).unwrap();
         assert!(admitted.run(cancel).await.is_err());
+        let mut source = manifest();
+        source["budgets"] = json!({"maxContextBytes":1});
+        assert!(AdmittedProgram::admit(source, json!({"message":"ok"})).is_err());
     }
 }
