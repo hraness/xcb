@@ -161,6 +161,21 @@ enum Commands {
     },
     /// Show questions, approvals and actions requiring attention across conversations.
     Attention,
+    /// Configure bounded project autonomy and inspect remaining grants.
+    Projects {
+        #[command(subcommand)]
+        command: Option<habitat::ProjectCommand>,
+    },
+    /// Opt-in habitat startup at macOS login; scoped to this state root.
+    Service {
+        #[command(subcommand)]
+        command: Option<ServiceCommand>,
+    },
+    /// Bind, search and explicitly promote notes to a project's local Wordcell vault.
+    Memory {
+        #[command(subcommand)]
+        command: habitat::MemoryCommand,
+    },
     /// List installed panes; subcommands inspect, validate, and install them.
     Panes {
         #[command(subcommand)]
@@ -403,6 +418,18 @@ enum SessionCommand {
         yes: bool,
     },
 }
+#[derive(Subcommand)]
+enum ServiceCommand {
+    /// Register startup and one-minute restart checks for this habitat.
+    Install,
+    /// Inspect registration and supervisor liveness without changing it.
+    Status,
+    /// Remove an idle service; never terminate active workers.
+    Uninstall,
+    /// Print the exact launchd declaration without installing it.
+    Plan,
+}
+
 #[derive(Subcommand)]
 enum CommandJobs {
     /// Move joined, acknowledged command jobs older than --days into
@@ -1611,6 +1638,61 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             conversation,
         }) => habitat::schedules(store.root(), command, conversation.as_ref(), cli.json).await,
         Some(Commands::Attention) => habitat::attention(store.root(), cli.json),
+        Some(Commands::Projects { command }) => habitat::projects(store.root(), command, cli.json),
+        Some(Commands::Memory { command }) => {
+            habitat::memory(store.root(), command, cli.json).await
+        }
+        Some(Commands::Service { command }) => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or(Error::PrivateState)?;
+            let executable = std::env::current_exe()?;
+            if matches!(command, Some(ServiceCommand::Plan)) {
+                let plan =
+                    xcb_runtime::habitat_service::Service::plan(store.root(), &executable, &home)?;
+                if cli.json {
+                    print_json(&plan)?;
+                } else {
+                    print!("{}", plan.render()?);
+                }
+                return Ok(0);
+            }
+            let status = match command {
+                Some(ServiceCommand::Install) => {
+                    xcb_runtime::habitat_service::install(store.root(), &executable, &home)?
+                }
+                Some(ServiceCommand::Uninstall) => {
+                    xcb_runtime::habitat_service::uninstall(store.root(), &home)?
+                }
+                _ => xcb_runtime::habitat_service::status(store.root(), &home)?,
+            };
+            if cli.json {
+                print_json(status)?;
+            } else {
+                println!(
+                    "Habitat startup: {} · login registration: {} · supervisor: {}",
+                    if status.installed {
+                        "installed"
+                    } else {
+                        "absent"
+                    },
+                    if status.registered {
+                        "loaded"
+                    } else {
+                        "unloaded"
+                    },
+                    if status.supervisor_running {
+                        "running"
+                    } else {
+                        "idle"
+                    }
+                );
+                if let Some(service) = status.service {
+                    println!("{}", service.manifest.display());
+                }
+            }
+            Ok(0)
+        }
         Some(Commands::Conversations) => {
             let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
             let conversations = managed.conversations(256)?;
@@ -2293,6 +2375,56 @@ fn automatic_route_notice(reason: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn project_memory_and_program_commands_require_explicit_scope() {
+        use clap::Parser;
+        assert!(
+            super::Cli::try_parse_from([
+                "xcb",
+                "projects",
+                "configure",
+                "project_a",
+                "Maintain parser",
+                "--tasks",
+                "10",
+                "--hours",
+                "24"
+            ])
+            .is_ok()
+        );
+        for invalid in ["0", "101"] {
+            assert!(
+                super::Cli::try_parse_from([
+                    "xcb",
+                    "projects",
+                    "configure",
+                    "project_a",
+                    "Goal",
+                    "--tasks",
+                    invalid,
+                    "--hours",
+                    "24"
+                ])
+                .is_err()
+            );
+        }
+        assert!(super::Cli::try_parse_from(["xcb", "projects", "resume", "project_a"]).is_err());
+        assert!(super::Cli::try_parse_from(["xcb", "memory", "promote", "task_a"]).is_err());
+        assert!(
+            super::Cli::try_parse_from([
+                "xcb",
+                "schedules",
+                "program",
+                "project_a",
+                "planner.json",
+                "--every",
+                "3600"
+            ])
+            .is_ok()
+        );
+        assert!(super::Cli::try_parse_from(["xcb", "service", "plan"]).is_ok());
+    }
+
     #[test]
     fn automatic_route_notice_does_not_echo_route_record_data() {
         assert_eq!(

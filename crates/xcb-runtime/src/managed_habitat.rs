@@ -13,6 +13,8 @@ pub struct HabitatSchedule {
     pub id: Id,
     pub conversation: Id,
     pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<crate::managed_program::AdmittedProgram>,
     pub interval_ms: u64,
     pub next_due_ms: u64,
     pub enabled: bool,
@@ -24,6 +26,9 @@ pub struct HabitatSchedule {
 impl HabitatSchedule {
     fn validate(&self) -> Result<()> {
         validate_prompt(&self.prompt)?;
+        if let Some(program) = &self.program {
+            program.verify()?;
+        }
         if !(MIN_INTERVAL_MS..=MAX_INTERVAL_MS).contains(&self.interval_ms)
             || self.revision == 0
             || self.updated_at_ms < self.created_at_ms
@@ -73,7 +78,7 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<()> {
 
 fn schedule_from(db: &Connection, id: &Id) -> Result<Option<HabitatSchedule>> {
     let row: Option<(String, i64, bool, i64, Option<String>, String)> = db.query_row(
-        "SELECT conversation,next_due,enabled,revision,last_task,payload FROM habitat_schedules WHERE id=?1 AND length(payload)<=65536",
+        "SELECT conversation,next_due,enabled,revision,last_task,payload FROM habitat_schedules WHERE id=?1 AND length(payload)<=262144",
         [id.as_str()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
     ).optional()?;
     row.map(
@@ -114,6 +119,9 @@ pub(super) struct CreateOptions<'a> {
     pub priority: u8,
     pub worker: Option<&'a WorkerMutation>,
     pub occurrence: Option<&'a Occurrence>,
+    pub program: Option<&'a crate::managed_program::AdmittedProgram>,
+    pub program_parent: Option<&'a ManagedTask>,
+    pub proposal: Option<ProjectProposal>,
 }
 
 pub(super) struct Occurrence {
@@ -121,6 +129,9 @@ pub(super) struct Occurrence {
     now: u64,
 }
 impl Occurrence {
+    pub fn schedule_id(&self) -> &Id {
+        &self.schedule.id
+    }
     pub fn check(&self, tx: &Connection) -> Result<()> {
         let current = schedule_from(tx, &self.schedule.id)?
             .ok_or(Error::Unavailable("schedule not found"))?;
@@ -129,6 +140,9 @@ impl Occurrence {
             || current.next_due_ms > self.now
         {
             return Err(Error::Conflict("schedule changed before dispatch"));
+        }
+        if project::policy_from(tx, &current.conversation)?.is_some_and(|p| !p.enabled) {
+            return Err(Error::Conflict("project is paused"));
         }
         // Block on all outstanding work in this project, including an uncertain
         // terminal record. A timer must never infer that uncertainty settled.
@@ -163,7 +177,8 @@ impl Occurrence {
 }
 
 pub(super) struct WorkerMutation {
-    source: ManagedTask,
+    pub(super) source: ManagedTask,
+    pub(super) proposal: Option<ProjectProposal>,
     session: Id,
     call: Id,
     input: String,
@@ -180,6 +195,7 @@ impl WorkerMutation {
         bounded_text(&input.to_string(), MAX_PROMPT_BYTES + 4096)?;
         Ok(Self {
             source: source.clone(),
+            proposal: None,
             session: session.clone(),
             call: Id::new(format!(
                 "hc_{}",
@@ -204,6 +220,16 @@ impl WorkerMutation {
             return Err(Error::Conflict(
                 "habitat source is no longer the active worker turn",
             ));
+        }
+        if let Some(proposal) = &self.proposal {
+            let policy = project::policy_from(tx, &self.source.conversation)?
+                .ok_or(Error::Conflict("project policy changed"))?;
+            if policy.generation != proposal.generation
+                || !policy.enabled
+                || policy.expires_at_ms <= now_ms()
+            {
+                return Err(Error::Conflict("project policy changed"));
+            }
         }
         Ok(())
     }
@@ -274,7 +300,7 @@ impl ManagedStore {
         if !(1..=256).contains(&limit) {
             return Err(xcb_core::Error::Invalid("attention limit").into());
         }
-        self.task_rows("SELECT id,payload,conversation FROM tasks WHERE state IN ('needs_input','uncertain') OR (state='queued' AND (CASE WHEN json_valid(payload) THEN json_extract(payload,'$.detail') ELSE '' END LIKE 'no eligible account:%' OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.detail') ELSE '' END LIKE 'usage limits block a matching admitted route;%') AND COALESCE(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.deferred') ELSE 1 END,0)=0) ORDER BY CASE WHEN state='needs_input' THEN 0 WHEN state='queued' THEN 1 ELSE 2 END,updated_at DESC,id LIMIT ?1",limit,false)
+        self.task_rows("SELECT id,payload,conversation FROM tasks WHERE state IN ('needs_input','uncertain') OR (state='queued' AND (CASE WHEN json_valid(payload) THEN json_extract(payload,'$.detail') ELSE '' END LIKE 'no eligible account:%' OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.detail') ELSE '' END LIKE 'usage limits block a matching admitted route;%' OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.detail') ELSE '' END LIKE 'project authority%') AND COALESCE(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.deferred') ELSE 1 END,0)=0) ORDER BY CASE WHEN state='needs_input' THEN 0 WHEN state='queued' THEN 1 ELSE 2 END,updated_at DESC,id LIMIT ?1",limit,false)
     }
 
     pub(super) async fn habitat_command(
@@ -284,6 +310,64 @@ impl ManagedStore {
     ) -> Result<String> {
         use xcb_core::ui::HabitatCommand;
         match command {
+            HabitatCommand::ConfigureProject {
+                expected_revision,
+                goal,
+                max_tasks,
+                expires_at_ms,
+                required_provider,
+            } => {
+                let policy = self.configure_project_policy(
+                    conversation,
+                    expected_revision,
+                    goal,
+                    max_tasks,
+                    expires_at_ms,
+                    required_provider,
+                )?;
+                Ok(format!(
+                    "Project authority enabled: {} tasks until {}",
+                    policy.max_tasks, policy.expires_at_ms
+                ))
+            }
+            HabitatCommand::ProjectEnabled {
+                conversation,
+                expected_revision,
+                enabled,
+            } => {
+                self.set_project_policy_enabled(&conversation, expected_revision, enabled)?;
+                Ok(if enabled {
+                    "Project resumed"
+                } else {
+                    "Project paused"
+                }
+                .into())
+            }
+            HabitatCommand::CompleteBacklog {
+                id,
+                expected_revision,
+                summary,
+            } => {
+                self.complete_backlog(&id, expected_revision, summary)
+                    .await?;
+                Ok("Backlog work completed with reported evidence".into())
+            }
+            HabitatCommand::ReconcileTask {
+                id,
+                expected_revision,
+            } => {
+                let store = Store::open(self.root().parent().ok_or(Error::PrivateState)?)?;
+                self.reconcile_uncertain(&store, &id, expected_revision)
+                    .await?;
+                Ok("Task reconciled from exact settled worker evidence".into())
+            }
+            HabitatCommand::MemorySearch { query } => {
+                let result = self.search_memory(conversation, &query, 8).await?;
+                Ok(xcb_core::display_text(
+                    &serde_json::to_string_pretty(&result)?,
+                    16_384,
+                ))
+            }
             HabitatCommand::Enqueue {
                 prompt,
                 deferred,
@@ -352,6 +436,16 @@ impl ManagedStore {
         &self,
         task: &ManagedTask,
     ) -> Result<(Option<Provider>, bool)> {
+        if task.schedule.is_some() && task.provider_required {
+            return Ok((task.provider_preference, true));
+        }
+        let required = task
+            .project_proposal
+            .as_ref()
+            .and_then(|proposal| proposal.required_provider);
+        if let Some(provider) = required {
+            return Ok((Some(provider), true));
+        }
         match task.backlog_prompt.as_deref() {
             Some(prompt) => self.initial_route_preferences(Path::new(&task.workspace), prompt),
             None => Ok((task.provider_preference, task.provider_required)),
@@ -531,6 +625,37 @@ impl ManagedStore {
         interval_ms: u64,
         first_due_ms: u64,
     ) -> Result<HabitatSchedule> {
+        self.create_schedule_inner(conversation, prompt, None, interval_ms, first_due_ms)
+            .await
+    }
+
+    pub async fn create_program_schedule(
+        &self,
+        conversation: &Id,
+        prompt: String,
+        program: crate::managed_program::AdmittedProgram,
+        interval_ms: u64,
+        first_due_ms: u64,
+    ) -> Result<HabitatSchedule> {
+        program.verify()?;
+        self.create_schedule_inner(
+            conversation,
+            prompt,
+            Some(program),
+            interval_ms,
+            first_due_ms,
+        )
+        .await
+    }
+
+    async fn create_schedule_inner(
+        &self,
+        conversation: &Id,
+        prompt: String,
+        program: Option<crate::managed_program::AdmittedProgram>,
+        interval_ms: u64,
+        first_due_ms: u64,
+    ) -> Result<HabitatSchedule> {
         self.conversation(conversation)?
             .ok_or(Error::Unavailable("conversation not found"))?;
         let now = now_ms();
@@ -538,6 +663,7 @@ impl ManagedStore {
             id: new_id("schedule"),
             conversation: conversation.clone(),
             prompt,
+            program,
             interval_ms,
             next_due_ms: first_due_ms,
             enabled: true,
@@ -644,6 +770,7 @@ impl ManagedStore {
                     Path::new(&current.workspace),
                     CreateOptions {
                         occurrence: Some(&occurrence),
+                        program: occurrence.schedule.program.as_ref(),
                         ..CreateOptions::default()
                     },
                 )
@@ -737,10 +864,24 @@ impl ManagedStore {
         name: &str,
         input: &Value,
     ) -> (Result<Value>, EffectState) {
-        let mutation = match WorkerMutation::new(source, session, call, name, input) {
+        let mut mutation = match WorkerMutation::new(source, session, call, name, input) {
             Ok(m) => m,
             Err(e) => return (Err(e), EffectState::None),
         };
+        if name == "xcb_backlog_add" {
+            mutation.proposal = match self.project_policy(&source.conversation) {
+                Ok(Some(policy)) if policy.enabled && policy.expires_at_ms > now_ms() => {
+                    Some(ProjectProposal {
+                        parent: source.id.clone(),
+                        generation: policy.generation,
+                        required_provider: policy.required_provider,
+                        admitted: false,
+                    })
+                }
+                Ok(_) => None,
+                Err(error) => return (Err(error), EffectState::None),
+            };
+        }
         // Mutations re-check this exact turn inside their publication transaction.
         let initial: Result<Option<ManagedTask>> = (|| {
             let db = self.db()?;
@@ -751,6 +892,26 @@ impl ManagedStore {
             Ok(Some(saved)) => return (Ok(compact_task(&saved)), EffectState::Settled),
             Err(e) => return (Err(e), EffectState::None),
             _ => (),
+        }
+        if name == "xcb_memory_search" {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Search {
+                query: String,
+                #[serde(default = "default_search_limit")]
+                limit: usize,
+            }
+            fn default_search_limit() -> usize {
+                8
+            }
+            let result = match serde_json::from_value::<Search>(input.clone()) {
+                Ok(args) => {
+                    self.search_memory(&source.conversation, &args.query, args.limit)
+                        .await
+                }
+                Err(error) => Err(error.into()),
+            };
+            return (result, EffectState::None);
         }
         if name == "xcb_backlog_get" {
             #[derive(Deserialize)]
@@ -820,6 +981,13 @@ impl ManagedStore {
             #[serde(default)]
             priority: u8,
         }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Complete {
+            task_id: Id,
+            expected_revision: u64,
+            summary: String,
+        }
         let result = match name {
             "xcb_backlog_add" => match serde_json::from_value::<Add>(input.clone()) {
                 Ok(args) if validate_prompt(&args.prompt).is_ok() => {
@@ -833,13 +1001,25 @@ impl ManagedStore {
                             deferred: true,
                             priority: args.priority,
                             worker: Some(&mutation),
-                            occurrence: None,
+                            ..CreateOptions::default()
                         },
                     )
                     .await
                 }
                 Ok(_) => Err(xcb_core::Error::Invalid("backlog prompt").into()),
                 Err(e) => Err(e.into()),
+            },
+            "xcb_backlog_complete" => match serde_json::from_value::<Complete>(input.clone()) {
+                Ok(args) => {
+                    self.complete_backlog_inner(
+                        &args.task_id,
+                        args.expected_revision,
+                        args.summary,
+                        Some(&mutation),
+                    )
+                    .await
+                }
+                Err(error) => Err(error.into()),
             },
             "xcb_backlog_update" => match serde_json::from_value::<Edit>(input.clone()) {
                 Ok(args) => {
@@ -907,7 +1087,9 @@ impl ManagedTask {
         } else if self.state == TaskState::NeedsInput {
             self.attention.unwrap_or(State::NeedsAnswer)
         } else if blocked_on_account(self)
-            || (self.state == TaskState::Queued && self.detail == routing::NO_QUOTA_AVAILABLE_ROUTE)
+            || (self.state == TaskState::Queued
+                && (self.detail == routing::NO_QUOTA_AVAILABLE_ROUTE
+                    || self.detail.starts_with("project authority")))
         {
             State::NeedsAction
         } else {

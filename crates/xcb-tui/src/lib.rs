@@ -41,6 +41,20 @@ pub struct SlashCommand {
 }
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
+        name: "/project",
+        alias: "",
+        args: "[all|grant <tasks> <hours> <goal>|pause|resume]",
+        summary: "bounded automatic project work and remaining budget",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/memory",
+        alias: "",
+        args: "search <query>",
+        summary: "search the project's bound Wordcell vault",
+        needs_args: true,
+    },
+    SlashCommand {
         name: "/attention",
         alias: "",
         args: "",
@@ -179,6 +193,7 @@ pub enum PickAction {
     Task(Id),
     Backlog(Id),
     Schedule(Id),
+    Project(Id),
     Text(String),
     EditPane,
 }
@@ -259,6 +274,15 @@ fn age_label(ms: u64) -> String {
         format!("{}m {}s ago", seconds / 60, seconds % 60)
     } else {
         format!("{seconds}s ago")
+    }
+}
+
+fn due_label(timestamp: u64) -> String {
+    let now = display_now_ms();
+    if timestamp <= now {
+        "now or overdue".into()
+    } else {
+        format!("in {}", age_label(timestamp - now).trim_end_matches(" ago"))
     }
 }
 
@@ -410,6 +434,11 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         schedule.id.as_str().hash(&mut hasher);
         schedule.revision.hash(&mut hasher);
         schedule.next_due_ms.hash(&mut hasher);
+    }
+    for project in &view.projects {
+        project.conversation.as_str().hash(&mut hasher);
+        project.revision.hash(&mut hasher);
+        project.status.hash(&mut hasher);
     }
     for agent in &view.subagents {
         agent.id.as_str().hash(&mut hasher);
@@ -610,6 +639,8 @@ impl App {
             return Vec::new();
         }
         const MANAGED: &[&str] = &[
+            "/project",
+            "/memory",
             "/attention",
             "/backlog",
             "/reply",
@@ -942,6 +973,53 @@ impl App {
         let (action, tail) = arguments.split_once(' ').unwrap_or((arguments, ""));
         let tail = tail.trim();
         match command {
+            "/project" if arguments.is_empty() || arguments == "all" => {
+                let all = arguments == "all";
+                self.picker("Project grants · goal / budget / status", self.view.projects.iter()
+                    .filter(|project| all || self.view.conversation.as_ref() == Some(&project.conversation))
+                    .map(|project| PickItem {
+                        label: format!("{} · {} · {} tasks left · {}", xcb_core::display_text(&project.goal, 52), project.status, project.remaining_tasks, project.conversation),
+                        action: PickAction::Project(project.conversation.clone()),
+                    }).collect());
+            }
+            "/project" if matches!(action, "pause" | "resume") => {
+                if let Some(project) = self.view.projects.iter().find(|project| if tail.is_empty() {
+                    self.view.conversation.as_ref() == Some(&project.conversation)
+                } else { project.conversation.as_str() == tail }) {
+                    self.send_habitat(output, Intent::Habitat(HabitatCommand::ProjectEnabled { conversation: project.conversation.clone(), expected_revision: project.revision, enabled: action == "resume" }), command, arguments);
+                } else { self.notice = "No matching project grant. /project all lists grants.".into(); }
+            }
+            "/project" if action == "grant" => {
+                let mut parts = tail.splitn(3, ' ');
+                let tasks = parts.next().and_then(|v| v.parse::<u32>().ok());
+                let hours = parts.next().and_then(|v| v.parse::<u64>().ok());
+                let goal = parts.next().unwrap_or("").trim();
+                if let (Some(max_tasks), Some(hours)) = (tasks, hours)
+                    && (1..=100).contains(&max_tasks) && (1..=720).contains(&hours) && !goal.is_empty() {
+                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
+                    let current = self.view.projects.iter().find(|p| self.view.conversation.as_ref() == Some(&p.conversation));
+                    self.send_habitat(output, Intent::Habitat(HabitatCommand::ConfigureProject {
+                        expected_revision: current.map(|p| p.revision), goal: goal.into(), max_tasks,
+                        expires_at_ms: now.saturating_add(hours * 3_600_000), required_provider: current.and_then(|p| p.required_provider),
+                    }), command, arguments);
+                } else { self.notice = "Use /project grant <1–100 tasks> <1–720 hours> <goal>. This authorizes automatic follow-up work.".into(); }
+            }
+            "/project" => self.notice = "Use /project [all], /project grant <tasks> <hours> <goal>, or /project pause|resume [conversation].".into(),
+            "/memory" if action == "search" && !tail.is_empty() => {
+                self.send_habitat(output, Intent::Habitat(HabitatCommand::MemorySearch { query: tail.into() }), command, arguments);
+            }
+            "/memory" => self.notice = "Use /memory search <query>. Bind a vault first with xcb memory configure.".into(),
+            "/backlog" if action == "complete" => {
+                let (id, summary) = tail.split_once(' ').unwrap_or((tail, ""));
+                if !summary.trim().is_empty() && let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == id) {
+                    self.send_habitat(output, Intent::Habitat(HabitatCommand::CompleteBacklog { id: task.id.clone(), expected_revision: task.revision, summary: summary.trim().into() }), command, arguments);
+                } else { self.notice = "Use /backlog complete <deferred-task-id> <work summary>.".into(); }
+            }
+            "/backlog" if action == "reconcile" => {
+                if let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == tail) {
+                    self.send_habitat(output, Intent::Habitat(HabitatCommand::ReconcileTask { id: task.id.clone(), expected_revision: task.revision }), command, arguments);
+                } else { self.notice = "Use /backlog reconcile <task-id>; retained run evidence must prove the outcome.".into(); }
+            }
             "/attention" | "/backlog" if command == "/attention" || arguments.is_empty() || arguments == "all" => {
                 let attention = command == "/attention";
                 let all = attention || arguments == "all";
@@ -1017,7 +1095,10 @@ impl App {
             .find(|entry| entry.alias == command)
             .map_or(command, |entry| entry.name);
         let arguments = arguments.trim();
-        if matches!(command, "/backlog" | "/attention" | "/schedule" | "/reply") {
+        if matches!(
+            command,
+            "/backlog" | "/attention" | "/schedule" | "/reply" | "/project" | "/memory"
+        ) {
             if self.managed_mode() {
                 self.habitat_command(command, arguments, output);
             } else {
@@ -1837,6 +1918,21 @@ impl App {
                         });
                     }
                 }
+                PickAction::Project(id) => {
+                    if let Some(project) = self.view.projects.iter().find(|p| p.conversation == id)
+                    {
+                        self.modal = Some(Modal::Inspect {
+                            title: format!("Project {} · {}", project.conversation, project.status),
+                            lines: vec![project.goal.clone(), String::new(),
+                                format!("{} tasks remaining · revision {}", project.remaining_tasks, project.revision),
+                                format!("Grant expires {}", due_label(project.expires_at_ms)),
+                                format!("Required provider: {}", project.required_provider.map_or("automatic".into(), |p| p.to_string())),
+                                String::new(), format!("/project {} {}", if project.enabled { "pause" } else { "resume" }, project.conversation),
+                                "Pause stops automatic dispatch; running work settles. Resume does not renew the grant.".into()],
+                            scroll: 0,
+                        });
+                    }
+                }
                 PickAction::Schedule(id) => {
                     if let Some(schedule) = self
                         .view
@@ -1858,10 +1954,7 @@ impl App {
                                     schedule.interval_ms / 1000,
                                     schedule.revision
                                 ),
-                                format!(
-                                    "next wake-up: {} (Unix milliseconds)",
-                                    schedule.next_due_ms
-                                ),
+                                format!("Next wake-up {}", due_label(schedule.next_due_ms)),
                                 String::new(),
                                 schedule.prompt.clone(),
                                 String::new(),
@@ -2110,6 +2203,60 @@ mod habitat_surface_tests {
         let mut app = app();
         app.slash("/backlog add retain this draft", &tx);
         assert_eq!(app.composer.text(), "/backlog add retain this draft");
+    }
+
+    #[test]
+    fn project_grant_is_bounded_and_preserves_provider_and_revision() {
+        let (tx, rx) = sync_channel(8);
+        let mut app = app();
+        app.view.projects.push(xcb_core::ui::ProjectRow {
+            conversation: app.view.conversation.clone().unwrap(),
+            goal: "Existing goal".into(),
+            enabled: true,
+            remaining_tasks: 3,
+            expires_at_ms: u64::MAX,
+            required_provider: Some(xcb_core::Provider::Codex),
+            revision: 17,
+            status: "following project".into(),
+        });
+        for input in [
+            "/project grant 0 24 goal",
+            "/project grant 101 24 goal",
+            "/project grant 5 721 goal",
+            "/project grant 5 24",
+        ] {
+            app.slash(input, &tx);
+            assert!(rx.try_recv().is_err());
+        }
+        app.slash("/project grant 5 24 Maintain the parser", &tx);
+        assert!(
+            matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::ConfigureProject {
+            expected_revision: Some(17), max_tasks: 5, required_provider: Some(xcb_core::Provider::Codex), goal, ..
+        })) if goal == "Maintain the parser")
+        );
+        app.slash("/project pause", &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Intent::Habitat(HabitatCommand::ProjectEnabled {
+                expected_revision: 17,
+                enabled: false,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn completion_and_memory_controls_do_not_submit_new_provider_prompts() {
+        let (tx, rx) = sync_channel(8);
+        let mut app = app();
+        app.slash("/backlog complete task_a Tests already cover this", &tx);
+        assert!(
+            matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::CompleteBacklog { expected_revision: 23, summary, .. })) if summary == "Tests already cover this")
+        );
+        app.slash("/memory search parser decisions", &tx);
+        assert!(
+            matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::MemorySearch { query })) if query == "parser decisions")
+        );
     }
 }
 

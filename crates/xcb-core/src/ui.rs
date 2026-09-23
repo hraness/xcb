@@ -110,7 +110,43 @@ pub struct ScheduleRow {
     pub revision: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ProjectRow {
+    pub conversation: Id,
+    pub goal: String,
+    pub enabled: bool,
+    pub remaining_tasks: u32,
+    pub expires_at_ms: u64,
+    pub required_provider: Option<Provider>,
+    pub revision: u64,
+    pub status: String,
+}
+
 pub enum HabitatCommand {
+    ConfigureProject {
+        expected_revision: Option<u64>,
+        goal: String,
+        max_tasks: u32,
+        expires_at_ms: u64,
+        required_provider: Option<Provider>,
+    },
+    ProjectEnabled {
+        conversation: Id,
+        expected_revision: u64,
+        enabled: bool,
+    },
+    CompleteBacklog {
+        id: Id,
+        expected_revision: u64,
+        summary: String,
+    },
+    ReconcileTask {
+        id: Id,
+        expected_revision: u64,
+    },
+    MemorySearch {
+        query: String,
+    },
     Enqueue {
         prompt: String,
         deferred: bool,
@@ -153,6 +189,7 @@ pub struct View {
     pub tasks: Vec<TaskRow>,
     pub backlog: Vec<BacklogRow>,
     pub schedules: Vec<ScheduleRow>,
+    pub projects: Vec<ProjectRow>,
     pub subagents: Vec<Subagent>,
     pub activity: Vec<String>,
     pub extensions: Vec<(String, String)>,
@@ -188,6 +225,7 @@ impl Default for View {
             tasks: vec![],
             backlog: vec![],
             schedules: vec![],
+            projects: vec![],
             subagents: vec![],
             activity: vec![],
             extensions: vec![],

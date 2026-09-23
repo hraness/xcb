@@ -101,7 +101,8 @@ rejection excludes unrelated HTTP and cancels delayed callbacks, while joined
 cancellation/drop tests use a directly reapable process leader. Exact denial,
 group-absence and custody assertions remain in place.
 
-The current boundaries and next integration contracts are in
-[`project-agents.md`](../project-agents.md): autonomous proposal admission,
-router-specific clarification, scheduled ALGAL manifests, in-place managed-task
-uncertainty resolution and Wordcell synchronization remain follow-up work.
+The foundation follow-ups are implemented by the [0.4.0 release
+plan](project-agent-release.md): bounded proposal admission, routing clarification,
+pinned deterministic ALGAL schedules, evidence-based uncertainty reconciliation,
+explicit Wordcell retrieval/promotion, and opt-in startup. Current behavior and
+remaining effectful-VM boundaries are in [project-agents.md](../project-agents.md).

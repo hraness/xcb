@@ -455,7 +455,7 @@ async fn legacy_task_receipts_survive_additive_habitat_migration() {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
     assert_eq!(
-        version, 2,
+        version, 3,
         "older binaries must refuse the new writer schema"
     );
 }

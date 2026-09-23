@@ -180,12 +180,15 @@ run concurrently; tasks in the same workspace run one at a time. Say
 
 Use `/backlog` for this conversation's backlog and `/backlog all` to browse all
 projects. `/attention` collects questions, approvals and actions across agents.
-Deferred work can be edited and released when ready. `/schedule` manages local
-recurring prompts; each wake-up dispatches ordinary bounded work through the
-same router. Completed tasks retain their summaries as work history. Workers
-can propose deferred follow-ups and read recent project summaries with scoped
-backlog and memory tools. See [persistent project agents](docs/project-agents.md)
-for scheduling, attention, working memory and the Wordcell/ALGAL boundaries.
+Deferred work can be edited, released, or completed with a summary. `/project
+grant <tasks> <hours> <goal>` delegates a bounded follow-up budget; `/project
+pause` holds future automatic work. `/schedule` manages recurring prompts, and
+`xcb schedules program` pins bounded ALGAL planners. Every occurrence retains
+its normal task history and attention states. Workers can propose follow-ups,
+read recent summaries, and search an explicitly bound Wordcell vault. Explicit
+note promotion keeps long-term knowledge separate from working memory. See
+[persistent project agents](docs/project-agents.md) and [opt-in login
+startup](docs/habitat-service.md) for controls and limits.
 
 The Rust supervisor owns scheduling and deterministic safety decisions. ALGAL
 records bounded transition receipts; it does not infer permissions, establish
@@ -335,6 +338,9 @@ xcb tasks                                        # global managed task swarm
 xcb backlog                                      # backlog and work history across projects
 xcb attention                                    # questions, approvals and actions
 xcb schedules                                    # durable recurring prompts
+xcb projects                                     # project goals and remaining autonomy grants
+xcb memory status <conversation-id>               # explicit Wordcell binding
+xcb service status                               # opt-in macOS login startup
 xcb tasks verify <task-id>                       # verify local transition receipts
 xcb tasks messages <task-id>                     # durable cross-provider mailbox
 xcb offers --refresh                             # refresh official expiring offers
