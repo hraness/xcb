@@ -26,7 +26,7 @@ describe("organized documentation", () => {
     expect(dynamicParams).toBe(false);
     expect(generateStaticParams()).toEqual([
       { slug: "getting-started" }, { slug: "providers" }, { slug: "workspace" },
-      { slug: "customization" }, { slug: "application-api" }, { slug: "reference" },
+      { slug: "customization" }, { slug: "route" }, { slug: "application-api" }, { slug: "reference" },
     ]);
     const overview = renderToStaticMarkup(<Docs />);
     for (const topic of docsTopics) {

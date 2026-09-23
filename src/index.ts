@@ -4,6 +4,7 @@ export type { SqliteBinding, SqliteDatabase, SqliteStatement } from "./sqlite-po
 export * from "./broker.ts";
 export { brokerDescriptors } from "./broker-descriptors.ts";
 export * from "./models.ts";
+export * from "./router.ts";
 export * from "./runtime.ts";
 export * from "./capabilities.ts";
 export * from "./task-runtime.ts";
