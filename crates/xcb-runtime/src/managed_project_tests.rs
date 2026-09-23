@@ -451,6 +451,7 @@ async fn exact_settled_outcome_can_reconcile_uncertainty_without_retry() {
             .is_err()
     );
     let outcome = Outcome {
+        tool_calls: Some(0),
         text: "Done with verified source receipt".into(),
         facts: xcb_core::policy::TurnFacts {
             terminal: Terminal::Completed,
@@ -779,6 +780,7 @@ async fn active_settle_continuation_defers_project_proposal_until_parent_finishe
         .unwrap();
     let child = propose(&f, &parent, "next", "Review remaining documentation").await;
     let outcome = |text: &str| Outcome {
+        tool_calls: Some(60),
         text: text.into(),
         facts: xcb_core::policy::TurnFacts {
             terminal: Terminal::Completed,

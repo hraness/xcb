@@ -60,6 +60,7 @@ fn guidance(f: &Fixture, text: &str) -> InboxEvent {
 }
 fn outcome() -> Outcome {
     Outcome {
+        tool_calls: Some(0),
         diagnostic: None,
         text: "The work and checks are complete.".into(),
         state: State::Idle,
@@ -77,9 +78,7 @@ async fn prepare(f: &Fixture, task: &ManagedTask) -> (ManagedTask, String) {
     let message_count = f.store.message_count(&session.id).unwrap();
     let events = f.managed.inbox_pending(task).unwrap();
     let mut prompt_task = task.clone();
-    if !events.is_empty() {
-        prompt_task.user_inputs.push(render(&events));
-    }
+    append_batch(&mut prompt_task, &events);
     let prompt = worker_prompt(&prompt_task, &[], &[], task.context_carried);
     let batch = Batch {
         events,
@@ -846,4 +845,190 @@ async fn retention_keeps_closed_watch_target_and_recent_late_report() {
     let report = event(&f, watch.event.as_ref().unwrap());
     assert_eq!(report.status, "closed");
     assert!(report.text.contains("Late report retained"));
+}
+
+#[tokio::test]
+async fn inbox_wake_preserves_confirm_veto_and_uses_neutral_prompt() {
+    let safe = "The fix is ready on the branch. Should I open the PR and merge it?";
+    let risky = "The old tables are unused. Should I drop the production database tables now?";
+    for (mode, text, expected) in [
+        (ReflexMode::Observe, safe, TaskState::NeedsInput),
+        (ReflexMode::Active, risky, TaskState::NeedsInput),
+        (ReflexMode::Active, safe, TaskState::Queued),
+    ] {
+        let f = fixture().await;
+        let mut config = Config::default();
+        config.extensions.reflexes.settle = ReflexMode::Active;
+        config.extensions.reflexes.confirm = mode;
+        config.save(f.store.root(), None).unwrap();
+        let (running, prompt) = prepare(&f, &f.task).await;
+        let event_id = guidance(&f, "Also summarize the validation results").id;
+        let finished = Outcome {
+            text: text.into(),
+            tool_calls: Some(12),
+            ..outcome()
+        };
+        record(&f, &prompt, &finished);
+        let next = f
+            .managed
+            .finish(&f.store, &running.id, Ok(finished))
+            .await
+            .unwrap();
+        assert_eq!(next.settle.as_deref(), Some("confirm"), "{text}");
+        assert_eq!(next.state, expected, "{mode:?}: {text}");
+        assert!(!next.next_prompt.contains("Yes, go ahead"));
+        let input = event(&f, &event_id);
+        assert!(input.receipt.is_none());
+        if expected == TaskState::Queued {
+            assert!(next.inbox_continuation);
+            assert!(next.next_prompt.contains("do not answer approvals"));
+            assert_eq!(input.status, "queued");
+        } else {
+            assert_eq!(next.attention, Some(State::NeedsAnswer));
+            assert_eq!(input.status, "held");
+        }
+    }
+}
+
+async fn reflex_continuation(f: &Fixture) -> ManagedTask {
+    let mut config = Config::default();
+    config.extensions.reflexes.settle = ReflexMode::Active;
+    config.save(f.store.root(), None).unwrap();
+    let (running, prompt) = prepare(f, &f.task).await;
+    let stopped = Outcome {
+        text: "Schema migrated. Next, I'll update the callers:".into(),
+        tool_calls: Some(60),
+        ..outcome()
+    };
+    record(f, &prompt, &stopped);
+    let next = f
+        .managed
+        .finish(&f.store, &running.id, Ok(stopped))
+        .await
+        .unwrap();
+    assert_eq!(next.state, TaskState::Queued);
+    assert_eq!(next.settle.as_deref(), Some("stopped_short"));
+    assert!(!next.inbox_continuation);
+    next
+}
+
+#[tokio::test]
+async fn inbox_steered_work_does_not_train_reflex_continuation() {
+    let f = fixture().await;
+    let next = reflex_continuation(&f).await;
+    guidance(&f, "Check the callers and report the results");
+    let (running, prompt) = prepare(&f, &next).await;
+    assert!(running.inbox_continuation);
+    // The cause survives reload/recovery rather than existing only in memory.
+    assert!(
+        f.managed
+            .task(&running.id)
+            .unwrap()
+            .unwrap()
+            .inbox_continuation
+    );
+    let completed = Outcome {
+        tool_calls: Some(14),
+        ..outcome()
+    };
+    record(&f, &prompt, &completed);
+    let done = f
+        .managed
+        .finish(&f.store, &running.id, Ok(completed))
+        .await
+        .unwrap();
+    assert_eq!(done.state, TaskState::Completed);
+    let status = reflex::ReflexStore::open(f.store.root())
+        .unwrap()
+        .status(Reflex::Settle, ReflexMode::Active, true)
+        .unwrap();
+    assert_eq!(status.observations, 2);
+    assert_eq!(status.heads["unfinished"].labeled, 0);
+}
+
+#[tokio::test]
+async fn cancelling_pending_or_prepared_inbox_work_does_not_train_reflex() {
+    for prepared in [false, true] {
+        let f = fixture().await;
+        let next = reflex_continuation(&f).await;
+        guidance(&f, "Use the updated requirements instead");
+        if prepared {
+            let (running, _) = prepare(&f, &next).await;
+            assert!(running.inbox_continuation);
+        }
+        f.managed
+            .submit(
+                &f.task.conversation,
+                new_id("cancel"),
+                format!("cancel {}", f.task.id),
+                vec![],
+                Path::new(&f.task.workspace),
+            )
+            .await
+            .unwrap();
+        assert!(
+            f.managed
+                .task(&f.task.id)
+                .unwrap()
+                .unwrap()
+                .cancel_requested
+        );
+        let status = reflex::ReflexStore::open(f.store.root())
+            .unwrap()
+            .status(Reflex::Settle, ReflexMode::Active, true)
+            .unwrap();
+        assert_eq!(status.heads["unfinished"].labeled, 0, "prepared={prepared}");
+    }
+}
+
+#[tokio::test]
+async fn late_guidance_neutralizes_queued_confirm_but_preserves_explicit_context() {
+    let f = fixture().await;
+    let mut config = Config::default();
+    config.extensions.reflexes.settle = ReflexMode::Active;
+    config.extensions.reflexes.confirm = ReflexMode::Active;
+    config.save(f.store.root(), None).unwrap();
+    let (running, prompt) = prepare(&f, &f.task).await;
+    let ask = Outcome {
+        text: "The fix is ready on the branch. Should I open the PR and merge it?".into(),
+        tool_calls: Some(12),
+        ..outcome()
+    };
+    record(&f, &prompt, &ask);
+    let queued = f
+        .managed
+        .finish(&f.store, &running.id, Ok(ask))
+        .await
+        .unwrap();
+    assert!(queued.next_prompt.contains("Yes, go ahead"));
+    let accepted = guidance(&f, "Actually, stop at the review and report what is ready");
+    let (events, projected) = fit(&queued, f.managed.inbox_pending(&queued).unwrap(), &[]);
+    assert_eq!(projected.next_prompt, CONTINUATION_PROMPT);
+    assert!(!worker_prompt(&projected, &[], &[], false).contains("Yes, go ahead"));
+    let (running, prompt) = prepare(&f, &queued).await;
+    assert_eq!(running.next_prompt, projected.next_prompt);
+    assert!(running.inbox_continuation);
+    assert!(prompt.contains(&accepted.text));
+    assert!(!prompt.contains("Yes, go ahead"));
+    assert_eq!(
+        digest(&prompt),
+        f.managed
+            .inbox_batch(&running.id)
+            .unwrap()
+            .unwrap()
+            .prompt_digest
+    );
+    for (attempts, checkpoint) in [
+        (0, "Yes, go ahead with the tests I explicitly approved."),
+        (
+            1,
+            "Continue the original task on a new eligible route. Previous settled route report: preserve these changes.",
+        ),
+    ] {
+        let mut retained = queued.clone();
+        retained.attempts = attempts;
+        retained.next_prompt = checkpoint.into();
+        let (_, projected) = fit(&retained, events.clone(), &[]);
+        assert_eq!(projected.next_prompt, checkpoint);
+    }
 }

@@ -2347,6 +2347,7 @@ mod tests {
             .unwrap();
         let run = store.prepare_run(&session.id, session.revision, 4).unwrap();
         let mut outcome = crate::runner::Outcome {
+            tool_calls: Some(0),
             diagnostic: None,
             text: "The turn limit interrupted the remaining work".into(),
             facts: TurnFacts {

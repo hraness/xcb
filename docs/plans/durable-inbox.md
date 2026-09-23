@@ -77,8 +77,10 @@ services, schedules or unqualified providers.
 
 ## Status
 
-Implementation and independent feature review are complete. Native workspace
-tests, strict Clippy and the site gate passed before integrating Reflexes v2.
-Final integration is checking continuation vetoes and learning attribution with
-that update, followed by fresh aggregate gates and operator acceptance. Release,
-publication and installation remain pending; no v0.5.0 publication is claimed.
+Implementation, Reflexes v2 integration and independent review are complete.
+Inbox-driven continuation preserves confirmation vetoes, uses a neutral handoff
+even for late guidance, and is excluded from automatic reflex learning. Native
+workspace tests, strict Clippy and the site gate passed before that integration;
+fresh aggregate gates and isolated CLI/TUI acceptance are now required on the
+integrated tree. Release, publication and installation remain pending; no v0.5.0
+publication is claimed.

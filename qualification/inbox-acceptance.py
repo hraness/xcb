@@ -176,12 +176,16 @@ def main():
                     # ANSI-stripped delta can omit matching letters from the
                     # previous screen. Resize clears its cached frame; restore
                     # the exact viewport and inspect only that full redraw.
-                    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 48, 159, 0, 0))
-                    drain(.4)
-                    offset = len(capture)
-                    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 48, 160, 0, 0))
-                    drain(.6)
-                    check(name + " full redraw checkpoint " + str(index), b"\x1b[2J" in capture[offset:])
+                    for columns in (159, 160):
+                        offset = len(capture)
+                        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 48, columns, 0, 0))
+                        redraw_by = time.monotonic() + 8
+                        while b"\x1b[2J" not in capture[offset:] and time.monotonic() < redraw_by:
+                            drain(.1)
+                        check(name + " full redraw checkpoint " + str(index) + " width " + str(columns), b"\x1b[2J" in capture[offset:])
+                        # Observe the intermediate frame before restoring the
+                        # viewport so a slow runner cannot coalesce both resizes.
+                        drain(.2)
                 segments.append(ANSI.sub("", capture[offset:].decode(errors="replace")))
             check(name + " exited without forced stop", reap(8))
             check(name + " exit success", os.waitstatus_to_exitcode(wait_status) == 0)
@@ -277,11 +281,13 @@ def main():
             (b"/inbox all\r", .5), (b"\x1b", .2),
             (b"/inbox\r", .5), (b"\x1b", .2), (b"\x04", .3),
         ]
-        screen, segments = terminal("inbox-tui", ["chat", "--resume", conversation], actions, redraw_at=(3, 4))
-        compact = re.sub(r"\s+", "", screen)
+        _, segments = terminal("inbox-tui", ["chat", "--resume", conversation], actions, redraw_at=(2, 3, 4, 6, 8))
+        task_picker = re.sub(r"\s+", "", segments[2])
+        all_picker = re.sub(r"\s+", "", segments[6])
+        conversation_picker = re.sub(r"\s+", "", segments[8])
         inspector = re.sub(r"\s+", "", "".join(segments[3:5]))
-        check("TUI exact task inbox rendered", "Taskinbox·recentdeliveryhistory" in compact)
-        check("TUI all and conversation inbox rendered", "Allagents·inbox·recentdeliveryhistory" in compact and "Thisagent·inbox·recentdeliveryhistory" in compact)
+        check("TUI exact task inbox rendered", "Taskinbox·recentdeliveryhistory" in task_picker)
+        check("TUI all and conversation inbox rendered", "Allagents·inbox·recentdeliveryhistory" in all_picker and "Thisagent·inbox·recentdeliveryhistory" in conversation_picker)
         ui_rows = events(ui_target["id"])
         ui_guidance = [row for row in ui_rows if row["text"] == long_text]
         check("TUI steer targets exact task once", len(ui_guidance) == 1 and ui_guidance[0]["task"] == ui_target["id"])

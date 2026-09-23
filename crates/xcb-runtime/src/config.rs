@@ -52,12 +52,18 @@ pub enum ReflexMode {
 /// Reflex policy. Routing is active by default because its shipped
 /// parameters reproduce the prior classifier exactly. Continuation from a
 /// stopped-short report spends provider turns, so it only observes until the
-/// user opts in.
+/// user opts in. Answering a worker's request for confirmation on the
+/// operator's behalf is a separate opt-in (`confirm`), which acts only while
+/// settle is not off.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReflexConfig {
     pub route: ReflexMode,
     pub settle: ReflexMode,
+    /// `active`: a completed turn the settle reflex categorizes as `confirm`
+    /// is answered with a standing go-ahead, unless the request carries a
+    /// risk or hand-off cue. `observe` and `off` never answer.
+    pub confirm: ReflexMode,
     /// Fit and promote new parameter generations from local labels.
     pub learn: bool,
 }
@@ -66,6 +72,7 @@ impl Default for ReflexConfig {
         Self {
             route: ReflexMode::Active,
             settle: ReflexMode::Observe,
+            confirm: ReflexMode::Observe,
             learn: true,
         }
     }
