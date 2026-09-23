@@ -912,7 +912,17 @@ impl App {
         true
     }
     pub fn handle(&mut self, event: Event, output: &SyncSender<Intent>) -> bool {
-        if !matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Release) {
+        // Only inputs that can change the view schedule a repaint: painting a
+        // frame per pointer-motion or focus event is pure churn.
+        let repaints = match &event {
+            Event::Key(key) => key.kind != KeyEventKind::Release,
+            Event::Mouse(mouse) => {
+                !matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_))
+            }
+            Event::FocusGained | Event::FocusLost => false,
+            _ => true,
+        };
+        if repaints {
             self.dirty = true;
         }
         if self.modal.is_some() {
@@ -1473,11 +1483,21 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
             needs_draw = false;
             blink = phase;
         }
-        if event::poll(Duration::from_millis(50))? && !app.handle(event::read()?, &output) {
-            break;
+        if event::poll(Duration::from_millis(50))? {
+            // Coalesce bursts: drain every queued event before the next draw
+            // so a paste storm or mouse flood paints once, not once per event.
+            let mut quit = !app.handle(event::read()?, &output);
+            while !quit && event::poll(Duration::ZERO)? {
+                quit = !app.handle(event::read()?, &output);
+            }
+            if quit {
+                break;
+            }
         }
         ticks = ticks.wrapping_add(1);
-        if refresh.elapsed() >= Duration::from_millis(750) {
+        // The kernel publishes ~1s views on its own; the TUI's extra refresh
+        // only needs to catch what slips through, so 5s is plenty.
+        if refresh.elapsed() >= Duration::from_secs(5) {
             app.send(&output, Intent::Refresh);
             refresh = Instant::now();
         }

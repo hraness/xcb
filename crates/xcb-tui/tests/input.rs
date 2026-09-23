@@ -419,6 +419,51 @@ fn unchanged_views_and_foreign_deltas_do_not_mark_a_repaint() {
     changed.state = xcb_core::session::State::Working;
     assert!(app.apply(xcb_core::ui::Update::View(Box::new(changed))));
     assert!(app.take_dirty());
+
+    // Pointer motion, drags, and focus notifications cannot change the view —
+    // they must not schedule a repaint.
+    let (tx, _rx) = std::sync::mpsc::sync_channel(4);
+    for event in [
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 4,
+            row: 4,
+            modifiers: KeyModifiers::NONE,
+        }),
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        }),
+        Event::FocusGained,
+        Event::FocusLost,
+        Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+            crossterm::event::KeyEventKind::Release,
+        )),
+    ] {
+        let label = format!("{event:?}");
+        assert!(app.handle(event, &tx), "event must not quit");
+        assert!(!app.take_dirty(), "{label} must not mark a repaint");
+    }
+    // A wheel turn scrolls the transcript and a key press types — both paint.
+    assert!(app.handle(
+        Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &tx,
+    ));
+    assert!(app.take_dirty(), "a wheel scroll repaints the viewport");
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+        &tx,
+    ));
+    assert!(app.take_dirty(), "a key press repaints");
 }
 
 fn picker_account(
