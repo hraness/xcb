@@ -76,8 +76,11 @@ xcb --help
 ```
 
 The installer builds with the lockfile and installs `~/.local/bin/xcb`.
-`XCB_INSTALL_PREFIX` changes the prefix. Both the old TypeScript CLI and the
-native CLI use the name `xcb`; use `command -v xcb` to check which one is active.
+`XCB_INSTALL_PREFIX` changes the prefix; `XCB_ADD_PATH=yes` appends the bin
+directory to your shell profile when it is not already on `PATH`.
+The TypeScript compatibility package installs its CLI as `xcb-compat`, so it
+cannot shadow the native `xcb`; use `command -v xcb` to check which binary is
+active.
 The installer also records a private install manifest under the prefix and
 keeps the exact installer beside the binary, so later upgrades use the same
 verified path.
@@ -396,4 +399,5 @@ See [Contributing](CONTRIBUTING.md) for setup and the native, compatibility, and
 site checks. The credential-free [native Codex boundary fixtures](qualification/codex-native.md)
 and [native Devin boundary fixture](qualification/devin-native.md) document
 repeatable checks separately from authenticated live acceptance.
+Release notes live in [CHANGELOG.md](CHANGELOG.md).
 Report vulnerabilities through [Security](SECURITY.md). Licensed under [MIT](LICENSE).
