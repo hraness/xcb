@@ -663,8 +663,34 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     .filter(|task| crate::task_status(task) == "running" && task.route.is_some())
                     .max_by_key(|task| task.updated_at_ms)
                     .and_then(|task| task.route.clone());
+                let account_hint = if app.view.accounts.is_empty() {
+                    " · 0 accounts — xcb accounts add <provider>"
+                } else {
+                    ""
+                };
+                // The binding quota for the fleet: the lowest recorded
+                // remaining share across usable accounts, plus any known
+                // account-wide block. `None` signals stay invisible rather
+                // than fabricate coverage.
+                let now = crate::display_now_ms();
+                let usable = app
+                    .view
+                    .accounts
+                    .iter()
+                    .filter(|account| account.enabled && !account.authentication_required);
+                let blocked = usable
+                    .clone()
+                    .filter_map(|account| account.quota_block_label(now))
+                    .next();
+                let lowest = usable
+                    .filter_map(|account| account.remaining_percent)
+                    .reduce(f64::min);
+                let quota = blocked
+                    .map(|label| format!(" · {label}"))
+                    .or_else(|| lowest.map(|p| format!(" · quota {}%", p.round() as u32)))
+                    .unwrap_or_default();
                 format!(
-                    "{running} running{} · {waiting} needs you · {} chats{} · /t tasks · ? help",
+                    "{running} running{} · {waiting} needs you · {} chats{}{}{} · /t tasks · ? help",
                     if queued > 0 {
                         format!(" · {queued} queued")
                     } else {
@@ -674,6 +700,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     routed
                         .map(|route| format!(" · {route}"))
                         .unwrap_or_default(),
+                    quota,
+                    account_hint,
                 )
             })
         })
@@ -682,7 +710,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                 .extensions
                 .iter()
                 .any(|(name, _)| name == "algal supervisor")
-                .then(|| "global dispatcher · / for commands · ? help".into())
+                .then(|| {
+                    if app.view.accounts.is_empty() {
+                        "no provider accounts — xcb accounts add <provider> · ? help".into()
+                    } else {
+                        "global dispatcher · / for commands · ? help".into()
+                    }
+                })
         })
         .or_else(|| {
             app.view
