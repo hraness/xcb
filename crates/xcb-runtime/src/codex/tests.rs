@@ -131,6 +131,197 @@ fn readiness_requires_the_matching_rpc_and_rejects_early_execution() {
 }
 
 #[test]
+fn pinned_thread_statuses_are_observations_not_turn_admission_or_completion() {
+    // Exported by the qualified 0.155.0-alpha.2.6 executable:
+    // v2/ThreadStatusChangedNotification.json SHA256
+    // 26f3c60c1b73f7fa2d31c74429cdc36f8746c76c33e3d314b3fb61d3661f05f6.
+    for status in [
+        json!({"type":"notLoaded"}),
+        json!({"type":"idle"}),
+        json!({"type":"systemError"}),
+        json!({"type":"active","activeFlags":[]}),
+    ] {
+        let mut c = codec();
+        c.thread_id = Some("thread1".into());
+        c.turn_rpc = Some(7);
+        let notification = json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":status}});
+        let (events, replies) = c.accept(notification.clone()).unwrap();
+        assert!(replies.is_empty());
+        assert!(!c.ready && !c.completed && c.turn_id.is_none());
+        assert_eq!(c.turn_rpc, Some(7));
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event, Event::Diagnostic(_)))
+        );
+        if status["type"] == "systemError" {
+            assert!(
+                matches!(&events[..], [Event::Diagnostic(detail)] if detail.as_str() == "unavailable: Codex thread reported a system error")
+            );
+        } else {
+            assert!(events.is_empty());
+        }
+        assert!(c.accept(notice("item/started", call_item())).is_err());
+        c.accept(json!({"id":7,"result":{"turn":{"id":"turn1"}}}))
+            .unwrap();
+        c.accept(notification).unwrap();
+        assert!(c.ready && !c.completed);
+        assert_eq!(c.turn_id.as_deref(), Some("turn1"));
+    }
+}
+
+#[test]
+fn thread_statuses_reject_foreign_identity_unknown_shapes_and_permission_flags() {
+    for status in [
+        json!({"type":"futureStatus"}),
+        json!({"type":"idle","activeFlags":[]}),
+        json!({"type":"notLoaded","extra":true}),
+        json!({"type":"systemError","message":"SYNTHETIC_SECRET"}),
+        json!({"type":"active"}),
+        json!({"type":"active","activeFlags":null}),
+        json!({"type":"active","activeFlags":["waitingOnApproval"]}),
+        json!({"type":"active","activeFlags":["waitingOnUserInput"]}),
+        json!({"type":"active","activeFlags":["futureFlag"]}),
+        json!("idle"),
+    ] {
+        assert!(started().accept(json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":status}})).is_err());
+    }
+    for thread in [Value::Null, json!("foreign")] {
+        assert!(started().accept(json!({"method":"thread/status/changed","params":{"threadId":thread,"status":{"type":"notLoaded"}}})).is_err());
+    }
+    assert!(started().accept(json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":{"type":"idle"},"extra":true}})).is_err());
+}
+
+#[test]
+fn turn_start_errors_are_sanitized_only_after_matching_the_expected_rpc() {
+    let mut c = codec();
+    c.thread_id = Some("thread1".into());
+    c.turn_rpc = Some(7);
+    let error = json!({"code":-32000,"message":"401 Unauthorized Bearer SYNTHETIC_SECRET user@example.invalid","data":{"token":"SYNTHETIC_DATA_SECRET"}});
+    for id in [json!(8), json!("7"), Value::Null] {
+        assert!(matches!(
+            c.accept(json!({"id":id,"error":error})),
+            Err(Error::Protocol(_))
+        ));
+    }
+    let failure = c.accept(json!({"id":7,"error":error})).unwrap_err();
+    assert!(matches!(
+        failure,
+        Error::CodexRpc {
+            method: "turn/start",
+            code: -32000,
+            ..
+        }
+    ));
+    let displayed = failure.to_string();
+    assert!(displayed.contains("authentication rejected"));
+    assert!(!displayed.contains("SYNTHETIC"));
+    assert!(!displayed.contains("example.invalid"));
+    assert!(!c.ready && c.turn_id.is_none());
+    assert!(matches!(
+        started().accept(json!({"id":7,"error":error})),
+        Err(Error::Protocol(_))
+    ));
+}
+
+#[test]
+fn failed_turns_preserve_fixed_diagnostics_and_terminal_classification() {
+    for (tag, terminal, failure, category) in [
+        (
+            "usageLimitExceeded",
+            Terminal::Failed,
+            Some(Failure::AccountQuota),
+            "provider usage limit exceeded",
+        ),
+        (
+            "unauthorized",
+            Terminal::Failed,
+            Some(Failure::Authentication),
+            "authentication rejected",
+        ),
+        (
+            "contextWindowExceeded",
+            Terminal::TokenLimit,
+            None,
+            "provider context window exceeded",
+        ),
+        (
+            "sandboxError",
+            Terminal::Failed,
+            Some(Failure::Policy),
+            "provider policy rejected",
+        ),
+        (
+            "SYNTHETIC_UNKNOWN_SECRET",
+            Terminal::Failed,
+            Some(Failure::Unknown),
+            "provider rejected the operation",
+        ),
+    ] {
+        for code in [
+            json!(tag),
+            json!({tag: {"secret":"SYNTHETIC_NESTED_SECRET"}}),
+        ] {
+            let mut c = started();
+            let (events, replies) = c.accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"failed","error":{"codexErrorInfo":code,"message":"SYNTHETIC_SECRET user@example.invalid"}}}})).unwrap();
+            assert!(replies.is_empty());
+            let diagnostic = events
+                .iter()
+                .find_map(|event| match event {
+                    Event::Diagnostic(value) => Some(serde_json::to_value(value).unwrap()),
+                    _ => None,
+                })
+                .expect("failed turns retain a safe diagnostic");
+            let diagnostic = diagnostic.as_str().unwrap();
+            assert!(diagnostic.contains("turn/completed"));
+            assert!(diagnostic.contains(category));
+            assert!(!diagnostic.contains("SYNTHETIC"));
+            assert!(!diagnostic.contains("example.invalid"));
+            assert!(events.iter().any(|event| matches!(event, Event::Result { terminal: observed, .. } if *observed == terminal)));
+            assert_eq!(
+                events.iter().find_map(|event| match event {
+                    Event::Quota { failure, .. } => *failure,
+                    _ => None,
+                }),
+                failure
+            );
+            assert!(c.completed);
+        }
+    }
+}
+
+#[test]
+fn error_notices_require_scope_and_do_not_persist_a_retried_failure() {
+    let mut notification = json!({"method":"error","params":{"threadId":"thread1","turnId":"turn1","willRetry":false,"error":{"message":"model is not supported: SYNTHETIC_SECRET user@example.invalid"}}});
+    let (events, _) = started().accept(notification.clone()).unwrap();
+    let diagnostic = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Diagnostic(value) => Some(serde_json::to_value(value).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        diagnostic
+            .as_str()
+            .unwrap()
+            .contains("selected model or reasoning effort")
+    );
+    assert!(!diagnostic.as_str().unwrap().contains("SYNTHETIC"));
+    notification["params"]["willRetry"] = json!(true);
+    assert!(
+        !started()
+            .accept(notification.clone())
+            .unwrap()
+            .0
+            .iter()
+            .any(|event| matches!(event, Event::Diagnostic(_)))
+    );
+    notification["params"]["threadId"] = json!("foreign");
+    assert!(started().accept(notification).is_err());
+}
+
+#[test]
 fn usage_counts_caches_once_and_refuses_regression() {
     let value = json!({"totalTokens":150,"inputTokens":120,"cachedInputTokens":80,"cacheWriteInputTokens":10,"outputTokens":30,"reasoningOutputTokens":20});
     let (counters, total) = usage(&value).unwrap();

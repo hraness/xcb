@@ -85,7 +85,7 @@ test("support boundaries appear before installation without implying offline inf
   const html = renderToStaticMarkup(<Home />);
   expect(html).toContain("source preview");
   expect(html).toContain("macOS ARM64");
-  expect(html).toContain("tested account hit provider quota");
+  expect(html).toContain("coding acceptance requires authenticated run evidence");
   expect(html).toContain("Offline Linux ARM64");
   expect(html).toContain("No native macOS command execution");
   expect(html).toContain("Model requests still go to the provider");

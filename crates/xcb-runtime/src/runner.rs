@@ -37,12 +37,76 @@ pub enum Progress {
     Notice(String),
 }
 pub type Observer = Arc<dyn Fn(Progress) + Send + Sync>;
+
+/// A bounded host-selected explanation, never a raw provider/OS error payload.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(transparent)]
+pub struct Diagnostic(String);
+
+impl Diagnostic {
+    const MAX_BYTES: usize = 512;
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(crate) fn from_error(error: &Error) -> Self {
+        let text = match error {
+            Error::Protocol(_)
+            | Error::Conflict(_)
+            | Error::Unavailable(_)
+            | Error::CodexRpc { .. }
+            | Error::DevinRpc { .. }
+            | Error::DevinModelChoices { .. } => error.to_string(),
+            Error::Core(_) => "invalid host input or local record".into(),
+            Error::Io(_) => "local I/O failed".into(),
+            Error::LaunchNotStarted(_) => "provider process could not start".into(),
+            Error::CleanupUnproven => "provider cleanup is unproven; custody retained".into(),
+            Error::Database(_) => "local database operation failed".into(),
+            Error::Json(_) => "invalid local record".into(),
+            Error::PrivateState => "local state failed private-file validation".into(),
+        };
+        let mut text: String = text
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect();
+        if text.len() > Self::MAX_BYTES {
+            let mut end = Self::MAX_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        Self(text)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Diagnostic {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+        if text.is_empty() || text.len() > Self::MAX_BYTES || text.chars().any(char::is_control) {
+            return Err(serde::de::Error::custom("invalid bounded host diagnostic"));
+        }
+        Ok(Self(text))
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Outcome {
     pub text: String,
     pub facts: TurnFacts,
     pub state: State,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<Diagnostic>,
 }
 
 pub fn should_idle_export(pane_generation: bool, facts: &TurnFacts, state: State) -> bool {
@@ -1215,6 +1279,9 @@ pub async fn login_codex(store: &Store, account: &Id, pin: &Pin) -> Result<()> {
     };
     if has_credential {
         auth::persist_codex_auth(store, &run, &plan.credentials, joined)?;
+        if result.is_ok() {
+            store.clear_authentication_failure(&run)?;
+        }
     } else {
         // No persistent account credential was handed to the login process.
         // A stopped, unsuccessful device flow may be retried normally.
@@ -1742,7 +1809,7 @@ pub async fn run(
     run_prepared(store, input, cancel, observer, launch, protocol, workspace).await
 }
 
-async fn run_prepared<P: Protocol>(
+pub(crate) async fn run_prepared<P: Protocol>(
     store: Arc<Store>,
     input: RunInput,
     mut cancel: watch::Receiver<bool>,
@@ -1793,6 +1860,7 @@ async fn run_prepared<P: Protocol>(
     let mut effects = EffectState::None;
     let mut pending_attention = false;
     let mut quota_failure = None;
+    let mut diagnostic = None;
     let mut answer = Answer::default();
     let mut thinking = String::new();
     let workspace = Arc::new(workspace);
@@ -1806,6 +1874,11 @@ async fn run_prepared<P: Protocol>(
             .map(|point| point.output_tokens)
             .unwrap_or(0);
         let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace; direct sessions have no managed mailbox. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
+        // Retain fresh discovery even when a cached selection has disappeared.
+        // The failed turn still cannot start or silently choose another model.
+        if protocol.refreshes_catalog() {
+            store.set_models(session.model.provider, &models)?;
+        }
         if !models.iter().any(|choice| {
             choice.id == session.model.id
                 && (session.model.effort.is_none() || choice.effort == session.model.effort)
@@ -1813,9 +1886,6 @@ async fn run_prepared<P: Protocol>(
             return Err(Error::Unavailable(
                 "selected model or effort is not in the fresh provider catalog",
             ));
-        }
-        if protocol.refreshes_catalog() {
-            store.set_models(session.model.provider, &models)?;
         }
         let (email, plan) = protocol.account_identity();
         if email.is_some() || plan.is_some() {
@@ -1924,6 +1994,10 @@ async fn run_prepared<P: Protocol>(
                     return Ok((Terminal::Cancelled, vec![]));
                 }
                 match event {
+                    TurnEvent::Diagnostic(detail) => {
+                        observer(Progress::Notice(detail.as_str().to_owned()));
+                        diagnostic = Some(detail);
+                    }
                     TurnEvent::Ready => {
                         if admitted {
                             return Err(Error::Protocol("duplicate initialization"));
@@ -2183,11 +2257,15 @@ async fn run_prepared<P: Protocol>(
             },
         ),
         Ok(Err(error)) => {
-            observer(Progress::Notice(error.to_string()));
+            let detail = Diagnostic::from_error(&error);
+            observer(Progress::Notice(detail.as_str().to_owned()));
+            diagnostic = Some(detail);
             (Terminal::Failed, vec![], Some(Failure::Unknown))
         }
         Err(_) => {
-            observer(Progress::Notice("Provider deadline reached".into()));
+            let detail = Diagnostic::from_error(&Error::Unavailable("provider deadline reached"));
+            observer(Progress::Notice(detail.as_str().to_owned()));
+            diagnostic = Some(detail);
             (Terminal::Failed, vec![], Some(Failure::Transport))
         }
     };
@@ -2205,6 +2283,11 @@ async fn run_prepared<P: Protocol>(
         text: final_text.clone(),
         facts,
         state,
+        diagnostic: if terminal == Terminal::Completed {
+            None
+        } else {
+            diagnostic
+        },
     };
     if joined {
         if !thinking.is_empty() {
@@ -2282,6 +2365,74 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn diagnostic_is_legacy_compatible_and_bounded() {
+        let original = Outcome {
+            text: String::new(),
+            facts: TurnFacts {
+                terminal: Terminal::Failed,
+                joined: true,
+                effects: EffectState::None,
+                pending_attention: false,
+                failure: Some(Failure::Unknown),
+            },
+            state: State::Failed,
+            diagnostic: None,
+        };
+        let mut legacy = serde_json::to_value(original).unwrap();
+        assert!(legacy.get("diagnostic").is_none());
+        assert!(
+            serde_json::from_value::<Outcome>(legacy.clone())
+                .unwrap()
+                .diagnostic
+                .is_none()
+        );
+        for text in [String::new(), "d".repeat(513), "unsafe\ntext".into()] {
+            legacy["diagnostic"] = json!(text);
+            assert!(serde_json::from_value::<Outcome>(legacy.clone()).is_err());
+        }
+        legacy["diagnostic"] = json!("d".repeat(512));
+        assert_eq!(
+            serde_json::from_value::<Outcome>(legacy)
+                .unwrap()
+                .diagnostic
+                .unwrap()
+                .as_str()
+                .len(),
+            512
+        );
+    }
+
+    #[test]
+    fn diagnostic_never_copies_external_error_payloads() {
+        let secret = "/private/account/auth.json token=secret-provider-payload\u{1b}[31m";
+        for error in [
+            Error::Io(std::io::Error::other(secret)),
+            Error::LaunchNotStarted(std::io::Error::other(secret)),
+            Error::Database(rusqlite::Error::InvalidParameterName(secret.into())),
+        ] {
+            assert!(error.to_string().contains(secret));
+            let diagnostic = Diagnostic::from_error(&error);
+            assert!(!diagnostic.as_str().contains("/private"));
+            assert!(!diagnostic.as_str().contains("token="));
+            assert!(!diagnostic.as_str().contains("secret-provider-payload"));
+            assert!(!diagnostic.as_str().chars().any(char::is_control));
+        }
+        assert_eq!(
+            Diagnostic::from_error(&Error::Protocol("fixture failure")).as_str(),
+            "provider protocol error: fixture failure"
+        );
+        assert_eq!(
+            Diagnostic::from_error(&Error::CodexRpc {
+                method: "turn/start",
+                code: -32000,
+                category: "permission denied"
+            })
+            .as_str(),
+            "Codex turn/start failed (RPC -32000): permission denied"
+        );
+    }
 
     fn file(path: &Path, mode: u32) {
         let mut created = std::fs::File::create(path).unwrap();

@@ -20,6 +20,7 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
         .collect();
     let mut independent_pools = BTreeMap::new();
     for account in store.accounts()? {
+        let authentication_required = store.authentication_required(&account.id)?;
         let mut by_window: BTreeMap<Id, Vec<QuotaPoint>> = BTreeMap::new();
         for point in store.quotas(&account.quota_pool)? {
             by_window
@@ -53,7 +54,7 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
         } else {
             Estimate::unknown("quota_or_burn_unmeasured")
         };
-        if account.enabled {
+        if account.enabled && !authentication_required {
             independent_pools
                 .entry(account.quota_pool.clone())
                 .or_insert_with(|| estimate.clone());
@@ -70,6 +71,7 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
             runway: estimate,
             busy: busy.contains(&account.id),
             enabled: account.enabled,
+            authentication_required,
         });
     }
     let known: Vec<_> = independent_pools

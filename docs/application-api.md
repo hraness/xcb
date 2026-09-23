@@ -18,11 +18,15 @@ text content block, separated by a blank line; there is no separate system-role
 message. This tool-free route does not add the MCP workspace instructions used
 by tool-enabled Devin sessions. The native decoder follows
 [ACP extension semantics](https://agentclientprotocol.com/protocol/v1/extensibility):
-bounded, valid underscore-prefixed notifications without an `id` are discarded
+unrecognized, bounded, valid underscore-prefixed notifications without an `id`
+are discarded
 without events, replies or changes to session, model, tools or custody. Unknown
 requests still receive a method-not-found response and trigger attention;
 ordinary unknown notifications and invalid `session/update` messages still fail.
-This compatibility handling does not qualify or activate a provider.
+Recognized `_cognition.ai/compaction` notifications retain their closed-shape,
+matching-session and active-turn checks before this extension fallback. Their
+summary is discarded without changing output or tool custody. This compatibility
+handling does not qualify or activate a provider.
 
 An installation reports `supported: false` until the application path has current
 qualification for the exact built executable, provider, account and model. A provider pin,

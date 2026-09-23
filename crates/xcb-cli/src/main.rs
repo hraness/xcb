@@ -386,7 +386,11 @@ fn print_json(value: impl serde::Serialize) -> Result<()> {
 }
 
 fn run_output(session: &Id, result: &runner::Outcome) -> serde_json::Value {
-    json!({"version":1,"session":session,"state":result.state,"outcome":result.facts,"text":result.text})
+    let mut output = json!({"version":1,"session":session,"state":result.state,"outcome":result.facts,"text":result.text});
+    if let Some(diagnostic) = &result.diagnostic {
+        output["diagnostic"] = json!(diagnostic);
+    }
+    output
 }
 
 fn run_exit_code(result: &runner::Outcome) -> i32 {
@@ -520,7 +524,7 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
     let view = summary::snapshot(store, None, config, now_ms())?;
     if as_json {
         return print_json(
-            json!({"version":1,"accounts":view.accounts.iter().map(|account| json!({"id":account.id,"name":account.name,"email":account.email,"provider":account.provider,"subscription":account.subscription,"remainingPercent":account.remaining_percent,"resetsAtMs":account.resets_at_ms,"quotaBlockedUntilMs":account.quota_blocked_until_ms,"runway":account.runway,"busy":account.busy,"enabled":account.enabled})).collect::<Vec<_>>(),"estimatedPoolSeconds":view.total_runway_seconds,"measuredPools":view.runway_coverage.0,"totalPools":view.runway_coverage.1,"localOnly":true}),
+            json!({"version":1,"accounts":view.accounts.iter().map(|account| json!({"id":account.id,"name":account.name,"email":account.email,"provider":account.provider,"subscription":account.subscription,"remainingPercent":account.remaining_percent,"resetsAtMs":account.resets_at_ms,"quotaBlockedUntilMs":account.quota_blocked_until_ms,"runway":account.runway,"busy":account.busy,"enabled":account.enabled,"authenticationRequired":account.authentication_required})).collect::<Vec<_>>(),"estimatedPoolSeconds":view.total_runway_seconds,"measuredPools":view.runway_coverage.0,"totalPools":view.runway_coverage.1,"localOnly":true}),
         );
     }
     if view.accounts.is_empty() {
@@ -561,7 +565,7 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
         // provider email rendered as the account's display identity, which is
         // the documented purpose of this local status table.
         println!(
-            "{} {:<35} {:<9} {:<19} {:<22} {}{}{}{}",
+            "{} {:<35} {:<9} {:<19} {:<22} {}{}{}{}{}",
             if config.default_account.as_ref() == Some(&account.id) {
                 ">"
             } else {
@@ -574,6 +578,11 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
             runway,
             if account.busy { " · busy" } else { "" },
             if account.enabled { "" } else { " · disabled" },
+            if account.authentication_required {
+                " · reconnect required"
+            } else {
+                ""
+            },
             account
                 .quota_block_label(now)
                 .map(|label| format!(" · {label}"))
@@ -1779,51 +1788,36 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 let (run, mut run_digest) = store
                     .recovery_candidate(&run_id)?
                     .ok_or(Error::Unavailable("run not found"))?;
-                // A run that took the account lease but never recorded a
-                // process group. `prepare_run` leases before the provider is
-                // spawned, so a kill in that window leaves a lease with
-                // nothing to signal and nothing to prove absent. Until now
-                // every command refused it and the account stayed unusable
-                // forever. The record still cannot prove a provider process
-                // is absent; this is the operator saying so.
+                // Prepared state also covers a child spawned before its PID
+                // was persisted. Neither --yes nor owner absence proves that
+                // child stopped, so this path only explains retained custody.
                 if run.phase == "prepared" && run.pid.is_none() {
-                    if !yes {
-                        if cli.json {
-                            print_json(json!({
-                                "version": 1,
-                                "dryRun": true,
-                                "run": run.id,
-                                "phase": run.phase,
-                                "pid": serde_json::Value::Null,
-                                "discardsWithoutProcessProof": true,
-                            }))?;
-                        } else {
-                            println!(
-                                "Run {} holds an account lease but never recorded a process group,",
-                                run.id
-                            );
-                            println!(
-                                "  so there is nothing to signal and nothing to prove stopped."
-                            );
-                            println!(
-                                "  It was killed between taking the lease and starting the provider."
-                            );
-                            println!(
-                                "Confirm no provider process from this run is alive, then re-run with --yes."
-                            );
-                        }
-                        return Ok(0);
+                    if yes {
+                        return Err(Error::Conflict(
+                            "run has no recorded process group; account custody retained because provider stop cannot be proven",
+                        ));
                     }
-                    let discarded = store.discard_unspawned_run(&run.id, &run_digest, now_ms())?;
                     if cli.json {
-                        print_json(
-                            json!({"version":1,"run":discarded.id,"phase":discarded.phase,"leaseReleased":true}),
-                        )?;
+                        print_json(json!({
+                            "version": 1,
+                            "dryRun": true,
+                            "run": run.id,
+                            "phase": run.phase,
+                            "pid": serde_json::Value::Null,
+                            "leaseReleased": false,
+                            "custodyRetained": true,
+                            "recoverable": false,
+                            "reason": "prepared state does not prove no provider child exists",
+                        }))?;
                     } else {
                         println!(
-                            "Discarded unspawned run {} · account lease released",
-                            discarded.id
+                            "Run {} has no recorded process group; account custody is retained.",
+                            run.id
                         );
+                        println!(
+                            "  A provider may have started before its PID was saved. Its stop cannot be proven from this record."
+                        );
+                        println!("  --yes cannot override missing process-stop evidence.");
                     }
                     return Ok(0);
                 }
@@ -2223,7 +2217,8 @@ mod tests {
 
     #[test]
     fn json_run_output_includes_its_resumable_session_id() {
-        let result = runner::Outcome {
+        let mut result = runner::Outcome {
+            diagnostic: None,
             text: "Completed response".into(),
             facts: xcb_core::policy::TurnFacts {
                 terminal: Terminal::Completed,
@@ -2243,6 +2238,13 @@ mod tests {
             output["outcome"],
             serde_json::to_value(&result.facts).unwrap()
         );
+        result.diagnostic = Some(
+            serde_json::from_value(json!("provider protocol error: fixture failure")).unwrap(),
+        );
+        assert_eq!(
+            run_output(&session, &result)["diagnostic"],
+            "provider protocol error: fixture failure"
+        );
     }
 
     #[test]
@@ -2252,6 +2254,7 @@ mod tests {
             session::State,
         };
         let mut result = runner::Outcome {
+            diagnostic: None,
             text: "Provider said done".into(),
             facts: TurnFacts {
                 terminal: Terminal::Completed,

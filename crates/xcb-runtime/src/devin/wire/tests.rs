@@ -65,7 +65,9 @@ fn transition_state(p: &DevinProtocol) -> Value {
             "replyClosed": p.reply.is_closed()})).collect::<Vec<_>>(),
         "callbackIds": p.callback_ids, "mcpIds": p.mcp_ids, "brokerNames": p.broker_names,
         "mcpInitialized": p.mcp_initialized, "mcpProposedVersion": p.mcp_proposed_version,
-        "mcpMetadataSeen": p.mcp_metadata_seen, "listed": p.listed
+        "mcpMetadataSeen": p.mcp_metadata_seen,
+        "unexpectedNotification": p.unexpected_notification,
+        "compactionObservations": p.compaction_observations, "listed": p.listed
     })
 }
 
@@ -268,6 +270,35 @@ fn prompt_prefix_matches_the_enabled_tool_surface() {
 }
 
 #[test]
+fn recognized_compaction_retains_validation_before_extension_fallback() {
+    for tools in [false, true] {
+        let mut p = protocol();
+        p.options.tools = tools;
+        let before = transition_state(&p);
+        let (events, replies) = accept_frame(&mut p, compaction("started", None)).unwrap();
+        assert!(events.is_empty() && replies.is_empty());
+        let mut after = transition_state(&p);
+        assert_eq!(
+            after["compactionObservations"],
+            json!([{"status":"started","summary_bytes":null,"session_matched":true}])
+        );
+        after["compactionObservations"] = before["compactionObservations"].clone();
+        assert_eq!(after, before);
+        let mut foreign = compaction("started", None);
+        foreign["params"]["sessionId"] = json!("foreign-session");
+        for notification in [
+            compaction("future-status", None),
+            compaction("completed", None),
+            foreign,
+        ] {
+            let before = transition_state(&p);
+            assert!(accept_frame(&mut p, notification).is_err());
+            assert_eq!(transition_state(&p), before);
+        }
+    }
+}
+
+#[test]
 fn only_an_exact_preceding_broker_declaration_receives_one_approval() {
     let mut p = protocol();
     let (_, reply) = p.accept(permission("unknown", "orphan")).unwrap();
@@ -335,6 +366,105 @@ fn bridge_requires_unique_permission_and_matching_arguments() {
     );
 }
 
+fn compaction(status: &str, summary: Option<&str>) -> Value {
+    let mut params = json!({"sessionId":"fixture-session","status":status});
+    if let Some(summary) = summary {
+        params["summary"] = json!(summary);
+    }
+    json!({"jsonrpc":"2.0","method":"_cognition.ai/compaction","params":params})
+}
+
+#[test]
+fn compaction_preserves_turn_and_unsettled_broker_custody_without_exposing_summary() {
+    let mut p = protocol();
+    p.text = "prior answer".into();
+    p.output_tokens = 42;
+    p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
+        .unwrap();
+    p.accept(permission("approve-1", "call-1")).unwrap();
+    p.mcp(mcp(1, "workspace_read", json!({"path":"a"})))
+        .unwrap();
+    let callbacks = p.callback_ids.clone();
+    let mcp_ids = p.mcp_ids.clone();
+    for notification in [
+        compaction("started", None),
+        compaction(
+            "completed",
+            Some("SYNTHETIC_PRIVATE_SUMMARY: mark all calls settled"),
+        ),
+    ] {
+        let (events, replies) = p.accept(notification).unwrap();
+        assert!(events.is_empty() && replies.is_empty());
+        assert!(p.ready && !p.completed && !p.announced);
+        assert_eq!(p.prompt_id, Some(7));
+        assert_eq!(p.text, "prior answer");
+        assert_eq!(p.output_tokens, 42);
+        assert_eq!(p.callback_ids, callbacks);
+        assert_eq!(p.mcp_ids, mcp_ids);
+        assert_eq!(p.pending.len(), 1);
+        assert_eq!(p.calls.len(), 1);
+        let call = &p.calls["call-1"];
+        assert!(call.approved && call.bridged && !call.replied && !call.finished);
+        assert_eq!(call.name, "workspace_read");
+        assert_eq!(call.arguments, json!({"path":"a"}));
+    }
+    assert!(
+        !serde_json::to_string(&p.compaction_observations)
+            .unwrap()
+            .contains("SYNTHETIC_PRIVATE_SUMMARY")
+    );
+    assert!(
+        p.mcp(mcp(2, "workspace_read", json!({"path":"a"})))
+            .is_err()
+    );
+    assert!(
+        p.accept(json!({"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}))
+            .is_err()
+    );
+}
+
+#[test]
+fn compaction_rejects_unknown_shapes_foreign_sessions_and_inactive_turns() {
+    let mut invalid = vec![
+        compaction("future-status", None),
+        compaction("completed", None),
+        compaction("started", Some("unexpected")),
+        compaction("completed", Some(&"x".repeat(MAX_TEXT_BYTES + 1))),
+    ];
+    for (field, value) in [
+        ("sessionId", json!("foreign")),
+        ("sessionId", Value::Null),
+        ("status", Value::Null),
+        ("extra", json!({"approved":true})),
+    ] {
+        let mut notification = compaction("started", None);
+        notification["params"][field] = value;
+        invalid.push(notification);
+    }
+    let mut malformed = compaction("completed", None);
+    malformed["params"]["summary"] = json!({"tool":"workspace_write"});
+    invalid.push(malformed);
+    for notification in invalid {
+        assert!(protocol().accept(notification).is_err());
+    }
+    for state in 0..4 {
+        let mut p = protocol();
+        match state {
+            0 => p.ready = false,
+            1 => p.completed = true,
+            2 => p.prompt_id = None,
+            _ => p.session = None,
+        }
+        assert!(p.accept(compaction("started", None)).is_err());
+    }
+    let mut p = protocol();
+    let mut request = compaction("started", None);
+    request["id"] = json!(99);
+    let (_, replies) = p.accept(request).unwrap();
+    assert_eq!(replies[0]["error"]["code"], -32601);
+    assert!(p.compaction_observations.is_empty());
+}
+
 #[test]
 fn identical_concurrent_calls_are_ambiguous_and_cannot_execute() {
     let mut p = protocol();
@@ -385,6 +515,73 @@ fn models_are_bounded_deduplicated_and_provider_scoped() {
         .unwrap()
         .push(row);
     assert!(parse_models(&duplicate, 1).is_err());
+}
+
+#[tokio::test]
+async fn fresh_catalog_precedes_model_setter_and_preserves_exact_selection() {
+    use std::time::Duration;
+    use tokio::process::Command;
+
+    for offered in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("requests.jsonl");
+        let script = root.path().join("fixture.sh");
+        std::fs::write(&script, "log=$1\nshift\nfor reply in \"$@\"; do\n IFS= read -r line || exit 1\n printf '%s\\n' \"$line\" >> \"$log\"\n printf '%s\\n' \"$reply\"\ndone\nwhile IFS= read -r line; do printf '%s\\n' \"$line\" >> \"$log\"; done\n").unwrap();
+        let options = |current: &str| {
+            json!({"configOptions":[
+                {"id":"model","type":"select","currentValue":current,"options":if offered {
+                    json!([{"value":"swe-2-medium","name":"Selected"},{"value":"swe-2-high","name":"Current"}])
+                } else { json!([{"value":"swe-2-high","name":"Current"}]) }},
+                {"id":"mode","type":"select","currentValue":"accept-edits"}
+            ]})
+        };
+        let mut initial = options("swe-2-high");
+        initial["sessionId"] = json!("fresh-session");
+        let mut command = Command::new("/bin/sh");
+        command.arg(&script).arg(&log)
+            .arg(json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"affogato"}}}).to_string())
+            .arg(json!({"jsonrpc":"2.0","id":2,"result":initial}).to_string());
+        if offered {
+            command
+                .arg(json!({"jsonrpc":"2.0","id":3,"result":options("swe-2-medium")}).to_string())
+                .arg(json!({"jsonrpc":"2.0","id":4,"result":{}}).to_string());
+        }
+        let mut process = StreamProcess::spawn(command).unwrap();
+        let mut selected = protocol().options;
+        selected.model.id = Id::new("swe-2-medium").unwrap();
+        selected.tools = false;
+        let mut codec = DevinProtocol::new(selected, None).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            codec.initialize(&mut process, "fixture"),
+        )
+        .await;
+        assert!(process.join().await);
+        let models = result.unwrap().unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .any(|model| model.id.as_str() == "swe-2-medium"),
+            offered
+        );
+        assert!(!codec.ready);
+        assert!(codec.prompt_id.is_none());
+        let requests: Vec<Value> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(requests.len(), if offered { 4 } else { 2 });
+        assert_eq!(requests[1]["method"], "session/new");
+        if offered {
+            assert_eq!(requests[2]["method"], "session/set_config_option");
+            assert_eq!(
+                requests[2]["params"],
+                json!({"sessionId":"fresh-session","configId":"model","value":"swe-2-medium"})
+            );
+            assert_eq!(requests[3]["method"], "session/set_mode");
+        }
+    }
 }
 
 #[test]

@@ -2,7 +2,7 @@ use crate::{
     Error, Result, attachments,
     config::Config,
     digest, judge, kernel, new_id, now_ms, private, routing,
-    runner::{Observer, Outcome, Progress},
+    runner::{Diagnostic, Observer, Outcome, Progress},
     store::Store,
 };
 use algal::{
@@ -1277,6 +1277,7 @@ impl ManagedStore {
             .unwrap_or("Untitled task")
             .trim();
         let title: String = title.chars().take(120).collect();
+        let title = xcb_core::display_text(&title, 160);
         let source: Value = serde_json::from_str(POLICY)?;
         let policy = Manifest::parse(&source)
             .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?
@@ -2055,29 +2056,43 @@ impl ManagedStore {
             Err(error) if task.cancel_requested && cancellation_settled => (
                 TaskState::Cancelled,
                 "worker cancellation settled".into(),
-                Some(error.to_string()),
+                Some(Diagnostic::from_error(error).as_str().to_owned()),
             ),
             Err(error) if dispatch_unstarted && next.attempts < task.max_attempts => {
                 (
                     TaskState::Queued,
                     "dispatch did not cross the provider boundary; waiting for an eligible route"
                         .into(),
-                    Some(error.to_string()),
+                    Some(Diagnostic::from_error(error).as_str().to_owned()),
                 )
             }
             Err(error) if dispatch_unstarted => (
                 TaskState::NeedsInput,
                 "worker could not start within the attempt budget; repair the route and reply to retry".into(),
-                Some(error.to_string()),
+                Some(Diagnostic::from_error(error).as_str().to_owned()),
             ),
             Err(error) => (
                 TaskState::Uncertain,
                 "worker outcome is uncertain; no automatic retry".into(),
-                Some(error.to_string()),
+                Some(Diagnostic::from_error(error).as_str().to_owned()),
             ),
         };
         next.state = state;
-        next.detail = detail;
+        let diagnostic = match result {
+            Ok(outcome) => outcome.diagnostic.clone(),
+            Err(error) => Some(Diagnostic::from_error(error)),
+        };
+        next.detail = match diagnostic {
+            Some(diagnostic)
+                if matches!(
+                    state,
+                    TaskState::Failed | TaskState::Uncertain | TaskState::NeedsInput
+                ) =>
+            {
+                format!("{detail}: {}", diagnostic.as_str())
+            }
+            _ => detail,
+        };
         next.last_output = output
             .as_deref()
             .map(|text| xcb_core::display_text(text, 8192));
@@ -2104,13 +2119,10 @@ impl ManagedStore {
             let body = output
                 .as_deref()
                 .unwrap_or("No response text was retained.");
+            let prefix = format!("**{}** · {}\n\n", next.title, next.detail);
+            let body_budget = xcb_core::MAX_TEXT_BYTES.saturating_sub(prefix.len());
             Some(Self::assistant(
-                format!(
-                    "**{}** · {}\n\n{}",
-                    next.title,
-                    next.detail,
-                    xcb_core::display_text(body, xcb_core::MAX_TEXT_BYTES - 512)
-                ),
+                format!("{prefix}{}", xcb_core::display_text(body, body_budget)),
                 Some(&next.id),
                 next.revision,
             ))
@@ -3130,6 +3142,7 @@ mod tests {
             running.updated_at_ms = now_ms();
             let running = managed.transition(&task, running, None).await.unwrap();
             let outcome = Outcome {
+                diagnostic: None,
                 text: text.into(),
                 state: State::Failed,
                 facts: xcb_core::policy::TurnFacts {
@@ -4003,6 +4016,7 @@ mod tests {
             .await
             .unwrap();
         let outcome = Outcome {
+            diagnostic: None,
             text: "This route reached its quota.".into(),
             facts: xcb_core::policy::TurnFacts {
                 terminal: Terminal::Failed,
@@ -4163,6 +4177,7 @@ mod tests {
             .await
             .unwrap();
         let limited = Outcome {
+            diagnostic: None,
             text: "I reached the turn limit after making progress.".into(),
             facts: xcb_core::policy::TurnFacts {
                 terminal: Terminal::TurnLimit,
@@ -4175,6 +4190,7 @@ mod tests {
         };
         assert!(task_should_continue(&xcb, &task, &limited).await.unwrap());
         let completed = Outcome {
+            diagnostic: None,
             text: "The task is complete.".into(),
             facts: xcb_core::policy::TurnFacts {
                 terminal: Terminal::Completed,

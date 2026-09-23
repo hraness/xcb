@@ -39,7 +39,7 @@ test("comparison attaches official evidence and retains current support boundari
     "https://docs.devin.ai/use-cases/gallery/batch-3-agents-best-solution",
   ]) expect(html).toContain(`href="${source}"`);
   expect(html).toContain("Native xcb is a source preview");
-  expect(html).toContain("tested account hit quota before coding acceptance");
+  expect(html).toContain("credential-free boundary proof is separate from authenticated coding acceptance");
   expect(html).toContain("offline Linux with prepared public dependencies");
   expect(html).toContain("not a general fleet of agents planning and merging parallel work");
   expect(html).toContain("an unknown model name cannot activate a provider");

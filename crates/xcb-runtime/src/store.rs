@@ -19,6 +19,23 @@ use xcb_core::{
 const MAX_ACCOUNTS: i64 = 128;
 const MAX_SESSIONS: i64 = 10_000;
 const MAX_MESSAGES: i64 = 10_000;
+pub(crate) const AUTHENTICATION_REQUIRED: &str =
+    "account authentication failed; reconnect this account before running tasks";
+
+fn authentication_required_from(db: &Connection, account: &Id) -> Result<bool> {
+    let available: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_auth_failures')",
+        [], |row| row.get(0),
+    )?;
+    if !available {
+        return Ok(false);
+    }
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM account_auth_failures WHERE account=?1)",
+        [account.as_str()],
+        |row| row.get(0),
+    )?)
+}
 
 /// A terminal report is committed in the same transaction as custody release.
 /// Its transcript boundary prevents a later turn from being mistaken for the
@@ -507,6 +524,14 @@ impl Store {
             payload TEXT NOT NULL,
             UNIQUE(session,input_sequence));",
         )?;
+        // Independent of session/run pruning. Generation changes alone cannot
+        // clear this record: login rotates before credentials are published.
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS account_auth_failures(
+            account TEXT PRIMARY KEY REFERENCES accounts(id),
+            generation TEXT,
+            run TEXT NOT NULL);",
+        )?;
         Ok(Self {
             root,
             instance: new_id("i").to_string(),
@@ -806,6 +831,7 @@ impl Store {
                 .chars()
                 .take(80)
                 .collect();
+            session.title = xcb_core::display_text(&session.title, 160);
             if session.title.is_empty() {
                 session.title = "Image message".into();
             }
@@ -845,6 +871,45 @@ impl Store {
         }
         Ok(messages)
     }
+    pub fn authentication_required(&self, account: &Id) -> Result<bool> {
+        let db = self.db()?;
+        authentication_required_from(&db, account)
+    }
+
+    pub fn require_authenticated_account(&self, account: &Id) -> Result<()> {
+        if self.authentication_required(account)? {
+            return Err(Error::Unavailable(AUTHENTICATION_REQUIRED));
+        }
+        Ok(())
+    }
+
+    /// Prompting probes recheck health under their exclusive account lease.
+    /// Reconnect and metadata probes remain available without this admission.
+    pub(crate) fn require_authenticated_run(&self, run: &RunRecord) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (current, _) = self.owned_run_from(&tx, run)?;
+        if authentication_required_from(&tx, &current.account)? {
+            return Err(Error::Unavailable(AUTHENTICATION_REQUIRED));
+        }
+        Ok(())
+    }
+
+    /// Only successful explicit credential replacement or supervised reauth
+    /// calls this, after publication while still holding exclusive custody.
+    /// Metadata presence, generation rotation, and routine refresh do not.
+    pub(crate) fn clear_authentication_failure(&self, run: &RunRecord) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (current, _) = self.owned_run_from(&tx, run)?;
+        tx.execute(
+            "DELETE FROM account_auth_failures WHERE account=?1",
+            [current.account.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn prepare_run(
         &self,
         session_id: &Id,
@@ -876,6 +941,9 @@ impl Store {
         let account: Account = decode(&account_json)?;
         if !account.enabled {
             return Err(Error::Conflict("account is disabled"));
+        }
+        if authentication_required_from(&tx, &account.id)? {
+            return Err(Error::Unavailable(AUTHENTICATION_REQUIRED));
         }
         if blocked_until_from(&tx, &self.root, &account, now)?.is_some() {
             return Err(Error::Unavailable(
@@ -1122,7 +1190,7 @@ impl Store {
     }
 
     pub(crate) fn settle(&self, run: &RunRecord, state: State, now: u64) -> Result<()> {
-        self.settle_inner(run, state, now, None)
+        self.settle_inner(run, state, now, None, None)
     }
 
     pub(crate) fn settle_outcome(
@@ -1133,7 +1201,33 @@ impl Store {
         now: u64,
     ) -> Result<()> {
         validate_outcome(outcome)?;
-        self.settle_inner(run, outcome.state, now, Some((input, outcome)))
+        self.settle_inner(run, outcome.state, now, Some((input, outcome)), None)
+    }
+
+    /// Application inference persists no prompt, output, or diagnostic payload.
+    /// Only joined sessionless terminal facts can affect account health.
+    pub(crate) fn settle_application(
+        &self,
+        run: &RunRecord,
+        facts: &xcb_core::policy::TurnFacts,
+        now: u64,
+    ) -> Result<()> {
+        use xcb_core::policy::{EffectState, Terminal};
+        if run.session.is_some()
+            || !facts.joined
+            || facts.effects != EffectState::None
+            || facts.pending_attention
+            || !matches!(facts.terminal, Terminal::Completed | Terminal::Failed)
+            || (facts.terminal == Terminal::Completed && facts.failure.is_some())
+        {
+            return Err(Error::Conflict("application settlement is unproven"));
+        }
+        let state = if facts.terminal == Terminal::Completed {
+            State::Idle
+        } else {
+            State::Failed
+        };
+        self.settle_inner(run, state, now, None, Some(facts))
     }
 
     fn settle_inner(
@@ -1142,6 +1236,7 @@ impl Store {
         state: State,
         now: u64,
         outcome: Option<(&Id, &crate::runner::Outcome)>,
+        application: Option<&xcb_core::policy::TurnFacts>,
     ) -> Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1150,6 +1245,30 @@ impl Store {
             return Err(Error::Conflict(
                 "command guest stop is unproven; reconcile command custody before settling",
             ));
+        }
+        if let Some(facts) = outcome.map(|(_, outcome)| &outcome.facts).or(application) {
+            use xcb_core::policy::{Failure, Terminal};
+            if facts.terminal == Terminal::Failed && facts.failure == Some(Failure::Authentication)
+            {
+                let generation = crate::application_qualification::read_generation(
+                    &self.root,
+                    &current.account,
+                )?;
+                tx.execute(
+                    "INSERT INTO account_auth_failures(account,generation,run) VALUES(?1,?2,?3)
+                    ON CONFLICT(account) DO UPDATE SET generation=excluded.generation,run=excluded.run",
+                    params![current.account.as_str(), generation, current.id.as_str()],
+                )?;
+            } else if facts.terminal == Terminal::Completed
+                && facts.failure.is_none()
+                && !facts.pending_attention
+                && state == State::Idle
+            {
+                tx.execute(
+                    "DELETE FROM account_auth_failures WHERE account=?1",
+                    [current.account.as_str()],
+                )?;
+            }
         }
         if let Some(id) = &current.session {
             let mut session =
@@ -1428,127 +1547,6 @@ impl Store {
         )? != 1
         {
             return Err(Error::Conflict("lease changed during recovery"));
-        }
-        tx.commit()?;
-        Ok(settled)
-    }
-    /// Settles a run that took an account lease but never recorded a process
-    /// group, releasing the lease.
-    ///
-    /// `prepare_run` takes the lease before the provider is spawned, and
-    /// `mark_spawned` records the process group immediately after. A process
-    /// killed inside that window leaves `phase = "prepared"` with `pid = None`:
-    /// a lease with nothing to signal, nothing to prove absent, and no way to
-    /// release it. Every other command then refuses — a new run, a probe,
-    /// enabling the account, even removing the session — so the account
-    /// becomes permanently unusable. `recover_run` is right to refuse this
-    /// case, because the record genuinely cannot prove whether a provider
-    /// process exists; what was missing is any way for the operator to answer
-    /// what the record cannot.
-    ///
-    /// This is that answer and nothing more. It settles ONLY a `prepared` run
-    /// with no recorded process group, under the same payload compare-and-swap
-    /// `recover_run` uses, and it refuses outright if the run carries command
-    /// custody or an unsettled credential receipt — those have real effects to
-    /// reconcile and are not the operator's to wave through. A run that
-    /// recorded a process group keeps going through `recover_run`, which proves
-    /// the stop instead of asserting it.
-    pub fn discard_unspawned_run(
-        &self,
-        run_id: &Id,
-        expected_digest: &str,
-        now: u64,
-    ) -> Result<RunRecord> {
-        let mut db = self.db()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let payload: String = tx
-            .query_row(
-                "SELECT payload FROM runs WHERE id=?1",
-                [run_id.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?
-            .ok_or(Error::Unavailable("run not found"))?;
-        let run: RunRecord = decode(&payload)?;
-        run.validate()?;
-        if run.phase != "prepared" {
-            return Err(Error::Conflict(
-                "run reached the provider; recover it by proving its process group stopped",
-            ));
-        }
-        // `mark_spawned` moves phase and pid in one statement, so a `prepared`
-        // row never carries a process group through the normal path. This
-        // guards the abnormal one: a payload that has been corrupted or edited
-        // on disk. Discarding is only ever for a run with nothing to signal,
-        // and a recorded process group means there is something to signal.
-        if run.pid.is_some() {
-            return Err(Error::Conflict(
-                "run recorded a process group; recover it by proving that group stopped",
-            ));
-        }
-        if digest(payload.as_bytes()) != expected_digest {
-            return Err(Error::Conflict("run changed since it was inspected"));
-        }
-        if run.command_custody.is_some() {
-            return Err(Error::Conflict(
-                "command guest stop is unproven; reconcile command custody before discarding",
-            ));
-        }
-        let unsettled: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tool_effects WHERE run=?1 AND settled=0)",
-            [run_id.as_str()],
-            |row| row.get(0),
-        )?;
-        if unsettled {
-            return Err(Error::Conflict(
-                "run has unsettled effect receipts; reconcile them before discarding",
-            ));
-        }
-        let held: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM leases WHERE account=?1 AND run=?2)",
-            params![run.account.as_str(), run_id.as_str()],
-            |row| row.get(0),
-        )?;
-        if !held {
-            return Err(Error::Conflict("run lease is absent"));
-        }
-        if let Some(session_id) = &run.session {
-            let mut session =
-                session_from(&tx, session_id)?.ok_or(Error::Unavailable("session not found"))?;
-            let expected_revision = session.revision;
-            session.revision = expected_revision
-                .checked_add(1)
-                .ok_or(Error::Conflict("revision overflow"))?;
-            // The turn never reached the provider, so the session did not
-            // become uncertain: nothing was sent and nothing came back.
-            session.state = State::Idle;
-            session.last_active_at_ms = session.last_active_at_ms.max(now);
-            update_session(&tx, &session, expected_revision)?;
-        }
-        let settled = RunRecord {
-            phase: "settled".into(),
-            ..run.clone()
-        };
-        if tx.execute(
-            "UPDATE runs SET phase='settled', payload=?1 WHERE id=?2 AND account=?3 AND phase='prepared' AND payload=?4",
-            params![
-                serde_json::to_string(&settled)?,
-                run_id.as_str(),
-                run.account.as_str(),
-                payload
-            ],
-        )? != 1
-        {
-            return Err(Error::Conflict("run changed while it was being discarded"));
-        }
-        if tx.execute(
-            "DELETE FROM leases WHERE account=?1 AND run=?2",
-            params![run.account.as_str(), run_id.as_str()],
-        )? != 1
-        {
-            return Err(Error::Conflict(
-                "lease changed while it was being discarded",
-            ));
         }
         tx.commit()?;
         Ok(settled)
@@ -2036,6 +2034,7 @@ mod tests {
             .unwrap();
         let run = store.prepare_run(&session.id, session.revision, 4).unwrap();
         let mut outcome = crate::runner::Outcome {
+            diagnostic: None,
             text: "The turn limit interrupted the remaining work".into(),
             facts: TurnFacts {
                 terminal: Terminal::TurnLimit,
@@ -2506,170 +2505,57 @@ mod tests {
         assert!(store.recover_run(&running.id, &payload_digest, 4).is_ok());
     }
 
-    /// The defect this pairs with: a run that took the account lease but was
-    /// killed before the provider started leaves the account permanently
-    /// unusable. `recover_run` refuses it — correctly, since there is no
-    /// process group to prove stopped — and every other command refuses too,
-    /// so nothing could ever release the lease.
     #[test]
-    fn an_unspawned_run_blocks_the_account_until_it_is_explicitly_discarded() {
-        let dir = root();
-        let base = dir.path().canonicalize().unwrap();
-        let store = Store::open(&base.join("state")).unwrap();
-        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
-        let session = store
-            .create_session(&account.id, choice(), &base.join("work"), 2)
-            .unwrap();
-        let prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
-        let run_digest = digest(serde_json::to_string(&prepared).unwrap().as_bytes());
-
-        // Everything the operator could reach is refused while the lease is held.
-        assert!(store.recover_run(&prepared.id, &run_digest, 4).is_err());
-        assert!(store.prepare_probe(&account.id, None, 4).is_err());
-        assert!(store.set_account_enabled(&account.id, false).is_err());
-        assert!(store.remove_session(&session.id).is_err());
-        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
-
-        let discarded = store
-            .discard_unspawned_run(&prepared.id, &run_digest, 5)
-            .unwrap();
-        assert_eq!(discarded.phase, "settled");
-        assert!(store.unsettled_runs().unwrap().is_empty());
-        // The account works again, which is the whole point.
-        store.prepare_probe(&account.id, None, 6).unwrap();
-        // Nothing reached the provider, so the session is idle rather than
-        // uncertain: no turn was sent and no answer came back.
-        let session = store.session(&session.id).unwrap().unwrap();
-        assert_eq!(session.state, State::Idle);
-    }
-
-    /// Discarding is only for the case the record cannot prove. A run that DID
-    /// record a process group keeps going through `recover_run`, which proves
-    /// the stop rather than asserting it, and a stale view of the run is
-    /// refused by the same compare-and-swap recovery uses.
-    #[test]
-    fn discarding_refuses_anything_it_is_not_for() {
-        let dir = root();
-        let base = dir.path().canonicalize().unwrap();
-        let store = Store::open(&base.join("state")).unwrap();
-        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
-        let session = store
-            .create_session(&account.id, choice(), &base.join("work"), 2)
-            .unwrap();
-
-        let spawned = store.prepare_run(&session.id, session.revision, 3).unwrap();
-        store.mark_spawned(&spawned, i32::MAX as u32).unwrap();
-        let (spawned, spawned_digest) = store.recovery_candidate(&spawned.id).unwrap().unwrap();
-        assert!(spawned.pid.is_some());
-        assert!(
+    fn prepared_recovery_retains_lease_without_independent_child_proof() {
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        for owner_kind in ["live", "missing", "absent"] {
+            let dir = root();
+            let base = dir.path().canonicalize().unwrap();
+            let store = Store::open(&base.join("state")).unwrap();
+            let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+            let session = store
+                .create_session(&account.id, choice(), &base.join("work"), 2)
+                .unwrap();
+            let mut prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
+            let prior_session = store.session(&session.id).unwrap().unwrap();
+            // A child can exist before mark_spawned records its PID. Missing
+            // owner metadata or an absent owner does not settle that child.
+            let mut child = Child(
+                std::process::Command::new("/bin/cat")
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            match owner_kind {
+                "missing" => prepared.owner = None,
+                "absent" => prepared.owner.as_mut().unwrap().pid = i32::MAX as u32,
+                _ => assert_eq!(prepared.owner.as_ref().unwrap().pid, std::process::id()),
+            }
+            let payload = serde_json::to_string(&prepared).unwrap();
             store
-                .discard_unspawned_run(&spawned.id, &spawned_digest, 4)
-                .is_err()
-        );
-        store.settle(&spawned, State::Failed, 5).unwrap();
-
-        let current = store.session(&session.id).unwrap().unwrap();
-        let prepared = store.prepare_run(&session.id, current.revision, 6).unwrap();
-        let run_digest = digest(serde_json::to_string(&prepared).unwrap().as_bytes());
-        // A digest that does not match the stored payload is refused.
-        assert!(
-            store
-                .discard_unspawned_run(&prepared.id, "not the stored digest", 7)
-                .is_err()
-        );
-        // An unknown run is refused rather than silently succeeding.
-        assert!(
-            store
-                .discard_unspawned_run(&Id::new("r_missing").unwrap(), &run_digest, 7)
-                .is_err()
-        );
-        // A row whose phase says it reached the provider but which records no
-        // process group. Like the case below, the API cannot produce this;
-        // a corrupted payload can, and it must not be waved through, because
-        // "reached the provider" means effects may exist.
-        let mismatched = RunRecord {
-            phase: "running".into(),
-            ..prepared.clone()
-        };
-        let mismatched_payload = serde_json::to_string(&mismatched).unwrap();
-        store
-            .db()
-            .unwrap()
-            .execute(
-                "UPDATE runs SET payload=?1 WHERE id=?2",
-                params![mismatched_payload, prepared.id.as_str()],
-            )
-            .unwrap();
-        assert!(
-            store
-                .discard_unspawned_run(&prepared.id, &digest(mismatched_payload.as_bytes()), 8)
-                .is_err()
-        );
-
-        // A `prepared` row that nonetheless carries a process group is not
-        // reachable through the API — `mark_spawned` moves both fields in one
-        // statement — but it is exactly what a corrupted or hand-edited
-        // payload looks like, and there would be something to signal.
-        let tampered = RunRecord {
-            pid: Some(4_242),
-            ..prepared.clone()
-        };
-        let tampered_payload = serde_json::to_string(&tampered).unwrap();
-        store
-            .db()
-            .unwrap()
-            .execute(
-                "UPDATE runs SET payload=?1 WHERE id=?2",
-                params![tampered_payload, prepared.id.as_str()],
-            )
-            .unwrap();
-        assert!(
-            store
-                .discard_unspawned_run(&prepared.id, &digest(tampered_payload.as_bytes()), 8)
-                .is_err()
-        );
-        store
-            .db()
-            .unwrap()
-            .execute(
-                "UPDATE runs SET payload=?1 WHERE id=?2",
-                params![
-                    serde_json::to_string(&prepared).unwrap(),
-                    prepared.id.as_str()
-                ],
-            )
-            .unwrap();
-
-        store
-            .discard_unspawned_run(&prepared.id, &run_digest, 8)
-            .unwrap();
-        // A second discard of the same run finds nothing left to release —
-        // checked against the run's CURRENT payload, so the refusal comes from
-        // the phase rather than from a stale digest. This run never recorded a
-        // process group, so the phase is the only thing that can refuse it.
-        let (settled, settled_digest) = store.recovery_candidate(&prepared.id).unwrap().unwrap();
-        assert_eq!(settled.phase, "settled");
-        assert!(settled.pid.is_none());
-        assert!(
-            store
-                .discard_unspawned_run(&prepared.id, &settled_digest, 9)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn recovery_rejects_prepared_run_with_no_recorded_pid() {
-        let dir = root();
-        let base = dir.path().canonicalize().unwrap();
-        let store = Store::open(&base.join("state")).unwrap();
-        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
-        let session = store
-            .create_session(&account.id, choice(), &base.join("work"), 2)
-            .unwrap();
-        let prepared = store.prepare_run(&session.id, session.revision, 3).unwrap();
-        let digest = digest(serde_json::to_string(&prepared).unwrap());
-        assert!(store.recover_run(&prepared.id, &digest, 4).is_err());
-        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+                .db()
+                .unwrap()
+                .execute(
+                    "UPDATE runs SET payload=?1 WHERE id=?2",
+                    params![payload, prepared.id.as_str()],
+                )
+                .unwrap();
+            let run_digest = digest(payload.as_bytes());
+            assert!(store.recover_run(&prepared.id, &run_digest, 4).is_err());
+            assert!(child.0.try_wait().unwrap().is_none());
+            assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+            assert!(store.prepare_probe(&account.id, None, 5).is_err());
+            let unchanged = store.session(&session.id).unwrap().unwrap();
+            assert_eq!(unchanged.state, prior_session.state);
+            assert_eq!(unchanged.revision, prior_session.revision);
+        }
     }
 
     #[test]

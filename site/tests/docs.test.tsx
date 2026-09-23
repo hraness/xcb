@@ -109,7 +109,7 @@ describe("organized documentation", () => {
     expect(provider).toContain('<caption id="provider-status-caption">Native CLI evidence and current limits</caption>');
     expect(provider).toContain("3000.10.31");
     expect(provider).toContain("3000.11.1");
-    expect(provider).toContain("Provider quota blocked the tested coding turn");
+    expect(provider).toContain("Authenticated coding acceptance requires separate account/model/build evidence");
     expect(provider).toContain("xcb accounts import-codex --source");
     expect(provider).toContain("xcb accounts import-devin --source");
     expect(provider).toContain("task execution disabled pending qualification");

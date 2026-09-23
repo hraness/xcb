@@ -5,9 +5,12 @@ tested accounts and admitted builds.** Each ran an expected failing test, made
 the exact repair, passed the test, and inspected filtered Git status, with joined
 processes and settled effects. The backend also passed all 12 mandatory VM
 boundary cases, including public dependency fetching, offline Cargo/Bun use from
-immutable caches, and rejection of a cache after its manifest changed. Devin
-quota still blocks coding acceptance across all three providers; these results
-do not establish an unrestricted replacement for their native CLIs.
+immutable caches, and rejection of a cache after its manifest changed. These
+results apply to the tested accounts, models and builds. Devin's credential-free
+boundary qualification is separate from live coding acceptance; the dated
+[September 20 resource-limit receipt](../qualification/devin-live-resource-limit-macos-arm64.json)
+does not establish current quota or model availability. These results do not
+establish an unrestricted replacement for the native CLIs.
 
 The native `workspace_exec` tool runs bounded Linux commands in an XCB-owned
 Lima VM on macOS ARM64. The VM has no host workspace mounts, SSH agent forwarding,

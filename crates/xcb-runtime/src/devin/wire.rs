@@ -73,6 +73,10 @@ pub(crate) struct DevinProtocol {
     mcp_proposed_version: Option<String>,
     #[cfg(test)]
     mcp_metadata_seen: bool,
+    #[cfg(test)]
+    unexpected_notification: Option<String>,
+    #[cfg(test)]
+    compaction_observations: Vec<Value>,
     listed: bool,
     output_tokens: u64,
 }
@@ -270,6 +274,10 @@ impl DevinProtocol {
             mcp_proposed_version: None,
             #[cfg(test)]
             mcp_metadata_seen: false,
+            #[cfg(test)]
+            unexpected_notification: None,
+            #[cfg(test)]
+            compaction_observations: Vec::new(),
             listed: false,
             output_tokens: 0,
         })
@@ -541,7 +549,36 @@ impl DevinProtocol {
             }
             return Ok((events, outgoing));
         }
-        if method == "session/update" {
+        if method == "_cognition.ai/compaction" {
+            self.session_scope(p)?;
+            require(
+                self.ready && !self.completed && self.prompt_id.is_some(),
+                "Devin compaction outside turn",
+            )?;
+            // Exact 3000.11.1 synthetic trace: started carries no summary;
+            // completed carries a bounded summary. These are informational:
+            // never reset tool/callback custody or interpret summary as output.
+            match p["status"].as_str() {
+                Some("started") => closed(p, &["sessionId", "status"])?,
+                Some("completed") => {
+                    closed(p, &["sessionId", "status", "summary"])?;
+                    text(&p["summary"], MAX_TEXT_BYTES)?;
+                }
+                _ => return Err(Error::Protocol("Devin unsupported compaction status")),
+            }
+            #[cfg(test)]
+            {
+                require(
+                    self.compaction_observations.len() < 64,
+                    "fixture compaction bound",
+                )?;
+                self.compaction_observations.push(json!({
+                    "status":p["status"],
+                    "summary_bytes":p["summary"].as_str().map(str::len),
+                    "session_matched":true,
+                }));
+            }
+        } else if method == "session/update" {
             if self.session.is_none() {
                 return Ok((events, outgoing));
             }
@@ -675,10 +712,15 @@ impl DevinProtocol {
                 _ => return Err(Error::Protocol("Devin unknown session update")),
             }
         // ACP reserves underscore-prefixed methods for extensions and says to
-        // ignore unrecognized notifications. Requests were handled above;
-        // these bounded, id-less frames grant no authority and change no state.
+        // ignore unrecognized notifications. Requests and known compaction
+        // notifications were handled above; these bounded, id-less frames
+        // grant no authority and change no state.
         // https://agentclientprotocol.com/protocol/v1/extensibility
         } else if !method.starts_with('_') {
+            #[cfg(test)]
+            {
+                self.unexpected_notification = Some(method);
+            }
             return Err(Error::Protocol("Devin unsupported notification"));
         }
         Ok((events, outgoing))
@@ -837,7 +879,12 @@ impl Protocol for DevinProtocol {
             .await?;
         self.session = Some(identity(&result["sessionId"])?);
         let models = parse_models(&result, now_ms())?;
-        if self.options.metadata_only {
+        // A cached route can disappear from this account's current catalog.
+        // Return that catalog to the host before any setter or prompt so it
+        // can persist the observation and reject the stale selection.
+        if self.options.metadata_only
+            || !models.iter().any(|model| model.id == self.options.model.id)
+        {
             return Ok(models);
         }
         let selected = if result["configOptions"].as_array().is_some_and(|options| {

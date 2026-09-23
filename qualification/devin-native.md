@@ -54,6 +54,11 @@ reach requests, native effects never appear, the immutable configuration
 survives, a PNG prompt is accepted, and every provider process group and bridge
 handler joins.
 
+A low-context-budget scenario also exercises Devin's started and completed
+compaction notifications during brokered tool calls. It verifies the same
+native denials and broker effects while treating compaction as informational:
+summaries never become task output, and pending calls retain their custody.
+
 In this exact Devin build, `notebook_read` can run without an ACP permission
 callback. Credentials therefore enter through the trusted environment adapter;
 persistent account files and the consumer workspace must stay outside the
@@ -70,7 +75,7 @@ live acceptance before making daily-driver claims.
 ## Recorded boundary result
 
 The [2026-09-22 receipt](devin-native-3000.11.1-macos-arm64.json) passed all
-five scenarios for exact build 3000.11.1. Its complete observed native tool
+six scenarios for exact build 3000.11.1. Its complete observed native tool
 inventory matches the previously reviewed 3000.10.31 schemas. Candidate checks
 passed before admission changed; the recorded receipt then reran the default
 admitted path with freshly built helper and fixture binaries. Production keeps

@@ -435,6 +435,7 @@ fn picker_account(
         remaining_percent: None,
         resets_at_ms: None,
         quota_blocked_until_ms: None,
+        authentication_required: false,
         runway: xcb_core::usage::Estimate::Unknown {
             reason: "unknown".into(),
         },

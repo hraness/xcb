@@ -54,7 +54,7 @@ rustup toolchain install 1.97.1 --profile minimal
           >
             <div className="xcb-download-platforms">
               <div><h3>macOS ARM64</h3><p>The tested platform: Claude and Codex coding workflows passed, and the isolated Linux command runner is available. Claude also runs under an admitted Linux <code>bwrap</code> configuration.</p></div>
-              <div><h3>Codex &amp; Devin</h3><p>The provider candidates currently require macOS. The tested Devin account reached provider quota before a coding turn; Claude and Codex are the supported paths today.</p></div>
+              <div><h3>Codex &amp; Devin</h3><p>The provider candidates currently require macOS and exact admitted builds. Devin’s credential-free boundary checks are separate from authenticated coding acceptance; account model availability is checked at launch.</p></div>
               <div><h3>Staying current</h3><p>Updates are user-level and release-based. <code>xcb update enable --policy notify</code> checks daily without replacing anything; <code>auto</code> installs only an exact stable archive with its adjacent checksum. No native release is published yet, so checks fail closed and leave a source install untouched.</p></div>
               <a className="xcb-text-link" href="/docs/workspace">Command-runner requirements ↗</a>
             </div>
