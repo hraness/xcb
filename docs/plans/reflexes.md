@@ -27,9 +27,13 @@ reflex; its link-determination experiment is not upstreamed.
   reflex started are labeled by whether they did real work and whether they
   were cancelled. Heavier labels win, so explicit labels outrank inferred
   ones. Only numeric features are stored.
-- Modes `off` / `observe` / `active` per reflex, plus a separate `confirm`
-  knob for answering go-ahead requests. Route ships active (generation 0 is
-  behavior-identical); settle and confirm ship observe.
+- Modes `off` / `observe` / `active` / `auto` per reflex, plus a separate
+  `confirm` knob for answering go-ahead requests. Route ships active
+  (generation 0 is behavior-identical); settle and confirm ship `auto`: a
+  head acts only once a replay of its operator labels certifies its
+  precision (lower bound at 0.75 for `unfinished`, 0.85 for `confirm`), and
+  about one acting turn in ten is still left to the operator so the
+  certificate keeps being tested and can be withdrawn.
 - Settle v2 (2026-09): priors fitted on 2,428 private operator follow-ups
   (aggregate numbers only in the reference). Tool-call count is the
   strongest signal; a `confirm` head separates "should I merge it?" from
@@ -50,10 +54,10 @@ pre-reflex behavior.
 
 ## Next
 
-- Enable settle `active` by default once operators' live precision holds at
-  the shipped threshold across trials.
-- Enable `confirm` only after settle has been active widely, with the judge
-  configured.
+- Watch live certificates across operators; raise or lower the per-head
+  precision floors only with out-of-sample evidence.
+- `confirm` stays observing until it certifies at its 0.85 floor; revisit
+  its features if it never does.
 - Add reflexes for context elision and account preference using the same
   ledger and trial rule.
 - Consider proposing program variants (not only parameters) and evaluating

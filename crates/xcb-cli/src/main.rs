@@ -691,6 +691,29 @@ fn human_age(now_ms: u64, then_ms: u64) -> String {
     }
 }
 
+/// Whether a settle head may act under `auto`, and the evidence.
+fn certificate_line(certificate: &xcb_core::reflex::Certificate) -> String {
+    let evidence = match (certificate.precision, certificate.lower) {
+        (Some(precision), Some(lower)) => format!(
+            "precision {precision:.2} (at least {lower:.2}) over {:.0} of {} operator-labeled turns at p ≥ {:.2}; floor {:.2}",
+            certificate.fired, certificate.window, certificate.threshold, certificate.floor
+        ),
+        _ => format!(
+            "no turns at p ≥ {:.2} among {} operator-labeled; floor {:.2}",
+            certificate.threshold, certificate.window, certificate.floor
+        ),
+    };
+    format!(
+        "{} · {} · {evidence}",
+        if certificate.certified {
+            "certified to act under auto"
+        } else {
+            "observing under auto"
+        },
+        certificate.reason
+    )
+}
+
 /// One line of reflex metrics: examples, accuracy, precision and recall at
 /// the head's threshold, and AUC when both classes are present.
 fn metrics_line(metrics: &xcb_core::reflex::Metrics) -> String {
@@ -1676,13 +1699,17 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                                 if let Some(trial) = row.trial {
                                     println!("    challenger {}", trial.reason);
                                 }
+                                if let Some(certificate) = &row.certificate {
+                                    println!("    {}", certificate_line(certificate));
+                                }
                             }
                         }
                     }
                 }
                 ReflexCommand::Train { reflex } => {
-                    let report =
-                        reflexes.train(reflex.into(), xcb_core::reflex::FitOptions::default())?;
+                    let options = xcb_core::reflex::FitOptions::default();
+                    let mut report = reflexes.train(reflex.into(), options)?;
+                    report.certificates = reflexes.certify(reflex.into(), options)?;
                     if cli.json {
                         print_json(report)?;
                     } else {
@@ -1691,6 +1718,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         }
                         for head in &report.started {
                             println!("{head}: fitted a challenger; it trials on the next labels");
+                        }
+                        for (head, certificate) in &report.certificates {
+                            println!("{head}: {}", certificate_line(certificate));
                         }
                         match report.promoted_version {
                             Some(version) => println!(
@@ -1755,8 +1785,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let rows = reflex::parse_import(reflex, &source)?;
                     let active = reflexes.active(reflex)?;
                     let replays = reflex::replay_import(&active, &rows)?;
+                    let certificates = reflex::certify_import(reflex, &rows)?;
                     if cli.json && dry_run {
-                        print_json(&replays)?;
+                        print_json(serde_json::json!({
+                            "replays": replays,
+                            "certificates": certificates,
+                        }))?;
                         return Ok(0);
                     }
                     if !cli.json {
@@ -1767,6 +1801,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                                 replay.trials,
                                 if replay.trials == 1 { "" } else { "s" },
                                 replay.promotions,
+                            );
+                        }
+                        for (head, certificate) in &certificates {
+                            println!(
+                                "{head}: this history alone {}",
+                                certificate_line(certificate)
                             );
                         }
                     }
@@ -1783,11 +1823,14 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         .filter_map(|(head, replay)| Some((head, (replay.head, replay.evidence?))))
                         .collect();
                     let adopted = reflexes.adopt(reflex, won, inserted)?;
+                    let certificates =
+                        reflexes.certify(reflex, xcb_core::reflex::FitOptions::default())?;
                     if cli.json {
                         print_json(serde_json::json!({
                             "inserted": inserted,
                             "examples": rows.len(),
                             "adopted_version": adopted,
+                            "certificates": certificates,
                         }))?;
                     } else {
                         println!("imported {inserted} of {} examples", rows.len());
@@ -1800,6 +1843,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             None => println!(
                                 "no head won a replayed trial; the active generation is unchanged"
                             ),
+                        }
+                        for (head, certificate) in &certificates {
+                            println!("{head}: {}", certificate_line(certificate));
                         }
                     }
                 }
