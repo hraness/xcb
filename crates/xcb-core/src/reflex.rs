@@ -691,6 +691,7 @@ const VETO_ANYWHERE: &[&str] = &[
     "drop",
     "destroy",
     "wipe",
+    "wiping",
     "truncat",
     "purg",
     "force-push",
@@ -708,6 +709,7 @@ const VETO_ANYWHERE: &[&str] = &[
     "production",
     "prod",
     "spend",
+    "spent",
     "purchas",
     "billing",
 ];
@@ -750,7 +752,7 @@ const VETO_IN_ASK: &[&str] = &[
 /// "dropdown", "payload" and "tokenizer" do not.
 const VETO_ENDINGS: &[&str] = &[
     "", "s", "es", "e", "ed", "d", "ing", "ion", "ions", "al", "ped", "ping", "ged", "ging",
-    "ment", "ments", "be", "bed", "bing", "ption", "ptions", "y", "ies", "ly",
+    "ment", "ments", "be", "bed", "bing", "ption", "ptions", "y", "ies", "ly", "ten",
 ];
 
 fn stem_matches(text: &str, stem: &str) -> bool {
@@ -759,11 +761,13 @@ fn stem_matches(text: &str, stem: &str) -> bool {
             .chars()
             .take_while(|c| c.is_alphanumeric())
             .collect();
+        // A stem ending in punctuation ("rm -") takes any flag after it.
+        let open_ended = !stem.ends_with(char::is_alphanumeric);
         !text[..start]
             .chars()
             .next_back()
             .is_some_and(char::is_alphanumeric)
-            && VETO_ENDINGS.contains(&ending.as_str())
+            && (open_ended || VETO_ENDINGS.contains(&ending.as_str()))
     })
 }
 
@@ -1725,6 +1729,10 @@ mod tests {
             "Should I push this to prod?",
             "Ship it live?",
             "Tag the release?",
+            "Should I rm -rf the build dir?",
+            "Should I go ahead with wiping the cache?",
+            "The config was overwritten. Restore it?",
+            "I spent the remaining credits. Continue?",
         ] {
             assert!(confirm_vetoed(risky), "{risky}");
         }
