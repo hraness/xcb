@@ -146,8 +146,96 @@ fn digest_file(mut file: File, limit: u64) -> Result<String> {
     Ok(hex::encode(hash.finalize()))
 }
 
+/// The exact file identity a verified digest is bound to, read from the same
+/// descriptor the digest is computed on. An inode replacement changes `ino`;
+/// an in-place write or permission change changes `size`, `mtime`, or the
+/// unforgeable status-change time `ctime` — any difference re-digests. The
+/// identity is a cache key, never a substitute for the checks
+/// `executable_file` runs on every call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    dev: u64,
+    ino: u64,
+    size: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl FileIdentity {
+    fn read(metadata: &fs::Metadata) -> Self {
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            size: metadata.len(),
+            mtime: (metadata.mtime(), metadata.mtime_nsec()),
+            ctime: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
+
+/// Process-wide verified digests keyed by canonical executable path. A route
+/// decision loads every provider's pin and each turn re-verifies the host and
+/// provider binaries, which re-read and re-hashed up to 512 MiB per call; the
+/// identity-bound cache makes a repeated verification a metadata read while
+/// remaining provably equivalent to re-hashing the exact installed bytes.
+const VERIFIED_DIGEST_LIMIT: usize = 16;
+
+fn verified_digests() -> &'static std::sync::Mutex<BTreeMap<PathBuf, (FileIdentity, String)>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<PathBuf, (FileIdentity, String)>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Full executable digests actually performed per canonical path, so
+/// launch-path tests can observe cache hits while running in parallel.
+#[cfg(test)]
+static EXECUTABLE_DIGESTS: std::sync::Mutex<BTreeMap<PathBuf, usize>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+fn digested_executables(path: &Path) -> usize {
+    EXECUTABLE_DIGESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(path)
+        .copied()
+        .unwrap_or(0)
+}
+
 pub fn executable_digest(path: &Path) -> Result<String> {
-    digest_file(executable_file(path)?, 512 * 1024 * 1024)
+    let file = executable_file(path)?;
+    // fstat of the open descriptor: the identity below names the inode the
+    // digest is computed from, never a re-resolved path.
+    let identity = FileIdentity::read(&file.metadata()?);
+    let key = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    {
+        let cache = verified_digests()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((known, sha256)) = cache.get(&key)
+            && *known == identity
+        {
+            return Ok(sha256.clone());
+        }
+    }
+    let sha256 = digest_file(file, 512 * 1024 * 1024)?;
+    #[cfg(test)]
+    EXECUTABLE_DIGESTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(key.clone())
+        .and_modify(|count| *count += 1)
+        .or_insert(1);
+    {
+        let mut cache = verified_digests()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        while cache.len() >= VERIFIED_DIGEST_LIMIT {
+            cache.pop_first();
+        }
+        cache.insert(key, (identity, sha256.clone()));
+    }
+    Ok(sha256)
 }
 
 /// Captured before a long-lived terminal can observe an in-place xcb update.
@@ -1035,6 +1123,85 @@ mod tests {
     fn zero_process_group_id_is_rejected_as_absence_proof() {
         assert!(prove_process_group_absent(0).is_err());
     }
+
+    /// A pinned executable digest that bypasses the verified-digest cache, so
+    /// tests can observe the first `Pin::load` re-hash directly.
+    fn uncached_digest(path: &Path) -> String {
+        digest_file(executable_file(path).unwrap(), 512 * 1024 * 1024).unwrap()
+    }
+
+    fn codex_pin(root: &Path, executable: &Path, sha256: String) -> Pin {
+        let (_, host_sha256) = host_identity().unwrap();
+        let pin = Pin {
+            provider: Provider::Codex,
+            executable: executable.to_owned(),
+            sha256,
+            version: "0.0.0".into(),
+            host_sha256,
+            observed_at_ms: crate::now_ms(),
+        };
+        pin.save(root).unwrap();
+        pin
+    }
+
+    #[test]
+    fn repeated_pin_loads_verify_against_one_executable_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        host_identity().unwrap();
+        codex_pin(&root, &executable, uncached_digest(&executable));
+        let digested = digested_executables(&executable);
+        for _ in 0..3 {
+            Pin::load(&root, Provider::Codex).unwrap();
+        }
+        assert_eq!(digested_executables(&executable) - digested, 1);
+    }
+
+    #[test]
+    fn touched_and_resized_executables_are_digested_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        host_identity().unwrap();
+        codex_pin(&root, &executable, uncached_digest(&executable));
+        Pin::load(&root, Provider::Codex).unwrap();
+        let digested = digested_executables(&executable);
+        // A pure metadata touch still re-hashes; identical bytes pass again.
+        File::options()
+            .write(true)
+            .open(&executable)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(60))
+            .unwrap();
+        Pin::load(&root, Provider::Codex).unwrap();
+        assert_eq!(digested_executables(&executable) - digested, 1);
+        // A size change re-hashes and the changed bytes fail verification.
+        fs::write(&executable, b"#!/bin/sh\necho changed\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(Pin::load(&root, Provider::Codex).is_err());
+        assert_eq!(digested_executables(&executable) - digested, 2);
+    }
+
+    #[test]
+    fn a_replaced_inode_with_the_same_size_is_digested_again() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        host_identity().unwrap();
+        codex_pin(&root, &executable, uncached_digest(&executable));
+        Pin::load(&root, Provider::Codex).unwrap();
+        let digested = digested_executables(&executable);
+        // Same size, different inode and bytes: a stale path or size cache
+        // would return the old digest; verification must fail closed.
+        let replacement = root.join("replacement");
+        fs::write(&replacement, b"#!/bin/sh\necho no\n").unwrap();
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&replacement, &executable).unwrap();
+        assert!(Pin::load(&root, Provider::Codex).is_err());
+        assert_eq!(digested_executables(&executable) - digested, 1);
+    }
+
     #[tokio::test]
     async fn interrupted_frame_read_preserves_the_partial_json_prefix() {
         let mut command = Command::new("/bin/sh");
