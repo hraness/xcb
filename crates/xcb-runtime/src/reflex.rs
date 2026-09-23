@@ -359,6 +359,10 @@ pub struct TrainReport {
     pub heads: BTreeMap<String, Comparison>,
     /// Heads for which this pass fitted a new challenger.
     pub started: Vec<String>,
+    /// Whether each acting head may act under `auto`. Left empty by
+    /// [`ReflexStore::train`]; callers that certify synchronously (see
+    /// [`ReflexStore::certify`]) fill it in.
+    pub certificates: BTreeMap<String, reflex::Certificate>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -370,6 +374,8 @@ pub struct HeadStatus {
     pub live: Option<reflex::Metrics>,
     /// The open challenger's trial so far, if one is running.
     pub trial: Option<Comparison>,
+    /// Whether the head may act under `auto`, as of the last training pass.
+    pub certificate: Option<reflex::Certificate>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -407,6 +413,7 @@ struct Labeled {
     example: Example,
     seq: i64,
     at_ms: i64,
+    source: String,
 }
 
 pub struct ReflexStore {
@@ -437,7 +444,8 @@ impl ReflexStore {
              CREATE INDEX IF NOT EXISTS observations_subject ON observations(reflex,subject,at_ms);
              CREATE TABLE IF NOT EXISTS labels(observation TEXT NOT NULL, reflex TEXT NOT NULL, head TEXT NOT NULL, label INTEGER NOT NULL, weight REAL NOT NULL, source TEXT NOT NULL, at_ms INTEGER NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY(observation,head));
              CREATE INDEX IF NOT EXISTS labels_head ON labels(reflex,head,seq);
-             CREATE TABLE IF NOT EXISTS trials(reflex TEXT NOT NULL, head TEXT NOT NULL, candidate TEXT NOT NULL, started_at_ms INTEGER NOT NULL, fitted_through INTEGER NOT NULL, PRIMARY KEY(reflex,head));",
+             CREATE TABLE IF NOT EXISTS trials(reflex TEXT NOT NULL, head TEXT NOT NULL, candidate TEXT NOT NULL, started_at_ms INTEGER NOT NULL, fitted_through INTEGER NOT NULL, PRIMARY KEY(reflex,head));
+             CREATE TABLE IF NOT EXISTS certificates(reflex TEXT NOT NULL, head TEXT NOT NULL, payload TEXT NOT NULL, at_ms INTEGER NOT NULL, through INTEGER NOT NULL, PRIMARY KEY(reflex,head));",
         )?;
         let current: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if current < SCHEMA_VERSION {
@@ -602,8 +610,9 @@ impl ReflexStore {
     }
 
     /// Labels and, when learning is enabled, trains after every
-    /// [`TRAIN_EVERY`] new labels. Training failure never fails the caller's
-    /// operation. Returns how many labels changed.
+    /// [`TRAIN_EVERY`] new labels and then re-certifies in the background
+    /// (see [`Self::certify_in_background`]). Training failure never fails
+    /// the caller's operation. Returns how many labels changed.
     pub fn label_and_learn(
         &self,
         reflex: Reflex,
@@ -620,8 +629,45 @@ impl ReflexStore {
         let after = self.label_count(reflex)?;
         if learn && changed > 0 && after / TRAIN_EVERY > before / TRAIN_EVERY {
             let _ = self.train(reflex, FitOptions::default());
+            self.certify_in_background(reflex);
         }
         Ok(changed)
+    }
+
+    /// Certification replays every retained label, which takes seconds on a
+    /// full ledger, so the labeling path never waits for it: it runs on its
+    /// own thread and connection. One pass per ledger and reflex runs at a
+    /// time; a skipped pass is picked up after the next training step, and
+    /// a pass that loses the race to newer labels is not stored.
+    fn certify_in_background(&self, reflex: Reflex) {
+        static RUNNING: Mutex<BTreeSet<(PathBuf, &'static str)>> = Mutex::new(BTreeSet::new());
+        struct Running((PathBuf, &'static str));
+        impl Drop for Running {
+            fn drop(&mut self) {
+                if let Ok(mut running) = RUNNING.lock() {
+                    running.remove(&self.0);
+                }
+            }
+        }
+        let key = (self.root.clone(), reflex.as_str());
+        match RUNNING.lock() {
+            Ok(mut running) => {
+                if !running.insert(key.clone()) {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+        let running = Running(key);
+        let root = self.root.clone();
+        let _ = std::thread::Builder::new()
+            .name("xcb-reflex-certify".into())
+            .spawn(move || {
+                let _running = running;
+                if let Ok(store) = ReflexStore::open(&root) {
+                    let _ = store.certify(reflex, FitOptions::default());
+                }
+            });
     }
 
     fn label_count(&self, reflex: Reflex) -> Result<i64> {
@@ -688,7 +734,7 @@ impl ReflexStore {
         let required = prior.head(head)?.weights.keys().collect::<Vec<_>>();
         let db = self.db()?;
         let mut query = db.prepare(
-            "SELECT o.id,o.features,l.label,l.weight,l.seq,l.at_ms FROM labels l JOIN observations o ON o.id=l.observation WHERE l.reflex=?1 AND l.head=?2 ORDER BY l.seq DESC LIMIT ?3",
+            "SELECT o.id,o.features,l.label,l.weight,l.seq,l.at_ms,l.source FROM labels l JOIN observations o ON o.id=l.observation WHERE l.reflex=?1 AND l.head=?2 ORDER BY l.seq DESC LIMIT ?3",
         )?;
         let rows = query.query_map(
             params![reflex.as_str(), head, reflex::MAX_EXAMPLES as i64],
@@ -700,12 +746,13 @@ impl ReflexStore {
                     row.get::<_, f64>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
                 ))
             },
         )?;
         let mut labeled = Vec::new();
         for row in rows {
-            let (id, features, label, weight, seq, at_ms) = row?;
+            let (id, features, label, weight, seq, at_ms, source) = row?;
             let Ok(features) = serde_json::from_str::<Features>(&features) else {
                 continue;
             };
@@ -721,6 +768,7 @@ impl ReflexStore {
                 },
                 seq,
                 at_ms,
+                source,
             });
         }
         labeled.reverse();
@@ -841,7 +889,109 @@ impl ReflexStore {
             labeled,
             heads: comparisons,
             started: started.into_keys().collect(),
+            certificates: BTreeMap::new(),
         })
+    }
+
+    /// Recomputes and stores whether each acting head may act under `auto`
+    /// (see [`reflex::certify`]).
+    pub fn certify(
+        &self,
+        reflex: Reflex,
+        options: FitOptions,
+    ) -> Result<BTreeMap<String, reflex::Certificate>> {
+        let prior = reflex::prior(reflex);
+        let mut certificates = BTreeMap::new();
+        let mut through = BTreeMap::new();
+        for name in heads_for(reflex) {
+            if reflex::precision_floor(name).is_none() {
+                continue;
+            }
+            let rows = self.labeled(reflex, name)?;
+            through.insert((*name).to_owned(), rows.last().map_or(0, |row| row.seq));
+            let examples: Vec<Example> = rows.iter().map(|row| row.example.clone()).collect();
+            let operator: Vec<bool> = rows
+                .iter()
+                .map(|row| reflex::operator_label(&row.source))
+                .collect();
+            let previous = self.certificate(reflex, name)?;
+            let certificate = reflex::certify(
+                name,
+                prior.head(name)?,
+                &examples,
+                &operator,
+                previous.as_ref(),
+                options,
+            )?;
+            certificates.insert((*name).to_owned(), certificate);
+        }
+        self.store_certificates(reflex, &certificates, &through)?;
+        Ok(certificates)
+    }
+
+    /// Stores certificates computed through each head's newest label
+    /// sequence. A concurrent pass that saw fewer labels never replaces a
+    /// newer certificate.
+    fn store_certificates(
+        &self,
+        reflex: Reflex,
+        certificates: &BTreeMap<String, reflex::Certificate>,
+        through: &BTreeMap<String, i64>,
+    ) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for (name, certificate) in certificates {
+            tx.execute(
+                "INSERT INTO certificates(reflex,head,payload,at_ms,through) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(reflex,head) DO UPDATE SET payload=excluded.payload,at_ms=excluded.at_ms,through=excluded.through WHERE excluded.through>=certificates.through",
+                params![
+                    reflex.as_str(),
+                    name,
+                    serde_json::to_string(certificate)?,
+                    now_ms() as i64,
+                    through.get(name).copied().unwrap_or(0)
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn put_certificate(
+        &self,
+        reflex: Reflex,
+        head: &str,
+        certificate: reflex::Certificate,
+    ) -> Result<()> {
+        self.store_certificates(
+            reflex,
+            &BTreeMap::from([(head.to_owned(), certificate)]),
+            &BTreeMap::from([(head.to_owned(), i64::MAX)]),
+        )
+    }
+
+    /// The stored certificate for a head. An unreadable one counts as none,
+    /// so `auto` falls back to observing.
+    pub fn certificate(&self, reflex: Reflex, head: &str) -> Result<Option<reflex::Certificate>> {
+        let payload: Option<String> = self
+            .db()?
+            .query_row(
+                "SELECT payload FROM certificates WHERE reflex=?1 AND head=?2",
+                params![reflex.as_str(), head],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(payload.and_then(|payload| serde_json::from_str(&payload).ok()))
+    }
+
+    /// Whether `head` may act on `features` under `auto`: it holds a
+    /// certificate and the certified head scores the turn at or above the
+    /// certified threshold. The probability is computed here rather than
+    /// read from the program's output, which a custom program controls.
+    pub fn certified(&self, reflex: Reflex, head: &str, features: &Features) -> Result<bool> {
+        Ok(self.certificate(reflex, head)?.is_some_and(|certificate| {
+            certificate.certified && certificate.head.probability(features) >= certificate.threshold
+        }))
     }
 
     /// Appends a generation whose heads were earned by a replay of labeled
@@ -949,6 +1099,7 @@ impl ReflexStore {
                     positives: rows.iter().filter(|row| row.example.label).count() as u32,
                     live: (!live.is_empty()).then(|| reflex::evaluate(head, &live)),
                     trial,
+                    certificate: self.certificate(reflex, name)?,
                 },
             );
         }
@@ -1103,6 +1254,47 @@ pub fn replay_import(
         );
     }
     Ok(replays)
+}
+
+/// Whether imported history alone would certify each acting head (see
+/// [`reflex::certify`]); every imported label is the operator's. Pure.
+pub fn certify_import(
+    reflex: Reflex,
+    rows: &[Imported],
+) -> Result<BTreeMap<String, reflex::Certificate>> {
+    let prior = reflex::prior(reflex);
+    let mut certificates = BTreeMap::new();
+    for name in heads_for(reflex) {
+        if reflex::precision_floor(name).is_none() {
+            continue;
+        }
+        let examples: Vec<Example> = rows
+            .iter()
+            .filter(|row| row.head == *name)
+            .map(|row| Example {
+                id: row.id.clone(),
+                features: row.features.clone(),
+                label: row.label,
+                weight: row.weight,
+            })
+            .collect();
+        if examples.is_empty() {
+            continue;
+        }
+        let operator = vec![true; examples.len()];
+        certificates.insert(
+            (*name).to_owned(),
+            reflex::certify(
+                name,
+                prior.head(name)?,
+                &examples,
+                &operator,
+                None,
+                FitOptions::default(),
+            )?,
+        );
+    }
+    Ok(certificates)
 }
 
 /// Route tier of a model identity for labels: the frontier tier is the top
@@ -1881,6 +2073,157 @@ mod tests {
         assert_eq!(
             store.adopt(Reflex::Route, BTreeMap::new(), 0).unwrap(),
             None
+        );
+    }
+
+    #[test]
+    fn operator_history_certifies_a_settle_head_in_the_ledger() {
+        use reflex::{SETTLE_CONFIRM, SETTLE_UNFINISHED};
+        let dir = temp();
+        let store = ReflexStore::open(dir.path()).unwrap();
+        let facts = TurnFacts {
+            terminal: Terminal::Completed,
+            joined: true,
+            effects: EffectState::None,
+            pending_attention: false,
+            failure: None,
+        };
+        let features = settle_features("Parser updated. Next, I'll wire the CLI:", &facts, 60);
+        assert!(
+            !store
+                .certified(Reflex::Settle, SETTLE_UNFINISHED, &features)
+                .unwrap()
+        );
+        let rows: Vec<Imported> = (0..400)
+            .map(|i| Imported {
+                id: format!("s{i}"),
+                head: SETTLE_UNFINISHED.into(),
+                features: features.clone(),
+                label: i % 10 != 0,
+                weight: 1.0,
+            })
+            .collect();
+        let dry = certify_import(Reflex::Settle, &rows).unwrap();
+        assert!(dry[SETTLE_UNFINISHED].certified);
+        assert!(!dry.contains_key(SETTLE_CONFIRM));
+        assert_eq!(store.import(Reflex::Settle, &rows).unwrap(), 400);
+        let certificates = store
+            .certify(Reflex::Settle, FitOptions::default())
+            .unwrap();
+        assert!(certificates[SETTLE_UNFINISHED].certified);
+        assert!(!certificates[SETTLE_CONFIRM].certified);
+        // Acting scores with the certified head, so rolling the active
+        // generation back does not change what was measured.
+        store.rollback(Reflex::Settle, 0).unwrap();
+        assert!(
+            store
+                .certified(Reflex::Settle, SETTLE_UNFINISHED, &features)
+                .unwrap()
+        );
+        let status = store
+            .status(Reflex::Settle, ReflexMode::Auto, true)
+            .unwrap();
+        assert!(
+            status.heads[SETTLE_UNFINISHED]
+                .certificate
+                .as_ref()
+                .is_some_and(|certificate| certificate.certified)
+        );
+        // An unreadable certificate counts as none.
+        store
+            .db()
+            .unwrap()
+            .execute("UPDATE certificates SET payload='{'", [])
+            .unwrap();
+        assert!(
+            !store
+                .certified(Reflex::Settle, SETTLE_UNFINISHED, &features)
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn labeling_certifies_in_the_background_and_stale_passes_do_not_win() {
+        use reflex::SETTLE_UNFINISHED;
+        let dir = temp();
+        let store = ReflexStore::open(dir.path()).unwrap();
+        let facts = TurnFacts {
+            terminal: Terminal::Completed,
+            joined: true,
+            effects: EffectState::None,
+            pending_attention: false,
+            failure: None,
+        };
+        let features = settle_features("Parser updated. Next, I'll wire the CLI:", &facts, 60);
+        let rows: Vec<Imported> = (0..400)
+            .map(|i| Imported {
+                id: format!("s{i}"),
+                head: SETTLE_UNFINISHED.into(),
+                features: features.clone(),
+                label: i % 10 != 0,
+                weight: 1.0,
+            })
+            .collect();
+        store.import(Reflex::Settle, &rows).unwrap();
+        assert!(
+            store
+                .certificate(Reflex::Settle, SETTLE_UNFINISHED)
+                .unwrap()
+                .is_none()
+        );
+        // Crossing a training step returns without waiting for certification.
+        for i in 0..TRAIN_EVERY {
+            let decision = store
+                .decide(
+                    Reflex::Settle,
+                    &features,
+                    settle_evidence(State::Idle, &features),
+                    false,
+                )
+                .await
+                .unwrap();
+            let subject = format!("live{i}");
+            store.observe(&subject, &decision).unwrap();
+            store
+                .label_and_learn(
+                    Reflex::Settle,
+                    &subject,
+                    &[(Some(SETTLE_UNFINISHED), true, 1.0)],
+                    "explicit",
+                    true,
+                )
+                .unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let certificate = loop {
+            if let Some(certificate) = store
+                .certificate(Reflex::Settle, SETTLE_UNFINISHED)
+                .unwrap()
+            {
+                break certificate;
+            }
+            assert!(Instant::now() < deadline, "certification never landed");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(certificate.certified);
+        // A pass computed through fewer labels never replaces a newer one.
+        let stale = reflex::Certificate {
+            certified: false,
+            reason: "stale".into(),
+            ..certificate.clone()
+        };
+        store
+            .store_certificates(
+                Reflex::Settle,
+                &BTreeMap::from([(SETTLE_UNFINISHED.to_owned(), stale)]),
+                &BTreeMap::from([(SETTLE_UNFINISHED.to_owned(), 1)]),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .certificate(Reflex::Settle, SETTLE_UNFINISHED)
+                .unwrap(),
+            Some(certificate)
         );
     }
 }

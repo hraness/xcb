@@ -6,14 +6,16 @@ can learn from how you respond to it. xcb ships two:
 | Reflex | Decides | Heads | Default |
 | --- | --- | --- | --- |
 | `route` | Frontier or standard model tier for a new task | `judged` (with judge evidence), `plain` (prompt shape and keyword cues only) | `active` |
-| `settle` | How a settled worker turn ended: `done`, `stopped_short`, `confirm`, `question`, `needs_action`, `needs_approval`, `blocked`, `interrupted`, `uncertain`, ... | `unfinished`, `confirm` | `observe` |
+| `settle` | How a settled worker turn ended: `done`, `stopped_short`, `confirm`, `question`, `needs_action`, `needs_approval`, `blocked`, `interrupted`, `uncertain`, ... | `unfinished`, `confirm` | `auto` |
 
 Auto-continuation is the settle reflex acting: a completed turn categorized as
-`stopped_short` is continued in its session when settle is `active` and every
-deterministic continuation gate passes. A turn categorized as `confirm` (the
-worker proposed a step and asked for the go-ahead) is answered "yes" only when
-the separate `confirm` knob is also `active` and the request names nothing
-risky.
+`stopped_short` is continued in its session when the `unfinished` head acts
+and every deterministic continuation gate passes. A turn categorized as
+`confirm` (the worker proposed a step and asked for the go-ahead) is answered
+"yes" only when the `confirm` head acts and the request names nothing risky.
+By default both heads are `auto`: they act only after your own replies
+certify their precision (see [Auto](#auto-acting-once-certified)), and they
+stop acting if it falls.
 
 ## Shape
 
@@ -59,8 +61,8 @@ Generation 0 of each reflex reproduces the behavior xcb had before reflexes:
   in three, and they catch about 30% and 20% of the real cases.
 
 Route's generation 0 is behavior-identical to xcb before reflexes. Settle
-ships in `observe`, so its fitted prior categorizes and learns but does not
-act until you turn it on.
+ships in `auto`, so its fitted prior categorizes and learns from the first
+turn but acts only once your replies certify it.
 
 ## How it learns
 
@@ -89,8 +91,8 @@ Other signals:
 | `xcb reflex label <reflex> <task> <label>` | either | explicit | 1.0 |
 
 The continuation labels keep an active reflex learning after you stop having
-to type "continue". With settle `active`, a `continue` reply (or a short
-"yes" to a turn categorized `confirm`) reopens the completed task in its
+to type "continue". With settle `active` or `auto`, a `continue` reply (or a
+short "yes" to a turn categorized `confirm`) reopens the completed task in its
 session instead of starting a new task; in `observe` it only labels. A label
 is replaced only by a heavier one, so an inferred label never overwrites an
 explicit one.
@@ -128,7 +130,54 @@ hurt much (0.77 against 0.79), which is the promotion gate doing its job.
 
 `xcb reflex status` reports each head's **live** metrics (accuracy,
 precision and recall at its threshold, and AUC on labels that arrived after
-it became active) and the open trial's progress.
+it became active), the open trial's progress and its certificate.
+
+### Auto: acting once certified
+
+`auto`, the default for settle and confirm, observes until your own replies
+show that a head is precise enough to act for you, then acts, and goes back
+to observing if it gets worse. After every training pass (in the
+background, so labeling never waits for the replay), after `xcb reflex train`
+and after every import:
+
+1. The head's retained labels are replayed from the shipped prior through the
+   same learning loop, so every turn is scored by a head that had not yet
+   learned from it.
+2. Only **operator** labels count: your replies, explicit labels and imported
+   history. Labels xcb earns by acting (continuation outcomes and
+   cancellations) still train the head, but they cannot certify it, because
+   they would confirm its own choices.
+3. On the newest 1,500 such turns (for `confirm`, only requests it could
+   answer: no risk or hand-off cue), the head is certified at the lowest
+   threshold, from its own upward in steps of 0.05, at which it fired on at
+   least 30 turns and the one-sided 99% lower bound on its precision reaches
+   the floor: **0.75** for `unfinished` and **0.85** for `confirm`, since
+   answering "yes" for you is the bigger step.
+4. A certified head keeps its certificate while its measured precision stays
+   within 0.05 of the floor (0.70 for `unfinished`, 0.80 for `confirm`).
+   Below that it goes back to observing.
+
+The certificate stores the head the replay ended with, and a certified head
+acts only on turns that head scores at or above the certified threshold, so
+the head that acts is the one that was measured, whichever generation is
+active or was rolled back to. The runtime computes that probability itself,
+so a custom program cannot raise it. About one such turn in ten, chosen by a
+hash of the task and turn, is still left for you, and a judge cannot continue
+it either. Your replies to those turns are the only unbiased evidence a head
+keeps getting once it acts, and they are what can withdraw its certificate.
+Only runs a head actually started are labeled by how they turned out.
+
+Treat the floor as a guardrail rather than a guarantee. The 99% bound holds
+for one threshold on one pass; up to seven thresholds are tried and the test
+repeats as labels arrive, so the real chance of certifying a head below its
+floor is somewhat higher. Once a head acts, fresh evidence arrives only from
+the held-out turns, so withdrawal lags a real decline by a few hundred
+turns.
+
+`xcb reflex status settle` shows each certificate and its evidence.
+`xcb reflex import settle <file> --dry-run` shows whether that history alone
+would certify each head. If the history is the one a prior was fitted on,
+certification on it is optimistic; see the measurements below.
 
 ## Measured on operator history
 
@@ -153,6 +202,14 @@ The shipped priors on the same history, at their thresholds:
 | `settle.confirm` | 0.45 | 0.66 | 0.21 | 0.84 |
 
 These are in-sample for the fit, so expect a little less on your own history.
+
+Out of sample, the `unfinished` head was fitted on the oldest 50%, 60% or
+70% of the history in time order and scored on the rest. It reached precision 0.77
+to 0.87 at thresholds 0.65 to 0.75. On the largest split, the certificate's
+lower bound cleared 0.75; on the two smaller ones it fell short (0.66 to 0.73).
+`confirm` never fired on 30 requests it could answer. So on this history `auto`
+continues stopped-short turns once enough fresh replies accumulate, and it
+leaves go-ahead requests to the operator until the head earns its 0.85 floor.
 The earlier keyword-only settle prior missed most of these cases: most
 "continue" replies followed turns that did a lot of work and ended in progress
 rather than turns that promised a next step, and most approvals followed a
@@ -212,7 +269,7 @@ reports without storing anything. Only the derived features are stored.
 `config.json` `extensions.reflexes`:
 
 ```json
-{ "route": "active", "settle": "observe", "confirm": "observe", "learn": true }
+{ "route": "active", "settle": "auto", "confirm": "auto", "learn": true }
 ```
 
 - `off`: the reflex does not run; routing and continuation behave as before.
@@ -220,22 +277,34 @@ reports without storing anything. Only the derived features are stored.
   categories are still shown on tasks.
 - `active`: the decision acts. For route it sets the tier; for settle a
   `stopped_short` completed turn is continued.
+- `auto` (settle and confirm): observe until the head is certified, then act
+  as `active` does on turns scored at or above the certified threshold,
+  leaving about one in ten to you. Routing has no `auto`; a config that sets
+  it is refused.
 - `confirm`: whether a `confirm` turn is answered "yes, go ahead". It acts
-  only when both `settle` and `confirm` are `active`, the turn completed,
+  only when `settle` is `active` or `auto`, the `confirm` head acts (`active`, or
+  `auto` and certified), the turn completed,
   nothing is handed to the user, the report never mentions deletion, secrets,
   production or spending, the asking paragraph proposes no deploy, release,
   tag, migration, removal, payment, access change or message to people
   (stems match with their inflections), and a configured judge agrees
   that the step stays within the task, is reversible and needs no new
-  permissions. A vetoed request is never sent to the judge, so the judge
-  cannot turn it into a "yes".
+  permissions. A vetoed request can still continue deterministically if its
+  turn was interrupted by a limit, with the generic prompt. A judge may veto
+  that continuation but can never turn the request into a "yes". The asking
+  paragraph is the last one and also the last one with a question, so a
+  question followed by a list of options is read in full.
 - `learn`: automatic training after labels. Explicit `xcb reflex train` works
   regardless.
 
-Settle ships in `observe` because continuing a turn the worker called finished
-is a behavior change; once `xcb reflex status settle` shows live precision you
-trust, set it to `active`. `confirm` stays `observe` longer: answering on your
-behalf is a larger step than continuing, so turn it on separately.
+Set `observe` to keep a head from ever acting, or `active` to let it act
+without a certificate. `off` disables settle entirely, and `observe` keeps
+`confirm` observing too.
+
+Configs and tasks are read strictly, so an older xcb refuses a config that
+says `auto` until the value is edited back to `observe` or `active`, and a
+task a reflex continued (it records which head started the run) until that
+task settles again under the newer build.
 
 ## Safety contract
 
