@@ -124,6 +124,14 @@ the output `decision`. A rejected program is reported by `xcb reflex status`
 and the shipped program runs instead. Every observation records the digest of
 the program that made it.
 
+Custom programs must compile with exactly those JSON inputs and one JSON
+`decision` output. Files are limited to 64 KiB and must be regular files, not
+symlinks. The runtime permits at most 16 cells, 64 edges, 64 steps, 100,000 work
+units, 64 KiB of context, 16 KiB of output and depth 1. Evaluation runs off the
+supervisor thread, joins its bounded pure work, and rejects results returned
+after five seconds. Oversized or invalid decisions fall back to ordinary routing
+or settlement.
+
 ## Commands
 
 ```

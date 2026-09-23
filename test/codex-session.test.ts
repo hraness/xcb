@@ -427,8 +427,17 @@ describe("Codex closed driver", () => {
     const receipt = await failure(fixture.run); expect(cancelled).toBe(true); expect(receipt.relay?.joined).toBe(true); expect(receipt.processStopped).toBe(true);
   });
   test("an upstream body that cannot join keeps custody", async () => {
-    const fixture = peer({ response: async () => new Response(new ReadableStream({ cancel() { return new Promise(() => {}); } }), { status: 403 }), deadlineMs: 80 });
-    const receipt = await failure(fixture.run); expect(receipt.relay?.joined).toBe(false); expect(receipt.processStopped).toBe(false);
+    let cancellations = 0;
+    const fixture = peer({ response: async () => new Response(new ReadableStream({
+      // The relay must own the body and start cleanup before cancellation;
+      // a startup deadline can expire before this body reaches the relay.
+      cancel() { cancellations++; fixture.abort(); return new Promise(() => {}); },
+    }), { status: 403 }) });
+    const receipt = await failure(fixture.run);
+    expect(fixture.count()).toBe(1); expect(cancellations).toBe(1);
+    expect(receipt.failures).toContain("CODEX_CANCELLED"); expect(receipt.failures).not.toContain("CODEX_SESSION_DEADLINE");
+    expect(receipt.failures).toContain("CODEX_CUSTODY_UNPROVEN");
+    expect(receipt.relay?.joined).toBe(false); expect(receipt.processStopped).toBe(false);
   });
   test("abort cancellation rejection of a stalled successful response remains latched", async () => {
     let reads = 0, cancellations = 0;

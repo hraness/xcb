@@ -271,6 +271,9 @@ fn planner() -> crate::managed_program::AdmittedProgram {
 #[tokio::test]
 async fn pure_scheduled_program_completes_without_provider_and_proposes_once() {
     let f = fixture().await;
+    let mut config = Config::default();
+    config.extensions.reflexes.settle = crate::config::ReflexMode::Active;
+    config.save(f.store.root(), None).unwrap();
     grant(&f, 2);
     let now = now_ms();
     let schedule = f
@@ -311,6 +314,7 @@ async fn pure_scheduled_program_completes_without_provider_and_proposes_once() {
     let completed = managed.task(&task.id).unwrap().unwrap();
     assert_eq!(completed.state, TaskState::Completed);
     assert!(completed.program_receipt.is_some());
+    assert!(completed.settle.is_none());
     assert!(completed.session.is_none());
     assert!(store.sessions(32).unwrap().is_empty());
     let backlog = managed.backlog(Some(&f.conversation), 64).unwrap();
@@ -733,4 +737,110 @@ async fn live_legacy_supervisor_blocks_schema_upgrade_without_mutation() {
         .unwrap();
     assert_eq!(version, 3);
     assert!(reopened.conversation(&f.conversation).unwrap().is_some());
+}
+
+#[tokio::test]
+async fn active_settle_continuation_defers_project_proposal_until_parent_finishes() {
+    use xcb_core::models::{Mode, ModelChoice};
+    let f = fixture().await;
+    grant(&f, 2);
+    let mut config = Config::default();
+    config.extensions.reflexes.settle = crate::config::ReflexMode::Active;
+    config.save(f.store.root(), None).unwrap();
+    let account = f
+        .store
+        .add_account(Provider::Codex, "Fixture", now_ms(), None)
+        .unwrap();
+    let model = ModelChoice {
+        provider: Provider::Codex,
+        id: Id::new("fixture").unwrap(),
+        label: "Fixture".into(),
+        mode: Mode::Fixed,
+        resolved: None,
+        effort: None,
+        observed_at_ms: now_ms(),
+    };
+    let session = f
+        .store
+        .create_session(&account.id, model, &f.workspace, now_ms())
+        .unwrap();
+    let task = enqueue(&f, "Update parser and its callers", false).await;
+    let parent = f
+        .managed
+        .prepare(
+            &task,
+            session.id.clone(),
+            "fixture".into(),
+            "fixture".into(),
+            0,
+            String::new(),
+        )
+        .await
+        .unwrap();
+    let child = propose(&f, &parent, "next", "Review remaining documentation").await;
+    let outcome = |text: &str| Outcome {
+        text: text.into(),
+        facts: xcb_core::policy::TurnFacts {
+            terminal: Terminal::Completed,
+            joined: true,
+            effects: EffectState::Settled,
+            pending_attention: false,
+            failure: None,
+        },
+        state: State::Idle,
+        diagnostic: None,
+    };
+    let continuing = f
+        .managed
+        .finish(
+            &f.store,
+            &parent.id,
+            Ok(outcome("Schema migrated. Next, I'll update the callers:")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(continuing.state, TaskState::Queued);
+    assert_eq!(continuing.settle.as_deref(), Some("stopped_short"));
+    f.managed.tick_projects(now_ms()).await.unwrap();
+    assert!(f.managed.task(&child.id).unwrap().unwrap().deferred);
+    assert_eq!(
+        f.managed
+            .project_policy(&f.conversation)
+            .unwrap()
+            .unwrap()
+            .admitted_tasks,
+        0
+    );
+    let running = f
+        .managed
+        .prepare(
+            &continuing,
+            session.id,
+            "fixture".into(),
+            "fixture".into(),
+            0,
+            String::new(),
+        )
+        .await
+        .unwrap();
+    let done = f
+        .managed
+        .finish(
+            &f.store,
+            &running.id,
+            Ok(outcome("All callers updated and tests pass.")),
+        )
+        .await
+        .unwrap();
+    assert_eq!(done.state, TaskState::Completed);
+    f.managed.tick_projects(now_ms()).await.unwrap();
+    assert!(!f.managed.task(&child.id).unwrap().unwrap().deferred);
+    assert_eq!(
+        f.managed
+            .project_policy(&f.conversation)
+            .unwrap()
+            .unwrap()
+            .admitted_tasks,
+        1
+    );
 }

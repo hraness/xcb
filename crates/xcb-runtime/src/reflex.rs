@@ -14,15 +14,22 @@
 
 use crate::{Error, Result, config::ReflexMode, digest, now_ms};
 use algal::{
-    contract::Manifest, effects::Host, graph::Transports, runtime, store::Store as AlgalStore,
+    contract::Manifest,
+    effects::Host,
+    graph::{self, Transports},
+    runtime,
+    store::Store as AlgalStore,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::Read,
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::Mutex,
+    time::{Duration, Instant},
 };
 use xcb_core::reflex::{
     self, Comparison, Example, Features, FitOptions, Head, Params, Reflex, heads_for,
@@ -31,6 +38,9 @@ use xcb_core::reflex::{
 const ROUTE_PROGRAM: &str = include_str!("../reflexes/route.algal.json");
 const SETTLE_PROGRAM: &str = include_str!("../reflexes/settle.algal.json");
 const MAX_PROGRAM_BYTES: u64 = 64 * 1024;
+const MAX_CONTEXT_BYTES: usize = 64 * 1024;
+const MAX_OUTPUT_BYTES: usize = 16 * 1024;
+const MAX_RUN_TIME: Duration = Duration::from_secs(5);
 const MAX_OBSERVATIONS: i64 = 20_000;
 const MAX_GENERATIONS: i64 = 256;
 /// A training pass runs after every this-many new labels.
@@ -54,6 +64,24 @@ pub struct Program {
     pub custom: bool,
 }
 
+/// Count serialized bytes without allocating an oversized intermediate string.
+fn json_within_limit(value: &impl Serialize, maximum: usize) -> bool {
+    struct Budget(usize);
+    impl std::io::Write for Budget {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.0 {
+                return Err(std::io::Error::other("reflex JSON budget exceeded"));
+            }
+            self.0 -= bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    serde_json::to_writer(Budget(maximum), value).is_ok()
+}
+
 /// Admission for reflex programs: an ALGAL organism with only `input`,
 /// `const` and `expr` cells, no agent calls, and the reflex interface
 /// (`features`, `params`, `evidence` in; `decision` out). Anything with an
@@ -61,6 +89,9 @@ pub struct Program {
 /// or the filesystem.
 pub fn admit(source: &Value) -> Result<(Manifest, String)> {
     const REJECTED: &str = "reflex program rejected";
+    if !json_within_limit(source, MAX_PROGRAM_BYTES as usize) {
+        return Err(Error::Unavailable(REJECTED));
+    }
     let cells = source["cells"]
         .as_array()
         .ok_or(Error::Unavailable(REJECTED))?;
@@ -82,10 +113,82 @@ pub fn admit(source: &Value) -> Result<(Manifest, String)> {
         return Err(Error::Unavailable(REJECTED));
     }
     let manifest = Manifest::parse(source).map_err(|_| Error::Unavailable(REJECTED))?;
+    // ALGAL's general-purpose ceilings are too generous for a policy decision
+    // in the supervisor. Keep custom programs within the shipped fast lane.
+    let budgets = &manifest.budgets;
+    if manifest.cells.len() > 16
+        || manifest.edges.len() > 64
+        || budgets.max_steps > 64
+        || budgets.max_work > 100_000
+        || budgets.max_context_bytes > MAX_CONTEXT_BYTES
+        || budgets.max_output_bytes > MAX_OUTPUT_BYTES
+        || budgets.max_depth > 1
+    {
+        return Err(Error::Unavailable(REJECTED));
+    }
+    let compiled = graph::compile(
+        manifest.clone(),
+        &mut AlgalStore::default(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        0,
+    )
+    .map_err(|_| Error::Unavailable(REJECTED))?;
+    let signature =
+        graph::interface_signature(&compiled).map_err(|_| Error::Unavailable(REJECTED))?;
+    if signature.outputs.len() != 1
+        || !signature.outputs.contains_key("decision")
+        || signature
+            .inputs
+            .values()
+            .chain(signature.outputs.values())
+            .any(|port| port["type"] != "json" || port["many"] == true || port["optional"] == true)
+    {
+        return Err(Error::Unavailable(REJECTED));
+    }
+    let probe = graph::interface_args(
+        &manifest,
+        &json!({"features": {}, "params": {}, "evidence": {}}),
+    )
+    .map_err(|_| Error::Unavailable(REJECTED))?;
+    for cell in &manifest.cells {
+        if cell["kind"] == "input"
+            && cell["outputs"].as_object().is_none_or(|ports| {
+                ports.iter().any(|(name, port)| {
+                    port["optional"] != true
+                        && probe[cell["id"].as_str().unwrap()].get(name).is_none()
+                })
+            })
+        {
+            return Err(Error::Unavailable(REJECTED));
+        }
+    }
     let digest = manifest
         .digest()
         .map_err(|_| Error::Unavailable(REJECTED))?;
     Ok((manifest, digest))
+}
+
+fn read_program(path: &Path) -> Result<Value> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            (rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK
+                | rustix::fs::OFlags::CLOEXEC)
+                .bits() as i32,
+        )
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_PROGRAM_BYTES {
+        return Err(Error::Unavailable("reflex program rejected"));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_PROGRAM_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PROGRAM_BYTES as usize {
+        return Err(Error::Unavailable("reflex program rejected"));
+    }
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 /// The program a reflex runs: an admissible custom program when one is
@@ -94,28 +197,19 @@ pub fn admit(source: &Value) -> Result<(Manifest, String)> {
 pub fn program(root: &Path, reflex: Reflex) -> Result<(Program, Option<&'static str>)> {
     let path = custom_path(root, reflex);
     let mut fault = None;
-    if let Ok(metadata) = std::fs::symlink_metadata(&path) {
-        let custom = if metadata.is_file() && metadata.len() <= MAX_PROGRAM_BYTES {
-            std::fs::read(&path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .and_then(|source| admit(&source).ok())
-        } else {
-            None
-        };
-        match custom {
-            Some((manifest, digest)) => {
-                return Ok((
-                    Program {
-                        manifest,
-                        digest,
-                        custom: true,
-                    },
-                    None,
-                ));
-            }
-            None => fault = Some("custom reflex program rejected; using the shipped program"),
+    match read_program(&path).and_then(|source| admit(&source)) {
+        Ok((manifest, digest)) => {
+            return Ok((
+                Program {
+                    manifest,
+                    digest,
+                    custom: true,
+                },
+                None,
+            ));
         }
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(_) => fault = Some("custom reflex program rejected; using the shipped program"),
     }
     let (manifest, digest) = admit(&serde_json::from_str(shipped_source(reflex))?)?;
     Ok((
@@ -165,31 +259,56 @@ pub async fn run(
     evidence: Value,
 ) -> Result<Decision> {
     const FAILED: &str = "reflex program failed";
+    params.validate()?;
+    if features.len() > reflex::MAX_FEATURES || features.values().any(|value| !value.is_finite()) {
+        return Err(Error::Unavailable(FAILED));
+    }
     let heads: serde_json::Map<String, Value> = params
         .heads
         .iter()
         .map(|(name, head)| (name.clone(), head_input(head)))
         .collect();
-    let args = json!({"src": {
+    let input = json!({
         "features": features,
         "params": heads,
         "evidence": evidence,
-    }});
-    let receipt = runtime::run(
-        program.manifest.clone(),
-        args,
-        &mut AlgalStore::default(),
-        &mut Host::default(),
-        &Transports::new(),
-        None,
-    )
-    .await
-    .map_err(|_| Error::Unavailable(FAILED))?;
-    if receipt["outcome"] != "complete" {
+    });
+    if !json_within_limit(&input, MAX_CONTEXT_BYTES) {
         return Err(Error::Unavailable(FAILED));
     }
-    let outputs =
-        runtime::outputs(&program.manifest, &receipt).map_err(|_| Error::Unavailable(FAILED))?;
+    let args =
+        graph::interface_args(&program.manifest, &input).map_err(|_| Error::Unavailable(FAILED))?;
+    let manifest = program.manifest.clone();
+    let started = Instant::now();
+    // Join bounded pure work instead of running CPU evaluation on the async
+    // supervisor or dropping it behind a timeout. No host or transport exists.
+    let (receipt, outputs) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let executor = tokio::runtime::Builder::new_current_thread().build()?;
+        let receipt = executor
+            .block_on(runtime::run(
+                manifest.clone(),
+                args,
+                &mut AlgalStore::default(),
+                &mut Host::default(),
+                &Transports::new(),
+                None,
+            ))
+            .map_err(|_| Error::Unavailable(FAILED))?;
+        if receipt["outcome"] != "complete" {
+            return Err(Error::Unavailable(FAILED));
+        }
+        let outputs =
+            runtime::outputs(&manifest, &receipt).map_err(|_| Error::Unavailable(FAILED))?;
+        if !json_within_limit(&outputs, MAX_OUTPUT_BYTES) {
+            return Err(Error::Unavailable(FAILED));
+        }
+        Ok((receipt, outputs))
+    })
+    .await
+    .map_err(|_| Error::Unavailable(FAILED))??;
+    if started.elapsed() > MAX_RUN_TIME {
+        return Err(Error::Unavailable(FAILED));
+    }
     let decision = &outputs["decision"];
     let value = match params.reflex {
         Reflex::Route => decision["route"]
@@ -842,6 +961,108 @@ mod tests {
             let mut agent = source;
             agent["budgets"]["maxAgentCalls"] = json!(1);
             assert!(admit(&agent).is_err());
+        }
+    }
+
+    #[test]
+    fn custom_admission_bounds_work_and_compiles_the_interface() {
+        let source: Value = serde_json::from_str(ROUTE_PROGRAM).unwrap();
+        for (key, excessive) in [
+            ("maxSteps", 65),
+            ("maxWork", 100_001),
+            ("maxContextBytes", 65_537),
+            ("maxOutputBytes", 16_385),
+            ("maxDepth", 2),
+        ] {
+            let mut invalid = source.clone();
+            invalid["budgets"][key] = json!(excessive);
+            assert!(admit(&invalid).is_err(), "{key}");
+        }
+        let mut invalid = source.clone();
+        invalid["interface"]["outputs"]["decision"]["cell"] = json!("missing");
+        assert!(admit(&invalid).is_err());
+        let mut invalid = source.clone();
+        invalid["interface"]["outputs"]["extra"] =
+            invalid["interface"]["outputs"]["decision"].clone();
+        assert!(admit(&invalid).is_err());
+        let mut invalid = source.clone();
+        invalid["cells"][0]["outputs"]["features"] = json!("text");
+        assert!(admit(&invalid).is_err());
+        let mut invalid = source.clone();
+        invalid["cells"][0]["outputs"]["hidden"] = json!("json");
+        assert!(admit(&invalid).is_err());
+        let mut invalid = source.clone();
+        for index in 0..16 {
+            invalid["cells"].as_array_mut().unwrap().push(json!({
+                "id": format!("extra{index}"), "kind": "const", "value": {}
+            }));
+        }
+        assert!(admit(&invalid).is_err());
+        let mut oversized = source;
+        oversized["padding"] = json!("x".repeat(MAX_PROGRAM_BYTES as usize));
+        assert!(admit(&oversized).is_err());
+    }
+
+    #[test]
+    fn custom_file_rejects_symlink_fifo_and_oversized_input() {
+        let dir = temp();
+        std::fs::create_dir(dir.path().join("reflexes")).unwrap();
+        let target = dir.path().join("source.json");
+        std::fs::write(&target, ROUTE_PROGRAM).unwrap();
+        let path = custom_path(dir.path(), Reflex::Route);
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        let (used, fault) = program(dir.path(), Reflex::Route).unwrap();
+        assert!(!used.custom && fault.is_some());
+        std::fs::remove_file(&path).unwrap();
+        rustix::fs::mkfifoat(rustix::fs::CWD, &path, rustix::fs::Mode::RUSR).unwrap();
+        let (used, fault) = program(dir.path(), Reflex::Route).unwrap();
+        assert!(!used.custom && fault.is_some());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, vec![b' '; MAX_PROGRAM_BYTES as usize + 1]).unwrap();
+        let (used, fault) = program(dir.path(), Reflex::Route).unwrap();
+        assert!(!used.custom && fault.is_some());
+    }
+
+    #[tokio::test]
+    async fn bounded_runner_uses_the_declared_interface_and_rejects_exhaustion() {
+        let source: Value =
+            serde_json::from_str(&ROUTE_PROGRAM.replace("\"src\"", "\"origin\"")).unwrap();
+        let (manifest, digest) = admit(&source).unwrap();
+        let mut program = Program {
+            manifest,
+            digest,
+            custom: true,
+        };
+        let params = reflex::prior(Reflex::Route);
+        let features = route_features("refactor the parser", true, false);
+        let evidence = json!({"substantial": false, "judged": false, "kind": null});
+        assert_eq!(
+            run(&program, &params, &features, evidence.clone())
+                .await
+                .unwrap()
+                .value,
+            "frontier"
+        );
+        assert!(
+            run(
+                &program,
+                &params,
+                &features,
+                json!({"large": "x".repeat(MAX_CONTEXT_BYTES)})
+            )
+            .await
+            .is_err()
+        );
+        for (key, limit) in [("maxSteps", 1), ("maxOutputBytes", 1)] {
+            let mut limited = source.clone();
+            limited["budgets"][key] = json!(limit);
+            (program.manifest, program.digest) = admit(&limited).unwrap();
+            assert!(
+                run(&program, &params, &features, evidence.clone())
+                    .await
+                    .is_err(),
+                "{key}"
+            );
         }
     }
 

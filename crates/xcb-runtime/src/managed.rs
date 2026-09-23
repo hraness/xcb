@@ -2557,14 +2557,14 @@ impl ManagedStore {
         if self
             .active_tasks(128)?
             .iter()
-            .any(|task| &task.conversation == conversation)
+            .any(|task| &task.conversation == conversation && !task.deferred)
         {
             return Ok(None);
         }
         Ok(self
-            .tasks(64)?
+            .backlog(Some(conversation), 256)?
             .into_iter()
-            .filter(|task| &task.conversation == conversation)
+            .filter(|task| !task.deferred)
             .max_by_key(|task| (task.created_at_ms, task.id.as_str().to_owned()))
             .filter(|task| {
                 task.state == TaskState::Completed
@@ -7264,6 +7264,12 @@ mod tests {
         assert_eq!(done.state, TaskState::Completed);
         // Default settle mode observes: categorized, not continued.
         assert_eq!(done.settle.as_deref(), Some("stopped_short"));
+        // A saved future idea is not an active turn and must not swallow
+        // explicit continuation feedback for the worker that just settled.
+        let deferred = managed
+            .enqueue_backlog(&chat, new_id("m"), "Future idea".into(), true, 5)
+            .await
+            .unwrap();
         let mut config = Config::default();
         config.extensions.reflexes.settle = ReflexMode::Active;
         config.save(&state, None).unwrap();
@@ -7287,7 +7293,8 @@ mod tests {
                 .unwrap()
                 .contains("Worker's last report")
         );
-        assert_eq!(managed.tasks(16).unwrap().len(), 1);
+        assert_eq!(managed.tasks(16).unwrap().len(), 2);
+        assert!(managed.task(&deferred.id).unwrap().unwrap().deferred);
         let reflexes = reflex::ReflexStore::open(&state).unwrap();
         let status = reflexes
             .status(Reflex::Settle, ReflexMode::Observe, true)
