@@ -128,8 +128,9 @@ sessions or establish fresh live acceptance across all three providers.
 Install an admitted Claude Code binary (major 2, version 2.1.268 or newer).
 xcb performs its own account sign-in below; it does
 not silently import your existing provider login. Replace `<account-id>` below
-with the generated ID printed by `accounts add` or `accounts import-*` (also
-listed by `xcb accounts`). Account names come from observed provider identities;
+with the generated ID printed by `accounts add` or `accounts import-*` (the
+`xcb accounts` ID column is shortened; `xcb accounts --json` lists full IDs).
+Account names come from observed provider identities;
 custom labels are not accepted.
 
 ```sh

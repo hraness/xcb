@@ -304,8 +304,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         .extensions
         .iter()
         .any(|(name, _)| name == "algal supervisor");
+    let shift_enter = app.keyboard_enhanced;
     if let Some(modal) = &mut app.modal {
-        render_modal(frame, modal, area, managed);
+        render_modal(frame, modal, area, managed, shift_enter);
     }
 }
 
@@ -885,7 +886,13 @@ fn render_slash_menu(
     );
 }
 
-fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, area: Rect, managed: bool) {
+fn render_modal(
+    frame: &mut Frame<'_>,
+    modal: &mut Modal,
+    area: Rect,
+    managed: bool,
+    shift_enter: bool,
+) {
     let area = modal_area(area);
     frame.render_widget(Clear, area);
     match modal {
@@ -896,9 +903,14 @@ fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, area: Rect, managed: b
                 "Esc stops the running turn · Esc also closes dialogs and the / menu"
             };
             let quit = if managed {
-                "Ctrl-C requests cancellation, clears a draft, then detaches · Ctrl-D detaches on empty"
+                "Ctrl-C requests cancellation, clears a draft (Ctrl-R restores), then detaches · Ctrl-D detaches on empty"
             } else {
-                "Ctrl-C stops a live turn, clears a draft, quits when idle · Ctrl-D quits on empty"
+                "Ctrl-C stops a live turn, clears a draft (Ctrl-R restores), quits when idle · Ctrl-D quits on empty"
+            };
+            let newline = if shift_enter {
+                "Enter send · Shift-Enter, Alt-Enter or Ctrl-J newline"
+            } else {
+                "Enter send · Alt-Enter or Ctrl-J newline (Shift-Enter needs the kitty keyboard protocol)"
             };
             let mode_keys = if managed {
                 "Ctrl-P managed tasks · Ctrl-R prompt history · Ctrl-G editor"
@@ -925,16 +937,18 @@ fn render_modal(frame: &mut Frame<'_>, modal: &mut Modal, area: Rect, managed: b
             };
             let block = Block::bordered()
                 .title(" Keyboard & commands ")
-                .title_bottom(" ? or Esc closes ");
+                .title_bottom(" Esc closes · ? closes and types ? when ? opened it ");
             let inner = block.inner(area);
             frame.render_widget(block, area);
             frame.render_widget(
                 Paragraph::new(
                     [
-                        "Enter send · Alt/Shift-Enter or Ctrl-J newline",
-                        "Ctrl-V paste text/image · Alt-Backspace remove last attachment",
-                        "Wheel/PageUp older · PageDown newer · End follows newest",
-                        "Ctrl-T thinking · Ctrl-O history · Ctrl-U tool output",
+                        newline,
+                        "Ctrl-V paste text/image · Alt-Backspace remove last attachment · pastes over 256 KiB are refused",
+                        "PageUp older · PageDown newer · Shift-End or Ctrl-End follows newest (plain End edits a draft)",
+                        "/mouse turns wheel scrolling on; while on, hold Shift (Option on macOS) to select text",
+                        "Ctrl-T thinking · Ctrl-O history · Ctrl-U tool output · these and Ctrl-G/P/L/R replace readline keys",
+                        "? on an empty line or F1 opens this help · Ctrl-A/E line ends · Ctrl-W/K delete word/line end",
                         mode_keys,
                         cancel,
                         quit,
