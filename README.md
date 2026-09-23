@@ -398,4 +398,5 @@ See [Contributing](CONTRIBUTING.md) for setup and the native, compatibility, and
 site checks. The credential-free [native Codex boundary fixtures](qualification/codex-native.md)
 and [native Devin boundary fixture](qualification/devin-native.md) document
 repeatable checks separately from authenticated live acceptance.
+Release notes live in [CHANGELOG.md](CHANGELOG.md).
 Report vulnerabilities through [Security](SECURITY.md). Licensed under [MIT](LICENSE).
