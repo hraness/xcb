@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -49,6 +49,9 @@ const POLICY: &str = include_str!("../managed-transition.algal.json");
 #[path = "managed_habitat.rs"]
 mod habitat;
 pub use habitat::{HabitatSchedule, WorkMemory};
+#[path = "managed_project.rs"]
+mod project;
+pub use project::{MemoryBinding, ProjectPolicy, ProjectProposal};
 
 #[cfg(test)]
 #[path = "managed_mailbox_tests.rs"]
@@ -198,6 +201,18 @@ pub struct ManagedTask {
     /// Editable prompt; original goal remains immutable receipt identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backlog_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_proposal: Option<ProjectProposal>,
+    #[serde(default)]
+    pub routing_question: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<crate::managed_program::AdmittedProgram>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_generation: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_receipt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<Id>,
     pub detail: String,
     /// How the last settled worker turn ended, as categorized by the settle
     /// reflex (`done`, `stopped_short`, `question`, `blocked`, ...).
@@ -222,6 +237,17 @@ impl ManagedTask {
             && self.conversation == other.conversation
             && self.workspace == other.workspace
             && self.goal == other.goal
+            && self.program == other.program
+            && self.program_generation == other.program_generation
+            && self.schedule == other.schedule
+            && self
+                .project_proposal
+                .as_ref()
+                .map(|p| (&p.parent, &p.generation, p.required_provider))
+                == other
+                    .project_proposal
+                    .as_ref()
+                    .map(|p| (&p.parent, &p.generation, p.required_provider))
             && self.provider_preference == other.provider_preference
             && self.provider_required == other.provider_required
             && self.max_attempts == other.max_attempts
@@ -269,6 +295,12 @@ impl ManagedTask {
             || !self.last_receipt.starts_with("sha256:")
         {
             return Err(xcb_core::Error::Invalid("managed task").into());
+        }
+        if let Some(program) = &self.program {
+            program.verify()?;
+            if self.session.is_some() || !self.worker_sessions.is_empty() {
+                return Err(Error::Conflict("program task cannot own provider sessions"));
+            }
         }
         label(&self.title, 160)?;
         bounded_text(&self.workspace, 4096)?;
@@ -377,6 +409,7 @@ struct ViewStamp {
     tasks: (i64, i64, i64),
     messages: i64,
     schedules: (i64, i64),
+    projects: (i64, i64, i64),
     config: Option<std::time::SystemTime>,
     fault: Option<std::time::SystemTime>,
     progress: Option<std::time::SystemTime>,
@@ -464,6 +497,27 @@ fn stamp_retention(root: &Path) {
     }
 }
 
+fn managed_migration_guard(root: &Path) -> Result<File> {
+    let path = root.join("supervisor.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(&path)?;
+    private::check_file(&file, 4096)?;
+    private::same_file(&path, &file)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Error::Conflict(
+            "managed state upgrade waits for the running supervisor to stop; let active work settle, pause schedules with the existing xcb, then restart xcb",
+        )),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 impl ManagedStore {
     pub fn open(root: &Path) -> Result<Self> {
         let root = private::directory(&root.join("managed"))?;
@@ -494,11 +548,19 @@ impl ManagedStore {
         }
         connection.pragma_update(None, "synchronous", "FULL")?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 2 {
+        if version > 3 {
             return Err(Error::Unavailable(
                 "managed state was written by a newer xcb",
             ));
         }
+        // A prior supervisor owns the old writer contract until all its work
+        // settles. Never advance the schema underneath that admitted writer.
+        // The daemon itself opens/migrates before taking its dispatch lock.
+        let _migration_guard = if version < 3 {
+            Some(managed_migration_guard(&root)?)
+        } else {
+            None
+        };
         // Incremental vacuum lets routine retention return freed pages to the
         // filesystem; on an existing file it only takes effect if a rebuild
         // already enabled it, so this is a no-op there.
@@ -547,6 +609,7 @@ impl ManagedStore {
             }
         }
         habitat::migrate(&mut connection)?;
+        project::migrate(&mut connection)?;
         let mut store = Self {
             root,
             connection: Mutex::new(connection),
@@ -655,7 +718,7 @@ impl ManagedStore {
                 )? as u64;
                 let stale_tasks: Vec<String> = {
                     let mut query = tx.prepare(
-                        "SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled') AND updated_at<?1 AND id NOT IN (SELECT last_task FROM habitat_schedules WHERE last_task IS NOT NULL) LIMIT ?2",
+                        "SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled') AND updated_at<?1 AND id NOT IN (SELECT last_task FROM habitat_schedules WHERE last_task IS NOT NULL) AND id NOT IN (SELECT json_extract(payload,'$.project_proposal.parent') FROM tasks WHERE json_valid(payload) AND json_extract(payload,'$.project_proposal.parent') IS NOT NULL AND state IN ('queued','running','needs_input','uncertain')) LIMIT ?2",
                     )?;
                     query
                         .query_map(params![sql(cutoff)?, RETENTION_BATCH], |row| row.get(0))?
@@ -940,6 +1003,11 @@ impl ManagedStore {
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
+        let projects = db.query_row(
+            "SELECT count(*),COALESCE(sum(revision),0),COALESCE(sum(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.expires_at_ms')<=?1 ELSE 0 END),0) FROM project_policies",
+            [sql(now_ms())?],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
         drop(db);
         let modified = |path: PathBuf| fs::metadata(path).and_then(|meta| meta.modified()).ok();
         Ok(ViewStamp {
@@ -948,6 +1016,7 @@ impl ManagedStore {
             tasks,
             messages,
             schedules,
+            projects,
             config: modified(state_root.join("config.json")),
             fault: modified(self.root.join(SUPERVISOR_FAULT_FILE)),
             progress: modified(self.root.join(PROGRESS_FILE)),
@@ -1317,6 +1386,8 @@ impl ManagedStore {
                 | "xcb_backlog_get"
                 | "xcb_backlog_add"
                 | "xcb_backlog_update"
+                | "xcb_backlog_complete"
+                | "xcb_memory_search"
                 | "xcb_memory_recent"
         ) {
             return self
@@ -1688,10 +1759,23 @@ impl ManagedStore {
     async fn transition_habitat(
         &self,
         expected: &ManagedTask,
+        next: ManagedTask,
+        message: Option<Message>,
+        additional: &[(Id, Message)],
+        mutation: Option<&habitat::WorkerMutation>,
+    ) -> Result<ManagedTask> {
+        self.transition_project(expected, next, message, additional, mutation, None)
+            .await
+    }
+
+    async fn transition_project(
+        &self,
+        expected: &ManagedTask,
         mut next: ManagedTask,
         message: Option<Message>,
         additional: &[(Id, Message)],
         mutation: Option<&habitat::WorkerMutation>,
+        admission: Option<&project::ProjectAdmission>,
     ) -> Result<ManagedTask> {
         next.validate()?;
         if !next.same_identity(expected) || next.revision != expected.revision + 1 {
@@ -1717,6 +1801,12 @@ impl ManagedStore {
             || serde_json::to_string(&current)? != serde_json::to_string(expected)?
         {
             return Err(Error::Conflict("managed task revision changed"));
+        }
+        if next.state == TaskState::Running && expected.state != TaskState::Running {
+            project::check_dispatch(&tx, &next, now_ms())?;
+        }
+        if let Some(admission) = admission {
+            admission.check_and_record(&tx, expected)?;
         }
         if tx.execute("UPDATE tasks SET state=?1,revision=?2,updated_at=?3,payload=?4 WHERE id=?5 AND revision=?6", params![next.state.as_str(), sql(next.revision)?, sql(next.updated_at_ms)?, serde_json::to_string(&next)?, next.id.as_str(), sql(expected.revision)?])? != 1 {
             return Err(Error::Conflict("managed task revision changed"));
@@ -1773,8 +1863,20 @@ impl ManagedStore {
         if attachments.len() > 8 {
             return Err(xcb_core::Error::Limit("attachments").into());
         }
-        let (provider_preference, provider_required) =
+        let (mut provider_preference, mut provider_required) =
             self.initial_route_preferences(workspace, &text)?;
+        let schedule_requirement = if options.occurrence.is_some() && options.program.is_none() {
+            self.project_policy(conversation)?
+                .and_then(|policy| policy.required_provider)
+        } else {
+            None
+        };
+        let routing_question = schedule_requirement
+            .is_some_and(|required| provider_required && provider_preference != Some(required));
+        if let Some(required) = schedule_requirement {
+            provider_preference = Some(required);
+            provider_required = true;
+        }
         let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
         let current = self
             .conversation(conversation)?
@@ -1840,12 +1942,29 @@ impl ManagedStore {
             provider_required,
             tried_routes: vec![],
             failed_accounts: vec![],
-            state: TaskState::Queued,
+            state: if routing_question {TaskState::NeedsInput}else{TaskState::Queued},
             deferred: options.deferred,
             priority: options.priority,
-            attention: None,
+            attention: routing_question.then_some(State::NeedsAnswer),
             backlog_prompt: None,
-            detail: if options.deferred {
+            routing_question,
+            project_proposal: options
+                .worker
+                .and_then(|worker| worker.proposal.clone())
+                .or_else(|| options.proposal.clone()),
+            program: options.program.cloned(),
+            program_generation: if options.program.is_some() {
+                self.project_policy(conversation)?
+                    .filter(|p| p.enabled && p.expires_at_ms > now)
+                    .map(|p| p.generation)
+            } else {
+                None
+            },
+            program_receipt: None,
+            schedule: options.occurrence.map(|o| o.schedule_id().clone()),
+            detail: if routing_question {
+                "This scheduled prompt requests a different provider from the project requirement. Reply with a revised task for the required provider, or cancel this occurrence."
+            } else if options.deferred {
                 "saved in backlog; release when ready"
             } else {
                 "waiting for an eligible worker"
@@ -1879,7 +1998,9 @@ impl ManagedStore {
             provenance: None,
         };
         let ack = Self::assistant(
-            if task.deferred {
+            if task.routing_question {
+                task.detail.clone()
+            } else if task.deferred {
                 format!(
                     "Saved **{}** in the backlog. Release it when ready.",
                     task.title
@@ -1903,6 +2024,25 @@ impl ManagedStore {
         }
         if let Some(occurrence) = options.occurrence {
             occurrence.check(&tx)?;
+            if options.program.is_none()
+                && project::policy_from(&tx, conversation)?
+                    .and_then(|policy| policy.required_provider)
+                    != schedule_requirement
+            {
+                return Err(Error::Conflict("project provider requirement changed"));
+            }
+        }
+        if let Some(parent) = options.program_parent {
+            let current =
+                task_from(&tx, &parent.id)?.ok_or(Error::Conflict("program parent missing"))?;
+            if current.revision != parent.revision
+                || current.state != TaskState::Running
+                || current.cancel_requested
+                || current.program.is_none()
+                || current.conversation != task.conversation
+            {
+                return Err(Error::Conflict("program parent changed"));
+            }
         }
         if let Some(saved) = task_from(&tx, &task.id)? {
             if saved.goal != task.goal
@@ -1998,6 +2138,33 @@ impl ManagedStore {
         next.failed_accounts.clear();
         next.tried_routes.clear();
         next.detail = "your answer is queued for the worker".into();
+        if task.routing_question {
+            habitat::validate_prompt(&text)?;
+            if task
+                .project_proposal
+                .as_ref()
+                .and_then(|p| p.required_provider)
+                .or_else(|| {
+                    task.provider_required
+                        .then_some(task.provider_preference)
+                        .flatten()
+                })
+                .is_some_and(|required| route_hint(&text).is_some_and(|hint| hint != required))
+            {
+                return Err(Error::Conflict(
+                    "reply still conflicts with the required provider",
+                ));
+            }
+            next.routing_question = false;
+            next.deferred = task.project_proposal.is_some();
+            next.backlog_prompt = Some(text.clone());
+            next.detail = if next.deferred {
+                "routing clarification saved; awaiting project admission"
+            } else {
+                "routing clarification saved; waiting for an eligible worker"
+            }
+            .into();
+        }
         next.cancel_requested = false;
         next.revision += 1;
         next.updated_at_ms = now;
@@ -2390,14 +2557,14 @@ impl ManagedStore {
         if self
             .active_tasks(128)?
             .iter()
-            .any(|task| &task.conversation == conversation)
+            .any(|task| &task.conversation == conversation && !task.deferred)
         {
             return Ok(None);
         }
         Ok(self
-            .tasks(64)?
+            .backlog(Some(conversation), 256)?
             .into_iter()
-            .filter(|task| &task.conversation == conversation)
+            .filter(|task| !task.deferred)
             .max_by_key(|task| (task.created_at_ms, task.id.as_str().to_owned()))
             .filter(|task| {
                 task.state == TaskState::Completed
@@ -3502,7 +3669,11 @@ fn append_context(prompt: &mut String, context: &str) {
 
 struct Completion {
     id: Id,
-    result: Result<Outcome>,
+    result: CompletionResult,
+}
+enum CompletionResult {
+    Provider(Result<Outcome>),
+    Program(Result<crate::managed_program::ProgramReport>),
 }
 
 /// Dispatch backoff for a task the supervisor could not launch. The wait
@@ -3806,11 +3977,17 @@ impl Supervisor {
     /// backoff; after the bound the task is marked uncertain so custody is
     /// retained without an automatic retry.
     async fn record(&mut self, completion: Completion, failures: u32) {
-        match self
-            .managed
-            .finish_ref(&self.store, &completion.id, &completion.result)
-            .await
-        {
+        let result = match &completion.result {
+            CompletionResult::Provider(result) => {
+                self.managed
+                    .finish_ref(&self.store, &completion.id, result)
+                    .await
+            }
+            CompletionResult::Program(result) => {
+                self.managed.finish_program(&completion.id, result).await
+            }
+        };
+        match result {
             Ok(finished) => {
                 if finished.state == TaskState::Queued
                     && finished.detail.starts_with("dispatch did not cross")
@@ -3940,6 +4117,7 @@ impl Supervisor {
             );
         }
         if !draining {
+            self.managed.tick_projects(now_ms()).await?;
             self.managed.tick_schedules(now_ms()).await?;
         }
         let mut tasks = self.managed.active_tasks(128)?;
@@ -4022,6 +4200,9 @@ impl Supervisor {
     async fn launch(&mut self, task: &ManagedTask) -> Result<Dispatch> {
         let managed = self.managed.clone();
         let store = self.store.clone();
+        if let Some(reason) = managed.project_dispatch_block(task)? {
+            return Ok(Dispatch::Deferred(reason.into()));
+        }
         if workspace_busy(&store, &task.workspace)? {
             return Ok(Dispatch::Deferred(
                 "waiting for an eligible worker: the workspace has an active turn".into(),
@@ -4045,6 +4226,31 @@ impl Supervisor {
                 Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
                 Err(error) => Err(error),
             };
+        }
+        if let Some(program) = &task.program {
+            let mut next = task.clone();
+            next.state = TaskState::Running;
+            next.detail = "running pinned ALGAL planner".into();
+            next.revision += 1;
+            next.updated_at_ms = now_ms().max(task.updated_at_ms);
+            let prepared = match managed.transition(task, next, None).await {
+                Ok(task) => task,
+                Err(Error::Conflict(_)) => return Ok(Dispatch::Settled),
+                Err(error) => return Err(error),
+            };
+            let id = prepared.id.clone();
+            let program = program.clone();
+            let (cancel, cancelled) = watch::channel(false);
+            self.active.insert(id.clone(), cancel);
+            self.active_workspaces
+                .insert(id.clone(), prepared.workspace);
+            self.joins.spawn(async move {
+                Completion {
+                    id,
+                    result: CompletionResult::Program(program.run(cancelled).await),
+                }
+            });
+            return Ok(Dispatch::Started);
         }
         let config = Config::load(store.root())?.0;
         let created_session = task.session.is_none();
@@ -4193,6 +4399,7 @@ impl Supervisor {
             &managed.mailbox_tail(&task.id, 16)?,
             carried,
         );
+        append_context(&mut prompt, &managed.project_context(&task.conversation)?);
         if !carried {
             append_context(
                 &mut prompt,
@@ -4291,7 +4498,10 @@ impl Supervisor {
                     "managed worker task aborted inside the supervisor",
                 )),
             };
-            Completion { id, result }
+            Completion {
+                id,
+                result: CompletionResult::Provider(result),
+            }
         });
         Ok(Dispatch::Started)
     }
@@ -4559,6 +4769,7 @@ fn managed_view(
         .iter()
         .map(habitat::backlog_row)
         .collect();
+    view.projects = managed.project_rows()?;
     view.schedules = managed
         .schedules(None)?
         .into_iter()
@@ -5474,7 +5685,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         let count: i64 = migrated
             .db()
             .unwrap()
@@ -6189,6 +6400,12 @@ mod tests {
             priority: 0,
             attention: None,
             backlog_prompt: None,
+            routing_question: false,
+            project_proposal: None,
+            program: None,
+            program_generation: None,
+            program_receipt: None,
+            schedule: None,
             detail: "x".into(),
             settle: None,
             attempts: 0,
@@ -7047,6 +7264,12 @@ mod tests {
         assert_eq!(done.state, TaskState::Completed);
         // Default settle mode observes: categorized, not continued.
         assert_eq!(done.settle.as_deref(), Some("stopped_short"));
+        // A saved future idea is not an active turn and must not swallow
+        // explicit continuation feedback for the worker that just settled.
+        let deferred = managed
+            .enqueue_backlog(&chat, new_id("m"), "Future idea".into(), true, 5)
+            .await
+            .unwrap();
         let mut config = Config::default();
         config.extensions.reflexes.settle = ReflexMode::Active;
         config.save(&state, None).unwrap();
@@ -7070,7 +7293,8 @@ mod tests {
                 .unwrap()
                 .contains("Worker's last report")
         );
-        assert_eq!(managed.tasks(16).unwrap().len(), 1);
+        assert_eq!(managed.tasks(16).unwrap().len(), 2);
+        assert!(managed.task(&deferred.id).unwrap().unwrap().deferred);
         let reflexes = reflex::ReflexStore::open(&state).unwrap();
         let status = reflexes
             .status(Reflex::Settle, ReflexMode::Observe, true)

@@ -1,6 +1,9 @@
 use clap::Subcommand;
-use std::path::Path;
-use xcb_core::{Id, session::State};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
+use xcb_core::{Id, Provider, session::State};
 use xcb_runtime::{
     Error, Result,
     managed::{self, ManagedStore, ManagedTask},
@@ -9,6 +12,24 @@ use xcb_runtime::{
 
 #[derive(Subcommand)]
 pub enum BacklogCommand {
+    /// Record that an unstarted deferred item is already done.
+    Complete {
+        /// Deferred item from `xcb backlog`.
+        id: Id,
+        /// Work already done and the evidence supporting completion.
+        summary: String,
+        /// Current task revision; stale completion is rejected.
+        #[arg(long)]
+        revision: u64,
+    },
+    /// Reconcile uncertainty only when retained run evidence proves an outcome.
+    Reconcile {
+        /// Uncertain task from `xcb attention`.
+        id: Id,
+        /// Current task revision; stale reconciliation is rejected.
+        #[arg(long)]
+        revision: u64,
+    },
     /// Hold work for later; --ready releases it immediately.
     Add {
         /// Persistent conversation id from `xcb conversations`.
@@ -58,7 +79,126 @@ pub enum BacklogCommand {
 }
 
 #[derive(Subcommand)]
+pub enum ProjectCommand {
+    /// Grant bounded automatic follow-up work for a project goal.
+    Configure {
+        /// Persistent project conversation from `xcb conversations`.
+        conversation: Id,
+        /// Authoritative project goal for automatically admitted work.
+        goal: String,
+        /// Maximum automatically admitted tasks in this grant.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
+        tasks: u32,
+        /// Grant lifetime, 1 hour to 30 days. A new grant replaces the old grant.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=720))]
+        hours: u64,
+        /// Required when replacing an existing policy; inspect `projects --json`.
+        #[arg(long)]
+        revision: Option<u64>,
+        /// Optional hard provider constraint inherited by automatic work.
+        #[arg(long)]
+        provider: Option<Provider>,
+    },
+    /// Pause automatic dispatch; running work is allowed to settle.
+    Pause {
+        /// Project conversation from `xcb projects`.
+        conversation: Id,
+        /// Current policy revision; stale updates are rejected.
+        #[arg(long)]
+        revision: u64,
+    },
+    /// Resume the same grant without replenishing its task budget or expiry.
+    Resume {
+        /// Project conversation from `xcb projects`.
+        conversation: Id,
+        /// Current policy revision; resuming does not renew the grant.
+        #[arg(long)]
+        revision: u64,
+    },
+}
+
+pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Result<i32> {
+    let store = ManagedStore::open(root)?;
+    let rows = match command {
+        None => store.project_policies()?,
+        Some(ProjectCommand::Configure {
+            conversation,
+            goal,
+            tasks,
+            hours,
+            revision,
+            provider,
+        }) => {
+            let expiry = now_ms()
+                .checked_add(hours * 3_600_000)
+                .ok_or(Error::Unavailable("project expiry overflow"))?;
+            let row = store.configure_project_policy(
+                &conversation,
+                revision,
+                goal,
+                tasks,
+                expiry,
+                provider,
+            )?;
+            wake(root)?;
+            vec![row]
+        }
+        Some(ProjectCommand::Pause {
+            conversation,
+            revision,
+        }) => {
+            vec![store.set_project_policy_enabled(&conversation, revision, false)?]
+        }
+        Some(ProjectCommand::Resume {
+            conversation,
+            revision,
+        }) => {
+            let row = store.set_project_policy_enabled(&conversation, revision, true)?;
+            wake(root)?;
+            vec![row]
+        }
+    };
+    if json {
+        crate::print_json(rows)?;
+    } else if rows.is_empty() {
+        println!(
+            "No project grants. Use xcb projects configure <conversation> <goal> --tasks N --hours N."
+        );
+    } else {
+        for row in rows {
+            println!(
+                "{} · {} · {}/{} tasks used · expires {} · rev {}\n  {}",
+                row.conversation,
+                row.status(),
+                row.admitted_tasks,
+                row.max_tasks,
+                row.expires_at_ms,
+                row.revision,
+                xcb_core::display_text(&row.goal, 4096)
+            );
+        }
+    }
+    Ok(0)
+}
+
+#[derive(Subcommand)]
 pub enum ScheduleCommand {
+    /// Schedule a pinned, deterministic ALGAL planning program.
+    Program {
+        /// Persistent project conversation from `xcb conversations`.
+        conversation: Id,
+        /// ALGAL manifest with a text summary output and optional prompt output.
+        manifest: PathBuf,
+        /// JSON object satisfying the manifest's input interface.
+        #[arg(long)]
+        inputs: Option<PathBuf>,
+        /// Human-readable schedule and backlog label.
+        #[arg(long, default_value = "Scheduled ALGAL planner")]
+        title: String,
+        /// Seconds between wake-ups, from 60 seconds to 365 days.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(60..=31_536_000))]
+        every: u64,
+    },
     /// Enable a recurring prompt; first wake-up occurs after the interval.
     Add {
         /// Persistent conversation to wake, from `xcb conversations`.
@@ -85,6 +225,110 @@ pub enum ScheduleCommand {
         #[arg(long)]
         revision: u64,
     },
+}
+
+#[derive(Subcommand)]
+pub enum MemoryCommand {
+    /// Bind an explicit local Wordcell vault and trusted executable to a project.
+    Configure {
+        /// Persistent project conversation from `xcb conversations`.
+        conversation: Id,
+        /// Existing local Wordcell vault directory.
+        #[arg(long)]
+        vault: PathBuf,
+        /// Absolute installed Wordcell CLI path; its bytes and interpreter are pinned.
+        #[arg(long)]
+        wordcell: PathBuf,
+        /// Required when replacing an existing binding.
+        #[arg(long)]
+        revision: Option<u64>,
+    },
+    /// Inspect the project binding without reading the vault.
+    Status {
+        /// Persistent project conversation from `xcb conversations`.
+        conversation: Id,
+    },
+    /// Search only the project's bound local vault; results are historical context.
+    Search {
+        /// Project conversation with an explicit memory binding.
+        conversation: Id,
+        /// Exact local search text, at most 1024 bytes.
+        query: String,
+        /// Maximum number of returned hits, from 1 to 16.
+        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u8).range(1..=16))]
+        limit: u8,
+    },
+    /// Explicitly promote a supplied note with task provenance; never a transcript.
+    Promote {
+        /// Source task whose conversation owns the Wordcell binding.
+        task: Id,
+        /// UTF-8 note, at most 8 KiB; identical promotion is idempotent.
+        #[arg(long)]
+        body_file: PathBuf,
+    },
+}
+
+fn read_bounded(path: &Path, max: usize) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take((max + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > max {
+        return Err(Error::Unavailable(
+            "input file exceeds the command's byte limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+pub async fn memory(root: &Path, command: MemoryCommand, json: bool) -> Result<i32> {
+    let store = ManagedStore::open(root)?;
+    let value = match command {
+        MemoryCommand::Configure {
+            conversation,
+            vault,
+            wordcell,
+            revision,
+        } => {
+            let config =
+                xcb_runtime::wordcell::WordcellConfig::admit(&wordcell, &vault.canonicalize()?)?;
+            serde_json::to_value(store.bind_memory(&conversation, revision, config)?)?
+        }
+        MemoryCommand::Status { conversation } => {
+            serde_json::to_value(store.memory_binding(&conversation)?)?
+        }
+        MemoryCommand::Search {
+            conversation,
+            query,
+            limit,
+        } => {
+            store
+                .search_memory(&conversation, &query, usize::from(limit))
+                .await?
+        }
+        MemoryCommand::Promote { task, body_file } => {
+            let item = store
+                .task(&task)?
+                .ok_or(Error::Unavailable("managed task not found"))?;
+            let note = String::from_utf8(read_bounded(&body_file, 8192)?)
+                .map_err(|_| Error::Unavailable("memory note must be UTF-8"))?;
+            let receipt = store
+                .promote_memory(&item.conversation, &task, &note)
+                .await?;
+            let unsettled = receipt.status != xcb_runtime::wordcell::PromotionStatus::Completed;
+            crate::print_json(&receipt)?;
+            return Ok(if unsettled { 2 } else { 0 });
+        }
+    };
+    if json {
+        crate::print_json(value)?;
+    } else {
+        println!(
+            "{}",
+            xcb_core::display_text(&serde_json::to_string_pretty(&value)?, 65536)
+        );
+    }
+    Ok(0)
 }
 
 fn wake(root: &Path) -> Result<()> {
@@ -125,6 +369,17 @@ pub async fn backlog(
     let store = ManagedStore::open(root)?;
     let mut runnable = false;
     let task = match command {
+        Some(BacklogCommand::Complete {
+            id,
+            summary,
+            revision,
+        }) => store.complete_backlog(&id, revision, summary).await?,
+        Some(BacklogCommand::Reconcile { id, revision }) => {
+            let runs = xcb_runtime::store::Store::open(root)?;
+            let task = store.reconcile_uncertain(&runs, &id, revision).await?;
+            runnable = true;
+            task
+        }
         None => {
             let tasks = store.backlog(conversation, 256)?;
             if json {
@@ -209,6 +464,35 @@ pub async fn schedules(
 ) -> Result<i32> {
     let store = ManagedStore::open(root)?;
     let rows = match command {
+        Some(ScheduleCommand::Program {
+            conversation,
+            manifest,
+            inputs,
+            title,
+            every,
+        }) => {
+            let manifest = serde_json::from_slice(&read_bounded(
+                &manifest,
+                xcb_runtime::managed_program::MAX_MANIFEST_BYTES,
+            )?)?;
+            let inputs = match inputs {
+                Some(path) => serde_json::from_slice(&read_bounded(
+                    &path,
+                    xcb_runtime::managed_program::MAX_INPUT_BYTES,
+                )?)?,
+                None => serde_json::json!({}),
+            };
+            let program = xcb_runtime::managed_program::AdmittedProgram::admit(manifest, inputs)?;
+            let interval = every * 1000;
+            let first = now_ms()
+                .checked_add(interval)
+                .ok_or(Error::Unavailable("schedule time overflow"))?;
+            let schedule = store
+                .create_program_schedule(&conversation, title, program, interval, first)
+                .await?;
+            wake(root)?;
+            vec![schedule]
+        }
         None => store.schedules(conversation)?,
         Some(ScheduleCommand::Add {
             conversation,
