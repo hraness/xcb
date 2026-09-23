@@ -77,10 +77,17 @@ services, schedules or unqualified providers.
 
 ## Status
 
-Implementation, Reflexes v2 integration and independent review are complete.
-Inbox-driven continuation preserves confirmation vetoes, uses a neutral handoff
-even for late guidance, and is excluded from automatic reflex learning. Native
-workspace tests, strict Clippy and the site gate passed before that integration;
-fresh aggregate gates and isolated CLI/TUI acceptance are now required on the
-integrated tree. Release, publication and installation remain pending; no v0.5.0
-publication is claimed.
+Implementation, Reflexes v2 integration, independent review and cross-platform
+validation are complete. [PR #145](https://github.com/hraness/xcb/pull/145)
+merged after macOS/Linux tests, native builds and operator acceptance, strict
+Clippy, formatting, compatibility, site, qualification and security checks passed.
+The local operator acceptance passed 182 checks; the native workspace passed
+727 tests with 5 intentional ignores, and compatibility passed 1,066 tests.
+
+[v0.5.0](https://github.com/hraness/xcb/releases/tag/v0.5.0) is published at
+`a291605db5c5baad04086492249ba7c0327f70ef`.
+[Release admission](https://github.com/hraness/xcb/actions/runs/35919203357)
+passed in native-only mode. All six actual assets were independently verified,
+including both native archives' checksums and exact source/run provenance.
+The site publication datum now uses those verified coordinates. Production and
+local installation evidence are recorded separately during delivery closeout.
