@@ -2,7 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const ORIGIN = "https://api.anthropic.com";
 const LIMIT = 2 * 1024 * 1024;
-export const CLAUDE_API_SDK_VERSION = "0.125.0";
+export const CLAUDE_API_SDK_VERSION = "0.127.0";
 export type ClaudeApiClient = Pick<Anthropic, "messages" | "models">;
 
 /** Internal host transport. Public setup never accepts a custom endpoint or fetch. */

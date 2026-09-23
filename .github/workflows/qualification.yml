@@ -87,7 +87,7 @@ jobs:
           bun qualification/build-receipt.ts "$BWRAP" "$SHA" evidence/linux-qualification.json || status=1
           if [ ! -f evidence/linux-qualification.json ]; then status=1; fi
           echo "status=$status" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: linux-kernel-boundary-evidence
