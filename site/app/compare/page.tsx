@@ -93,6 +93,11 @@ export default function Compare() {
                     <td><p>You want a configurable coding agent across model providers. xcb focuses on supported coding-agent runtimes and their accounts; its current provider coverage is narrower.</p></td>
                   </tr>
                   <tr>
+                    <th scope="row"><span className="xcb-comparison-name">Prime Agent</span><span className="xcb-comparison-kind">Self-improving agent harness</span></th>
+                    <td><p>An open-source coding agent built around a recursive LM control environment and a Continual Harness that refines prompts, memories, and subagent specs through evidence-backed updates.</p><div className="xcb-comparison-sources"><a href="https://github.com/PrimeIntellect-ai/prime-agent">Prime Agent</a><a href="https://primeintellect.ai">Prime Intellect</a></div></td>
+                    <td><p>You want an agent that tunes its own context and skills. xcb&apos;s experimental harness evolves a different object — routing manifests evaluated on labeled cases — under admission, custody, and settlement contracts that stay fixed.</p></td>
+                  </tr>
+                  <tr>
                     <th scope="row"><span className="xcb-comparison-name">Devin cloud</span><span className="xcb-comparison-kind">Managed task environments</span></th>
                     <td><p>Delegate work into development environments with a shell, browser, and editor. Documented workflows can compare parallel Devin sessions.</p><div className="xcb-comparison-sources"><a href="https://docs.devin.ai/enterprise/deployment/overview">Deployment docs</a><a href="https://docs.devin.ai/use-cases/gallery/batch-3-agents-best-solution">Parallel workflow</a></div></td>
                     <td><p>You want managed remote task environments. xcb keeps its terminal and session state locally. Its Devin adapter uses the local ACP candidate, whose credential-free boundary proof is separate from authenticated coding acceptance. Account model availability is checked at launch.</p><a href="/docs/providers#devin">xcb’s Devin status</a></td>

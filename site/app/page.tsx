@@ -7,6 +7,7 @@ import {
   ProductHero,
 } from "@hraness/design-kit/react/server";
 import { AskAiAboutThis } from "@hraness/ui";
+import { HeroGraphic } from "./hero-graphic";
 import { publishedRelease } from "./publication";
 import { CompatibilityArchive, NativeDownloads, ReleaseSummary } from "./release-state";
 import { RoutePreview } from "./route-preview";
@@ -49,9 +50,16 @@ export default function Home() {
               actions={[{ href: "/docs/getting-started", label: "Get started ↗" }, { href: "/docs/route", label: "Route contract" }]}
               boundary="Open source · uses the subscriptions you already have · source build"
               notice={<div className="xcb-hero-install"><p>Install from source in three commands. Needs Git and rustup; release binaries are built for macOS ARM64 and Linux x86_64.</p><pre className="install-command" tabIndex={0}><code>{threeCommandInstall}</code></pre><ReleaseSummary release={publishedRelease} /></div>}
-              frame={<RoutePreview />}
+              frame={<HeroGraphic />}
             />
           </div>
+          <MarketingSection id="why" heading="Why xcb." headingId="why-title" summary="Most agent tools start from one seat. xcb starts from the subscriptions you already pay for — and from the agents that call it.">
+            <div className="xcb-fit-grid">
+              <div><h3>Multiplex your subscriptions</h3><p>One account&apos;s quota window shouldn&apos;t idle your day. Every credentialed account stays in the eligible set, and each turn lands on the best route that is actually free.</p></div>
+              <div><h3>Made for other agents</h3><p>xcb is infrastructure, not just an app. A closed JSON contract lets any agent hand over a task and get a settled result back; the SDK embeds the same router in your application.</p></div>
+              <div><h3>Evolves under fixed contracts</h3><p>Experimental: the managed harness proposes routing manifests, evaluates them on labeled cases, and promotes only strictly-better ones. What it may never change — admission, custody, settlement — stays fixed.</p></div>
+            </div>
+          </MarketingSection>
           <MarketingSection id="router" heading="Every turn. One accountable route." headingId="router-title" summary="A call is never just a prompt. The route that takes it is admitted, held, and settled on the record.">
             <div className="xcb-fit-grid">
               <div><h3>Custody that can be proven</h3><p>The selected account is held under an exclusive, generation-fenced lease while its provider runs. Credentials never enter the workspace, and custody stays held until process exit is independently proven.</p></div>
@@ -65,6 +73,7 @@ export default function Home() {
               <div><h3>For agents — <code>xcb --json route</code></h3><p>One closed JSON document on stdin, one bounded JSON result on stdout. The contract takes a task and eligibility constraints — never credentials, tools, hooks, or provider flags.</p><a className="xcb-text-link" href="/docs/route">Request and response schema ↗</a></div>
               <div><h3>For applications — the SDK</h3><p><code>createSubscriptionRouter</code> bundles the lease store and qualified task adapters into one call. The TypeScript compatibility package is a source build; hosts supply adapters and qualification evidence.</p><a className="xcb-text-link" href="/docs/route#sdk">Router entry point ↗</a></div>
             </div>
+            <RoutePreview />
           </MarketingSection>
           <MarketingSection id="routing" heading="See the route before it runs." headingId="routing-title" layout="split-reverse" summary="No hidden brokerage. Every selection is a filter you can preview and a turn you can verify.">
             <div className="xcb-workflow-proof">
@@ -85,7 +94,14 @@ export default function Home() {
           <MarketingSection id="harness" heading="A harness that improves itself." headingId="harness-title" summary="Experimental: the managed harness is being rebuilt as a self-evolving ALGAL harness. Routing manifests are proposed and evaluated on labeled cases, and a manifest is promoted only when it is strictly better — while admission, custody, and settlement contracts stay fixed and deterministic.">
             <div className="xcb-pane-example">
               <span className="xcb-badge" aria-label="Experimental feature">Experimental</span>
-              <p>The current build does not execute self-modifying orchestration policies. The durable record format, exclusive account custody, and provider admission gates underneath it are the same ones the route contract uses.</p>
+              <div className="xcb-evolve-loop" aria-label="The evolution loop">
+                <div className="xcb-evolve-step"><strong>propose</strong><span>routing manifests</span></div>
+                <span className="xcb-evolve-arrow" aria-hidden="true">→</span>
+                <div className="xcb-evolve-step"><strong>evaluate</strong><span>labeled cases</span></div>
+                <span className="xcb-evolve-arrow" aria-hidden="true">→</span>
+                <div className="xcb-evolve-step"><strong>promote</strong><span>strictly better only</span></div>
+              </div>
+              <p>The current build does not execute self-modifying orchestration policies. The durable record format, exclusive account custody, and provider admission gates underneath it are the same ones the route contract uses — and they are fixed inputs to the evolution, not things it can rewrite.</p>
               <a className="xcb-text-link" href={`${repository}/blob/main/docs/managed-harness.md`}>Managed harness design ↗</a>
             </div>
           </MarketingSection>

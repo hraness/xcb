@@ -92,6 +92,7 @@ test("the router leads and the experimental harness comes last", () => {
   expect(html).toContain("createSubscriptionRouter");
   expect(html).toContain('href="/docs/route"');
   for (const [before, after] of [
+    ['id="why"', 'id="router"'],
     ['id="router"', 'id="interfaces"'],
     ['id="interfaces"', 'id="routing"'],
     ['id="routing"', 'id="workspace"'],
