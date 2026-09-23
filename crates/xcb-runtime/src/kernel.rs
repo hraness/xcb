@@ -238,12 +238,17 @@ async fn configured_judge_continuation(
     judge_continuation(judge.as_ref(), input).await
 }
 
+/// `managed_task` marks the session with the owning managed task atomically
+/// at creation, so reconciliation can prove custody of an orphan if the
+/// supervisor dies before `prepare` admits it. Direct/interactive sessions
+/// pass `None` and are never swept.
 pub fn new_session(
     store: &Store,
     workspace: &Path,
     config: &Config,
     account: Option<&Id>,
     model: Option<&str>,
+    managed_task: Option<&Id>,
 ) -> Result<Session> {
     // An explicit model chooses its provider when no account was supplied.
     // The saved default is a preference, not a cross-provider override.
@@ -324,7 +329,10 @@ pub fn new_session(
     };
     let account = store.account(&id)?;
     let model = choose_model(store, account.provider, model, config)?;
-    let session = store.create_session(&id, model, workspace, now_ms())?;
+    let session = match managed_task {
+        Some(task) => store.create_managed_session(&id, model, workspace, now_ms(), task)?,
+        None => store.create_session(&id, model, workspace, now_ms())?,
+    };
     store.select_pane(&session.id, &config.pane)?;
     store
         .session(&session.id)?
@@ -1158,6 +1166,31 @@ fn start(
     }
 }
 
+/// mtime probe for `config.json`: the kernel's own publish cadence picks up
+/// writes from sibling terminals, keeping it the single refresh path — no
+/// TUI-side `Intent::Refresh` timer is needed.
+fn config_modified(root: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(root.join("config.json"))
+        .and_then(|meta| meta.modified())
+        .ok()
+}
+
+fn reload_config(
+    root: &Path,
+    config: &mut Config,
+    stamp: &mut Option<std::time::SystemTime>,
+    outbox: &Mutex<Outbox>,
+) {
+    *stamp = config_modified(root);
+    match Config::load(root) {
+        Ok((fresh, _)) => *config = fresh,
+        Err(error) => queue(
+            outbox,
+            Update::Notice(format!("Configuration reload rejected: {error}")),
+        ),
+    }
+}
+
 pub async fn serve(
     store: Arc<Store>,
     workspace: PathBuf,
@@ -1166,6 +1199,7 @@ pub async fn serve(
     output: SyncSender<Update>,
 ) -> Result<()> {
     let mut config = Config::load(store.root())?.0;
+    let mut config_stamp = config_modified(store.root());
     let mut active: BTreeMap<Id, Active> = BTreeMap::new();
     let outbox = Arc::new(Mutex::new(Outbox::default()));
     let (completed, mut completions) = mpsc::channel::<(Id, Result<Outcome>)>(16);
@@ -1204,10 +1238,10 @@ pub async fn serve(
                     if matches!(intent, Intent::Quit) { quit = true; pending_pane = None; for task in active.values() { let _ = task.cancel.send(true); } break; }
                     let handled: Result<()> = (|| {
                         match intent {
-                            Intent::Refresh => { match Config::load(store.root()) { Ok((fresh, _)) => config = fresh, Err(error) => queue(&outbox, Update::Notice(format!("Configuration reload rejected: {error}"))) } }
+                            Intent::Refresh => reload_config(store.root(), &mut config, &mut config_stamp, &outbox),
                             Intent::Submit { text, attachments, .. } => {
                                 let prepared: Result<Id> = (|| {
-                                    if current.is_none() { current = Some(new_session(&store, &workspace, &config, None, None)?.id); }
+                                    if current.is_none() { current = Some(new_session(&store, &workspace, &config, None, None, None)?.id); }
                                     let id = current.clone().expect("selected session");
                                     if active.contains_key(&id) || active.len() >= 16 { return Err(Error::Conflict("a turn is still running; your draft was restored to the composer")); }
                                     let session = store.session(&id)?.ok_or(Error::Unavailable("session not found"))?;
@@ -1232,7 +1266,7 @@ pub async fn serve(
                             }
                             Intent::Conversation(_) => return Err(Error::Unavailable("managed conversations are available from plain xcb chat")),
                             Intent::Resume(id) => { if store.session(&id)?.is_none() { return Err(Error::Unavailable("session not found")); } current = Some(id); }
-                            Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None)?.id),
+                            Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None, None)?.id),
                             Intent::Account(account) => {
                                 if current.as_ref().is_some_and(|id| active.contains_key(id)) { return Err(Error::Conflict("stop or finish the turn before changing accounts")); }
                                 store.require_quota_available(&account, now_ms())?;
@@ -1240,7 +1274,7 @@ pub async fn serve(
                                 let provider = store.account(&account)?.provider;
                                 let model = choose_model(&store, provider, None, &config)?;
                                 if let Some(id) = &current { let session = store.session(id)?.ok_or(Error::Unavailable("session not found"))?; store.rebind(id, session.revision, &account, model)?; }
-                                else { current = Some(new_session(&store, &workspace, &config, Some(&account), None)?.id); }
+                                else { current = Some(new_session(&store, &workspace, &config, Some(&account), None, None)?.id); }
                             }
                             Intent::Model(key) => {
                                 let matches: Vec<_> = store.models()?.into_iter().filter(|model| model.key() == key || model.id.as_str() == key).collect();
@@ -1250,7 +1284,7 @@ pub async fn serve(
                                 let previous = current.as_ref().map(|id| store.session(id)).transpose()?.flatten();
                                 let account = model_account(&store, model.provider, previous.as_ref().map(|session| &session.account), &config)?;
                                 if let Some(id) = &current { let session = store.session(id)?.ok_or(Error::Unavailable("session not found"))?; store.rebind(id, session.revision, &account, model)?; }
-                                else { current = Some(new_session(&store, &workspace, &config, Some(&account), Some(&model.key()))?.id); }
+                                else { current = Some(new_session(&store, &workspace, &config, Some(&account), Some(&model.key()), None)?.id); }
                             }
                             Intent::SetDefault => {
                                 let session = current.as_ref().and_then(|id| store.session(id).ok().flatten()).ok_or(Error::Unavailable("select a session first"))?;
@@ -1289,6 +1323,11 @@ pub async fn serve(
                 // reset drafts, scroll positions, notices or open pickers.
                 let refresh_after = if active.is_empty() { Duration::from_secs(1) } else { Duration::from_millis(250) };
                 if activity_published.elapsed() >= refresh_after {
+                    // A config written by a sibling terminal (xcb plugins, an
+                    // edited file) lands on this same cadence.
+                    if config_modified(store.root()) != config_stamp {
+                        reload_config(store.root(), &mut config, &mut config_stamp, &outbox);
+                    }
                     publish(&store, current.as_ref(), &config, &active, &outbox)?;
                     activity_published = tokio::time::Instant::now();
                 }
@@ -1352,6 +1391,7 @@ fn generation_session(store: &Store, source: &Session, config: &Config) -> Resul
         config,
         Some(&source.account),
         Some(&source.model.key()),
+        None,
     )
 }
 fn pane_prompt(request: &str) -> Result<String> {
@@ -1524,6 +1564,7 @@ mod tests {
             &config,
             Some(&blocked.id),
             Some(&model.key()),
+            None,
         )
         .unwrap();
         let now = now_ms();
@@ -1548,7 +1589,7 @@ mod tests {
             fallback.id
         );
         assert_eq!(
-            new_session(&store, &workspace, &config, None, Some(&model.key()))
+            new_session(&store, &workspace, &config, None, Some(&model.key()), None)
                 .unwrap()
                 .account,
             fallback.id
@@ -1559,7 +1600,8 @@ mod tests {
                 &workspace,
                 &config,
                 Some(&blocked.id),
-                Some(&model.key())
+                Some(&model.key()),
+                None
             )
             .unwrap_err()
             .to_string()
@@ -1577,7 +1619,7 @@ mod tests {
         );
         store.set_account_enabled(&fallback.id, false).unwrap();
         assert!(
-            new_session(&store, &workspace, &config, None, Some(&model.key()))
+            new_session(&store, &workspace, &config, None, Some(&model.key()), None)
                 .unwrap_err()
                 .to_string()
                 .contains("reported quota reset")
@@ -2020,21 +2062,29 @@ mod tests {
             .set_models(Provider::Devin, std::slice::from_ref(&model))
             .unwrap();
         crate::devin::auth::store_token(&store, &connected.id, b"synthetic-token").unwrap();
-        let chosen = new_session(&store, &workspace, &config, None, Some(&model.key())).unwrap();
+        let chosen =
+            new_session(&store, &workspace, &config, None, Some(&model.key()), None).unwrap();
         assert_eq!(chosen.account, connected.id);
         let other_default = Config {
             default_account: Some(claude.id),
             ..config.clone()
         };
         assert_eq!(
-            new_session(&store, &workspace, &other_default, None, Some(&model.key()))
-                .unwrap()
-                .account,
+            new_session(
+                &store,
+                &workspace,
+                &other_default,
+                None,
+                Some(&model.key()),
+                None
+            )
+            .unwrap()
+            .account,
             connected.id
         );
         let run = store.prepare_probe(&connected.id, None, 4).unwrap();
         assert_eq!(
-            new_session(&store, &workspace, &config, None, Some(&model.key()))
+            new_session(&store, &workspace, &config, None, Some(&model.key()), None)
                 .unwrap()
                 .account,
             unsigned.id
@@ -2043,7 +2093,7 @@ mod tests {
         store.settle(&run, State::Idle, 5).unwrap();
         crate::devin::auth::store_token(&store, &unsigned.id, b"synthetic-token").unwrap();
         assert_eq!(
-            new_session(&store, &workspace, &config, None, Some(&model.key()))
+            new_session(&store, &workspace, &config, None, Some(&model.key()), None)
                 .unwrap()
                 .account,
             unsigned.id
@@ -2389,5 +2439,50 @@ mod tests {
             .await
             .unwrap()
         );
+    }
+
+    /// The kernel's own publish cadence is the single refresh path: a config
+    /// written by another terminal lands on it with no `Intent::Refresh` in
+    /// flight, and a quiet window never publishes twice on the same change.
+    #[tokio::test]
+    async fn the_kernel_republishes_config_writes_without_a_client_refresh() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = directory.path().canonicalize().unwrap().join("state");
+        let store = Arc::new(Store::open(&state).unwrap());
+        let workspace =
+            crate::private::directory(&directory.path().canonicalize().unwrap().join("workspace"))
+                .unwrap();
+        let (commands, input) = sync_channel(8);
+        let (output, updates) = sync_channel(64);
+        let task = tokio::spawn(serve(store.clone(), workspace, None, input, output));
+        view_matching(&updates, |view| !view.reduced_motion).await;
+
+        // A sibling terminal writes config.json; no intent is sent.
+        let (mut fresh, revision) = Config::load(&state).unwrap();
+        fresh.reduced_motion = true;
+        fresh.save(&state, revision.as_deref()).unwrap();
+        view_matching(&updates, |view| view.reduced_motion).await;
+
+        // The quiet window that follows publishes only on the ~1s idle
+        // cadence: roughly once, never a duplicate burst.
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+        let mut views = 0usize;
+        while let Ok(update) = updates.try_recv() {
+            assert!(
+                matches!(update, Update::View(_)),
+                "idle polling publishes only full views"
+            );
+            views += 1;
+        }
+        assert!(
+            views <= 2,
+            "a quiet window must not duplicate publishes: {views}"
+        );
+        commands.send(Intent::Quit).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }

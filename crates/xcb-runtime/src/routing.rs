@@ -3,11 +3,20 @@ use crate::{
     store::Store, summary,
 };
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 use xcb_core::{
     Id, Provider,
     models::{Mode, ModelChoice},
 };
+
+/// The route-selection judge may only reorder already-admitted candidates, so
+/// its latency is bounded well under the backend request ceiling: a slow,
+/// failing or absent judge leaves the deterministic order intact and lets the
+/// supervisor tick proceed.
+const ROUTE_JUDGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -540,22 +549,8 @@ async fn route_with_admitted(
                 criteria,
             },
         );
-        if let Ok(answers) = backend
-            .ask(
-                &serde_json::json!({"task":xcb_core::display_text(task,8192),"class":class}),
-                &questions,
-            )
-            .await
-            && let Some(index) = answers
-                .answers
-                .get("route")
-                .and_then(judge::JudgeAnswer::choice)
-                .and_then(|(value, _)| {
-                    value
-                        .strip_prefix("route_")
-                        .and_then(|value| value.parse::<usize>().ok())
-                })
-                .filter(|index| *index < candidates.len())
+        if let Some(index) =
+            judge_route_index(backend.as_ref(), task, class, &questions, candidates.len()).await
         {
             selected = index;
             judged = true;
@@ -591,6 +586,40 @@ async fn route_with_admitted(
         profile: candidate.profile,
         reason,
     })
+}
+
+/// Ask the judge to order the admitted candidates, bounded so a stalled judge
+/// cannot hold a supervisor tick. A timeout, transport failure or answer that
+/// does not name an in-range `route_N` option yields `None`, preserving the
+/// deterministic order already computed for the candidates.
+async fn judge_route_index(
+    backend: &dyn judge::Judge,
+    task: &str,
+    class: TaskClass,
+    questions: &judge::JudgeQuestions,
+    candidates: usize,
+) -> Option<usize> {
+    let asked = tokio::time::timeout(
+        ROUTE_JUDGE_TIMEOUT,
+        backend.ask(
+            &serde_json::json!({"task":xcb_core::display_text(task,8192),"class":class}),
+            questions,
+        ),
+    )
+    .await;
+    let Ok(Ok(answers)) = asked else {
+        return None;
+    };
+    answers
+        .answers
+        .get("route")
+        .and_then(judge::JudgeAnswer::choice)
+        .and_then(|(value, _)| {
+            value
+                .strip_prefix("route_")
+                .and_then(|value| value.parse::<usize>().ok())
+        })
+        .filter(|index| *index < candidates)
 }
 
 #[cfg(test)]
@@ -633,9 +662,15 @@ mod tests {
         assert_eq!(route.account, second);
         assert_eq!(route.model.provider, Provider::Codex);
         let work = store.root().parent().unwrap().join("synthetic-work");
-        let selected =
-            crate::kernel::new_session(&store, &work, &config, None, Some("codex/gpt-5.6-sol"))
-                .unwrap();
+        let selected = crate::kernel::new_session(
+            &store,
+            &work,
+            &config,
+            None,
+            Some("codex/gpt-5.6-sol"),
+            None,
+        )
+        .unwrap();
         assert_eq!(selected.account, second);
         assert!(
             crate::kernel::new_session(
@@ -643,7 +678,8 @@ mod tests {
                 &work,
                 &config,
                 Some(&first),
-                Some("codex/gpt-5.6-sol")
+                Some("codex/gpt-5.6-sol"),
+                None
             )
             .is_err()
         );
@@ -654,8 +690,15 @@ mod tests {
                 .is_err()
         );
         assert!(
-            crate::kernel::new_session(&store, &work, &config, None, Some("codex/gpt-5.6-sol"))
-                .is_err()
+            crate::kernel::new_session(
+                &store,
+                &work,
+                &config,
+                None,
+                Some("codex/gpt-5.6-sol"),
+                None
+            )
+            .is_err()
         );
     }
 
@@ -983,5 +1026,138 @@ mod tests {
         ] {
             assert_eq!(explicit_provider_intent(task), None, "{task}");
         }
+    }
+
+    /// A judge that never answers inside the bound: the call must return so a
+    /// supervisor tick can keep its deterministic candidate order.
+    struct StalledJudge;
+    impl judge::Judge for StalledJudge {
+        fn ask<'a>(
+            &'a self,
+            _: &'a serde_json::Value,
+            _: &'a judge::JudgeQuestions,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<judge::JudgeAnswers>> + Send + 'a>,
+        > {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_route_judge_cannot_hold_the_selection() {
+        let mut questions = judge::JudgeQuestions::new();
+        questions.insert(
+            "route".into(),
+            judge::JudgeQuestion::Choice {
+                instructions: "pick a route".into(),
+                criteria: BTreeMap::from([("route_0".into(), None), ("route_1".into(), None)]),
+            },
+        );
+        let started = std::time::Instant::now();
+        let index = judge_route_index(
+            &StalledJudge,
+            "fix the flaky test",
+            TaskClass::Balanced,
+            &questions,
+            2,
+        )
+        .await;
+        assert_eq!(index, None);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= ROUTE_JUDGE_TIMEOUT && elapsed < Duration::from_secs(15),
+            "route judge returned after {elapsed:?}"
+        );
+    }
+
+    /// A fast judge that answers inside the bound still reorders candidates.
+    struct FastJudge;
+    impl judge::Judge for FastJudge {
+        fn ask<'a>(
+            &'a self,
+            _: &'a serde_json::Value,
+            _: &'a judge::JudgeQuestions,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<judge::JudgeAnswers>> + Send + 'a>,
+        > {
+            Box::pin(async {
+                Ok(judge::JudgeAnswers {
+                    answers: BTreeMap::from([(
+                        "route".into(),
+                        judge::JudgeAnswer::Choice {
+                            choice: "route_1".into(),
+                            confidence: 0.9,
+                            probabilities: BTreeMap::from([
+                                ("route_0".into(), 0.1),
+                                ("route_1".into(), 0.9),
+                            ]),
+                        },
+                    )]),
+                    model: None,
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn answered_route_judge_still_reorders_candidates() {
+        let mut questions = judge::JudgeQuestions::new();
+        questions.insert(
+            "route".into(),
+            judge::JudgeQuestion::Choice {
+                instructions: "pick a route".into(),
+                criteria: BTreeMap::from([("route_0".into(), None), ("route_1".into(), None)]),
+            },
+        );
+        assert_eq!(
+            judge_route_index(
+                &FastJudge,
+                "fix the flaky test",
+                TaskClass::Balanced,
+                &questions,
+                2
+            )
+            .await,
+            Some(1)
+        );
+        // Out-of-range answers are rejected, not clamped.
+        struct OutOfRange;
+        impl judge::Judge for OutOfRange {
+            fn ask<'a>(
+                &'a self,
+                _: &'a serde_json::Value,
+                _: &'a judge::JudgeQuestions,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<judge::JudgeAnswers>> + Send + 'a>,
+            > {
+                Box::pin(async {
+                    Ok(judge::JudgeAnswers {
+                        answers: BTreeMap::from([(
+                            "route".into(),
+                            judge::JudgeAnswer::Choice {
+                                choice: "route_7".into(),
+                                confidence: 0.9,
+                                probabilities: BTreeMap::from([
+                                    ("route_0".into(), 0.1),
+                                    ("route_7".into(), 0.9),
+                                ]),
+                            },
+                        )]),
+                        model: None,
+                    })
+                })
+            }
+        }
+        assert_eq!(
+            judge_route_index(
+                &OutOfRange,
+                "fix the flaky test",
+                TaskClass::Balanced,
+                &questions,
+                2
+            )
+            .await,
+            None
+        );
     }
 }

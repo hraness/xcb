@@ -75,6 +75,22 @@ impl TaskState {
             Self::Uncertain => "uncertain",
         }
     }
+    /// Display label shared by `xcb tasks`, the TUI task surfaces, and the
+    /// supervisor's status text. `as_str` stays the stored wire value; the
+    /// queued label carries its waiting-for-a-route annotation so a queued
+    /// task never reads as a live worker. Callers that classify rather than
+    /// display match the leading word (`queued`, `running`, …).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued — waiting for a route",
+            Self::Running => "running",
+            Self::NeedsInput => "needs input",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Uncertain => "uncertain",
+        }
+    }
     fn terminal(self) -> bool {
         matches!(
             self,
@@ -132,6 +148,17 @@ pub struct ManagedTask {
     /// Explicit user follow-ups survive provider failover and continuation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub user_inputs: Vec<String>,
+    /// Leading `user_inputs` entries the current session transcript provably
+    /// carries: a continuation prompt only sends the entries added since.
+    /// Reset whenever the task moves to a new worker session.
+    #[serde(default)]
+    pub delivered_inputs: usize,
+    /// Whether the current session's transcript provably carries the task's
+    /// original prompt (goal, contract, preferences). Set only when a run
+    /// completed on this session — the run provably appended the prompt it
+    /// was handed — and reset when the session is replaced.
+    #[serde(default)]
+    pub context_carried: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_at_ms: Option<u64>,
     pub attachments: Vec<Attachment>,
@@ -182,6 +209,8 @@ impl ManagedTask {
             || self.max_attempts > 32
             || self.attempts > self.max_attempts
             || self.user_inputs.len() > 64
+            || self.delivered_inputs > self.user_inputs.len()
+            || (self.context_carried && self.session.is_none())
             || self.user_inputs.iter().map(String::len).sum::<usize>() > 64 * 1024
             || self
                 .input_at_ms
@@ -288,6 +317,15 @@ pub struct ManagedStore {
     root: PathBuf,
     connection: Mutex<Connection>,
     unreadable: Mutex<BTreeSet<String>>,
+    /// A database still over `MAX_DB_BYTES` after a retention pass opens
+    /// read-only instead of failing or panicking: reads keep working and
+    /// every write reports the degraded state.
+    read_only: bool,
+    /// Diagnostics: active-task scans issued since this handle opened. Tests
+    /// use it to prove a prune pass scans once instead of per candidate.
+    active_scans: std::sync::atomic::AtomicU64,
+    /// Diagnostics: additive schema migrations this handle executed.
+    mailbox_migrations: std::sync::atomic::AtomicU64,
 }
 
 /// See `ManagedStore::view_stamp`.
@@ -299,6 +337,7 @@ struct ViewStamp {
     messages: i64,
     config: Option<std::time::SystemTime>,
     fault: Option<std::time::SystemTime>,
+    progress: Option<std::time::SystemTime>,
     unreadable: usize,
 }
 
@@ -327,13 +366,77 @@ fn task_from(tx: &Transaction<'_>, id: &Id) -> Result<Option<ManagedTask>> {
     .transpose()
 }
 
+/// Live bound for the managed database. Below it the store opens normally;
+/// above it `open` first runs retention, then degrades to read-only reads
+/// with a surfaced notice when the file stays over the bound.
+const MAX_DB_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Absolute custody bound for opening an existing database at all: retention
+/// and read-only access still need a custody-checked descriptor.
+const MAX_DB_OPEN_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+/// Retention horizon: messages, mailbox rows and terminal tasks older than
+/// this may be retired. Documented in docs/managed-harness.md.
+const RETENTION_HORIZON_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+/// Per-conversation retained transcript bound, independent of the larger
+/// write-time `MAX_MESSAGES` admission cap.
+const RETENTION_CONVERSATION_MESSAGES: i64 = 4096;
+/// Rows each retention statement retires per immediate transaction so a pass
+/// never holds the writer lock for long.
+const RETENTION_BATCH: i64 = 2048;
+/// Total bounded batches per `retain` call; leftover work resumes next open.
+const RETENTION_PASSES: u32 = 64;
+/// Retention runs at open at most this often; the stamp file inside the
+/// managed directory records the last completed pass.
+const RETENTION_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const RETENTION_STAMP_FILE: &str = "retention.stamp";
+/// Supervisor-side idle check cadence; the file probe itself is cheap.
+const RETENTION_IDLE_CHECK: Duration = Duration::from_secs(60 * 60);
+
+/// Size of the database file plus its live WAL: growth lands in the WAL
+/// first, so the bound has to count both.
+fn db_bytes(path: &Path) -> u64 {
+    fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+        + fs::metadata(path.with_extension("sqlite-wal"))
+            .map(|meta| meta.len())
+            .unwrap_or(0)
+}
+
+fn retention_due(root: &Path) -> bool {
+    match fs::symlink_metadata(root.join(RETENTION_STAMP_FILE)) {
+        Ok(meta) => meta
+            .modified()
+            .map(|at| at.elapsed().unwrap_or_default() >= RETENTION_INTERVAL)
+            .unwrap_or(true),
+        Err(_) => true,
+    }
+}
+
+fn stamp_retention(root: &Path) {
+    let path = root.join(RETENTION_STAMP_FILE);
+    match private::read(&path, 64) {
+        Ok(previous) => {
+            let _ = private::replace(&path, &[], &digest(&previous));
+        }
+        Err(_) => {
+            let _ = private::create(&path, &[]);
+        }
+    }
+}
+
 impl ManagedStore {
     pub fn open(root: &Path) -> Result<Self> {
         let root = private::directory(&root.join("managed"))?;
         let path = root.join("managed.sqlite");
+        let mut oversized = false;
         match fs::symlink_metadata(&path) {
-            Ok(_) => {
-                private::open_file(&path, 4 * 1024 * 1024 * 1024)?;
+            Ok(meta) => {
+                // Custody-check even an oversized database so retention can
+                // run on it instead of the open failing outright.
+                private::open_file(&path, MAX_DB_OPEN_BYTES)?;
+                oversized = meta.len()
+                    + fs::metadata(path.with_extension("sqlite-wal"))
+                        .map(|wal| wal.len())
+                        .unwrap_or(0)
+                    > MAX_DB_BYTES;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 private::create(&path, &[])?
@@ -354,6 +457,10 @@ impl ManagedStore {
                 "managed state was written by a newer xcb",
             ));
         }
+        // Incremental vacuum lets routine retention return freed pages to the
+        // filesystem; on an existing file it only takes effect if a rebuild
+        // already enabled it, so this is a no-op there.
+        connection.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
         if version == 0 {
             let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute_batch(
@@ -370,27 +477,189 @@ impl ManagedStore {
             )?;
             tx.commit()?;
         }
+        let mut mailbox_migrations = 0u64;
         if version == 1 {
-            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            tx.execute_batch(
-                "CREATE TABLE IF NOT EXISTS mailbox_messages(id TEXT PRIMARY KEY, source_task TEXT NOT NULL REFERENCES tasks(id), target_task TEXT NOT NULL REFERENCES tasks(id), sequence INTEGER NOT NULL, created_at INTEGER NOT NULL, payload TEXT NOT NULL, UNIQUE(target_task,sequence));
-                 CREATE INDEX IF NOT EXISTS mailbox_target_sequence ON mailbox_messages(target_task,sequence);",
+            // The additive mailbox migration only runs while the table is
+            // actually missing, so a routine open never takes the writer
+            // lock; a peer that migrated first is re-checked inside it.
+            let mailbox_ready: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mailbox_messages')",
+                [],
+                |row| row.get(0),
             )?;
-            tx.commit()?;
+            if !mailbox_ready {
+                let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let current: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='mailbox_messages')",
+                    [],
+                    |row| row.get(0),
+                )?;
+                if !current {
+                    tx.execute_batch(
+                        "CREATE TABLE mailbox_messages(id TEXT PRIMARY KEY, source_task TEXT NOT NULL REFERENCES tasks(id), target_task TEXT NOT NULL REFERENCES tasks(id), sequence INTEGER NOT NULL, created_at INTEGER NOT NULL, payload TEXT NOT NULL, UNIQUE(target_task,sequence));
+                         CREATE INDEX mailbox_target_sequence ON mailbox_messages(target_task,sequence);",
+                    )?;
+                    mailbox_migrations += 1;
+                }
+                tx.commit()?;
+            }
         }
-        Ok(Self {
+        let mut store = Self {
             root,
             connection: Mutex::new(connection),
             unreadable: Mutex::new(BTreeSet::new()),
-        })
+            read_only: false,
+            active_scans: std::sync::atomic::AtomicU64::new(0),
+            mailbox_migrations: std::sync::atomic::AtomicU64::new(mailbox_migrations),
+        };
+        if oversized || retention_due(store.root()) {
+            match store.retain() {
+                Ok(_) => stamp_retention(store.root()),
+                // A failed pass still opens the store; an oversized file then
+                // falls through to the read-only fallback below.
+                Err(error) => record_supervisor_fault(
+                    store.root(),
+                    &format!("managed retention could not run: {}", fault_text(&error)),
+                ),
+            }
+        }
+        if oversized && db_bytes(&path) > MAX_DB_BYTES {
+            // Deletes alone never shrink the file: freed pages sit on the
+            // freelist until a rebuild. One bounded VACUUM attempt runs here
+            // so a recoverable database does not degrade permanently; it
+            // also enables incremental vacuum for later routine passes.
+            let rebuilt: Result<()> = (|| {
+                let connection = store
+                    .connection
+                    .get_mut()
+                    .map_err(|_| Error::Conflict("managed database lock poisoned"))?;
+                connection.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+                connection.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+                Ok(())
+            })();
+            if let Err(error) = rebuilt {
+                record_supervisor_fault(
+                    store.root(),
+                    &format!(
+                        "managed retention could not rebuild the database: {}",
+                        fault_text(&error)
+                    ),
+                );
+            }
+        }
+        if oversized && db_bytes(&path) > MAX_DB_BYTES {
+            store
+                .connection
+                .get_mut()
+                .map_err(|_| Error::Conflict("managed database lock poisoned"))?
+                .pragma_update(None, "query_only", true)?;
+            store.read_only = true;
+            record_supervisor_fault(
+                store.root(),
+                "managed history stays over the 4 GiB bound after retention; reads continue but new writes are refused until old rows are removed",
+            );
+        }
+        Ok(store)
     }
     fn db(&self) -> Result<MutexGuard<'_, Connection>> {
         self.connection
             .lock()
             .map_err(|_| Error::Conflict("managed database lock poisoned"))
     }
+    /// Custody for a mutating transaction; refuses early on a read-only
+    /// degraded store so every write path reports one bounded diagnostic.
+    fn write_db(&self) -> Result<MutexGuard<'_, Connection>> {
+        if self.read_only {
+            return Err(Error::Unavailable(
+                "managed store is read-only after retention; remove old history",
+            ));
+        }
+        self.db()
+    }
     pub fn root(&self) -> &Path {
         &self.root
+    }
+    /// Whether the store degraded to read-only after retention could not
+    /// bring the database back under `MAX_DB_BYTES`.
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Bounded retention for the managed database, run at open and safe to
+    /// run any time: messages and mailbox rows past `RETENTION_HORIZON_MS`,
+    /// terminal tasks past the horizon with their receipt chains and mailbox
+    /// rows, per-conversation transcript caps, and receipts whose task no
+    /// longer exists — each in small immediate transactions — then a WAL
+    /// truncate. Nonterminal tasks and live receipt chains are never removed.
+    pub fn retain(&self) -> Result<u64> {
+        if self.read_only {
+            return Ok(0);
+        }
+        let cutoff = now_ms().saturating_sub(RETENTION_HORIZON_MS);
+        let mut removed_total = 0u64;
+        let mut db = self.db()?;
+        for _ in 0..RETENTION_PASSES {
+            let mut removed = 0u64;
+            {
+                let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                removed += tx.execute(
+                    "DELETE FROM messages WHERE rowid IN (SELECT rowid FROM messages WHERE at_ms<?1 LIMIT ?2)",
+                    params![sql(cutoff)?, RETENTION_BATCH],
+                )? as u64;
+                removed += tx.execute(
+                    "DELETE FROM mailbox_messages WHERE rowid IN (SELECT rowid FROM mailbox_messages WHERE created_at<?1 LIMIT ?2)",
+                    params![sql(cutoff)?, RETENTION_BATCH],
+                )? as u64;
+                let stale_tasks: Vec<String> = {
+                    let mut query = tx.prepare(
+                        "SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled','uncertain') AND updated_at<?1 LIMIT ?2",
+                    )?;
+                    query
+                        .query_map(params![sql(cutoff)?, RETENTION_BATCH], |row| row.get(0))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?
+                };
+                for id in &stale_tasks {
+                    removed +=
+                        tx.execute("DELETE FROM receipts WHERE task=?1", [id.as_str()])? as u64;
+                    removed += tx.execute(
+                        "DELETE FROM mailbox_messages WHERE source_task=?1 OR target_task=?1",
+                        [id.as_str()],
+                    )? as u64;
+                    removed += tx.execute("DELETE FROM tasks WHERE id=?1", [id.as_str()])? as u64;
+                }
+                removed += tx.execute(
+                    "DELETE FROM receipts WHERE rowid IN (SELECT rowid FROM receipts WHERE task IS NOT NULL AND task NOT IN (SELECT id FROM tasks) LIMIT ?1)",
+                    [RETENTION_BATCH],
+                )? as u64;
+                removed += tx.execute(
+                    "DELETE FROM messages WHERE rowid IN (SELECT rowid FROM (SELECT rowid, ROW_NUMBER() OVER (PARTITION BY conversation ORDER BY sequence DESC) AS rn FROM messages) WHERE rn>?1 LIMIT ?2)",
+                    params![RETENTION_CONVERSATION_MESSAGES, RETENTION_BATCH],
+                )? as u64;
+                tx.commit()?;
+            }
+            removed_total += removed;
+            if removed == 0 {
+                break;
+            }
+        }
+        // Retire the WAL the deletes accumulated; a busy checkpoint leaves it
+        // for the next pass instead of failing this one. Incremental vacuum
+        // returns freed pages when the database was built or rebuilt with it
+        // enabled and is a harmless no-op otherwise.
+        let _ = db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            row.get::<_, i64>(0)
+        });
+        let _ = db.execute_batch("PRAGMA incremental_vacuum(4096)");
+        Ok(removed_total)
+    }
+    /// See `active_scans`.
+    pub fn active_scan_count(&self) -> u64 {
+        self.active_scans.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    /// See `mailbox_migrations`.
+    pub fn mailbox_migration_count(&self) -> u64 {
+        self.mailbox_migrations
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn create_conversation(&self, workspace: &Path) -> Result<ManagedConversation> {
@@ -415,7 +684,7 @@ impl ManagedStore {
         };
         conversation.validate()?;
         let (_, receipt, receipt_json) = Self::algal_receipt(&conversation).await?;
-        let mut db = self.db()?;
+        let mut db = self.write_db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let count: i64 =
             tx.query_row("SELECT count(*) FROM conversations", [], |row| row.get(0))?;
@@ -583,6 +852,7 @@ impl ManagedStore {
             messages,
             config: modified(state_root.join("config.json")),
             fault: modified(self.root.join(SUPERVISOR_FAULT_FILE)),
+            progress: modified(self.root.join(PROGRESS_FILE)),
             unreadable: self.unreadable_tasks(),
         })
     }
@@ -600,11 +870,14 @@ impl ManagedStore {
         if !(1..=256).contains(&limit) {
             return Err(xcb_core::Error::Invalid("managed active task page").into());
         }
-        self.task_rows(
+        let tasks = self.task_rows(
             "SELECT id,payload,conversation FROM tasks WHERE state IN ('queued','running','needs_input') ORDER BY updated_at DESC,id LIMIT ?1",
             limit,
             true,
-        )
+        )?;
+        self.active_scans
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(tasks)
     }
     pub fn task(&self, id: &Id) -> Result<Option<ManagedTask>> {
         let db = self.db()?;
@@ -725,6 +998,19 @@ impl ManagedStore {
                 task.session.as_ref() == Some(session) || task.worker_sessions.contains(session)
             }))
     }
+    /// Session ids referenced by any nonterminal task — current session and
+    /// worker history — computed with a single managed task scan so a prune
+    /// pass does not rescan per candidate.
+    pub(crate) fn active_session_ids(&self) -> Result<BTreeSet<Id>> {
+        let mut ids = BTreeSet::new();
+        for task in self.active_tasks(MAX_NONTERMINAL_TASKS as usize)? {
+            if let Some(session) = &task.session {
+                ids.insert(session.clone());
+            }
+            ids.extend(task.worker_sessions.iter().cloned());
+        }
+        Ok(ids)
+    }
 
     fn mailbox_tail(&self, task: &Id, limit: usize) -> Result<Vec<MailboxMessage>> {
         let latest: i64 = self.db()?.query_row(
@@ -801,7 +1087,7 @@ impl ManagedStore {
         };
         let mut effects = EffectState::None;
         let result = (|| {
-            let mut db = self.db()?;
+            let mut db = self.write_db()?;
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let current_source = task_from(&tx, &source.id)?
                 .ok_or(Error::Unavailable("mailbox source task not found"))?;
@@ -1112,7 +1398,7 @@ impl ManagedStore {
             task_receipt: &task.last_receipt,
         };
         let (_, receipt, receipt_json) = Self::algal_receipt(&observation).await?;
-        let mut db = self.db()?;
+        let mut db = self.write_db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let recorded: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM receipts WHERE digest=?1)",
@@ -1295,7 +1581,7 @@ impl ManagedStore {
         }
         next.last_receipt = receipt.clone();
         next.validate()?;
-        let mut db = self.db()?;
+        let mut db = self.write_db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current =
             task_from(&tx, &expected.id)?.ok_or(Error::Unavailable("managed task not found"))?;
@@ -1381,6 +1667,8 @@ impl ManagedStore {
             goal: text.clone(),
             next_prompt: text.clone(),
             user_inputs: vec![],
+            delivered_inputs: 0,
+            context_carried: false,
             input_at_ms: None,
             attachments: attachments.clone(),
             session: None,
@@ -1413,7 +1701,10 @@ impl ManagedStore {
         let (_, receipt, receipt_json) = Self::algal_receipt(&task).await?;
         task.last_receipt = receipt.clone();
         task.validate()?;
-        bounded_text(&worker_prompt(&task, &[], &[]), xcb_core::MAX_TEXT_BYTES)?;
+        bounded_text(
+            &worker_prompt(&task, &[], &[], false),
+            xcb_core::MAX_TEXT_BYTES,
+        )?;
         let user = Message {
             id,
             role: Role::User,
@@ -1430,7 +1721,7 @@ impl ManagedStore {
             Some(&task.id),
             task.revision,
         );
-        let mut db = self.db()?;
+        let mut db = self.write_db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let count: i64 = tx.query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))?;
         let active: i64 = tx.query_row(
@@ -1466,7 +1757,7 @@ impl ManagedStore {
             provenance: None,
         };
         let assistant = Self::assistant(answer, None, now);
-        let mut db = self.db()?;
+        let mut db = self.write_db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         Self::append_message_tx(&tx, &user, conversation, None)?;
         Self::append_message_tx(&tx, &assistant, conversation, None)?;
@@ -1510,7 +1801,10 @@ impl ManagedStore {
         next.cancel_requested = false;
         next.revision += 1;
         next.updated_at_ms = now;
-        bounded_text(&worker_prompt(&next, &[], &[]), xcb_core::MAX_TEXT_BYTES)?;
+        bounded_text(
+            &worker_prompt(&next, &[], &[], false),
+            xcb_core::MAX_TEXT_BYTES,
+        )?;
         let supplied_attachments = attachments.clone();
         let local = &task.conversation == conversation;
         let message = if local {
@@ -1604,7 +1898,7 @@ impl ManagedStore {
             None,
             preference.created_at_ms,
         );
-        let mut db = self.db()?;
+        let mut db = self.write_db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let count: i64 = tx.query_row("SELECT count(*) FROM preferences", [], |row| row.get(0))?;
         if count >= MAX_PREFERENCES {
@@ -1984,6 +2278,12 @@ impl ManagedStore {
         message_count: usize,
     ) -> Result<ManagedTask> {
         let mut next = task.clone();
+        if next.session.as_ref() != Some(&session) {
+            // A replacement session starts with an empty transcript: nothing
+            // it never received can be treated as carried.
+            next.context_carried = false;
+            next.delivered_inputs = 0;
+        }
         next.session = Some(session.clone());
         if !next.worker_sessions.contains(&session) {
             next.worker_sessions.push(session);
@@ -2097,6 +2397,16 @@ impl ManagedStore {
             _ => false,
         };
         let mut next = task.clone();
+        // A run that produced an outcome provably appended the prompt it was
+        // handed: this session's transcript now carries the task context and
+        // every input that prompt contained. A failed dispatch proves
+        // neither, and without a recorded session there is no transcript to
+        // carry the context, so the next prompt conservatively resends
+        // everything.
+        if result.is_ok() && next.session.is_some() {
+            next.context_carried = true;
+            next.delivered_inputs = next.user_inputs.len();
+        }
         if let Some(account) = failed_account
             && !next.failed_accounts.contains(&account)
         {
@@ -2211,6 +2521,10 @@ impl ManagedStore {
             .map(|text| xcb_core::display_text(text, 8192));
         if state == TaskState::Queued && failover_route {
             next.session = None;
+            // A replacement session starts with an empty transcript, so the
+            // next prompt must carry every input again.
+            next.delivered_inputs = 0;
+            next.context_carried = false;
             next.next_prompt = format!(
                 "Continue the original task on a new eligible route. Preserve completed effects and do not repeat them or expand scope. Previous settled route report:\n\n{}",
                 xcb_core::display_text(
@@ -2266,6 +2580,47 @@ impl ManagedStore {
                 }
             }
         }
+        // Sweep orphan native sessions: sessions the managed harness created
+        // (proven by the atomic `managed_task` marker) that never reached
+        // `prepare` because the supervisor died or preparation failed. A
+        // session stays when a task still references it, when an unsettled
+        // run holds custody, or when a transcript exists — fail closed, never
+        // delete possible work or unmanaged sessions (marker is `None`).
+        for session in store.managed_marked_sessions()? {
+            let owner = session.managed_task.as_ref().expect("marked sessions only");
+            let referenced = match self.task(owner) {
+                Ok(Some(task)) => {
+                    task.session.as_ref() == Some(&session.id)
+                        || task.worker_sessions.contains(&session.id)
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            if referenced
+                || unsettled
+                    .iter()
+                    .any(|run| run.session.as_ref() == Some(&session.id))
+            {
+                continue;
+            }
+            match store.message_count(&session.id) {
+                Ok(0) => (),
+                Ok(_) => continue,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            }
+            match store.remove_session(&session.id) {
+                Ok(_) | Err(Error::Conflict(_)) => (),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
         match first_error {
             Some(error) => Err(error),
             None => Ok(()),
@@ -2282,6 +2637,8 @@ impl ManagedStore {
             let mut next = task.clone();
             next.state = TaskState::Queued;
             next.detail = "dispatch was not admitted; queued again".into();
+            next.delivered_inputs = 0;
+            next.context_carried = false;
             next.revision += 1;
             next.updated_at_ms = now_ms();
             self.transition(task, next, None).await?;
@@ -2348,7 +2705,7 @@ fn task_status(task: &ManagedTask) -> String {
     let mut line = format!(
         "- **{}** · {} · {} · {}",
         task.title,
-        task.state.as_str().replace('_', " "),
+        task.state.label(),
         project,
         task.detail
     );
@@ -2577,11 +2934,52 @@ fn workspace_busy(store: &Store, workspace: &str) -> Result<bool> {
     Ok(false)
 }
 
+/// The worker prompt for one dispatch. When `carried` is true the session
+/// transcript provably holds the original task, contract, preferences and
+/// previously delivered inputs, so only the continuation checkpoint, inputs
+/// added since `delivered_inputs`, and the bounded inbox tail are sent. A
+/// fresh or replaced session gets the complete prompt.
 fn worker_prompt(
     task: &ManagedTask,
     preferences: &[Preference],
     mailbox: &[MailboxMessage],
+    carried: bool,
 ) -> String {
+    if carried {
+        let mut prompt = String::new();
+        for input in task.user_inputs.get(task.delivered_inputs..).unwrap_or(&[]) {
+            if !prompt.is_empty() {
+                prompt.push_str("\n\n");
+            }
+            prompt.push_str("Additional user input:\n");
+            prompt.push_str(input);
+        }
+        if task.next_prompt != task.goal && task.user_inputs.last() != Some(&task.next_prompt) {
+            if !prompt.is_empty() {
+                prompt.push_str("\n\n");
+            }
+            prompt.push_str("Task continuation:\n");
+            prompt.push_str(&task.next_prompt);
+        }
+        if prompt.is_empty() {
+            prompt.push_str(
+                "Task continuation:\nContinue the original task from the last confirmed checkpoint.",
+            );
+        }
+        if !mailbox.is_empty() {
+            let mut context = String::from(
+                "\n\nXCB cross-provider inbox (use xcb_message_list for the complete mailbox):\n",
+            );
+            for message in mailbox.iter().rev().take(16).rev() {
+                context.push_str(&format!(
+                    "- #{} from {} task {}: {}\n",
+                    message.sequence, message.source_provider, message.source_task, message.body
+                ));
+            }
+            append_context(&mut prompt, &context);
+        }
+        return prompt;
+    }
     let mut prompt = format!("Original user task:\n{}", task.goal);
     for input in &task.user_inputs {
         prompt.push_str("\n\nAdditional user input:\n");
@@ -2715,6 +3113,72 @@ fn clear_supervisor_fault(root: &Path) {
     let _ = fs::remove_file(root.join(SUPERVISOR_FAULT_FILE));
 }
 
+/// Ephemeral worker heartbeats live outside the managed database: a progress
+/// note is not durable task state, is never receipted, and is superseded by
+/// the settlement detail written by the next durable transition.
+const PROGRESS_FILE: &str = "progress.json";
+const MAX_PROGRESS_BYTES: usize = 64 * 1024;
+const MAX_PROGRESS_BEATS: usize = 256;
+const MAX_PROGRESS_TEXT: usize = 320;
+/// The supervisor flushes observer heartbeats at this cadence: often enough
+/// for a live detail field, never per event.
+const PROGRESS_FLUSH: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressBeat {
+    at_ms: u64,
+    text: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProgressFile {
+    version: u32,
+    beats: BTreeMap<Id, ProgressBeat>,
+}
+
+fn write_progress(root: &Path, beats: &BTreeMap<Id, ProgressBeat>) -> Result<()> {
+    let path = root.join(PROGRESS_FILE);
+    if beats.is_empty() {
+        return match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        };
+    }
+    let bytes = serde_json::to_vec(&ProgressFile {
+        version: 1,
+        beats: beats.clone(),
+    })?;
+    match private::read(&path, MAX_PROGRESS_BYTES) {
+        Ok(previous) => private::replace(&path, &bytes, &digest(&previous)),
+        Err(_) => private::create(&path, &bytes),
+    }
+}
+
+fn read_progress(root: &Path) -> BTreeMap<Id, ProgressBeat> {
+    let Ok(bytes) = private::read(&root.join(PROGRESS_FILE), MAX_PROGRESS_BYTES) else {
+        return BTreeMap::new();
+    };
+    let file: ProgressFile = match serde_json::from_slice(&bytes) {
+        Ok(file) => file,
+        Err(_) => return BTreeMap::new(),
+    };
+    if file.version != 1 {
+        return BTreeMap::new();
+    }
+    file.beats
+        .into_iter()
+        .take(MAX_PROGRESS_BEATS)
+        .filter(|(_, beat)| !beat.text.is_empty())
+        .map(|(id, mut beat)| {
+            beat.text = xcb_core::display_text(&beat.text, MAX_PROGRESS_TEXT);
+            (id, beat)
+        })
+        .collect()
+}
+
 /// The last recorded supervisor fault under a managed state directory.
 pub fn supervisor_fault(root: &Path) -> Option<String> {
     let bytes = private::read(&root.join(SUPERVISOR_FAULT_FILE), MAX_FAULT_BYTES).ok()?;
@@ -2753,6 +3217,15 @@ struct Supervisor {
     joins: JoinSet<Completion>,
     unrecorded: Vec<Unrecorded>,
     unreadable_noted: usize,
+    /// Latest host-selected heartbeat per active task, fed by each worker's
+    /// observer and flushed to `progress.json` on a bounded cadence.
+    progress: Arc<Mutex<BTreeMap<Id, ProgressBeat>>>,
+    /// The last serialized heartbeat set written; equal bytes skip the write.
+    progress_bytes: Vec<u8>,
+    progress_at: Instant,
+    /// Last time the supervisor re-checked the retention stamp; opens run
+    /// the first check so this only matters on long-lived daemons.
+    retention_checked: Instant,
 }
 
 impl Supervisor {
@@ -2767,6 +3240,44 @@ impl Supervisor {
             joins: JoinSet::new(),
             unrecorded: Vec::new(),
             unreadable_noted: 0,
+            progress: Arc::new(Mutex::new(BTreeMap::new())),
+            progress_bytes: Vec::new(),
+            progress_at: Instant::now(),
+            retention_checked: Instant::now(),
+        }
+    }
+
+    /// Publish the current heartbeat set at most once per `PROGRESS_FLUSH`.
+    /// Beats for tasks that left `active` are dropped here, so a settlement
+    /// removes its ephemeral note in the same tick it is recorded.
+    fn flush_progress(&mut self) {
+        let beats = match self.progress.lock() {
+            Ok(mut beats) => {
+                beats.retain(|id, _| self.active.contains_key(id));
+                beats.clone()
+            }
+            Err(_) => BTreeMap::new(),
+        };
+        let bytes = serde_json::to_vec(&ProgressFile {
+            version: 1,
+            beats: beats.clone(),
+        })
+        .unwrap_or_default();
+        if bytes == self.progress_bytes
+            || (beats.is_empty() && self.progress_bytes.is_empty())
+            || self.progress_at.elapsed() < PROGRESS_FLUSH
+        {
+            return;
+        }
+        match write_progress(self.managed.root(), &beats) {
+            Ok(()) => {
+                self.progress_bytes = bytes;
+                self.progress_at = Instant::now();
+            }
+            Err(_) => record_supervisor_fault(
+                self.managed.root(),
+                "worker progress could not be flushed; heartbeats are paused",
+            ),
         }
     }
 
@@ -2952,6 +3463,22 @@ impl Supervisor {
                 Err(error) => self.task_fault(&task, &error).await,
             }
         }
+        if self.retention_checked.elapsed() >= RETENTION_IDLE_CHECK {
+            self.retention_checked = Instant::now();
+            if retention_due(self.managed.root()) {
+                match self.managed.retain() {
+                    Ok(_) => stamp_retention(self.managed.root()),
+                    Err(error) => record_supervisor_fault(
+                        self.managed.root(),
+                        &format!(
+                            "idle managed retention could not run: {}",
+                            fault_text(&error)
+                        ),
+                    ),
+                }
+            }
+        }
+        self.flush_progress();
         Ok(())
     }
 
@@ -2983,25 +3510,6 @@ impl Supervisor {
             };
         }
         let config = Config::load(store.root())?.0;
-        let prompt = worker_prompt(
-            task,
-            &managed.preferences(Path::new(&task.workspace))?,
-            &managed.mailbox_tail(&task.id, 16)?,
-        );
-        if bounded_text(&prompt, xcb_core::MAX_TEXT_BYTES).is_err() {
-            let mut failed = task.clone();
-            failed.state = TaskState::Failed;
-            failed.detail =
-                "worker prompt exceeds the supported context limit; start a smaller task".into();
-            failed.revision += 1;
-            failed.updated_at_ms = now_ms();
-            let message =
-                ManagedStore::assistant(failed.detail.clone(), Some(&task.id), failed.revision);
-            return match managed.transition(task, failed, Some(message)).await {
-                Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
-                Err(error) => Err(error),
-            };
-        }
         let created_session = task.session.is_none();
         let mut route_reason = task
             .route_reason
@@ -3078,6 +3586,7 @@ impl Supervisor {
                 &config,
                 Some(&decision.account),
                 Some(&model_key),
+                Some(&task.id),
             ) {
                 Ok(session) => session,
                 Err(Error::Conflict(reason) | Error::Unavailable(reason)) => {
@@ -3122,6 +3631,36 @@ impl Supervisor {
         }
         let route = format!("{} · {}", session.model.key(), session.account);
         let message_count = store.message_count(&session.id)?;
+        // The delta form is sent only when the task record proves this
+        // session's transcript already carries the original prompt. The
+        // message-count check is belt-and-braces for a transcript that lost
+        // rows outside the managed flow.
+        let carried = task.session.is_some()
+            && task.context_carried
+            && message_count > task.message_count_before;
+        let prompt = worker_prompt(
+            task,
+            &managed.preferences(Path::new(&task.workspace))?,
+            &managed.mailbox_tail(&task.id, 16)?,
+            carried,
+        );
+        if bounded_text(&prompt, xcb_core::MAX_TEXT_BYTES).is_err() {
+            if created_session {
+                store.remove_session(&session.id)?;
+            }
+            let mut failed = task.clone();
+            failed.state = TaskState::Failed;
+            failed.detail =
+                "worker prompt exceeds the supported context limit; start a smaller task".into();
+            failed.revision += 1;
+            failed.updated_at_ms = now_ms();
+            let message =
+                ManagedStore::assistant(failed.detail.clone(), Some(&task.id), failed.revision);
+            return match managed.transition(task, failed, Some(message)).await {
+                Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
+                Err(error) => Err(error),
+            };
+        }
         let prepared = match managed
             .prepare(task, session.id.clone(), route, route_reason, message_count)
             .await
@@ -3133,7 +3672,14 @@ impl Supervisor {
                 }
                 return Ok(Dispatch::Settled);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                if created_session {
+                    // Best effort now; the managed-task marker lets startup
+                    // reconciliation sweep the orphan if this cannot run.
+                    let _ = store.remove_session(&session.id);
+                }
+                return Err(error);
+            }
         };
         let images = prepared.attachments.clone();
         let id = prepared.id.clone();
@@ -3143,13 +3689,34 @@ impl Supervisor {
             .insert(id.clone(), session.account.clone());
         self.active_workspaces
             .insert(id.clone(), prepared.workspace.clone());
+        let progress = self.progress.clone();
+        let progress_task = id.clone();
         self.joins.spawn(async move {
-            let observer: Observer =
-                Arc::new(
-                    |event| {
-                        if let Progress::Notice(_) | Progress::Tool(_) = event {}
-                    },
-                );
+            let observer: Observer = Arc::new(move |event| {
+                // Only host-selected identifiers and notices become a
+                // heartbeat; raw worker text is provider content and never
+                // becomes managed detail.
+                let text = match event {
+                    Progress::Tool(name) => format!("running tool {name}"),
+                    Progress::Notice(text) => text,
+                    Progress::Subagent(subagent) => {
+                        format!("running subagent {}", subagent.label)
+                    }
+                    Progress::Text { .. } => return,
+                };
+                let Ok(mut beats) = progress.lock() else {
+                    return;
+                };
+                if beats.len() < MAX_PROGRESS_BEATS || beats.contains_key(&progress_task) {
+                    beats.insert(
+                        progress_task.clone(),
+                        ProgressBeat {
+                            at_ms: now_ms(),
+                            text: xcb_core::display_text(&text, MAX_PROGRESS_TEXT),
+                        },
+                    );
+                }
+            });
             // A nested task turns a worker panic into an ordinary error for
             // `finish`, which retains custody instead of ending the supervisor.
             let result = match tokio::spawn(kernel::execute_once(
@@ -3185,6 +3752,12 @@ impl Supervisor {
         for entry in pending {
             self.record(entry.completion, MAX_RECORD_FAILURES).await;
         }
+        // Heartbeats never outlive their supervisor: the settlement details
+        // recorded above are the durable story now.
+        if let Ok(mut beats) = self.progress.lock() {
+            beats.clear();
+        }
+        let _ = write_progress(self.managed.root(), &BTreeMap::new());
     }
 }
 
@@ -3209,6 +3782,9 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
     // Lock, identity and store failures above are the only fatal startup
     // errors. Everything after this point is recorded and isolated.
     clear_supervisor_fault(managed.root());
+    // Stale heartbeats from a previous supervisor are meaningless; the merge
+    // filter would ignore them anyway, but do not leave them on disk.
+    let _ = fs::remove_file(managed.root().join(PROGRESS_FILE));
     if let Err(error) = managed.reconcile_startup(&store).await {
         record_supervisor_fault(
             managed.root(),
@@ -3361,16 +3937,30 @@ fn managed_view(
             task.state.ui()
         }
     };
+    // An ephemeral heartbeat fresher than the task's last durable transition
+    // rides along in the detail column; the settlement detail supersedes it
+    // because that transition bumps `updated_at_ms` past the beat.
+    let progress = read_progress(managed.root());
     view.tasks = tasks
         .iter()
-        .map(|task| TaskRow {
-            id: task.id.clone(),
-            title: task.title.clone(),
-            state: task_state(task),
-            detail: task.detail.clone(),
-            route: task.route.clone(),
-            workspace: task.workspace.clone(),
-            updated_at_ms: task.updated_at_ms,
+        .map(|task| {
+            let detail = match progress.get(&task.id) {
+                Some(beat) if !task.state.terminal() && beat.at_ms > task.updated_at_ms => {
+                    xcb_core::display_text(&format!("{} · {}", task.detail, beat.text), 4096)
+                }
+                _ => task.detail.clone(),
+            };
+            TaskRow {
+                id: task.id.clone(),
+                title: task.title.clone(),
+                state: task_state(task),
+                status: Some(task.state.label().into()),
+                detail,
+                route: task.route.clone(),
+                route_reason: task.route_reason.clone(),
+                workspace: task.workspace.clone(),
+                updated_at_ms: task.updated_at_ms,
+            }
         })
         .collect();
     view.managed_cancel_available = tasks
@@ -3665,7 +4255,7 @@ mod tests {
         assert!(queued.input_at_ms.is_some());
         let mut failed_over = queued.clone();
         failed_over.next_prompt = "Resume from the checkpoint".into();
-        let prompt = worker_prompt(&failed_over, &[], &[]);
+        let prompt = worker_prompt(&failed_over, &[], &[], false);
         assert!(prompt.contains("Implement the parser"));
         assert!(prompt.contains("Accept UTF-8"));
         assert!(prompt.contains("Resume from the checkpoint"));
@@ -4866,6 +5456,8 @@ mod tests {
             goal: "x".into(),
             next_prompt: "x".into(),
             user_inputs: vec![],
+            delivered_inputs: 0,
+            context_carried: false,
             input_at_ms: None,
             attachments: vec![],
             session: None,
@@ -4889,7 +5481,7 @@ mod tests {
             created_at_ms: 1,
             updated_at_ms: 1,
         };
-        assert!(worker_prompt(&task, &preferences, &[]).contains("keep updates concise"));
+        assert!(worker_prompt(&task, &preferences, &[], false).contains("keep updates concise"));
     }
 
     fn idle_outcome(terminal: Terminal, text: &str) -> Outcome {
@@ -5370,6 +5962,70 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    /// Task rows carry the supervisor's wire phase and dispatched route so the
+    /// CLI and TUI can tell queued from running without re-deriving custody.
+    #[tokio::test]
+    async fn managed_view_task_rows_carry_phase_and_route() {
+        use xcb_core::models::{Mode, ModelChoice};
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = managed
+            .create_task(
+                &chat,
+                message("m_view_phase"),
+                "queued work".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        let view = managed_view(&xcb, &managed, &chat, &workspace).unwrap();
+        let row = view
+            .tasks
+            .iter()
+            .find(|row| row.id == task.id)
+            .expect("queued task row");
+        // Both phases map to `State::Working`; the status label keeps queued
+        // visually distinct from a dispatched worker.
+        assert_eq!(row.state, State::Working);
+        assert_eq!(row.status.as_deref(), Some("queued — waiting for a route"));
+        assert_eq!(row.route, None);
+
+        let account = xcb.add_account(Provider::Claude, "Test", 1, None).unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("sonnet").unwrap(),
+            label: "Sonnet".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: Some(Id::new("high").unwrap()),
+            observed_at_ms: 1,
+        };
+        let session = xcb
+            .create_session(&account.id, model.clone(), &workspace, 1)
+            .unwrap();
+        let route = format!("{} · {}", model.key(), account.id);
+        managed
+            .prepare(&task, session.id, route.clone(), "fixture reason".into(), 0)
+            .await
+            .unwrap();
+        let view = managed_view(&xcb, &managed, &chat, &workspace).unwrap();
+        let row = view
+            .tasks
+            .iter()
+            .find(|row| row.id == task.id)
+            .expect("running task row");
+        assert_eq!(row.status.as_deref(), Some("running"));
+        assert_eq!(row.route.as_deref(), Some(route.as_str()));
+        assert_eq!(row.route_reason.as_deref(), Some("fixture reason"));
     }
 
     /// The managed view is rebuilt and sent only when its cheap change stamp

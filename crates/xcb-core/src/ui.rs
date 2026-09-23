@@ -54,8 +54,18 @@ pub struct TaskRow {
     pub id: Id,
     pub title: String,
     pub state: State,
+    /// Managed worker phase label (`queued — waiting for a route`,
+    /// `running`, `needs input`, …). `state` folds queued and running into
+    /// `State::Working`, so this keeps the supervisor's wire phase
+    /// distinguishable — callers that classify match the label's leading
+    /// word; `None` for rows produced without one.
+    pub status: Option<String>,
     pub detail: String,
+    /// Routed `model · account` once a worker is dispatched; a bare provider
+    /// name while the route is only a preference.
     pub route: Option<String>,
+    /// Why the supervisor picked `route`, when it recorded one.
+    pub route_reason: Option<String>,
     pub workspace: String,
     pub updated_at_ms: u64,
 }
