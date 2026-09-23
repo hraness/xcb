@@ -793,6 +793,31 @@ fn task_inspect_modal_renders_route_detail_and_scrolls() {
     }
 }
 
+#[test]
+fn inbox_inspection_preserves_lines_and_sanitizes_terminal_controls() {
+    let mut app = app();
+    app.modal = Some(Modal::Inspect {
+        title: "Inbox event_safe".into(),
+        lines: vec![
+            "task task_a".into(),
+            "delivery queued".into(),
+            "first evidence line\nsecond evidence line\u{1b}[31m\u{202e}".into(),
+            "receipt: no settled delivery yet".into(),
+        ],
+        scroll: 0,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    assert!(contents.contains("delivery queued"));
+    assert!(contents.contains("first evidence line"));
+    assert!(contents.contains("second evidence line"));
+    assert!(contents.contains("receipt: no settled delivery yet"));
+    assert!(!contents.contains(['\u{1b}', '\u{202e}']));
+}
+
 fn account_row() -> xcb_core::ui::AccountRow {
     xcb_core::ui::AccountRow {
         id: xcb_core::Id::new("a_fixture").unwrap(),
@@ -874,7 +899,9 @@ fn managed_work_does_not_advertise_direct_session_followups() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(contents.contains("Describe new work or ask for status"));
+    assert!(contents.contains("Describe new work"));
+    assert!(contents.contains("/steer <task> <guidance>"));
+    assert!(contents.contains("/inbox"));
     assert!(!contents.contains("Type a follow-up"));
 }
 

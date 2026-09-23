@@ -124,7 +124,32 @@ pub struct ProjectRow {
     pub status: String,
 }
 
+/// A durable host event and its honest delivery evidence, not model obedience.
+#[derive(Debug, Clone)]
+pub struct InboxRow {
+    pub id: Id,
+    pub task: Id,
+    pub conversation: Id,
+    pub sequence: u64,
+    pub kind: String,
+    pub text: String,
+    pub status: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub receipt: Option<String>,
+}
+
 pub enum HabitatCommand {
+    Steer {
+        task: Id,
+        event: Id,
+        text: String,
+    },
+    WatchTask {
+        task: Id,
+        source: Id,
+        event: Id,
+    },
     ConfigureProject {
         expected_revision: Option<u64>,
         goal: String,
@@ -192,6 +217,7 @@ pub struct View {
     pub backlog: Vec<BacklogRow>,
     pub schedules: Vec<ScheduleRow>,
     pub projects: Vec<ProjectRow>,
+    pub inbox: Vec<InboxRow>,
     pub subagents: Vec<Subagent>,
     pub activity: Vec<String>,
     pub extensions: Vec<(String, String)>,
@@ -228,6 +254,7 @@ impl Default for View {
             backlog: vec![],
             schedules: vec![],
             projects: vec![],
+            inbox: vec![],
             subagents: vec![],
             activity: vec![],
             extensions: vec![],

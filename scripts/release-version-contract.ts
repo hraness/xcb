@@ -28,11 +28,18 @@ export function assertReleaseVersionContract(
   packageSource: string,
   cargoSource: string,
   internalManifests: Readonly<Record<string, string>>,
+  cliSource?: string,
 ): string {
   const packageVersion = manifestVersion(packageSource);
   const cargoVersion = workspaceVersion(cargoSource);
   if (packageVersion !== cargoVersion) {
     throw new Error(`Public package ${packageVersion} and native workspace ${cargoVersion} versions differ.`);
+  }
+  if (cliSource !== undefined) {
+    const cliVersion = /^const VERSION\s*=\s*"([^"]+)";/mu.exec(cliSource)?.[1];
+    if (cliVersion !== packageVersion) {
+      throw new Error(`Compatibility CLI version ${cliVersion ?? "(missing)"} differs from package ${packageVersion}.`);
+    }
   }
   for (const [path, source] of Object.entries(internalManifests)) {
     for (const match of source.matchAll(/^xcb-(?:core|runtime|tui)\s*=\s*\{([^}]+)\}/gmu)) {
@@ -52,15 +59,17 @@ if (import.meta.main) {
     "crates/xcb-runtime/Cargo.toml",
     "crates/xcb-tui/Cargo.toml",
   ];
-  const [packageSource, cargoSource, ...sources] = await Promise.all([
+  const [packageSource, cargoSource, cliSource, ...sources] = await Promise.all([
     readFile(resolve(root, "package.json"), "utf8"),
     readFile(resolve(root, "Cargo.toml"), "utf8"),
+    readFile(resolve(root, "src/cli.ts"), "utf8"),
     ...manifestPaths.map(async path => await readFile(resolve(root, path), "utf8")),
   ]);
   const version = assertReleaseVersionContract(
     packageSource,
     cargoSource,
     Object.fromEntries(manifestPaths.map((path, index) => [path, sources[index]!])) as Readonly<Record<string, string>>,
+    cliSource,
   );
   process.stdout.write(`Release source versions agree at ${version}.\n`);
 }
