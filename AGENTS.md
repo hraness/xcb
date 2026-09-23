@@ -4,7 +4,9 @@
   frontend, and CLI. Panes are bounded userspace data; executable hooks require
   separate trust. Keep local metering separate from opt-in aiCharts publishing.
 - `src/` owns provider-neutral routing, account leases, model selection,
-  scoped tool contracts, the unqualified Devin ACP task adapter
+  scoped tool contracts, the `router.ts` subscription-router entry point
+  (`createSubscriptionRouter`) that bundles the lease store and qualified task
+  adapters for embedding hosts, the unqualified Devin ACP task adapter
   (`devin-acp.ts`, `devin-client.ts`, `devin-adapter.ts`, `devin-mcp.ts`),
   per-account browser-session custody (`browser-session.ts`), and the
   provider-neutral managed-account controller (`managed-account.ts`), and

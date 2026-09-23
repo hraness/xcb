@@ -1,4 +1,5 @@
 mod application;
+mod route;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::json;
@@ -48,11 +49,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Open a persistent control conversation; workers continue after detach.
+    /// Open the control conversation for this directory; workers continue after detach.
     Chat {
-        /// Reopen this control conversation instead of starting a new one.
-        #[arg(long)]
+        /// Reopen this control conversation instead of the latest one for the directory.
+        #[arg(long, conflicts_with = "new")]
         resume: Option<Id>,
+        /// Start a new control conversation even if one exists for this directory.
+        #[arg(long)]
+        new: bool,
     },
     /// Bounded, ephemeral application inference with no tools or hooks.
     Generate {
@@ -102,6 +106,9 @@ enum Commands {
         #[arg(long = "image")]
         images: Vec<PathBuf>,
     },
+    /// Select one eligible account/model route and run a single bounded turn.
+    /// Machine contract: requires --json and a closed request on stdin.
+    Route,
     /// Reopen a direct provider session in the terminal UI.
     Resume {
         /// Session to reopen; the latest session when omitted.
@@ -831,6 +838,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
     if let Some(Commands::Generate { capabilities }) = &cli.command {
         return application::dispatch(&root, *capabilities, cli.json).await;
     }
+    if matches!(&cli.command, Some(Commands::Route)) {
+        return route::dispatch(&root, cli.json).await;
+    }
     if let Some(Commands::ApplicationDiagnostic { account, request }) = &cli.command {
         return application::diagnostic_dispatch(&root, account, request, cli.json);
     }
@@ -865,13 +875,14 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             Commands::Generate { .. }
             | Commands::ApplicationDiagnostic { .. }
             | Commands::QualifyApplication { .. }
-            | Commands::ManagedDaemon,
+            | Commands::ManagedDaemon
+            | Commands::Route,
         ) => {
             unreachable!("early dispatch returns above")
         }
-        None => managed_chat(store, cli.cwd.canonicalize()?, None, cli.json).await,
-        Some(Commands::Chat { resume }) => {
-            managed_chat(store, cli.cwd.canonicalize()?, resume, cli.json).await
+        None => managed_chat(store, cli.cwd.canonicalize()?, None, false, cli.json).await,
+        Some(Commands::Chat { resume, new }) => {
+            managed_chat(store, cli.cwd.canonicalize()?, resume, new, cli.json).await
         }
         Some(Commands::Resume { id }) => {
             let id = id
@@ -1327,6 +1338,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             task: &task,
                             required_provider,
                             preferred_provider,
+                            required_model: None,
                             excluded_routes: &excluded_routes,
                             excluded_accounts: &excluded_accounts,
                             account: None,
@@ -1557,10 +1569,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             } else if conversations.is_empty() {
                 println!("No managed conversations.");
             } else {
+                let counts = managed.message_counts()?;
                 for conversation in conversations {
+                    let messages = counts.get(&conversation.id).copied().unwrap_or_default();
                     println!(
-                        "{}  {} · {}",
-                        conversation.id, conversation.title, conversation.workspace
+                        "{}  {} · {} msgs · {}",
+                        conversation.id, conversation.title, messages, conversation.workspace
                     );
                 }
             }
@@ -2136,6 +2150,7 @@ async fn managed_chat(
     store: Arc<Store>,
     cwd: PathBuf,
     resume: Option<Id>,
+    new: bool,
     json: bool,
 ) -> Result<i32> {
     if json {
@@ -2153,6 +2168,12 @@ async fn managed_chat(
         Some(id) => managed
             .conversation(&id)?
             .ok_or(Error::Unavailable("managed conversation not found"))?,
+        // The ambient launch reopens this directory's live thread; `/new` or
+        // `--new` is the explicit way to start a parallel conversation.
+        None if !new => match managed.latest_conversation_for_workspace(&cwd)? {
+            Some(conversation) => conversation,
+            None => managed.create_conversation(&cwd).await?,
+        },
         None => managed.create_conversation(&cwd).await?,
     };
     let executable = std::env::current_exe()?;
@@ -2622,11 +2643,26 @@ mod tests {
     #[test]
     fn managed_task_cli_lists_and_inspects_without_exposing_daemon_controls() {
         let cli = Cli::try_parse_from(["xcb", "chat"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::Chat { resume: None })));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Chat {
+                resume: None,
+                new: false
+            })
+        ));
         let cli = Cli::try_parse_from(["xcb", "chat", "--resume", "c_example"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Commands::Chat { resume: Some(id) }) if id.as_str() == "c_example")
+            matches!(cli.command, Some(Commands::Chat { resume: Some(id), .. }) if id.as_str() == "c_example")
         );
+        let cli = Cli::try_parse_from(["xcb", "chat", "--new"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Chat {
+                resume: None,
+                new: true
+            })
+        ));
+        assert!(Cli::try_parse_from(["xcb", "chat", "--resume", "c_example", "--new"]).is_err());
         let cli = Cli::try_parse_from(["xcb", "conversations"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Conversations)));
         let cli = Cli::try_parse_from(["xcb", "tasks"]).unwrap();

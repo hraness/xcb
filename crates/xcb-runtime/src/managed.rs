@@ -28,7 +28,8 @@ use xcb_core::{
     Id, Provider, bounded_text, label,
     policy::{EffectState, Failure, Terminal, should_continue},
     session::{Attachment, Message, Role, State},
-    ui::{ConversationRow, Intent, TaskRow, Update, View},
+    ui::{AccountRow, ConversationRow, Intent, TaskRow, Update, View},
+    usage::Estimate,
 };
 
 const MAX_CONVERSATIONS: i64 = 4096;
@@ -159,6 +160,11 @@ pub struct ManagedTask {
     /// was handed — and reset when the session is replaced.
     #[serde(default)]
     pub context_carried: bool,
+    /// Fingerprint of the preferences block this session's prompt provably
+    /// carried, stamped whenever a worker prompt is prepared. A carried
+    /// continuation resends the preferences only when they changed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub delivered_preferences: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_at_ms: Option<u64>,
     pub attachments: Vec<Attachment>,
@@ -210,6 +216,8 @@ impl ManagedTask {
             || self.attempts > self.max_attempts
             || self.user_inputs.len() > 64
             || self.delivered_inputs > self.user_inputs.len()
+            || (!self.delivered_preferences.is_empty()
+                && !xcb_core::hex64(&self.delivered_preferences))
             || (self.context_carried && self.session.is_none())
             || self.user_inputs.iter().map(String::len).sum::<usize>() > 64 * 1024
             || self
@@ -724,6 +732,55 @@ impl ManagedStore {
             Ok(conversation)
         })
         .transpose()
+    }
+
+    /// Most recently updated conversation rooted at `workspace` (the canonical
+    /// path `create_conversation` records), used by the ambient launch path to
+    /// reopen the current thread instead of spawning one per invocation.
+    pub fn latest_conversation_for_workspace(
+        &self,
+        workspace: &Path,
+    ) -> Result<Option<ManagedConversation>> {
+        let workspace = fs::canonicalize(workspace)?;
+        let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
+        let db = self.db()?;
+        let row: Option<(String, i64)> = db
+            .query_row(
+                "SELECT payload,updated_at FROM conversations \
+                 WHERE json_extract(payload,'$.workspace')=?1 \
+                 ORDER BY updated_at DESC,id LIMIT 1",
+                [workspace],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        row.map(|(payload, updated)| {
+            let mut conversation: ManagedConversation = decode(&payload)?;
+            conversation.updated_at_ms = u64::try_from(updated)
+                .map_err(|_| xcb_core::Error::Invalid("conversation timestamp"))?;
+            conversation.validate()?;
+            Ok(conversation)
+        })
+        .transpose()
+    }
+
+    /// Durable message counts per conversation, one grouped query for picker
+    /// metadata — rows are bounded by `MAX_CONVERSATIONS`.
+    pub fn message_counts(&self) -> Result<BTreeMap<Id, usize>> {
+        let db = self.db()?;
+        let mut query =
+            db.prepare("SELECT conversation,count(*) FROM messages GROUP BY conversation")?;
+        let rows = query.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut counts = BTreeMap::new();
+        for row in rows {
+            let (id, count) = row?;
+            counts.insert(
+                Id::new(&id).map_err(|_| xcb_core::Error::Invalid("message conversation"))?,
+                usize::try_from(count).map_err(|_| xcb_core::Error::Invalid("message count"))?,
+            );
+        }
+        Ok(counts)
     }
 
     pub fn conversations(&self, limit: usize) -> Result<Vec<ManagedConversation>> {
@@ -1669,6 +1726,7 @@ impl ManagedStore {
             user_inputs: vec![],
             delivered_inputs: 0,
             context_carried: false,
+            delivered_preferences: String::new(),
             input_at_ms: None,
             attachments: attachments.clone(),
             session: None,
@@ -2276,6 +2334,7 @@ impl ManagedStore {
         route: String,
         route_reason: String,
         message_count: usize,
+        delivered_preferences: String,
     ) -> Result<ManagedTask> {
         let mut next = task.clone();
         if next.session.as_ref() != Some(&session) {
@@ -2283,8 +2342,10 @@ impl ManagedStore {
             // it never received can be treated as carried.
             next.context_carried = false;
             next.delivered_inputs = 0;
+            next.delivered_preferences.clear();
         }
         next.session = Some(session.clone());
+        next.delivered_preferences = delivered_preferences;
         if !next.worker_sessions.contains(&session) {
             next.worker_sessions.push(session);
         }
@@ -2384,10 +2445,12 @@ impl ManagedStore {
         } else {
             None
         };
+        // A store error during the continuation check is not a policy
+        // decision: propagating it requeues this completion through the
+        // bounded unrecorded-retry path instead of settling the task on a
+        // misread.
         let continue_task = match result {
-            Ok(outcome) if !unsettled => task_should_continue(store, &task, outcome)
-                .await
-                .unwrap_or(false),
+            Ok(outcome) if !unsettled => task_should_continue(store, &task, outcome).await?,
             _ => false,
         };
         let budget_exhausted = match result {
@@ -2524,6 +2587,7 @@ impl ManagedStore {
             // A replacement session starts with an empty transcript, so the
             // next prompt must carry every input again.
             next.delivered_inputs = 0;
+            next.delivered_preferences.clear();
             next.context_carried = false;
             next.next_prompt = format!(
                 "Continue the original task on a new eligible route. Preserve completed effects and do not repeat them or expand scope. Previous settled route report:\n\n{}",
@@ -2638,6 +2702,7 @@ impl ManagedStore {
             next.state = TaskState::Queued;
             next.detail = "dispatch was not admitted; queued again".into();
             next.delivered_inputs = 0;
+            next.delivered_preferences.clear();
             next.context_carried = false;
             next.revision += 1;
             next.updated_at_ms = now_ms();
@@ -2934,6 +2999,23 @@ fn workspace_busy(store: &Store, workspace: &str) -> Result<bool> {
     Ok(false)
 }
 
+/// Fingerprint of the preference list a prompt carried: scope and text in
+/// storage order. `""` when there were no preferences to carry, so a later
+/// added preference still differs from the delivered state.
+fn preferences_fingerprint(preferences: &[Preference]) -> String {
+    if preferences.is_empty() {
+        return String::new();
+    }
+    let mut key = String::from("xcb-preferences-v1");
+    for preference in preferences {
+        key.push('\0');
+        key.push_str(&preference.scope);
+        key.push('\0');
+        key.push_str(&preference.text);
+    }
+    digest(key)
+}
+
 /// The worker prompt for one dispatch. When `carried` is true the session
 /// transcript provably holds the original task, contract, preferences and
 /// previously delivered inputs, so only the continuation checkpoint, inputs
@@ -2977,6 +3059,24 @@ fn worker_prompt(
                 ));
             }
             append_context(&mut prompt, &context);
+        }
+        // Preferences learned or edited since the prompt this transcript
+        // carries still reach the worker, once per change.
+        if preferences_fingerprint(preferences) != task.delivered_preferences {
+            if preferences.is_empty() {
+                append_context(
+                    &mut prompt,
+                    "\n\nUser preferences were cleared; preference context from earlier turns no longer applies.",
+                );
+            } else {
+                let mut context = String::from("\n\nUpdated user preferences:\n");
+                for preference in preferences.iter().take(16) {
+                    context.push_str("- ");
+                    context.push_str(&preference.text);
+                    context.push('\n');
+                }
+                append_context(&mut prompt, &context);
+            }
         }
         return prompt;
     }
@@ -3070,6 +3170,17 @@ impl LaunchAttempt {
 /// before the task is marked uncertain, never dropped with the supervisor.
 struct Unrecorded {
     completion: Completion,
+    at: Instant,
+    failures: u32,
+}
+
+/// A worker whose uncertain settlement failed after the record bound:
+/// retried on the same backoff before startup reconciliation is the
+/// backstop, so a transient store fault cannot leave a dead worker's task
+/// looking live until the next daemon start.
+struct PendingUncertain {
+    id: Id,
+    reason: String,
     at: Instant,
     failures: u32,
 }
@@ -3216,6 +3327,7 @@ struct Supervisor {
     launch_attempts: BTreeMap<Id, LaunchAttempt>,
     joins: JoinSet<Completion>,
     unrecorded: Vec<Unrecorded>,
+    pending_uncertain: Vec<PendingUncertain>,
     unreadable_noted: usize,
     /// Latest host-selected heartbeat per active task, fed by each worker's
     /// observer and flushed to `progress.json` on a bounded cadence.
@@ -3239,6 +3351,7 @@ impl Supervisor {
             launch_attempts: BTreeMap::new(),
             joins: JoinSet::new(),
             unrecorded: Vec::new(),
+            pending_uncertain: Vec::new(),
             unreadable_noted: 0,
             progress: Arc::new(Mutex::new(BTreeMap::new())),
             progress_bytes: Vec::new(),
@@ -3351,27 +3464,47 @@ impl Supervisor {
                         fault_text(&error)
                     ),
                 );
-                if let Ok(Some(task)) = self.managed.task(&completion.id)
-                    && !task.state.terminal()
-                {
-                    let mut next = task.clone();
-                    next.state = TaskState::Uncertain;
-                    next.detail = format!(
-                        "the worker outcome could not be recorded: {}; no retry will be launched",
-                        fault_text(&error)
-                    );
-                    next.next_prompt.clear();
-                    next.attachments.clear();
-                    next.revision += 1;
-                    next.updated_at_ms = now_ms();
-                    let message = ManagedStore::assistant(
-                        format!("**{}** needs recovery. {}", task.title, next.detail),
-                        Some(&task.id),
-                        next.revision,
-                    );
-                    let _ = self.managed.transition(&task, next, Some(message)).await;
+                let reason = fault_text(&error);
+                if self.mark_uncertain(&completion.id, &reason).await.is_err() {
+                    self.pending_uncertain.push(PendingUncertain {
+                        id: completion.id,
+                        reason,
+                        at: Instant::now(),
+                        failures: 0,
+                    });
                 }
             }
+        }
+    }
+
+    /// The post-bound settlement for a worker whose outcome could not be
+    /// recorded: mark the task uncertain so custody stays held without an
+    /// automatic retry. A revision conflict means another writer already
+    /// moved the task — there is nothing left to settle here.
+    async fn mark_uncertain(&mut self, id: &Id, reason: &str) -> Result<()> {
+        let Some(task) = self.managed.task(id)? else {
+            return Ok(());
+        };
+        if task.state.terminal() {
+            return Ok(());
+        }
+        let mut next = task.clone();
+        next.state = TaskState::Uncertain;
+        next.detail = format!(
+            "the worker outcome could not be recorded: {reason}; no retry will be launched"
+        );
+        next.next_prompt.clear();
+        next.attachments.clear();
+        next.revision += 1;
+        next.updated_at_ms = now_ms();
+        let message = ManagedStore::assistant(
+            format!("**{}** needs recovery. {}", task.title, next.detail),
+            Some(&task.id),
+            next.revision,
+        );
+        match self.managed.transition(&task, next, Some(message)).await {
+            Ok(_) | Err(Error::Conflict(_)) => Ok(()),
+            Err(error) => Err(error),
         }
     }
 
@@ -3402,6 +3535,28 @@ impl Supervisor {
         };
         for entry in due {
             self.record(entry.completion, entry.failures).await;
+        }
+        let mut pending = std::mem::take(&mut self.pending_uncertain);
+        for entry in pending.drain(..) {
+            if entry.at.elapsed() < Duration::from_secs(5u64 << entry.failures.min(4)) {
+                self.pending_uncertain.push(entry);
+                continue;
+            }
+            if self.mark_uncertain(&entry.id, &entry.reason).await.is_err() {
+                let failures = entry.failures.saturating_add(1);
+                if failures < MAX_RECORD_FAILURES {
+                    self.pending_uncertain.push(PendingUncertain {
+                        failures,
+                        at: Instant::now(),
+                        ..entry
+                    });
+                } else {
+                    record_supervisor_fault(
+                        self.managed.root(),
+                        "a task could not be marked uncertain; the next supervisor start reconciles it",
+                    );
+                }
+            }
         }
         let unreadable = self.managed.unreadable_tasks();
         if unreadable > self.unreadable_noted {
@@ -3557,6 +3712,7 @@ impl Supervisor {
                     task: &task.goal,
                     required_provider,
                     preferred_provider: task.provider_preference,
+                    required_model: None,
                     excluded_routes: &excluded_routes,
                     excluded_accounts: &excluded_accounts,
                     account: None,
@@ -3638,9 +3794,10 @@ impl Supervisor {
         let carried = task.session.is_some()
             && task.context_carried
             && message_count > task.message_count_before;
+        let preferences = managed.preferences(Path::new(&task.workspace))?;
         let prompt = worker_prompt(
             task,
-            &managed.preferences(Path::new(&task.workspace))?,
+            &preferences,
             &managed.mailbox_tail(&task.id, 16)?,
             carried,
         );
@@ -3662,7 +3819,14 @@ impl Supervisor {
             };
         }
         let prepared = match managed
-            .prepare(task, session.id.clone(), route, route_reason, message_count)
+            .prepare(
+                task,
+                session.id.clone(),
+                route,
+                route_reason,
+                message_count,
+                preferences_fingerprint(&preferences),
+            )
             .await
         {
             Ok(task) => task,
@@ -3908,16 +4072,50 @@ fn managed_view(
         ..View::default()
     };
     view.conversation = Some(conversation.clone());
+    let message_counts = managed.message_counts()?;
     view.conversations = managed
         .conversations(64)?
         .into_iter()
         .map(|conversation| ConversationRow {
+            messages: message_counts
+                .get(&conversation.id)
+                .copied()
+                .unwrap_or_default(),
             id: conversation.id,
             title: conversation.title,
             workspace: conversation.workspace,
             updated_at_ms: conversation.updated_at_ms,
         })
         .collect();
+    // Account identity and any recorded quota signal are real; runway is
+    // honestly unknown because managed workers do not feed the direct-mode
+    // velocity estimator.
+    let now = now_ms();
+    let busy: BTreeSet<_> = store
+        .unsettled_runs()?
+        .into_iter()
+        .map(|run| run.account)
+        .collect();
+    view.accounts = store
+        .accounts()?
+        .iter()
+        .map(|account| {
+            Ok(AccountRow {
+                id: account.id.clone(),
+                provider: account.provider,
+                name: account.name(),
+                email: account.email.clone(),
+                subscription: account.subscription.clone(),
+                remaining_percent: store.remaining_percent(&account.quota_pool, now)?,
+                resets_at_ms: None,
+                quota_blocked_until_ms: store.quota_blocked_until(&account.id, now)?,
+                runway: Estimate::unknown("runway is not estimated for managed accounts"),
+                busy: busy.contains(&account.id),
+                enabled: account.enabled,
+                authentication_required: store.authentication_required(&account.id)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     view.messages = managed.messages(conversation, 256)?;
     let mut tasks = managed.active_tasks(128)?;
     let active_ids: BTreeSet<_> = tasks.iter().map(|task| task.id.clone()).collect();
@@ -4013,10 +4211,18 @@ pub async fn serve_ui(
         .conversation(&conversation)?
         .ok_or(Error::Unavailable("managed conversation not found"))?;
     let mut workspace = PathBuf::from(selected.workspace);
+    if store.accounts()?.is_empty() {
+        output
+            .try_send(Update::Notice(
+                "No provider accounts are configured; work queues until one is added — `xcb accounts add <provider>`, then `xcb doctor`.".into(),
+            ))
+            .ok();
+    }
     ensure_daemon(store.root(), &executable)?;
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     let mut quit = false;
     let mut last_stamp: Option<ViewStamp> = None;
+    let mut stamp_fault_noted = false;
     let mut last_ensure = Instant::now();
     let mut last_ensure_error: Option<String> = None;
     let mut dispatch_pending = false;
@@ -4091,6 +4297,19 @@ pub async fn serve_ui(
                             .ok();
                     }
                 },
+                Intent::NewSession => match managed.create_conversation(&workspace).await {
+                    Ok(created) => {
+                        conversation = created.id;
+                        last_stamp = None;
+                    }
+                    Err(error) => {
+                        output
+                            .try_send(Update::Notice(format!(
+                                "New conversation was not created: {error}"
+                            )))
+                            .ok();
+                    }
+                },
                 Intent::AttachPath(path) => {
                     match attachments::from_path(store.root(), Path::new(&path)) {
                         Ok(attachment) => {
@@ -4120,7 +4339,6 @@ pub async fn serve_ui(
                 Intent::Account(_)
                 | Intent::Model(_)
                 | Intent::SetDefault
-                | Intent::NewSession
                 | Intent::Resume(_)
                 | Intent::Pane(_)
                 | Intent::SavePane { .. }
@@ -4134,8 +4352,22 @@ pub async fn serve_ui(
             break;
         }
         // Rebuild the view only when a cheap change signal moved or an
-        // intent was handled; the 250 ms cadence itself is unchanged.
+        // intent was handled; the 250 ms cadence itself is unchanged. A
+        // probe that keeps failing silently reverts to per-refresh rebuilds,
+        // so the first failure is surfaced instead of hiding as a stall.
         let stamp = managed.view_stamp(store.root(), &conversation).ok();
+        if stamp.is_none() && !stamp_fault_noted {
+            stamp_fault_noted = true;
+            output
+                .try_send(Update::Notice(
+                    "Managed-state change probe is failing; the view refreshes on every poll instead."
+                        .into(),
+                ))
+                .ok();
+        }
+        if stamp.is_some() {
+            stamp_fault_noted = false;
+        }
         if handled || stamp.is_none() || stamp != last_stamp {
             let view = managed_view(&store, &managed, &conversation, &workspace)?;
             dispatch_pending = view
@@ -4657,6 +4889,7 @@ mod tests {
                 "claude/test".into(),
                 "fixture".into(),
                 0,
+                String::new(),
             )
             .await
             .unwrap();
@@ -4667,6 +4900,7 @@ mod tests {
                 "codex/test".into(),
                 "fixture".into(),
                 0,
+                String::new(),
             )
             .await
             .unwrap();
@@ -5129,6 +5363,7 @@ mod tests {
                 model.key(),
                 "fixture route".into(),
                 0,
+                String::new(),
             )
             .await
             .unwrap();
@@ -5158,6 +5393,7 @@ mod tests {
                 "claude/sonnet/high".into(),
                 "fixture route".into(),
                 0,
+                String::new(),
             )
             .await
             .unwrap();
@@ -5218,7 +5454,14 @@ mod tests {
             .unwrap();
         let route = format!("{} · {}", model.key(), account.id);
         let task = managed
-            .prepare(&task, session.id, route.clone(), "fixture".into(), 0)
+            .prepare(
+                &task,
+                session.id,
+                route.clone(),
+                "fixture".into(),
+                0,
+                String::new(),
+            )
             .await
             .unwrap();
         let outcome = Outcome {
@@ -5445,7 +5688,12 @@ mod tests {
                 .text
                 .contains("keep updates concise")
         );
-        let task = ManagedTask {
+        let task = bare_task(chat, &workspace);
+        assert!(worker_prompt(&task, &preferences, &[], false).contains("keep updates concise"));
+    }
+
+    fn bare_task(chat: Id, workspace: &Path) -> ManagedTask {
+        ManagedTask {
             version: 1,
             id: message("t_x"),
             operation: message("op_x"),
@@ -5458,6 +5706,7 @@ mod tests {
             user_inputs: vec![],
             delivered_inputs: 0,
             context_carried: false,
+            delivered_preferences: String::new(),
             input_at_ms: None,
             attachments: vec![],
             session: None,
@@ -5480,8 +5729,155 @@ mod tests {
             revision: 1,
             created_at_ms: 1,
             updated_at_ms: 1,
-        };
-        assert!(worker_prompt(&task, &preferences, &[], false).contains("keep updates concise"));
+        }
+    }
+
+    fn preference(scope: &str, text: &str) -> Preference {
+        Preference {
+            version: 1,
+            id: message("p_x"),
+            scope: scope.into(),
+            text: text.into(),
+            source_message: message("m_pref"),
+            created_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn preferences_fingerprint_tracks_the_delivered_list() {
+        let a = preference("global", "keep it short");
+        let b = preference("/tmp/workspace", "prefer tests");
+        assert_eq!(preferences_fingerprint(&[]), "");
+        let delivered = preferences_fingerprint(std::slice::from_ref(&a));
+        assert_eq!(delivered.len(), 64);
+        assert_eq!(delivered, preferences_fingerprint(std::slice::from_ref(&a)));
+        assert_ne!(delivered, preferences_fingerprint(&[a.clone(), b.clone()]));
+        assert_ne!(delivered, preferences_fingerprint(&[b, a.clone()]));
+        let mut edited = a;
+        edited.text = "keep it shorter".into();
+        assert_ne!(delivered, preferences_fingerprint(&[edited]));
+    }
+
+    #[test]
+    fn carried_prompt_sends_preferences_only_when_they_changed() {
+        let directory = root();
+        let workspace = workspace(&directory);
+        let mut task = bare_task(message("c_x"), &workspace);
+        task.context_carried = true;
+        let preferences = vec![preference("global", "keep updates concise")];
+        // A task recorded before preference stamping still learns them once.
+        let prompt = worker_prompt(&task, &preferences, &[], true);
+        assert!(prompt.contains("Updated user preferences:"));
+        assert!(prompt.contains("keep updates concise"));
+        // Once stamped as delivered, unchanged preferences stay out.
+        task.delivered_preferences = preferences_fingerprint(&preferences);
+        let prompt = worker_prompt(&task, &preferences, &[], true);
+        assert!(!prompt.contains("Updated user preferences"));
+        assert!(!prompt.contains("keep updates concise"));
+        // An edit after delivery is sent again as a delta.
+        let edited = vec![preference("global", "keep updates terse")];
+        let prompt = worker_prompt(&task, &edited, &[], true);
+        assert!(prompt.contains("Updated user preferences:"));
+        assert!(prompt.contains("keep updates terse"));
+        // Clearing preferences is an explicit signal, not silence.
+        task.delivered_preferences = preferences_fingerprint(&edited);
+        let prompt = worker_prompt(&task, &[], &[], true);
+        assert!(prompt.contains("preferences were cleared"));
+    }
+
+    #[test]
+    fn task_record_without_delivered_preferences_still_loads() {
+        let directory = root();
+        let workspace = workspace(&directory);
+        let task = bare_task(message("c_x"), &workspace);
+        let mut json = serde_json::to_value(&task).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("delivered_preferences");
+        let loaded: ManagedTask = serde_json::from_value(json).unwrap();
+        assert_eq!(loaded.delivered_preferences, "");
+    }
+
+    #[tokio::test]
+    async fn replacement_session_drops_carried_prompt_context() {
+        let root = root();
+        let workspace = workspace(&root);
+        let managed = ManagedStore::open(&workspace).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = managed
+            .create_task(&chat, message("m_x"), "work".into(), vec![], &workspace)
+            .await
+            .unwrap();
+        let first = managed
+            .prepare(
+                &task,
+                message("s_one"),
+                "claude/test".into(),
+                "route".into(),
+                0,
+                "a".repeat(64),
+            )
+            .await
+            .unwrap();
+        let mut carried = first.clone();
+        carried.context_carried = true;
+        carried.user_inputs = vec!["one".into(), "two".into()];
+        carried.delivered_inputs = 2;
+        // The carried marker can only exist in the store after a completed
+        // run; persisting it directly models that settled state.
+        managed
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE tasks SET payload=?1 WHERE id=?2",
+                params![
+                    serde_json::to_string(&carried).unwrap(),
+                    carried.id.as_str()
+                ],
+            )
+            .unwrap();
+        // A replacement session starts empty: carried context cannot be
+        // assumed for a transcript this session never received.
+        let replaced = managed
+            .prepare(
+                &carried,
+                message("s_two"),
+                "claude/test".into(),
+                "route".into(),
+                3,
+                "b".repeat(64),
+            )
+            .await
+            .unwrap();
+        assert!(!replaced.context_carried);
+        assert_eq!(replaced.delivered_inputs, 0);
+        assert_eq!(replaced.delivered_preferences, "b".repeat(64));
+        // Preparing the same session again preserves carried context.
+        let mut same = replaced.clone();
+        same.context_carried = true;
+        same.delivered_inputs = same.user_inputs.len();
+        managed
+            .db()
+            .unwrap()
+            .execute(
+                "UPDATE tasks SET payload=?1 WHERE id=?2",
+                params![serde_json::to_string(&same).unwrap(), same.id.as_str()],
+            )
+            .unwrap();
+        let kept = managed
+            .prepare(
+                &same,
+                message("s_two"),
+                "claude/test".into(),
+                "route".into(),
+                4,
+                "c".repeat(64),
+            )
+            .await
+            .unwrap();
+        assert!(kept.context_carried);
+        assert_eq!(kept.delivered_inputs, 2);
+        assert_eq!(kept.delivered_preferences, "c".repeat(64));
     }
 
     fn idle_outcome(terminal: Terminal, text: &str) -> Outcome {
@@ -5533,6 +5929,7 @@ mod tests {
                 "claude/sonnet".into(),
                 "fixture".into(),
                 0,
+                String::new(),
             )
             .await
             .unwrap()
@@ -6014,7 +6411,14 @@ mod tests {
             .unwrap();
         let route = format!("{} · {}", model.key(), account.id);
         managed
-            .prepare(&task, session.id, route.clone(), "fixture reason".into(), 0)
+            .prepare(
+                &task,
+                session.id,
+                route.clone(),
+                "fixture reason".into(),
+                0,
+                String::new(),
+            )
             .await
             .unwrap();
         let view = managed_view(&xcb, &managed, &chat, &workspace).unwrap();
@@ -6081,5 +6485,40 @@ mod tests {
         );
         commands.send(Intent::Quit).unwrap();
         ui.await.unwrap().unwrap();
+    }
+
+    /// The ambient launch lookup returns the newest conversation for the
+    /// exact canonical workspace and ignores conversations rooted elsewhere.
+    #[tokio::test]
+    async fn latest_conversation_for_workspace_matches_canonical_root() {
+        let state_root = root();
+        let work_root = root();
+        let other_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let work = work_root.path().canonicalize().unwrap();
+        let other = other_root.path().canonicalize().unwrap();
+
+        let first = conversation(&managed, &work).await;
+        let _foreign = conversation(&managed, &other).await;
+        let latest = managed
+            .latest_conversation_for_workspace(&work)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, first);
+        let second = conversation(&managed, &work).await;
+        let latest = managed
+            .latest_conversation_for_workspace(&work)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, second);
+        assert!(
+            managed
+                .latest_conversation_for_workspace(&state_root.path().join("missing"))
+                .is_err()
+        );
+        let counts = managed.message_counts().unwrap();
+        assert!(counts.values().all(|count| *count == 0));
     }
 }

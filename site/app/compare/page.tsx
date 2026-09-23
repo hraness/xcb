@@ -27,9 +27,9 @@ export default function Compare() {
             name=""
             heading="Choose the layer you need."
             headingId="compare-title"
-            summary="Some tools give you a coding agent. Others help you build an agent system. xcb focuses on the local workspace around your coding-agent accounts."
+            summary="Some tools give you a coding agent. Others help you build an agent system. xcb routes work across the coding-agent accounts you already have."
             actions={[{ href: "/docs/getting-started", label: "Try the source preview" }, { href: "/docs/providers", label: "Check provider support" }]}
-            boundary="xcb brings accounts, models, sessions, and usage into one terminal. Provider access and usage limits still apply."
+            boundary="xcb selects an eligible account/model route, runs one bounded turn, and proves custody at settlement. Provider access and usage limits still apply."
           />
 
           <MarketingSection
@@ -48,9 +48,14 @@ export default function Compare() {
                 </thead>
                 <tbody>
                   <tr className="xcb-comparison-own-row">
-                    <th scope="row"><span className="xcb-comparison-name">xcb</span><span className="xcb-comparison-kind">Local account workspace</span></th>
-                    <td><p>Named coding-agent accounts, model choice, local sessions, and usage in one terminal, with workspace tools and explicit runtime support.</p><a href="/docs/providers">Provider support</a></td>
-                    <td><p>You work across supported provider accounts and want a common workflow. Native xcb is a source preview with specific platform and command limits.</p><a href="/docs/workspace">Workspace limits</a></td>
+                    <th scope="row"><span className="xcb-comparison-name">xcb</span><span className="xcb-comparison-kind">Subscription router</span></th>
+                    <td><p>A local router that selects an eligible route across your named coding-agent accounts and runs one bounded turn — callable as a JSON contract by another agent or embedded as a TypeScript SDK. A terminal workspace is the reference host.</p><a href="/docs/route">Route contract</a></td>
+                    <td><p>You work across supported provider accounts and want work routed among them with proven custody. Native xcb is a source preview with specific platform and command limits.</p><a href="/docs/workspace">Workspace limits</a></td>
+                  </tr>
+                  <tr>
+                    <th scope="row"><span className="xcb-comparison-name">Request routers</span><span className="xcb-comparison-kind">Subscription proxies</span></th>
+                    <td><p>Forward API requests from one client across providers and subscription logins — Claude Code Router, Claudish, subswitch, and similar proxies sit at the HTTP layer.</p><div className="xcb-comparison-sources"><a href="https://github.com/musistudio/claude-code-router">Claude Code Router</a><a href="https://claudish.com">Claudish</a><a href="https://github.com/dean0x/subswitch">subswitch</a></div></td>
+                    <td><p>You want one client&apos;s requests rerouted across providers. xcb routes a whole task to an eligible account and owns its custody until the turn settles — it is not a request proxy and does not rewrite API traffic.</p></td>
                   </tr>
                   <tr>
                     <th scope="row"><span className="xcb-comparison-name">Superset</span><span className="xcb-comparison-kind">Agent workspace</span></th>
@@ -88,6 +93,11 @@ export default function Compare() {
                     <td><p>You want a configurable coding agent across model providers. xcb focuses on supported coding-agent runtimes and their accounts; its current provider coverage is narrower.</p></td>
                   </tr>
                   <tr>
+                    <th scope="row"><span className="xcb-comparison-name">Prime Agent</span><span className="xcb-comparison-kind">Self-improving agent harness</span></th>
+                    <td><p>An open-source coding agent built around a recursive LM control environment and a Continual Harness that refines prompts, memories, and subagent specs through evidence-backed updates.</p><div className="xcb-comparison-sources"><a href="https://github.com/PrimeIntellect-ai/prime-agent">Prime Agent</a><a href="https://primeintellect.ai">Prime Intellect</a></div></td>
+                    <td><p>You want an agent that tunes its own context and skills. xcb&apos;s experimental harness evolves a different object — routing manifests evaluated on labeled cases — under admission, custody, and settlement contracts that stay fixed.</p></td>
+                  </tr>
+                  <tr>
                     <th scope="row"><span className="xcb-comparison-name">Devin cloud</span><span className="xcb-comparison-kind">Managed task environments</span></th>
                     <td><p>Delegate work into development environments with a shell, browser, and editor. Documented workflows can compare parallel Devin sessions.</p><div className="xcb-comparison-sources"><a href="https://docs.devin.ai/enterprise/deployment/overview">Deployment docs</a><a href="https://docs.devin.ai/use-cases/gallery/batch-3-agents-best-solution">Parallel workflow</a></div></td>
                     <td><p>You want managed remote task environments. xcb keeps its terminal and session state locally. Its Devin adapter uses the local ACP candidate, whose credential-free boundary proof is separate from authenticated coding acceptance. Account model availability is checked at launch.</p><a href="/docs/providers#devin">xcb’s Devin status</a></td>
@@ -95,7 +105,7 @@ export default function Compare() {
                 </tbody>
               </table>
             </div>
-            <p className="xcb-compare-note">This page focuses on user-facing coding tools. xcb is a local workspace and control plane around those tools, not a general-purpose multi-agent task graph. The fit guidance is our interpretation of documented capabilities; it does not claim that other tools lack account controls, customization, local storage, or parallel work.</p>
+            <p className="xcb-compare-note">This page focuses on user-facing coding tools. xcb is a local subscription router around those tools, not a general-purpose multi-agent task graph. The fit guidance is our interpretation of documented capabilities; it does not claim that other tools lack account controls, customization, local storage, or parallel work.</p>
           </MarketingSection>
 
           <MarketingSection
@@ -103,10 +113,10 @@ export default function Compare() {
             heading="Make the choice concrete."
             headingId="fit-title"
             layout="split"
-            summary="xcb is for developers who want to bring the administration around their coding agents into one place."
+            summary="xcb is for developers and agents who want one accountable route across their coding-agent subscriptions."
           >
             <div className="xcb-comparison-fit">
-              <div><h3>Choose xcb for a shared local workflow.</h3><p>Select a named account, choose an observed model, reopen a saved session, and inspect usage without changing terminal interfaces.</p></div>
+              <div><h3>Choose xcb for routed, accountable turns.</h3><p>Submit a task through the JSON contract or SDK and get back the selected route, a resumable session, and settled outcome facts — custody held until process exit is proven.</p></div>
               <div><h3>Keep provider tools for their full capabilities.</h3><p>The tested Claude and Codex setups passed coding workflows on macOS ARM64. xcb’s command runner currently uses offline Linux with prepared public dependencies and read-only Git inspection. Native macOS commands, Git commits, and pushes are outside that runner.</p></div>
               <div><h3>Use orchestration tools for a task graph.</h3><p>xcb’s current evidence covers account concurrency and controlled continuation, not a general fleet of agents planning and merging parallel work. It selects observed, supported models; an unknown model name cannot activate a provider.</p></div>
               <div><h3>Distinguish local state from local inference.</h3><p>xcb keeps its sessions and account state on your machine. Model requests still go to the selected provider. Subscription allowances remain separate, and unknown usage stays unknown.</p></div>
