@@ -1047,7 +1047,9 @@ mod tests {
     async fn supervised_capture_cancel_deadline_and_drop_stop_owned_groups() {
         for mode in ["cancel", "deadline", "drop"] {
             let mut command = Command::new("/bin/sh");
-            command.args(["-c", "sleep 30"]);
+            // Do not introduce an orphan-reaping dependency into the joined
+            // cancellation/deadline/drop fixture.
+            command.args(["-c", "exec sleep 30"]);
             let (sender, cancel) = tokio::sync::watch::channel(false);
             let (ready, pid) = tokio::sync::oneshot::channel();
             let task = tokio::spawn(capture_supervised(

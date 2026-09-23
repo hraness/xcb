@@ -11,10 +11,10 @@ original goal, explicit follow-ups, worker history, and transition receipts.
 | --- | --- |
 | Managed store | Atomic intake, task revisions, replies, mailbox delivery, receipt history |
 | Supervisor | Dispatch, bounded continuation, cancellation, restart reconciliation |
-| Router | Rank already eligible account/model routes using explicit heuristics |
+| Router | Classify task capability demand and rank already eligible account/model routes |
 | Kernel and runner | Workspace/account custody, provider admission, effects, settlement |
 | ALGAL | Deterministic, replayable recording of bounded transition records |
-| Optional judge | Rank eligible routes or evaluate continuation after safety gates |
+| Optional judge | Classify task capability demand or evaluate continuation after safety gates |
 
 The pinned ALGAL program records its input. Rust enforces the state machine,
 admission and custody contracts. Receipt replay proves consistency of these
@@ -98,13 +98,14 @@ last pass) and is rechecked hourly by a live supervisor; an oversized open
 always runs it first. Each pass deletes, in small immediate transactions:
 
 - conversation messages and mailbox rows older than 30 days;
-- tasks in a terminal state (`completed`, `failed`, `cancelled`, `uncertain`)
+- tasks in a settled terminal state (`completed`, `failed`, `cancelled`)
   older than 30 days, together with their receipts and mailbox rows;
 - receipts whose task no longer exists;
 - the oldest messages beyond 4,096 per conversation.
 
-Nonterminal tasks and the receipt chains of retained tasks are never
-removed. A pass ends with `wal_checkpoint(TRUNCATE)` plus a bounded
+Nonterminal tasks, unresolved uncertain tasks, the last task referenced by a
+schedule, and the receipt chains of retained tasks are never removed. Uncertain
+history must remain visible so retention cannot silently unblock recurrence. A pass ends with `wal_checkpoint(TRUNCATE)` plus a bounded
 incremental vacuum, and an oversized open attempts one full `VACUUM`
 rebuild so a recoverable database is not degraded permanently.
 
@@ -143,11 +144,14 @@ When no admitted, enabled, credentialed account exists, a queued task says
 so and waits for the user to add or reconnect one; a temporary route
 shortage retries with backoff.
 
-The optional judge only reorders already-admitted candidates, and its call
-is bounded to about five seconds for route selection even though the judge
-backend allows fifteen for other questions; a stalled, failing or invalid
-answer falls back to the deterministic order so the supervisor tick cannot
-be held by the judge.
+The optional judge supplies six typed classifier answers in one call bounded
+to five seconds. The native port of ALGAL's fitted classifier selects capability
+demand; deterministic ordering remains available when the call is absent,
+stalled, failing or invalid. Substantial prompts independently require the
+highest known eligible quality tier. Judgment never qualifies a provider or
+widens a hard constraint. See [quota routing](quota-routing.md) for policy and
+provenance, and [persistent project agents](project-agents.md) for backlog,
+schedules, attention and recent working memory.
 
 Public promotions are bounded, expiring observations with source digests.
 They do not prove a user's entitlement and cannot qualify an unadmitted

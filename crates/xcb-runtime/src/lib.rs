@@ -35,6 +35,7 @@ pub mod runner;
 pub mod sandbox;
 pub mod store;
 pub mod summary;
+mod task_classifier;
 pub mod update;
 mod wire_helpers;
 

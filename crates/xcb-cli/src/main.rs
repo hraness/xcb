@@ -1,4 +1,5 @@
 mod application;
+mod habitat;
 mod route;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -96,10 +97,10 @@ enum Commands {
         /// Task text; piped stdin is used when omitted.
         #[arg(short = 'p', long)]
         prompt: Option<String>,
-        /// Account name or id to run on; the configured default otherwise.
+        /// Restrict automatic routing to this account name or id.
         #[arg(long)]
         account: Option<String>,
-        /// Model key (provider/model[/effort]); "auto" asks the judge to route.
+        /// Model key (provider/model[/effort]); omitted or "auto" routes automatically.
         #[arg(long)]
         model: Option<String>,
         /// Attach an image file to the prompt; repeatable, up to 8.
@@ -142,6 +143,24 @@ enum Commands {
     },
     /// List persistent managed control conversations.
     Conversations,
+    /// Manage a conversation's durable work queue and completed work.
+    Backlog {
+        #[command(subcommand)]
+        command: Option<habitat::BacklogCommand>,
+        /// Filter by persistent conversation; otherwise show all conversations.
+        #[arg(long)]
+        conversation: Option<Id>,
+    },
+    /// Manage local recurring wake-ups for persistent conversations.
+    Schedules {
+        #[command(subcommand)]
+        command: Option<habitat::ScheduleCommand>,
+        /// Filter schedules by persistent conversation; otherwise show all.
+        #[arg(long)]
+        conversation: Option<Id>,
+    },
+    /// Show questions, approvals and actions requiring attention across conversations.
+    Attention,
     /// List installed panes; subcommands inspect, validate, and install them.
     Panes {
         #[command(subcommand)]
@@ -340,7 +359,7 @@ enum ModelCommand {
         #[arg(long)]
         from_native: bool,
     },
-    /// Make an observed model the default, e.g. `xcb models default claude/sonnet/high`.
+    /// Set a preferred model. Automatic routing can select a stronger eligible route.
     Default {
         /// Full observed model key (provider/model[/effort]) from `xcb models`.
         key: String,
@@ -929,12 +948,32 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 .map(|name| store.resolve_account(&name).map(|account| account.id))
                 .transpose()?;
             let mut model = model;
-            if model.as_deref() == Some("auto") {
-                let (routed_account, choice) =
-                    kernel::auto_route(&store, &config, &prompt, account.as_ref()).await?;
-                eprintln!("xcb: judge selected an admitted route");
-                account = Some(routed_account);
-                model = Some(choice.key());
+            if model.as_deref().is_none_or(|model| model == "auto") {
+                let workspace = cli.cwd.canonicalize()?;
+                let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
+                let (preference, required) =
+                    managed.initial_route_preferences(&workspace, &prompt)?;
+                let (preferred_provider, required_provider) =
+                    preview_provider_preferences(preference, required, None)?;
+                let excluded_routes = std::collections::BTreeSet::new();
+                let excluded_accounts = std::collections::BTreeSet::new();
+                let decision = xcb_runtime::routing::smart_route(
+                    &store,
+                    &config,
+                    xcb_runtime::routing::RouteRequest {
+                        task: &prompt,
+                        required_provider,
+                        preferred_provider,
+                        required_model: None,
+                        excluded_routes: &excluded_routes,
+                        excluded_accounts: &excluded_accounts,
+                        account: account.as_ref(),
+                    },
+                )
+                .await?;
+                eprintln!("xcb: {}", automatic_route_notice(&decision.reason));
+                account = Some(decision.account);
+                model = Some(decision.model.key());
             }
             let session = kernel::new_session(
                 &store,
@@ -1435,7 +1474,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         choice.mode
                     );
                 }
-                println!("* default route per provider (xcb models default <key> repins it)");
+                println!(
+                    "* preferred route per provider (xcb models default <key> changes it); automatic routing may select a stronger model"
+                );
             }
             Ok(0)
         }
@@ -1561,6 +1602,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Some(Commands::Backlog {
+            command,
+            conversation,
+        }) => habitat::backlog(store.root(), command, conversation.as_ref(), cli.json).await,
+        Some(Commands::Schedules {
+            command,
+            conversation,
+        }) => habitat::schedules(store.root(), command, conversation.as_ref(), cli.json).await,
+        Some(Commands::Attention) => habitat::attention(store.root(), cli.json),
         Some(Commands::Conversations) => {
             let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
             let conversations = managed.conversations(256)?;
@@ -2231,8 +2281,81 @@ async fn main() {
     std::process::exit(code);
 }
 
+/// Stderr is often retained by callers. Keep this notice independent of
+/// account-bearing route records and provider-supplied model metadata.
+fn automatic_route_notice(reason: &str) -> &'static str {
+    if reason.starts_with("Warning: usage limits") {
+        "Usage limits block a higher-ranked model; using the best eligible route."
+    } else {
+        "Automatically selected an admitted route."
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn automatic_route_notice_does_not_echo_route_record_data() {
+        assert_eq!(
+            automatic_route_notice("Warning: usage limits block private-provider-metadata"),
+            "Usage limits block a higher-ranked model; using the best eligible route."
+        );
+        assert_eq!(
+            automatic_route_notice("private-account-and-model-metadata"),
+            "Automatically selected an admitted route."
+        );
+    }
+
+    #[test]
+    fn habitat_commands_require_revision_and_bound_schedule_intervals() {
+        use clap::Parser;
+        assert!(super::Cli::try_parse_from(["xcb", "backlog", "release", "task_a"]).is_err());
+        assert!(
+            super::Cli::try_parse_from(["xcb", "backlog", "release", "task_a", "--revision", "4"])
+                .is_ok()
+        );
+        assert!(
+            super::Cli::try_parse_from([
+                "xcb",
+                "schedules",
+                "add",
+                "project_a",
+                "check progress",
+                "--every",
+                "59"
+            ])
+            .is_err()
+        );
+        assert!(
+            super::Cli::try_parse_from([
+                "xcb",
+                "schedules",
+                "add",
+                "project_a",
+                "check progress",
+                "--every",
+                "3600"
+            ])
+            .is_ok()
+        );
+        assert!(
+            super::Cli::try_parse_from([
+                "xcb",
+                "backlog",
+                "add",
+                "project_a",
+                "review",
+                "--priority",
+                "10"
+            ])
+            .is_err()
+        );
+        assert!(
+            super::Cli::try_parse_from(["xcb", "backlog", "--conversation", "project_a", "--json"])
+                .is_ok()
+        );
+        assert!(super::Cli::try_parse_from(["xcb", "attention", "--json"]).is_ok());
+    }
+
     use super::*;
 
     #[test]

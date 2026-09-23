@@ -30,14 +30,16 @@ type PeerOptions = {
   maxRequests?: number; deadlineMs?: number;
   ioMs?: number; runtimeError?: boolean; finalizationError?: boolean; response?: () => Promise<Response>;
   mutateEnvelope?(envelope: Record<string, any>): void; malformedThreadReply?: boolean;
-  earlyTurnStarts?: readonly string[]; orphanTurnStart?: boolean; earlyForbiddenRequest?: boolean; turnStartedAfterReply?: boolean;
+  earlyTurnStarts?: readonly string[]; orphanTurnStart?: boolean; earlyForbiddenRequest?: boolean; turnStartedAfterReply?: boolean; holdTurnReply?: boolean;
   startupNotifications?: readonly Record<string, unknown>[];
   terminalNotifications?: readonly Record<string, unknown>[]; terminalPartial?: string; abortAtTerminalWrite?: boolean;
+  scheduleResponse?(start: () => void): () => void;
 };
 /** Synthetic streams exercise the protocol driver. They make no native/confinement claim. */
 function peer(options: PeerOptions = {}) {
   const names = options.names ?? (options.classify ? [] : ["files.read"]), invocations: unknown[] = [], submitted: unknown[] = [];
   let upstreamRequests = 0, revoked = false, stopped = false, endpoint = "", httpIndex = 0, callbackId = 100;
+  let cancelResponse: (() => void) | null = null;
   let currentItem: Record<string, any> | null = null, currentParams: Record<string, any> | null = null;
   let resolveExit!: () => void; const exited = new Promise<void>(resolve => { resolveExit = resolve; });
   const stdout = new PassThrough(), network = new Set<Promise<unknown>>();
@@ -51,6 +53,7 @@ function peer(options: PeerOptions = {}) {
   const emit = (value: Record<string, any>) => { options.mutateEnvelope?.(value); if (!stdout.destroyed) stdout.write(JSON.stringify(value) + "\n"); };
   const scoped = (item: unknown) => ({ threadId: "thread-1", turnId: "turn-1", item });
   function nextResponse() {
+    if (stopped) return;
     const operation = (async () => {
       const number = ++httpIndex;
       const body: Record<string, any> = { model: MODEL, instructions: CODEX_BASE_INSTRUCTIONS, input: structuredClone(input),
@@ -99,9 +102,15 @@ function peer(options: PeerOptions = {}) {
     if (message.method === "turn/start") {
       for (const id of options.earlyTurnStarts ?? []) emit({ method: "turn/started", params: { threadId: "thread-1", turn: { id } } });
       if (options.earlyForbiddenRequest) emit({ id: 999, method: "item/commandExecution/requestApproval", params: { threadId: "thread-1", turnId: "turn-1" } });
+      if (options.holdTurnReply) { callback(); return; }
       emit({ id: message.id, result: { turn: { id: "turn-1" } } });
       if (options.turnStartedAfterReply) emit({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
-      if (options.truncated) { stdout.write('{"method":'); stdout.end(); } else setTimeout(nextResponse, 0);
+      if (options.truncated) { stdout.write('{"method":'); stdout.end(); }
+      else {
+        const start = () => { cancelResponse = null; nextResponse(); };
+        if (options.scheduleResponse) cancelResponse = options.scheduleResponse(start);
+        else { const timer = setTimeout(start, 0); cancelResponse = () => clearTimeout(timer); }
+      }
     }
     if (message.result?.contentItems) {
       const text = message.result.contentItems[0].text; submitted.push(message.result);
@@ -119,7 +128,8 @@ function peer(options: PeerOptions = {}) {
     return { cwd: "/synthetic/scratch", write: (bytes: Uint8Array) => new Promise<import("../src/process-port.ts").ProviderProcessWriteResult>((resolve, reject) => {
       stdin.write(bytes, error => error ? reject(error) : resolve({ outcome: "accepted-full", acceptedBytes: bytes.byteLength }));
     }), stdout, ready: Promise.resolve(), exited, receipt,
-      async stopAndJoin() { stopped = true; stdin.end(); stdout.end(); resolveExit(); await Promise.allSettled([...network]);
+      async stopAndJoin() { stopped = true; cancelResponse?.(); cancelResponse = null;
+        stdin.end(); stdout.end(); resolveExit(); await Promise.allSettled([...network]);
         if (options.finalizationError) throw Error("CODEX_FINALIZATION_FAILED"); return receipt(); } };
   } };
   const upstream: CodexResponsesUpstream = { async request(body, signal) {
@@ -137,7 +147,7 @@ function peer(options: PeerOptions = {}) {
       purpose: options.classify ? "classify" : "respond", model: MODEL, prompt: PROMPT, signal: controller.signal },
       limits: { deadlineMs: options.deadlineMs ?? 2000, ioMs: options.ioMs ?? 500, cleanupMs: 100, ...(options.maxRequests ? { maxRequests: options.maxRequests } : {}) } });
   }
-  return { run, invocations, submitted, count: () => upstreamRequests, revoked: () => revoked, stopped: () => stopped,
+  return { run, invocations, submitted, count: () => upstreamRequests, requests: () => httpIndex, revoked: () => revoked, stopped: () => stopped,
     abort: () => controller.abort(new Error("synthetic user cancellation")) };
 }
 async function failure(run: () => Promise<unknown>): Promise<CodexSessionReceipt> {
@@ -228,11 +238,27 @@ describe("Codex closed driver", () => {
     expect(fixture.invocations).toHaveLength(0); expect(receipt.processStopped).toBe(true);
   });
   test("unknown notifications are not admitted by the pending turn/start window", async () => {
-    const fixture = peer({ earlyTurnStarts: ["turn-1"], mutateEnvelope(value) {
+    // Keep the RPC pending: this boundary must reject the notification before
+    // either a successful turn binding or unrelated HTTP transport can intervene.
+    const fixture = peer({ earlyTurnStarts: ["turn-1"], holdTurnReply: true, mutateEnvelope(value) {
       if (value.method === "turn/started") value.method = "turn/unknown";
     } });
     const receipt = await failure(fixture.run); expect(receipt.failures).toContain("CODEX_UNREVIEWED_NOTIFICATION");
     expect(receipt.unexpectedNotification).toBe("turn/unknown"); expect(fixture.invocations).toHaveLength(0); expect(receipt.processStopped).toBe(true);
+    expect(receipt.failureStage).toBe("turn/start"); expect(receipt.relay?.requests).toBe(0); expect(receipt.handlersJoined).toBe(true);
+  });
+  test("synthetic peer cancels deferred HTTP work when an early notification stops it", async () => {
+    let startResponse!: () => void, cancelled = false;
+    const fixture = peer({ earlyTurnStarts: ["turn-1"], mutateEnvelope(value) {
+      if (value.method === "turn/started") value.method = "turn/unknown";
+    }, scheduleResponse(start) { startResponse = start; return () => { cancelled = true; }; } });
+    const receipt = await failure(fixture.run);
+    expect(receipt.failures).toContain("CODEX_UNREVIEWED_NOTIFICATION");
+    expect(receipt.unexpectedNotification).toBe("turn/unknown"); expect(receipt.processStopped).toBe(true);
+    // Model a callback already dequeued when stopAndJoin cancelled its timer.
+    startResponse();
+    expect(fixture.requests()).toBe(0); expect(cancelled).toBe(true);
+    expect(fixture.invocations).toHaveLength(0); expect(fixture.count()).toBe(0);
   });
   test("six serial broker tools, exact results, strict JSON and joined stop", async () => {
     const fixture = peer({ names: BROKER_TOOL_NAMES }); const result = await fixture.run();

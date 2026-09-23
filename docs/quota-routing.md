@@ -20,13 +20,14 @@ relative quality, cost and latency profiles from observed model identities,
 peels non-dominated models into Pareto layers, then scores them for routine,
 balanced or complex work. Fresh remaining usage, configured favorites and a
 soft workspace-learned provider preference break ties. An explicit opening “Use
-Claude/Codex/Devin” directive remains a hard provider constraint. If the judge is
-enabled it may choose only from the already eligible top routes; a missing or
-failed judgment falls back to the deterministic ordering rather than widening
-eligibility. `xcb models tiers --task TEXT` shows the model layers and
+Claude/Codex/Devin” directive remains a hard provider constraint. The optional
+judge classifies capability demand through the ALGAL fitted classifier; route
+selection then follows deterministic policy within already eligible candidates.
+A missing or failed classification uses a deterministic demand estimate without
+widening eligibility. `xcb models tiers --task TEXT` shows the model layers and
 `xcb --cwd WORKSPACE models route --task TEXT` previews the admitted route using
 the same workspace preferences and provider directive. Preview does not reserve
-an account; availability and optional judgment may change before execution. These are relative
+an account; availability and optional classification may change before execution. These are relative
 routing heuristics, not provider price guarantees; the SWE-2 capability/cost
 position follows Cognition’s published
 [Pareto analysis](https://cognition.com/blog/swe-2).
@@ -78,3 +79,39 @@ The separation of account health from active work and selection was informed by
 [Underclass's routing and health design](https://github.com/ghuntley/underclass/tree/a0ed73d732e5230657595ab6803c182aea93d792).
 XCB retains its own custody and provider contracts; no Underclass source code
 was copied.
+
+## Automatic capability selection
+
+Native managed tasks and unpinned `xcb run` use the same automatic selector.
+The optional typed judge asks the six questions from ALGAL's fitted model-router:
+kind, difficulty, scope, ambiguity, stakes and frontier demand. The fitted head
+combines them with deterministic prompt-shape features. One bounded call supplies
+all answers; missing, invalid or timed-out answers use deterministic routing.
+The fit predicts one operator's historical model choices, not measured model
+quality. Its implementation and provenance are in `task_classifier.rs` and
+[ALGAL's model-router documentation](https://github.com/hraness/algal/blob/main/docs/model-router.md).
+
+Score answers use zero-based criterion indices, as specified by the
+[TypeSafe API](https://docs.typesafe.ai/api#score-answer). Five criteria therefore
+admit indices 0–4; their text labels do not change the numeric scale. The ALGAL
+example response fixture includes an out-of-range probability bucket `5` and
+is not a live-wire conformance fixture. Native tests preserve the fitted
+numeric inputs while using valid probability distributions; invalid bucket
+responses fall back instead of weakening judge validation.
+
+A prompt with at least 400 words or 8 KiB requests the highest known quality
+among eligible routes independently of classifier availability. This is an
+explicit xcb policy, not a claim made by the fitted classifier. Lower price,
+quota percentage, favorites and provider preference cannot demote that quality
+tier. Explicit provider/model constraints still narrow eligibility first.
+
+If observed usage exhaustion excludes a stronger connected admitted model, the
+selected route explains the downgrade. Busy, disconnected and unqualified
+routes are not described as quota failures. If a matching admitted route is
+quota-blocked and no eligible fallback exists, the CLI reports the usage limit
+and managed work enters the attention inbox while waiting for availability.
+Unknown account/model availability
+remains unknown until the provider validates the route. An observed model's
+context-window size is not recorded here, so length-based selection is a quality
+policy and does not certify context fit. Provider/session admission and account
+custody continue to be checked at execution time.

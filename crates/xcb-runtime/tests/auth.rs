@@ -873,7 +873,10 @@ async fn claude_login_cancellation_joins_before_releasing_and_busy_accounts_do_n
     let base = directory.path().canonicalize().unwrap();
     let store = std::sync::Arc::new(Store::open(&base.join("state")).unwrap());
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
-    let pin = claude_login_pin(&base, "sleep 30");
+    // Keep the blocking fixture in the owned leader. A shell waiting on a
+    // forked sleep can leave an orphan whose reaping depends on the host;
+    // this test requires a joined cancellation, not that uncertain outcome.
+    let pin = claude_login_pin(&base, "exec sleep 30");
     let (sender, cancel) = tokio::sync::watch::channel(false);
     let owned_store = store.clone();
     let owned_id = account.id.clone();
@@ -899,12 +902,14 @@ async fn claude_login_cancellation_joins_before_releasing_and_busy_accounts_do_n
     assert!(auth::login(&store, &account.id, &pin).await.is_err());
     assert_eq!(store.unsettled_runs().unwrap().len(), 1);
     sender.send(true).unwrap();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(15), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
     assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(15), task)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_err()
+        matches!(&error, xcb_runtime::Error::Unavailable("sign-in cancelled")),
+        "login did not report joined cancellation"
     );
     assert!(xcb_runtime::process::prove_process_group_absent(run.pid.unwrap()).is_ok());
     assert!(store.unsettled_runs().unwrap().is_empty());
@@ -993,7 +998,8 @@ async fn dropped_claude_login_keeps_durable_custody_after_attempting_group_stop(
     let base = directory.path().canonicalize().unwrap();
     let store = std::sync::Arc::new(Store::open(&base.join("state")).unwrap());
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
-    let pin = claude_login_pin(&base, "sleep 30");
+    // The host owns and reaps this leader directly, including after abort.
+    let pin = claude_login_pin(&base, "exec sleep 30");
     let owned_store = store.clone();
     let id = account.id.clone();
     let task = tokio::spawn(async move { auth::login(&owned_store, &id, &pin).await });

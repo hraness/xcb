@@ -1265,6 +1265,7 @@ pub async fn serve(
                                 }
                             }
                             Intent::Conversation(_) => return Err(Error::Unavailable("managed conversations are available from plain xcb chat")),
+                            Intent::Habitat(_) => return Err(Error::Unavailable("persistent backlog and schedules are available from plain xcb chat")),
                             Intent::Resume(id) => { if store.session(&id)?.is_none() { return Err(Error::Unavailable("session not found")); } current = Some(id); }
                             Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None, None)?.id),
                             Intent::Account(account) => {

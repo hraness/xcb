@@ -1093,17 +1093,46 @@ fn global_command_menu_only_shows_conversation_and_task_controls() {
         names,
         vec![
             "/attach",
+            "/attention",
+            "/backlog",
             "/exit",
             "/help",
             "/mouse",
             "/new",
             "/quit",
+            "/reply",
+            "/schedule",
             "/sessions",
             "/tasks",
         ]
     );
     assert!(!names.contains(&"/model"));
     assert!(!names.contains(&"/pane"));
+}
+
+#[test]
+fn exact_command_aliases_win_over_new_command_prefixes() {
+    let mut app = App::default();
+    for (alias, command) in [
+        ("/a", "/accounts"),
+        ("/s", "/sessions"),
+        ("/r", "/reload"),
+        ("/b", "/backlog"),
+    ] {
+        app.composer.set_text(alias);
+        let matches = app.slash_matches();
+        assert_eq!(
+            matches.len(),
+            1,
+            "{alias} must have one unambiguous meaning"
+        );
+        assert_eq!(matches[0].name, command);
+    }
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    app.composer.set_text("/s");
+    assert_eq!(app.slash_matches()[0].name, "/sessions");
+    app.composer.set_text("/at");
+    assert_eq!(app.slash_matches()[0].name, "/attach");
 }
 
 #[test]
