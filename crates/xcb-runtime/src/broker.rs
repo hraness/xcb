@@ -153,6 +153,20 @@ fn read_text_at(parent: &File, name: &std::ffi::OsStr) -> Result<String> {
 fn revision_at(parent: &File, name: &std::ffi::OsStr) -> Result<String> {
     Ok(digest(read_bytes_at(parent, name, MAX_TEXT_BYTES)?))
 }
+/// One open carrying both proofs a write needs from an existing target: the
+/// content revision and the permission bits the replacement preserves.
+fn revision_mode_at(parent: &File, name: &std::ffi::OsStr) -> Result<(String, u32)> {
+    let mut file = opened_file_at(parent, name)?;
+    let mode = file.metadata()?.mode() & 0o777;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(MAX_TEXT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_TEXT_BYTES {
+        return Err(xcb_core::Error::Limit("workspace file").into());
+    }
+    Ok((digest(&bytes), mode))
+}
 fn open_directory_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
     Ok(File::from(
         rustix::fs::openat(
@@ -284,19 +298,32 @@ impl Workspace {
                 Err(error) => Err(error),
             }
         };
-        check()?;
-        let mode = if expected.is_some() {
-            file_at(&parent, name)?.metadata()?.mode() & 0o777
-        } else {
-            0o600
+        // The first revision proof and the preserved permission bits ride
+        // the same descriptor; staging re-proves the target separately.
+        let mode = match revision_mode_at(&parent, name) {
+            Ok((current, mode)) if expected == Some(current.as_str()) => Some(mode),
+            Err(Error::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound && expected.is_none() =>
+            {
+                None
+            }
+            Ok(_) => {
+                return Err(Error::Conflict(
+                    "workspace revision changed; read the current file first",
+                ));
+            }
+            Err(error) => return Err(error),
         };
         let temp = format!(".xcb-{}", uuid::Uuid::new_v4().simple());
+        // A new file takes the ordinary create bits: the kernel applies the
+        // process umask, so a workspace write behaves like any other tool's.
+        // A replacement stages privately until the preserved mode is set.
         let mut file = File::from(
             rustix::fs::openat(
                 &parent,
                 temp.as_str(),
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::RUSR | Mode::WUSR,
+                Mode::from_raw_mode(if mode.is_some() { 0o600 } else { 0o666 }),
             )
             .map_err(io)?,
         );
@@ -307,7 +334,9 @@ impl Workspace {
         *effects = EffectState::Uncertain;
         let result = (|| {
             file.write_all(text.as_bytes())?;
-            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            if let Some(mode) = mode {
+                file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+            }
             file.sync_all()?;
             check()?;
             self.check_root()?;
@@ -354,7 +383,9 @@ impl Workspace {
             let final_component = index + 1 == parts.len();
             if parents || final_component {
                 self.check_root()?;
-                match rustix::fs::mkdirat(&directory, *part, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+                // Ordinary directory create bits; the kernel applies the
+                // process umask like any other tool's mkdir.
+                match rustix::fs::mkdirat(&directory, *part, Mode::from_raw_mode(0o777)) {
                     Ok(()) => {
                         // A created directory must be reconciled if either sync fails.
                         *effects = EffectState::Uncertain;
@@ -572,36 +603,36 @@ impl Workspace {
         }
         match name {
             "workspace_mkdir" => {
-                let args: MkdirArgs = serde_json::from_value(input.clone())?;
+                let args = MkdirArgs::deserialize(input)?;
                 Ok(json!({"created": self.mkdir_observed(&args.path, args.parents, effects)?}))
             }
             "workspace_remove" => {
-                let args: RemoveArgs = serde_json::from_value(input.clone())?;
+                let args = RemoveArgs::deserialize(input)?;
                 self.remove_observed(&args.path, &args.expected_revision, effects)?;
                 Ok(json!({"removed": true}))
             }
             "workspace_rename" => {
-                let args: RenameArgs = serde_json::from_value(input.clone())?;
+                let args = RenameArgs::deserialize(input)?;
                 Ok(
                     json!({"revision": self.rename_observed(&args.from, &args.to, &args.expected_revision, effects)?}),
                 )
             }
             "workspace_read" => {
-                let args: PathArgs = serde_json::from_value(input.clone())?;
+                let args = PathArgs::deserialize(input)?;
                 Ok(serde_json::to_value(self.read(&args.path)?)?)
             }
             "workspace_list" => {
-                let args: PathArgs = serde_json::from_value(input.clone())?;
+                let args = PathArgs::deserialize(input)?;
                 Ok(serde_json::to_value(self.list(&args.path)?)?)
             }
             "workspace_write" => {
-                let args: WriteArgs = serde_json::from_value(input.clone())?;
+                let args = WriteArgs::deserialize(input)?;
                 Ok(
                     json!({"revision":self.write_observed(&args.path, &args.text, args.expected_revision.as_deref(), effects)?}),
                 )
             }
             "workspace_search" => {
-                let args: SearchArgs = serde_json::from_value(input.clone())?;
+                let args = SearchArgs::deserialize(input)?;
                 self.search(&args.path, &args.query)
             }
             _ => Err(Error::Unavailable("unknown workspace tool")),

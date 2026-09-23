@@ -1,0 +1,195 @@
+"use client";
+
+import { useEffect, useRef, type CSSProperties } from "react";
+
+type FieldNote = {
+  id: string;
+  type: "agent" | "route" | "session" | "custody" | "limit" | "terminal" | "receipt" | "task" | "manifest";
+  title: string;
+  body: string;
+  x: number;
+  y: number;
+  rotate: number;
+  width: number;
+  drift: [number, number];
+  seconds: number;
+  delay: number;
+  tags?: string[];
+  bloom?: boolean;
+};
+
+const notes: FieldNote[] = [
+  { id: "claude", type: "agent", title: "claude · max", body: "Enabled, credentialed, idle. sonnet 4.6 observed moments ago.", tags: ["eligible"], x: 13, y: 26, rotate: 1.4, width: 178, drift: [10, 14], seconds: 38, delay: -21 },
+  { id: "codex", type: "agent", title: "codex · plus", body: "gpt-5.2-codex observed. One Pareto tier behind the pick.", x: 46, y: 11, rotate: -1.2, width: 186, drift: [11, 10], seconds: 45, delay: -14 },
+  { id: "devin", type: "agent", title: "devin", body: "ACP candidate. Inside a provider-reported quota window.", tags: ["resumes at reset"], x: 79, y: 13, rotate: 1.7, width: 172, drift: [13, 9], seconds: 44, delay: -30 },
+  { id: "task", type: "task", title: "fix the failing parser test", body: "Arrives as one bounded task — never a credential, never a hook.", x: 9, y: 55, rotate: -1.6, width: 180, drift: [9, 12], seconds: 41, delay: -8 },
+  { id: "route", type: "route", title: "route → claude/sonnet", body: "One turn. Explicit model, deadline, and output bound.", x: 34, y: 39, rotate: -0.8, width: 198, drift: [10, 12], seconds: 40, delay: -5, bloom: true },
+  { id: "session", type: "session", title: "session s_4f2a", body: "Resumable. Processes joined; outcome facts recorded.", x: 60, y: 50, rotate: 0.9, width: 188, drift: [8, 13], seconds: 47, delay: -18 },
+  { id: "lease", type: "custody", title: "lease held · a7f2", body: "Exclusive, generation-fenced. Released only after exit is proven.", x: 86, y: 62, rotate: -1.1, width: 192, drift: [14, 8], seconds: 39, delay: -2 },
+  { id: "quota", type: "limit", title: "quota window", body: "A provider-reported reset excludes that account's routes.", x: 90, y: 36, rotate: 0.6, width: 176, drift: [8, 11], seconds: 48, delay: -26 },
+  { id: "terminal", type: "terminal", title: "$ xcb --json route", body: "stdin: one task document\nstdout: one bounded result", x: 20, y: 79, rotate: -2, width: 204, drift: [12, 9], seconds: 35, delay: -15 },
+  { id: "receipt", type: "receipt", title: "receipt verified", body: "The settled outcome replays against the written record.", x: 49, y: 85, rotate: 1.5, width: 182, drift: [9, 11], seconds: 44, delay: -27 },
+  { id: "manifest", type: "manifest", title: "routing manifest", body: "A proposed router. Promoted only when strictly better.", x: 74, y: 86, rotate: -2.2, width: 176, drift: [8, 14], seconds: 40, delay: -11 },
+];
+
+const edges = [
+  { from: "task", to: "route", label: "submits", pulse: true },
+  { from: "route", to: "claude", label: "holds lease" },
+  { from: "route", to: "session", label: "settles" },
+  { from: "claude", to: "session", label: "runs", pulse: true },
+  { from: "codex", to: "route", label: "candidate" },
+  { from: "devin", to: "quota", label: "inside" },
+  { from: "quota", to: "route", label: "fails over" },
+  { from: "session", to: "lease", label: "released after" },
+  { from: "terminal", to: "task", label: "drives" },
+  { from: "receipt", to: "session", label: "replays" },
+  { from: "manifest", to: "route", label: "proposes", pulse: true },
+  { from: "terminal", to: "receipt", label: "verifies" },
+];
+
+const noteById = new Map(notes.map((note) => [note.id, note]));
+
+function edgePath(from: FieldNote, to: FieldNote) {
+  const midX = (from.x + to.x) / 2;
+  const bend = Math.min(10, 0.5 * Math.abs(from.y - to.y) + 5);
+  const topY = Math.min(from.y, to.y) - bend;
+  return `M ${from.x} ${from.y} Q ${midX} ${topY} ${to.x} ${to.y}`;
+}
+
+function edgeMid(from: FieldNote, to: FieldNote) {
+  const midX = (from.x + to.x) / 2;
+  const bend = Math.min(10, 0.5 * Math.abs(from.y - to.y) + 5);
+  const topY = Math.min(from.y, to.y) - bend;
+  return [(from.x + 2 * midX + to.x) / 4, (from.y + 2 * topY + to.y) / 4] as const;
+}
+
+/**
+ * Ambient routing field behind the hero: drifting account/session cards and
+ * routed edges. Pointer proximity sharpens each card through --prox; when the
+ * pointer rests, a slow probe keeps wandering the reveal. A press sends a
+ * burst of clarity out from the point.
+ */
+export function HeroField() {
+  const field = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const root = field.current;
+    if (root === null) return;
+    const targets = Array.from(root.querySelectorAll<HTMLElement>("[data-prox]"));
+    if (targets.length === 0) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+    const centers = new Map<HTMLElement, [number, number]>();
+    const measure = () => {
+      centers.clear();
+      for (const el of targets) {
+        const rect = el.getBoundingClientRect();
+        centers.set(el, [rect.left + rect.width / 2, rect.top + rect.height / 2]);
+      }
+    };
+    measure();
+
+    let pointerX = -1e4, pointerY = -1e4;
+    let burstX = -1e4, burstY = -1e4, burst = 0;
+    let lastPointerAt = -1e4;
+    let raf = 0;
+
+    const apply = () => {
+      raf = 0;
+      const now = performance.now();
+      // Idle: a slow probe roams the field so the reveal never sits still.
+      if (now - lastPointerAt > 3200) {
+        const rect = root.getBoundingClientRect();
+        const t = now / 1000;
+        pointerX = rect.left + rect.width * (0.5 + 0.4 * Math.sin(t * 0.29) * Math.cos(t * 0.11));
+        pointerY = rect.top + rect.height * (0.5 + 0.34 * Math.sin(t * 0.21 + 1.9) * Math.cos(t * 0.07));
+        schedule();
+      }
+      if (burst > 0) {
+        burst = Math.max(0, burst - 0.022);
+        schedule();
+      }
+      for (const el of targets) {
+        const c = centers.get(el);
+        if (c === undefined) continue;
+        const near = Math.max(0, 1 - Math.hypot(c[0] - pointerX, c[1] - pointerY) / 340);
+        const ring = burst * Math.max(0, 1 - Math.hypot(c[0] - burstX, c[1] - burstY) / 520);
+        el.style.setProperty("--prox", Math.min(1, near + ring).toFixed(3));
+      }
+    };
+    const schedule = () => { if (raf === 0) raf = requestAnimationFrame(apply); };
+    const onMove = (event: PointerEvent) => {
+      pointerX = event.clientX;
+      pointerY = event.clientY;
+      lastPointerAt = performance.now();
+      schedule();
+    };
+    const onDown = (event: PointerEvent) => {
+      burstX = event.clientX;
+      burstY = event.clientY;
+      burst = 1;
+      schedule();
+    };
+    const onLeave = () => {
+      pointerX = -1e4;
+      pointerY = -1e4;
+      lastPointerAt = performance.now();
+      schedule();
+    };
+
+    window.addEventListener("pointermove", onMove, { passive: true });
+    window.addEventListener("pointerdown", onDown, { passive: true });
+    window.addEventListener("scroll", measure, { capture: true, passive: true });
+    window.addEventListener("resize", measure);
+    document.documentElement.addEventListener("pointerleave", onLeave);
+    window.addEventListener("blur", onLeave);
+    schedule();
+
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("scroll", measure, { capture: true });
+      window.removeEventListener("resize", measure);
+      document.documentElement.removeEventListener("pointerleave", onLeave);
+      window.removeEventListener("blur", onLeave);
+      if (raf !== 0) cancelAnimationFrame(raf);
+    };
+  }, []);
+
+  return (
+    <div aria-hidden="true" className="xcb-field" ref={field}>
+      <svg className="xcb-edges" preserveAspectRatio="none" viewBox="0 0 100 100">
+        {edges.map((edge) => {
+          const from = noteById.get(edge.from);
+          const to = noteById.get(edge.to);
+          if (from === undefined || to === undefined) return null;
+          return <path key={`${edge.from}-${edge.to}`} className={edge.pulse === true ? "xcb-edge xcb-edge--pulse" : "xcb-edge"} d={edgePath(from, to)} data-prox="" />;
+        })}
+      </svg>
+      {edges.map((edge) => {
+        const from = noteById.get(edge.from);
+        const to = noteById.get(edge.to);
+        if (from === undefined || to === undefined) return null;
+        const [x, y] = edgeMid(from, to);
+        return <span key={`label-${edge.from}-${edge.to}`} className="xcb-edge-label" data-prox="" style={{ left: `${x}%`, top: `${y}%` }}>{edge.label}</span>;
+      })}
+      {notes.map((note) => (
+        <article
+          key={note.id}
+          className={note.bloom === true ? "xcb-field-note xcb-field-note--bloom" : "xcb-field-note"}
+          data-prox=""
+          data-type={note.type}
+          style={{
+            "--x": `${note.x}%`, "--y": `${note.y}%`, "--w": `${note.width}px`, "--r": `${note.rotate}deg`,
+            "--dx": `${note.drift[0]}px`, "--dy": `${note.drift[1]}px`, "--s": `${note.seconds}s`, "--d": `${note.delay}s`, "--bd": `${note.delay * 0.7}s`,
+          } as CSSProperties}
+        >
+          <span className="xcb-field-note-type">{note.type}</span>
+          <h3 className="xcb-field-note-title">{note.title}</h3>
+          <p className="xcb-field-note-body">{note.body}</p>
+          {note.tags !== undefined && <div className="xcb-field-note-tags">{note.tags.map((tag) => <span key={tag}>#{tag}</span>)}</div>}
+        </article>
+      ))}
+    </div>
+  );
+}
