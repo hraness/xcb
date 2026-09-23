@@ -35,6 +35,7 @@ pub mod sandbox;
 pub mod store;
 pub mod summary;
 pub mod update;
+mod wire_helpers;
 
 use sha2::{Digest, Sha256};
 use xcb_core::Id;
@@ -83,6 +84,38 @@ pub enum Error {
     },
 }
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Fixed provider failure categories. They are the only provider-derived text
+/// that reaches diagnostics, and the runner settles account state from them,
+/// so every codec maps its raw errors onto exactly these strings.
+pub(crate) mod category {
+    pub const AUTHENTICATION: &str = "authentication rejected; reconnect this account";
+    pub const CODEX_USAGE_LIMIT: &str = "provider usage limit exceeded";
+    pub const DEVIN_RESOURCE_LIMIT: &str = "provider quota or resource limit reached";
+    pub const TLS: &str = "TLS certificate or transport failure";
+    pub const NETWORK: &str = "provider request or network failure";
+}
+
+impl Error {
+    /// Account-level classification of a turn that failed with this error.
+    /// Only a codec-assigned fixed category can name authentication, quota or
+    /// transport; every other error stays `Unknown` so custody is not
+    /// released or recovery started on a guess.
+    pub(crate) fn failure(&self) -> xcb_core::policy::Failure {
+        use xcb_core::policy::Failure;
+        let category = match self {
+            Error::CodexRpc { category, .. } | Error::DevinRpc { category, .. } => *category,
+            Error::Unavailable(text) => *text,
+            _ => return Failure::Unknown,
+        };
+        match category {
+            category::AUTHENTICATION => Failure::Authentication,
+            category::CODEX_USAGE_LIMIT | category::DEVIN_RESOURCE_LIMIT => Failure::AccountQuota,
+            category::TLS | category::NETWORK => Failure::Transport,
+            _ => Failure::Unknown,
+        }
+    }
+}
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()

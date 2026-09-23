@@ -91,7 +91,26 @@ def main():
     fcntl.flock(admission_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     # Retain this descriptor throughout setup. An old runtime may not start a
     # command while its immutable guest helper or qualification is changing.
-    for job in (root / 'jobs').iterdir():
+    jobs_dir = root / 'jobs'
+    pending_dir = jobs_dir / 'pending'
+    if pending_dir.exists():
+        # Mirror the runtime's pending-marker admission: once the migration
+        # sentinel exists only marked jobs can hold unjoined custody, so the
+        # scan stays proportional to pending work. A partial migration is
+        # refused rather than trusted; the next runtime admission rebuilds it.
+        if not pending_dir.is_dir() or not (pending_dir / 'pending-ready').is_file():
+            raise RuntimeError('incomplete pending-marker migration; retry after one runtime admission')
+        candidates = []
+        for marker in pending_dir.iterdir():
+            if marker.name == 'pending-ready':
+                continue
+            job = jobs_dir / marker.name
+            if not marker.is_file() or not job.is_dir():
+                raise RuntimeError('pending marker without its job record')
+            candidates.append(job)
+    else:
+        candidates = [job for job in jobs_dir.iterdir() if job.name != 'pending']
+    for job in candidates:
         if (job / 'started.json').exists():
             custody = json.loads((job / 'custody.json').read_bytes())
             joined = False
