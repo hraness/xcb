@@ -7,6 +7,7 @@ import {
   ProductHero,
 } from "@hraness/design-kit/react/server";
 import { AskAiAboutThis } from "@hraness/ui";
+import { HeroField } from "./hero-field";
 import { HeroGraphic } from "./hero-graphic";
 import { publishedRelease } from "./publication";
 import { CompatibilityArchive, NativeDownloads, ReleaseSummary } from "./release-state";
@@ -45,6 +46,7 @@ export default function Home() {
       <main id="main" tabIndex={-1}>
         <MarketingPage>
           <div className="hraness-material-wall xcb-opening">
+            <HeroField />
             <ProductHero className="xcb-marketing-hero" align="center" name=""
               heading="All your AI subscriptions. One router." headingId="hero-title" summary={summary}
               actions={[{ href: "/docs/getting-started", label: "Get started ↗" }, { href: "/docs/route", label: "Route contract" }]}
