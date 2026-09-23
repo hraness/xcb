@@ -1298,6 +1298,88 @@ mod tests {
         assert!(pin.snapshot(&launch).is_err());
     }
 
+    /// Launch-path timing on a synthetic 150 MiB provider executable that
+    /// embeds the Codex catalog fixture. Fixtures live under `XCB_BENCH_DIR`
+    /// (default: the system temp directory). Run with
+    /// `cargo test -p xcb-runtime launch_path_benchmark --locked -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "launch-path benchmark; run explicitly with --ignored --nocapture"]
+    fn launch_path_benchmark() {
+        use std::time::Instant;
+        let base = std::env::var_os("XCB_BENCH_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        fs::create_dir_all(&base).unwrap();
+        let directory = tempfile::tempdir_in(&base).unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = root.join("codex");
+        {
+            // 150 MiB of xorshift filler with the pretty-printed catalog
+            // fixture embedded once, NUL-terminated, a third of the way in.
+            let mut file = std::io::BufWriter::new(fs::File::create(&executable).unwrap());
+            let mut state = 0x9E37_79B9_7F4A_7C15u64;
+            let mut block = [0u8; 64 * 1024];
+            let total = 150 * 1024 * 1024usize;
+            let catalog_at = total / 3;
+            let mut written = 0usize;
+            let mut fixture =
+                serde_json::to_vec_pretty(&crate::codex::fixture_catalog_source()).unwrap();
+            fixture.push(0);
+            while written < total {
+                for chunk in block.chunks_mut(8) {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    chunk.copy_from_slice(&state.to_le_bytes()[..chunk.len()]);
+                }
+                if written == catalog_at {
+                    file.write_all(&fixture).unwrap();
+                }
+                file.write_all(&block).unwrap();
+                written += block.len();
+            }
+            file.flush().unwrap();
+        }
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let sha256 = executable_digest(&executable).unwrap();
+        let (_, host_sha256) = host_identity().unwrap();
+        let pin = Pin {
+            provider: Provider::Codex,
+            executable: executable.clone(),
+            sha256: sha256.clone(),
+            version: crate::codex::VERSION.into(),
+            host_sha256,
+            observed_at_ms: crate::now_ms(),
+        };
+        pin.save(&root).unwrap();
+        let size = fs::metadata(&executable).unwrap().len();
+        eprintln!(
+            "benchmark executable: {} bytes at {}",
+            size,
+            executable.display()
+        );
+        for round in 1..=3 {
+            let started = Instant::now();
+            let loaded = Pin::load(&root, Provider::Codex).unwrap();
+            assert_eq!(loaded.sha256, sha256);
+            eprintln!("Pin::load #{round}: {:?}", started.elapsed());
+        }
+        for round in 1..=2 {
+            let launch = private::directory(&root.join(format!("launch-{round}"))).unwrap();
+            let started = Instant::now();
+            let snapshot = pin.snapshot(&launch).unwrap();
+            eprintln!("Pin::snapshot #{round}: {:?}", started.elapsed());
+            assert_eq!(fs::metadata(&snapshot).unwrap().len(), size);
+        }
+        for round in 1..=3 {
+            let started = Instant::now();
+            let catalog =
+                crate::codex::static_catalog_bound(&root, &pin, Some("gpt-6-astra"), &sha256)
+                    .unwrap();
+            eprintln!("static_catalog #{round}: {:?}", started.elapsed());
+            assert!(catalog.admission.models.contains("gpt-6-astra"));
+        }
+    }
     #[tokio::test]
     async fn interrupted_frame_read_preserves_the_partial_json_prefix() {
         let mut command = Command::new("/bin/sh");
