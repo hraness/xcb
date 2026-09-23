@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { parsePublishedRelease } from "../app/publication";
+import { parsePublishedRelease, publishedRelease, type NativeAsset } from "../app/publication";
 
 const site = join(import.meta.dir, "..");
 const read = async (path: string): Promise<string> => await readFile(join(site, path), "utf8");
@@ -29,27 +29,31 @@ function compare(left: readonly [bigint, bigint, bigint], right: readonly [bigin
 
 describe("xcb site source contract", () => {
   test("advertises only a verified published release that does not exceed the source version", async () => {
-    const [home, publication, packageSource] = await Promise.all([
+    const [home, releaseState, publication, packageSource] = await Promise.all([
       read("app/page.tsx"),
+      read("app/release-state.tsx"),
       read("published-release.json"),
       readFile(join(site, "..", "package.json"), "utf8"),
     ]);
     const publishedRelease = record(JSON.parse(publication) as unknown, "published release");
     const packageJson = record(JSON.parse(packageSource) as unknown, "source package");
-    expect(Object.keys(publishedRelease).sort()).toEqual(["archiveUrl", "verificationRun", "version"]);
+    expect(Object.keys(publishedRelease).sort()).toEqual(["archiveUrl", "native", "verificationRun", "version"]);
     const admitted = parsePublishedRelease(publishedRelease);
+    // The homepage always renders the datum through the shared release-state
+    // components; the datum alone decides between downloads and the honest
+    // no-release state.
+    expect(home).toContain('import { publishedRelease } from "./publication"');
+    expect(home).toContain('from "./release-state"');
+    expect(home).not.toContain("package.json");
     if (admitted === null) {
-      expect(home).toContain("First xcb package release in preparation");
+      expect(releaseState).toContain("No native release is published yet; install from source.");
       return;
     }
     const published = stableVersion(admitted.version, "published version");
     const source = stableVersion(packageJson.version, "source version");
     expect(compare(published, source)).toBeLessThanOrEqual(0);
     expect(publishedRelease.verificationRun).toMatch(/^https:\/\/github\.com\/hraness\/xcb\/actions\/runs\/[1-9][0-9]*$/u);
-    expect(home).toContain('import { publishedRelease } from "./publication"');
-    expect(home).toContain("const releaseVersion = publishedRelease?.version;");
-    expect(home).not.toContain("package.json");
-    expect(home).toContain("href={publishedRelease.verificationRun}");
+    expect(releaseState).toContain("release.verificationRun");
   });
 
   test("renders the README landing identity and the shared Ask AI links", async () => {
@@ -84,32 +88,64 @@ describe("xcb site source contract", () => {
   });
 
   test("keeps the llms.txt map and docs social metadata on the canonical origin", async () => {
-    const [llms, docs] = await Promise.all([read("public/llms.txt"), read("app/docs/page.tsx")]);
+    const [{ GET }, docs] = await Promise.all([import("../app/llms.txt/route"), read("app/docs/page.tsx")]);
+    const llms = await GET().text();
     expect(llms).toContain("https://xcb.sh/");
     expect(llms).toContain("https://xcb.sh/docs");
+    expect(llms).toContain("https://xcb.sh/README.md");
     expect(llms).not.toContain("http://");
+    if (publishedRelease === null) expect(llms).toContain("No native xcb binary");
+    else expect(llms).toContain(`v${publishedRelease.version}`);
     expect(docs).toContain('siteName: "xcb"');
     expect(docs).toContain('card: "summary_large_image"');
   });
 });
 
 
-test("publication metadata fails closed without an exact xcb artifact and verification", () => {
-  expect(parsePublishedRelease({ version: null, archiveUrl: null, verificationRun: null })).toBeNull();
+test("publication metadata fails closed without an exact xcb artifact and verification", async () => {
+  expect(parsePublishedRelease({ version: null, archiveUrl: null, verificationRun: null, native: null })).toBeNull();
   const verificationRun = "https://github.com/hraness/xcb/actions/runs/123";
   const archiveUrl = "https://github.com/hraness/xcb/releases/download/v0.20.0/hraness-xcb-0.20.0.tgz";
-  const valid = { version: "0.20.0", archiveUrl, verificationRun };
+  const native: NativeAsset[] = [
+    {
+      platform: "darwin-aarch64",
+      url: "https://github.com/hraness/xcb/releases/download/v0.20.0/xcb-0.20.0-darwin-aarch64.tar.gz",
+      sha256Url: "https://github.com/hraness/xcb/releases/download/v0.20.0/xcb-0.20.0-darwin-aarch64.tar.gz.sha256",
+    },
+    {
+      platform: "linux-x86_64",
+      url: "https://github.com/hraness/xcb/releases/download/v0.20.0/xcb-0.20.0-linux-x86_64.tar.gz",
+      sha256Url: "https://github.com/hraness/xcb/releases/download/v0.20.0/xcb-0.20.0-linux-x86_64.tar.gz.sha256",
+    },
+  ];
+  const valid = { version: "0.20.0", archiveUrl, verificationRun, native };
   expect(parsePublishedRelease(valid)).toEqual(valid);
+  // Either artifact kind alone satisfies the contract.
+  expect(parsePublishedRelease({ ...valid, archiveUrl: null })?.archiveUrl).toBeNull();
+  expect(parsePublishedRelease({ ...valid, native: [] })?.native).toEqual([]);
   for (const value of [
-    null, {}, { ...valid, archiveUrl: null }, { ...valid, verificationRun: null },
+    null, {},
+    { version: null, archiveUrl: null, verificationRun: null },
+    { ...valid, archiveUrl: null, native: [] },
+    { ...valid, native: null },
+    { ...valid, native: {} },
+    { ...valid, native: [native[0], native[0]] },
+    { ...valid, native: [{ ...native[0], platform: "darwin-x86_64" }] },
+    { ...valid, native: [{ ...native[0], url: `${native[0]!.url}.other` }] },
+    { ...valid, native: [{ ...native[0], sha256Url: native[0]!.url }] },
+    { ...valid, native: [{ ...native[0], extra: true }] },
+    { ...valid, verificationRun: null },
     { ...valid, verificationRun: "https://example.com" },
     { ...valid, version: "9007199254740992.0.0" }, { ...valid, extra: true },
     { ...valid, archiveUrl: "https://github.com/hraness/xcb/releases/download/v0.3.0/hraness-agentmixer-0.3.0.tgz" },
     { ...valid, archiveUrl: archiveUrl.replace("0.20.0.tgz", "0.19.0.tgz") },
-    { version: "0.3.0", verificationRun },
+    { version: "0.3.0", verificationRun, archiveUrl: null, native: [] },
   ]) {
     expect(() => parsePublishedRelease(value)).toThrow();
   }
+  // The shipped fixture exercises the full published state without claiming one.
+  const fixture = JSON.parse(await read("tests/fixtures/published-release.json")) as unknown;
+  expect(parsePublishedRelease(fixture)).toEqual(valid);
 });
 
 

@@ -342,6 +342,20 @@ a { text-underline-offset: 0.2em; }
 .xcb-release-details summary { cursor: pointer; width: fit-content; }
 .xcb-release-details p { margin-block: .75rem; }
 .xcb-release-details a { text-decoration: underline; }
+
+/* The hero carries the three-command source install and the signed-off
+   release line, both read from the publication datum. */
+.xcb-hero-install { display: grid; gap: .9rem; justify-items: center; width: 100%; max-width: 44rem; margin: 1.75rem auto 0; }
+.xcb-hero-install > p { margin: 0; color: var(--muted); font-size: .85rem; }
+.xcb-hero-install .install-command { margin: 0; width: 100%; font-size: .8rem; line-height: 1.75; text-align: left; overflow-x: auto; border: 1px solid var(--line); border-radius: .5rem; padding: 1rem 1.25rem; }
+.xcb-release-summary { margin: 0; font-size: .82rem; color: var(--muted); }
+.xcb-release-summary a { text-decoration: underline; }
+.xcb-native-downloads { display: grid; gap: .75rem; width: 100%; text-align: left; }
+.xcb-native-downloads ul { list-style: none; margin: 0; padding: 0; display: grid; }
+.xcb-native-downloads li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: .3rem 1rem; padding-block: .55rem; border-bottom: 1px solid var(--line); }
+.xcb-native-downloads li:first-child { border-top: 1px solid var(--line); }
+.xcb-native-downloads p { margin: 0; }
+.xcb-native-downloads a { text-decoration: underline; }
 .hraness-marketing-install .install-command { font-size: .83rem; line-height: 1.8; text-align: left; overflow-x: auto; max-width: 100%; border: 1px solid var(--line); padding: 1.2rem 1.5rem; border-radius: .5rem; }
 .hraness-marketing-install > .xcb-text-link { margin-inline: auto; }
 section[id], h2[id], h3[id] { scroll-margin-top: 6.5rem; }
