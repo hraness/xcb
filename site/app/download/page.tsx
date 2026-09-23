@@ -7,7 +7,9 @@ import { SiteHeader } from "../site-header";
 import { socialImages } from "../social";
 
 const title = "Download xcb · Verified releases and the source build";
-const description = "Build xcb, the router for your Claude, Codex, and Devin subscriptions, from source. Verified macOS ARM64 and Linux x86_64 archives appear here once published.";
+const description = publishedRelease === null
+  ? "Build xcb, the router for your Claude, Codex, and Devin subscriptions, from source. Verified macOS ARM64 and Linux x86_64 archives appear here once published."
+  : `Download xcb v${publishedRelease.version}, the router for your Claude, Codex, and Devin subscriptions, with checksums and a public verification run, or build it from source.`;
 
 export const metadata: Metadata = {
   title,

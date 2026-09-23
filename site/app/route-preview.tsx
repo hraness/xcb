@@ -44,7 +44,7 @@ const result = await router.run({
 // the account is released only after the provider stops`}</code></pre>}
         </div>
       </div>
-      <figcaption>Illustrative requests · the SDK is built from source. <a href="/docs/route">Route tasks →</a></figcaption>
+      <figcaption>Illustrative requests · no live provider calls. <a href="/docs/route">Route tasks →</a></figcaption>
     </figure>
   );
 }
