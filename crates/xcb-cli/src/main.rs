@@ -931,6 +931,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 &config,
                 account.as_ref(),
                 model.as_deref(),
+                None,
             )?;
             let (cancel, cancelled) = watch::channel(false);
             // Install both handlers before starting any provider. SIGTERM must

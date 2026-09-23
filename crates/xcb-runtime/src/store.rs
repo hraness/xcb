@@ -351,6 +351,11 @@ pub struct Store {
     /// foreign-owned live runs.
     instance: String,
     connection: Mutex<Connection>,
+    /// Lazily opened managed store: session probes reuse one connection and
+    /// its migration probe instead of paying a fresh open on every call.
+    /// `None` means not opened yet — or the managed database absent at the
+    /// last check — so a later created managed root is still discovered.
+    managed: Mutex<Option<crate::managed::ManagedStore>>,
 }
 
 fn decode<T: DeserializeOwned>(text: &str) -> Result<T> {
@@ -485,6 +490,7 @@ impl Store {
             root,
             instance: new_id("i").to_string(),
             connection: Mutex::new(connection),
+            managed: Mutex::new(None),
         })
     }
 
@@ -596,6 +602,7 @@ impl Store {
             root,
             instance: new_id("i").to_string(),
             connection: Mutex::new(connection),
+            managed: Mutex::new(None),
         })
     }
     fn db(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -784,6 +791,30 @@ impl Store {
         workspace: &Path,
         now: u64,
     ) -> Result<Session> {
+        self.create_session_inner(account_id, model, workspace, now, None)
+    }
+    /// The same custody checks as `create_session`, with the owning managed
+    /// task recorded on the session atomically. The marker lets startup
+    /// reconciliation prove custody of an orphan if the supervisor dies
+    /// between session creation and managed `prepare`.
+    pub fn create_managed_session(
+        &self,
+        account_id: &Id,
+        model: ModelChoice,
+        workspace: &Path,
+        now: u64,
+        task: &Id,
+    ) -> Result<Session> {
+        self.create_session_inner(account_id, model, workspace, now, Some(task))
+    }
+    fn create_session_inner(
+        &self,
+        account_id: &Id,
+        model: ModelChoice,
+        workspace: &Path,
+        now: u64,
+        managed_task: Option<&Id>,
+    ) -> Result<Session> {
         let account = self.account(account_id)?;
         model.validate()?;
         let workspace = workspace.canonicalize()?;
@@ -803,6 +834,7 @@ impl Store {
             title: "New session".into(),
             pane: Id::new("focus")?,
             state: State::Idle,
+            managed_task: managed_task.cloned(),
             revision: 0,
             created_at_ms: now,
             last_active_at_ms: now,
@@ -851,6 +883,29 @@ impl Store {
                 continue;
             };
             sessions.push(session);
+        }
+        Ok(sessions)
+    }
+    /// Sessions carrying a managed-task ownership marker, decoded tolerantly
+    /// like `sessions`: a row that cannot be proven marked is skipped rather
+    /// than reported, so the orphan sweep never acts on unproven custody.
+    pub fn managed_marked_sessions(&self) -> Result<Vec<Session>> {
+        let db = self.db()?;
+        let mut query = db.prepare(
+            "SELECT payload FROM sessions WHERE payload LIKE '%\"managed_task\":%' ORDER BY last_active,id LIMIT ?1",
+        )?;
+        let rows = query.query_map([MAX_SESSIONS + 1], |row| row.get::<_, String>(0))?;
+        let mut sessions = Vec::new();
+        for row in rows {
+            let Ok(session) = decode::<Session>(&row?).and_then(|session| {
+                session.validate()?;
+                Ok(session)
+            }) else {
+                continue;
+            };
+            if session.managed_task.is_some() {
+                sessions.push(session);
+            }
         }
         Ok(sessions)
     }
@@ -1608,10 +1663,13 @@ impl Store {
         Ok(settled)
     }
     pub fn remove_session(&self, id: &Id) -> Result<bool> {
-        if let Some(managed) = self.existing_managed_store()?
-            && managed.has_active_session(id)?
         {
-            return Err(Error::Conflict("session belongs to an active managed task"));
+            let managed = self.managed_guard()?;
+            if let Some(managed) = managed.as_ref()
+                && managed.has_active_session(id)?
+            {
+                return Err(Error::Conflict("session belongs to an active managed task"));
+            }
         }
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1643,25 +1701,42 @@ impl Store {
         drop(db);
         // Do not hold native database custody while inspecting the managed
         // store. Paused questions and between-turn queues still need history.
-        if let Some(managed) = self.existing_managed_store()? {
-            let mut eligible = Vec::new();
-            for id in candidates {
-                if !managed.has_active_session(&id)? {
-                    eligible.push(id);
-                }
+        // One managed handle and one active-task scan serve the whole pass.
+        let managed = self.managed_guard()?;
+        match managed.as_ref() {
+            Some(managed) => {
+                let active = managed.active_session_ids()?;
+                Ok(candidates
+                    .into_iter()
+                    .filter(|id| !active.contains(id))
+                    .collect())
             }
-            Ok(eligible)
-        } else {
-            Ok(candidates)
+            None => Ok(candidates),
         }
     }
 
-    fn existing_managed_store(&self) -> Result<Option<crate::managed::ManagedStore>> {
-        if self.root.join("managed/managed.sqlite").try_exists()? {
-            Ok(Some(crate::managed::ManagedStore::open(&self.root)?))
-        } else {
-            Ok(None)
+    /// The cached managed handle, opened on first use when
+    /// `managed/managed.sqlite` exists. A failed open is retried on the next
+    /// call rather than remembered; a still-missing database leaves `None`
+    /// and is re-probed cheaply each call.
+    fn managed_guard(&self) -> Result<MutexGuard<'_, Option<crate::managed::ManagedStore>>> {
+        let mut managed = self
+            .managed
+            .lock()
+            .map_err(|_| Error::Conflict("managed store lock poisoned"))?;
+        if managed.is_none() && self.root.join("managed/managed.sqlite").try_exists()? {
+            *managed = Some(crate::managed::ManagedStore::open(&self.root)?);
         }
+        Ok(managed)
+    }
+
+    /// The cached handle's active-task scan count, for churn regression tests.
+    #[cfg(test)]
+    pub(crate) fn managed_active_scans(&self) -> Option<u64> {
+        self.managed
+            .lock()
+            .ok()
+            .and_then(|managed| managed.as_ref().map(|m| m.active_scan_count()))
     }
     pub fn set_models(&self, provider: Provider, choices: &[ModelChoice]) -> Result<()> {
         if choices.len() > 4096 {

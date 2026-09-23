@@ -175,6 +175,7 @@ fn explicit_model_selects_its_provider_instead_of_an_unrelated_default_account()
         &config,
         None,
         Some(&codex_model.key()),
+        None,
     )
     .unwrap();
     assert_eq!(session.account, codex.id);
@@ -185,14 +186,24 @@ fn explicit_model_selects_its_provider_instead_of_an_unrelated_default_account()
             &base.join("work"),
             &config,
             Some(&claude.id),
-            Some(&codex_model.key())
+            Some(&codex_model.key()),
+            None
         )
         .is_err()
     );
     store.set_account_enabled(&claude.id, false).unwrap();
-    let session = kernel::new_session(&store, &base.join("work"), &config, None, None).unwrap();
+    let session =
+        kernel::new_session(&store, &base.join("work"), &config, None, None, None).unwrap();
     assert_eq!(session.account, codex.id);
     assert!(
-        kernel::new_session(&store, &base.join("work"), &config, Some(&claude.id), None).is_err()
+        kernel::new_session(
+            &store,
+            &base.join("work"),
+            &config,
+            Some(&claude.id),
+            None,
+            None
+        )
+        .is_err()
     );
 }

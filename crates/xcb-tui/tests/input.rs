@@ -392,6 +392,7 @@ fn view_for(session: &str) -> xcb_core::ui::View {
             title: format!("Session {session}"),
             pane: xcb_core::Id::new("focus").unwrap(),
             state: xcb_core::session::State::Idle,
+            managed_task: None,
             revision: 1,
             created_at_ms: 1,
             last_active_at_ms: 2,
