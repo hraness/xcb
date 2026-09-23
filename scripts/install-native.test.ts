@@ -220,6 +220,7 @@ for (const [label, entries] of Object.entries({
   hardlink: [{ name: "xcb", type: "1", link: "../escaped" }],
   directory: [{ name: "xcb", type: "5" }],
   extra: [{ name: "xcb", contents: binary("0.4.0") }, { name: "extra", contents: "forbidden" }],
+  appledouble: [{ name: "._xcb", contents: "metadata" }, { name: "xcb", contents: binary("0.4.0") }],
   duplicate: [{ name: "xcb", contents: binary("0.4.0") }, { name: "xcb", contents: binary("0.4.0") }],
 } satisfies Record<string, Entry[]>)) {
   test(`native release refuses ${label} archive entries before extraction`, () => {

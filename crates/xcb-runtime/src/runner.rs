@@ -797,7 +797,11 @@ pub(crate) fn prepare_codex(
     let home = private::directory(&scratch.join("home"))?;
     let profile = private::directory(&scratch.join("profile"))?;
     let tmp = private::directory(&home.join("tmp"))?;
-    let catalog = codex::static_catalog(pin, (!metadata_only).then_some(model.id.as_str()))?;
+    let catalog = codex::static_catalog(
+        store.root(),
+        pin,
+        (!metadata_only).then_some(model.id.as_str()),
+    )?;
     let catalog_path = directory.join("models.json");
     private::create(&catalog_path, &catalog.bytes)?;
     let config_path = profile.join("config.toml");

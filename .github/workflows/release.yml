@@ -213,7 +213,9 @@ jobs:
     name: Native binary (${{ matrix.os }})
     needs: verify
     permissions:
+      attestations: write
       contents: read
+      id-token: write
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -230,11 +232,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      # No dependency cache: a release build is a cold, reproducible build.
       - name: Build and package the native binary
         env:
           XCB_VERSION: ${{ needs.verify.outputs.verified_tag }}
         run: ./scripts/build-native.sh
+      - name: Re-admit the packaged archive exactly like the installer
+        env:
+          XCB_VERSION: ${{ needs.verify.outputs.verified_tag }}
+        run: ./scripts/check-native-archive.sh "$XCB_VERSION" artifacts/*.tar.gz
+      - name: Attest native release tarball provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: artifacts/*.tar.gz
       - name: Preserve the exact native release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -285,6 +295,17 @@ jobs:
         with:
           name: xcb-native-macos-15-${{ github.run_attempt }}
           path: native-artifacts
+      - name: Re-verify the downloaded native asset checksums
+        run: |
+          set -euo pipefail
+          for archive in native-artifacts/*.tar.gz; do
+            recorded=$(tr -d '[:space:]' < "$archive.sha256")
+            actual=$(sha256sum "$archive" | sed 's/ .*//')
+            if [[ ${#recorded} -ne 64 || "$recorded" != "$actual" ]]; then
+              echo "::error::Downloaded native asset $archive fails its adjacent checksum"
+              exit 1
+            fi
+          done
       - name: Bind the immutable workflow artifacts
         env:
           GITHUB_WRITER_ARTIFACT_DIGEST: ${{ needs.verify.outputs.github_writer_artifact_digest }}
@@ -305,7 +326,7 @@ jobs:
           bun run ./github-release-writer/scripts/publish-github-release.ts "$VERIFIED_TAG" artifacts/*.tgz artifacts/SHA256SUMS github-release-writer/package.json native-artifacts
 
   pre_npm:
-    name: Admit immutable GitHub bytes and npm retry state
+    name: GitHub parity and pre-npm admission
     needs:
       - verify
       - publish_github
@@ -345,10 +366,23 @@ jobs:
           artifact-ids: ${{ needs.verify.outputs.release_artifact_id }}
           merge-multiple: true
           path: artifacts
+      - name: Download the exact Ubuntu native assets by run-bound name
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: xcb-native-ubuntu-24.04-${{ github.run_attempt }}
+          path: native-artifacts
+      - name: Download the exact macOS native assets by run-bound name
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: xcb-native-macos-15-${{ github.run_attempt }}
+          path: native-artifacts
       - name: Prove immutable Latest GitHub Release exact-byte parity
-        run: bun run ./scripts/check-github-release.ts artifacts/*.tgz artifacts/SHA256SUMS package.json
+        run: bun run ./scripts/check-github-release.ts artifacts/*.tgz artifacts/SHA256SUMS package.json native-artifacts
+      # npm-only: with vars.XCB_PUBLISH_NPM unset the GitHub parity check above
+      # is the terminal gate and no npm retry state exists to admit.
       - name: Admit absent or exact same-run npm state
         id: npm_state
+        if: vars.XCB_PUBLISH_NPM == 'true'
         run: |
           set -euo pipefail
           bun run ./scripts/check-npm-retry-state.ts artifacts/*.tgz package.json
@@ -357,6 +391,7 @@ jobs:
 
   publish_npm:
     name: Publish exact npm package through OIDC only
+    if: vars.XCB_PUBLISH_NPM == 'true'
     needs:
       - verify
       - pre_npm
@@ -424,8 +459,12 @@ jobs:
 
   admit:
     name: Admit exact public npm and GitHub distributions
+    # Runs even when publish_npm is skipped (native-only mode): the GitHub
+    # verification half still applies, and the run must stay green.
+    if: ${{ !failure() && !cancelled() }}
     needs:
       - verify
+      - publish_github
       - pre_npm
       - publish_npm
     permissions:
@@ -437,7 +476,7 @@ jobs:
       GITHUB_REPOSITORY: ${{ github.repository }}
       GITHUB_TOKEN: ${{ github.token }}
       NPM_WRITER_RESULT: ${{ needs.publish_npm.outputs.npm_completion }}
-      NPM_WRITER_RESULT_REQUIRED: "true"
+      NPM_WRITER_RESULT_REQUIRED: ${{ vars.XCB_PUBLISH_NPM == 'true' }}
       NPM_COMPLETION_RUN_ATTEMPT: ${{ needs.publish_npm.outputs.npm_completion_run_attempt }}
       NPM_COMPLETION_RUN_ID: ${{ needs.publish_npm.outputs.npm_completion_run_id }}
       VERIFIED_SHA: ${{ needs.verify.outputs.verified_sha }}

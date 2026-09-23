@@ -11,7 +11,7 @@ export function DocsShell({ active, children }: { active?: DocsSlug; children: R
           <nav aria-label="Documentation">
             <p className="xcb-docs-nav-title">Documentation</p>
             <a href="/docs" aria-current={active === undefined ? "page" : undefined}>Overview</a>
-            {(["Start here", "Daily use", "Build with XCB"] as const).map((group) => (
+            {(["Start here", "Daily use", "Build with xcb"] as const).map((group) => (
               <div className="xcb-docs-nav-group" key={group}>
                 <p>{group}</p>
                 <ul>
