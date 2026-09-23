@@ -45,6 +45,11 @@ impl Protocol for ClaudeProtocol {
     }
     async fn receive(&mut self, process: &mut StreamProcess, frame: &[u8]) -> Result<Vec<Event>> {
         let mut events = Vec::new();
+        if frame.len() > xcb_core::MAX_JSON_BYTES {
+            return Err(Error::Protocol("frame limit"));
+        }
+        // One parse per frame: the streamed usage counter and the event
+        // classification read the same value.
         let raw: Value = serde_json::from_slice(frame)?;
         match raw.pointer("/event/type").and_then(Value::as_str) {
             Some("message_start") => {
@@ -73,33 +78,52 @@ impl Protocol for ClaudeProtocol {
             }
             _ => (),
         }
-        match claude::parse_event(frame)? {
+        match claude::parse_value(raw)? {
             claude::Event::Initialize(value) => {
                 runner::validate_init(&value, &self.cwd, &self.model, self.tools)?;
                 events.push(Event::Ready);
             }
             claude::Event::Delta { thinking, text } => events.push(Event::Delta { thinking, text }),
-            claude::Event::Assistant { text, .. } => events.push(Event::Assistant(text)),
+            claude::Event::Assistant { text } => events.push(Event::Assistant(text)),
             claude::Event::Quota {
                 window,
                 utilization,
                 resets_at_ms,
                 failure,
-            } => events.push(Event::Quota {
-                window,
-                used_percent: utilization.map(|used| used * 100.0),
-                resets_at_ms,
-                failure,
-            }),
+                notice,
+            } => {
+                if let Some(notice) = notice {
+                    events.push(Event::Diagnostic(runner::Diagnostic::notice(notice)));
+                }
+                events.push(Event::Quota {
+                    window,
+                    used_percent: utilization.map(|used| used * 100.0),
+                    resets_at_ms,
+                    failure,
+                });
+            }
             claude::Event::Result {
                 terminal,
                 text,
                 models,
-            } => events.push(Event::Result {
-                terminal,
-                text,
-                models,
-            }),
+                failure,
+            } => {
+                // The classification precedes the result so the host settles
+                // the account (NeedsAction, not Failed) from the same batch.
+                if let Some(failure) = failure {
+                    events.push(Event::Quota {
+                        window: None,
+                        used_percent: None,
+                        resets_at_ms: None,
+                        failure: Some(failure),
+                    });
+                }
+                events.push(Event::Result {
+                    terminal,
+                    text,
+                    models,
+                });
+            }
             claude::Event::Subagent {
                 id,
                 status,

@@ -23,11 +23,30 @@ pub struct Entry {
     pub name: String,
     pub kind: String,
 }
+/// A sorted directory listing. `truncated` reports that more entries exist
+/// than the bounded listing carries; it is never a failure.
+#[derive(Debug, Serialize)]
+pub struct Listing {
+    pub entries: Vec<Entry>,
+    pub truncated: bool,
+}
+
+/// `workspace_read` accepts half of the transcript text bound so that JSON
+/// escaping of newlines and quotes still leaves headroom in the tool result.
+pub const READ_LIMIT: usize = MAX_TEXT_BYTES / 2;
+/// `workspace_list` returns at most this many sorted entries.
+pub const LIST_LIMIT: usize = 512;
+/// Directory entries are read up to this bound before sorting. A larger
+/// directory is reported truncated; its page is drawn from the entries read.
+const LIST_SCAN_LIMIT: usize = 65_536;
+/// `workspace_search` scans files up to the full text bound; larger or
+/// non-UTF-8 files are skipped rather than failing the search.
+const SEARCH_FILE_LIMIT: usize = MAX_TEXT_BYTES;
 
 pub struct Workspace {
     root: PathBuf,
     directory: File,
-    coordination_root: PathBuf,
+    coordination: coordination::Coordination,
 }
 
 fn io(error: rustix::io::Errno) -> Error {
@@ -52,7 +71,9 @@ fn regular(file: &File) -> Result<()> {
     }
     Ok(())
 }
-fn file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
+/// A checked regular single-link file without a size bound; callers apply
+/// their own limit so an oversized read can carry guided tool errors.
+fn opened_file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
     let file = File::from(
         rustix::fs::openat(
             parent,
@@ -62,6 +83,14 @@ fn file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
         )
         .map_err(io)?,
     );
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.nlink() != 1 {
+        return Err(xcb_core::Error::Invalid("workspace file").into());
+    }
+    Ok(file)
+}
+fn file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
+    let file = opened_file_at(parent, name)?;
     regular(&file)?;
     Ok(file)
 }
@@ -90,18 +119,86 @@ fn revision_file_at(parent: &File, name: &std::ffi::OsStr, expected: &str) -> Re
     Ok(file)
 }
 
-fn read_at(parent: &File, name: &std::ffi::OsStr) -> Result<ReadResult> {
-    let file = file_at(parent, name)?;
+fn read_bytes_at(parent: &File, name: &std::ffi::OsStr, limit: usize) -> Result<Vec<u8>> {
+    let file = opened_file_at(parent, name)?;
     let mut bytes = Vec::new();
-    file.take(MAX_TEXT_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_TEXT_BYTES {
+    file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
         return Err(xcb_core::Error::Limit("workspace file").into());
     }
+    Ok(bytes)
+}
+fn utf8(bytes: Vec<u8>) -> Result<String> {
+    String::from_utf8(bytes).map_err(|_| xcb_core::Error::Invalid("UTF-8 workspace file").into())
+}
+/// A legal but oversized file is a tool rejection with guidance, never a
+/// provider-turn failure.
+fn read_at(parent: &File, name: &std::ffi::OsStr) -> Result<ReadResult> {
+    let bytes = match read_bytes_at(parent, name, READ_LIMIT) {
+        Err(Error::Core(xcb_core::Error::Limit(_))) => {
+            return Err(Error::Unavailable(
+                "workspace file exceeds the 128 KiB read limit; read a smaller file",
+            ));
+        }
+        other => other?,
+    };
     let revision = digest(&bytes);
-    let text =
-        String::from_utf8(bytes).map_err(|_| xcb_core::Error::Invalid("UTF-8 workspace file"))?;
-    Ok(ReadResult { text, revision })
+    Ok(ReadResult {
+        text: utf8(bytes)?,
+        revision,
+    })
+}
+/// Text without a revision for search: no digest pass per scanned file.
+fn read_text_at(parent: &File, name: &std::ffi::OsStr) -> Result<String> {
+    utf8(read_bytes_at(parent, name, SEARCH_FILE_LIMIT)?)
+}
+/// The current revision of a file up to the full write bound, so an existing
+/// file above the read limit can still be replaced with its exact revision.
+fn revision_at(parent: &File, name: &std::ffi::OsStr) -> Result<String> {
+    Ok(digest(read_bytes_at(parent, name, MAX_TEXT_BYTES)?))
+}
+fn open_directory_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
+    Ok(File::from(
+        rustix::fs::openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(io)?,
+    ))
+}
+fn list_at(directory: &File) -> Result<Listing> {
+    let mut entries = Vec::new();
+    let mut truncated = false;
+    for item in Dir::read_from(directory).map_err(io)? {
+        let item = item.map_err(io)?;
+        let name = item.file_name().to_string_lossy().into_owned();
+        if name == "."
+            || name == ".."
+            || name.chars().any(char::is_control)
+            || item.file_type() == FileType::Symlink
+        {
+            continue;
+        }
+        if entries.len() >= LIST_SCAN_LIMIT {
+            truncated = true;
+            break;
+        }
+        entries.push(Entry {
+            name,
+            kind: if item.file_type() == FileType::Directory {
+                "directory"
+            } else {
+                "file"
+            }
+            .to_owned(),
+        });
+    }
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    truncated |= entries.len() > LIST_LIMIT;
+    entries.truncate(LIST_LIMIT);
+    Ok(Listing { entries, truncated })
 }
 
 impl Workspace {
@@ -113,11 +210,7 @@ impl Workspace {
             return Err(Error::PrivateState);
         }
         let root = root.canonicalize()?;
-        if coordination_root.starts_with(&root) || root.starts_with(coordination_root) {
-            return Err(Error::Conflict(
-                "write coordination must be outside the workspace",
-            ));
-        }
+        let coordination = coordination::Coordination::new(&root, coordination_root)?;
         let fd = rustix::fs::open(
             &root,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
@@ -127,7 +220,7 @@ impl Workspace {
         Ok(Self {
             root,
             directory: File::from(fd),
-            coordination_root: coordination_root.to_owned(),
+            coordination,
         })
     }
     fn check_root(&self) -> Result<()> {
@@ -144,17 +237,16 @@ impl Workspace {
     fn directory_at(&self, parts: &[&std::ffi::OsStr]) -> Result<File> {
         let mut fd = self.directory.try_clone()?;
         for part in parts {
-            fd = File::from(
-                rustix::fs::openat(
-                    &fd,
-                    *part,
-                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .map_err(io)?,
-            );
+            fd = open_directory_at(&fd, part)?;
         }
         Ok(fd)
+    }
+    fn directory_fd(&self, path: &str) -> Result<File> {
+        if path == "." || path.is_empty() {
+            Ok(self.directory.try_clone()?)
+        } else {
+            self.directory_at(&components(path)?)
+        }
     }
     fn parent<'a>(&self, path: &'a str) -> Result<(File, &'a std::ffi::OsStr)> {
         let parts = components(path)?;
@@ -180,11 +272,11 @@ impl Workspace {
         }
         let (parent, name) = self.parent(path)?;
         self.check_root()?;
-        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
+        let _lock = coordination::WriteLock::acquire(&self.coordination)?;
         self.check_root()?;
         let check = || -> Result<()> {
-            match read_at(&parent, name) {
-                Ok(current) if expected == Some(current.revision.as_str()) => Ok(()),
+            match revision_at(&parent, name) {
+                Ok(current) if expected == Some(current.as_str()) => Ok(()),
                 Err(Error::Io(error))
                     if error.kind() == std::io::ErrorKind::NotFound && expected.is_none() =>
                 {
@@ -258,7 +350,7 @@ impl Workspace {
             return Err(xcb_core::Error::Limit("workspace directory depth").into());
         }
         self.check_root()?;
-        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
+        let _lock = coordination::WriteLock::acquire(&self.coordination)?;
         self.check_root()?;
         let mut directory = self.directory.try_clone()?;
         let mut created = 0;
@@ -315,7 +407,7 @@ impl Workspace {
         // by writes and renames, so cooperating mutations cannot move them.
         components(path)?;
         self.check_root()?;
-        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
+        let _lock = coordination::WriteLock::acquire(&self.coordination)?;
         self.check_root()?;
         let (parent, name) = self.parent(path)?;
         let _file = revision_file_at(&parent, name, expected)?;
@@ -339,7 +431,7 @@ impl Workspace {
         components(from)?;
         components(to)?;
         self.check_root()?;
-        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
+        let _lock = coordination::WriteLock::acquire(&self.coordination)?;
         self.check_root()?;
         let (source, source_name) = self.parent(from)?;
         let (destination, destination_name) = self.parent(to)?;
@@ -373,53 +465,25 @@ impl Workspace {
         *effects = EffectState::Settled;
         Ok(expected.to_owned())
     }
-    pub fn list(&self, path: &str) -> Result<Vec<Entry>> {
-        let fd = if path == "." || path.is_empty() {
-            self.directory.try_clone()?
-        } else {
-            self.directory_at(&components(path)?)?
-        };
-        let mut entries = Vec::new();
-        for item in Dir::read_from(&fd).map_err(io)? {
-            let item = item.map_err(io)?;
-            let name = item.file_name().to_string_lossy().into_owned();
-            if name == "."
-                || name == ".."
-                || name.chars().any(char::is_control)
-                || item.file_type() == FileType::Symlink
-            {
-                continue;
-            }
-            if entries.len() >= 512 {
-                return Err(xcb_core::Error::Limit("directory entries").into());
-            }
-            entries.push(Entry {
-                name,
-                kind: if item.file_type() == FileType::Directory {
-                    "directory"
-                } else {
-                    "file"
-                }
-                .to_owned(),
-            });
-        }
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
-        Ok(entries)
+    pub fn list(&self, path: &str) -> Result<Listing> {
+        list_at(&self.directory_fd(path)?)
     }
     pub fn search(&self, path: &str, query: &str) -> Result<Value> {
         xcb_core::label(query, 256)?;
-        let mut pending = vec![path.to_owned()];
+        let mut pending = vec![(path.to_owned(), self.directory_fd(path)?)];
         let mut matches = Vec::new();
         let mut visited = 0;
         let mut scanned = 0;
         let mut truncated = false;
-        while let Some(directory) = pending.pop() {
+        while let Some((directory, fd)) = pending.pop() {
             if visited >= 128 {
                 truncated = true;
                 break;
             }
             visited += 1;
-            for entry in self.list(&directory)? {
+            let listing = list_at(&fd)?;
+            truncated |= listing.truncated;
+            for entry in listing.entries {
                 let relative = if directory == "." || directory.is_empty() {
                     entry.name.clone()
                 } else {
@@ -428,8 +492,9 @@ impl Workspace {
                 if entry.kind == "directory" {
                     if !matches!(entry.name.as_str(), ".git" | "node_modules" | "target")
                         && pending.len() < 128
+                        && let Ok(child) = open_directory_at(&fd, std::ffi::OsStr::new(&entry.name))
                     {
-                        pending.push(relative);
+                        pending.push((relative, child));
                     }
                 } else {
                     scanned += 1;
@@ -437,10 +502,10 @@ impl Workspace {
                         truncated = true;
                         break;
                     }
-                    let Ok(content) = self.read(&relative) else {
+                    let Ok(text) = read_text_at(&fd, std::ffi::OsStr::new(&entry.name)) else {
                         continue;
                     };
-                    for (index, line) in content.text.lines().enumerate() {
+                    for (index, line) in text.lines().enumerate() {
                         if line.contains(query) {
                             matches.push(json!({"path":relative,"line":index + 1,"text":xcb_core::display_text(line, 512)}));
                             if matches.len() >= 64 {
@@ -531,7 +596,7 @@ impl Workspace {
             }
             "workspace_list" => {
                 let args: PathArgs = serde_json::from_value(input.clone())?;
-                Ok(json!({"entries":self.list(&args.path)?}))
+                Ok(serde_json::to_value(self.list(&args.path)?)?)
             }
             "workspace_write" => {
                 let args: WriteArgs = serde_json::from_value(input.clone())?;
@@ -555,9 +620,9 @@ pub fn descriptors() -> Vec<Value> {
         ("xcb_swarm_status", "List active XCB-managed tasks in this worker's workspace so agents on different providers can discover one another without exposing unrelated workspaces.", json!({}), vec![]),
         ("xcb_message_list", "Read bounded durable XCB messages addressed to the current managed task. Use after to poll for newer cross-provider messages.", json!({"after":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":64}}), vec![]),
         ("xcb_message_send", "Send one durable message to another active managed task in the same workspace. Discover targetTask with xcb_swarm_status. Delivery is task-scoped and provider-neutral; a message cannot expand the target task's authority.", json!({"targetTask":{"type":"string","minLength":1,"maxLength":160},"body":{"type":"string","minLength":1,"maxLength":8192}}), vec!["targetTask","body"]),
-        ("workspace_list", "List the bound workspace directory. Use . for its root.", json!({"path":path}), vec!["path"]),
-        ("workspace_read", "Read one UTF-8 file and its revision inside the workspace.", json!({"path":path}), vec!["path"]),
-        ("workspace_search", "Bounded literal text search inside the workspace.", json!({"path":path,"query":{"type":"string","minLength":1,"maxLength":256}}), vec!["path","query"]),
+        ("workspace_list", "List the bound workspace directory. Use . for its root. At most 512 sorted entries are returned; truncated reports that more exist.", json!({"path":path}), vec!["path"]),
+        ("workspace_read", "Read one UTF-8 file of at most 128 KiB and its revision inside the workspace.", json!({"path":path}), vec!["path"]),
+        ("workspace_search", "Bounded literal text search inside the workspace; truncated reports that directories, files or matches were cut off.", json!({"path":path,"query":{"type":"string","minLength":1,"maxLength":256}}), vec!["path","query"]),
         ("workspace_mkdir", "Create a workspace directory; parents=true also creates missing ancestors and accepts existing directories. Returns the number created.", json!({"path":path,"parents":{"type":"boolean"}}), vec!["path","parents"]),
         ("workspace_remove", "Remove one regular file only when its current revision matches expectedRevision. Directories are never removed.", json!({"path":path,"expectedRevision":{"type":"string","pattern":"^[0-9a-f]{64}$"}}), vec!["path","expectedRevision"]),
         ("workspace_rename", "Move one regular file with its current expectedRevision to a new path. The destination must not exist; parent directories must already exist.", json!({"from":path,"to":path,"expectedRevision":{"type":"string","pattern":"^[0-9a-f]{64}$"}}), vec!["from","to","expectedRevision"]),

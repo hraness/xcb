@@ -174,6 +174,13 @@ pub enum Modal {
         kind: EditorKind,
         error: Option<String>,
     },
+    /// Scrollable read-only detail view (managed task inspect): full route,
+    /// workspace and detail that a one-line notice could not show.
+    Inspect {
+        title: String,
+        lines: Vec<String>,
+        scroll: u16,
+    },
     Help,
 }
 
@@ -208,6 +215,73 @@ fn display_now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+/// Compact age for task rows: `12s ago`, `3m 7s ago`, `1h 4m ago`.
+fn age_label(ms: u64) -> String {
+    let seconds = ms / 1000;
+    if seconds >= 3600 {
+        format!("{}h {}m ago", seconds / 3600, seconds % 3600 / 60)
+    } else if seconds >= 60 {
+        format!("{}m {}s ago", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s ago")
+    }
+}
+
+/// The managed worker phase a task row reports. `TaskRow::state` folds queued
+/// and running into `State::Working`, so the supervisor's own phase label
+/// keeps them distinguishable; rows produced without one fall back to the
+/// mapped session state.
+fn task_status(task: &xcb_core::ui::TaskRow) -> &str {
+    task.status.as_deref().unwrap_or_else(|| task.state.label())
+}
+
+/// `TaskRow::status` is a display label (`queued — waiting for a route`), so
+/// phase classification matches its leading word rather than the whole
+/// string. Rows published without a status fall back to the mapped session
+/// state, which cannot tell queued from running — those count as live work.
+fn task_queued(task: &xcb_core::ui::TaskRow) -> bool {
+    task.status
+        .as_deref()
+        .is_some_and(|status| status.starts_with("queued"))
+}
+
+/// Scrollable detail view for a managed task — the routed model/account,
+/// workspace and latest detail that a one-line notice could not show.
+fn inspect_task(task: &xcb_core::ui::TaskRow) -> Modal {
+    let status = task_status(task);
+    let mut headline = status.to_owned();
+    // The mapped view state only adds signal when it asks for the user.
+    if task.state.attention() && task.state.label() != status {
+        headline.push_str(" · ");
+        headline.push_str(task.state.label());
+    }
+    headline.push_str(" · updated ");
+    headline.push_str(&age_label(
+        display_now_ms().saturating_sub(task.updated_at_ms),
+    ));
+    let mut lines = vec![
+        task.title.clone(),
+        headline,
+        String::new(),
+        format!("task       {}", task.id),
+        format!("workspace  {}", task.workspace),
+        format!(
+            "route      {}",
+            task.route.as_deref().unwrap_or("not routed yet")
+        ),
+    ];
+    if let Some(reason) = &task.route_reason {
+        lines.push(format!("routing    {reason}"));
+    }
+    lines.push(String::new());
+    lines.push(task.detail.clone());
+    Modal::Inspect {
+        title: format!("{} · {}", task.id, status),
+        lines,
+        scroll: 0,
+    }
 }
 
 /// Fingerprint of the rendered parts of a `View`. Used to skip repaints when a
@@ -288,8 +362,10 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         task.id.as_str().hash(&mut hasher);
         task.title.hash(&mut hasher);
         (task.state as u8).hash(&mut hasher);
+        task.status.hash(&mut hasher);
         task.detail.hash(&mut hasher);
         task.route.hash(&mut hasher);
+        task.route_reason.hash(&mut hasher);
         task.updated_at_ms.hash(&mut hasher);
     }
     for agent in &view.subagents {
@@ -367,6 +443,10 @@ pub struct App {
     slash_dismissed: Cell<bool>,
     /// Composer text the menu state belongs to; any edit resets selection.
     slash_text: std::cell::RefCell<String>,
+    /// Per-frame render state: wrapped transcript rows per message, the
+    /// streaming tail's last wrap, and textarea viewport mirrors. Interior
+    /// mutability lets the render tree read `&App` while refreshing it.
+    pub(crate) render_cache: std::cell::RefCell<render::RenderCache>,
     dirty: bool,
     view_fingerprint: u64,
     /// Mouse capture is off by default so terminal-native drag selection and
@@ -879,11 +959,15 @@ impl App {
                     .iter()
                     .map(|task| PickItem {
                         label: format!(
-                            "{} · {} · {} · {}",
+                            "{} · {} · {} · {}{}",
                             task.id,
                             task.title,
-                            task.state.label(),
-                            task.detail
+                            task_status(task),
+                            task.detail,
+                            task.route
+                                .as_deref()
+                                .map(|route| format!(" · {route}"))
+                                .unwrap_or_default()
                         ),
                         action: PickAction::Task(task.id.clone()),
                     })
@@ -978,7 +1062,17 @@ impl App {
         true
     }
     pub fn handle(&mut self, event: Event, output: &SyncSender<Intent>) -> bool {
-        if !matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Release) {
+        // Only inputs that can change the view schedule a repaint: painting a
+        // frame per pointer-motion or focus event is pure churn.
+        let repaints = match &event {
+            Event::Key(key) => key.kind != KeyEventKind::Release,
+            Event::Mouse(mouse) => {
+                !matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_))
+            }
+            Event::FocusGained | Event::FocusLost => false,
+            _ => true,
+        };
+        if repaints {
             self.dirty = true;
         }
         // A key press or paste acknowledges whatever notice was showing; the
@@ -1428,6 +1522,41 @@ impl App {
                     }
                 }
                 Modal::Help => {}
+                Modal::Inspect { scroll, .. } => {
+                    // Read-only dialog: navigation moves the viewport; the
+                    // offset is clamped to the wrapped body height at render.
+                    if let Event::Mouse(mouse) = event {
+                        match mouse.kind {
+                            MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(3),
+                            MouseEventKind::ScrollDown => *scroll = scroll.saturating_add(3),
+                            _ => (),
+                        }
+                        return true;
+                    }
+                    if let Event::Key(key) = event {
+                        if key.kind == KeyEventKind::Release {
+                            return true;
+                        }
+                        match key.code {
+                            KeyCode::Up => *scroll = scroll.saturating_sub(1),
+                            KeyCode::Down => *scroll = scroll.saturating_add(1),
+                            KeyCode::Char('p') | KeyCode::Char('n')
+                                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                *scroll = if key.code == KeyCode::Char('p') {
+                                    scroll.saturating_sub(1)
+                                } else {
+                                    scroll.saturating_add(1)
+                                };
+                            }
+                            KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                            KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+                            KeyCode::Home => *scroll = 0,
+                            KeyCode::End => *scroll = u16::MAX,
+                            _ => (),
+                        }
+                    }
+                }
                 Modal::Editor {
                     textarea,
                     kind,
@@ -1509,17 +1638,7 @@ impl App {
                 PickAction::Session(id) => self.send(output, Intent::Resume(id)),
                 PickAction::Task(id) => {
                     if let Some(task) = self.view.tasks.iter().find(|task| task.id == id) {
-                        self.notice = format!(
-                            "{} · {} · {} · {}{}",
-                            task.id,
-                            task.title,
-                            task.state.label(),
-                            task.detail,
-                            task.route
-                                .as_ref()
-                                .map(|route| format!(" · {route}"))
-                                .unwrap_or_default()
-                        );
+                        self.modal = Some(inspect_task(task));
                     }
                 }
                 PickAction::Text(text) => self.composer.set_text(&text),
@@ -1578,7 +1697,6 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
         ..App::default()
     };
     let mut ticks = 0u64;
-    let mut refresh = Instant::now();
     let mut needs_draw = true;
     let mut blink = 0u64;
     loop {
@@ -1609,8 +1727,16 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
             needs_draw = false;
             blink = phase;
         }
-        if event::poll(Duration::from_millis(50))? && !app.handle(event::read()?, &output) {
-            break;
+        if event::poll(Duration::from_millis(50))? {
+            // Coalesce bursts: drain every queued event before the next draw
+            // so a paste storm or mouse flood paints once, not once per event.
+            let mut quit = !app.handle(event::read()?, &output);
+            while !quit && event::poll(Duration::ZERO)? {
+                quit = !app.handle(event::read()?, &output);
+            }
+            if quit {
+                break;
+            }
         }
         match app.take_mouse_toggle() {
             Some(true) => execute!(io::stdout(), EnableMouseCapture)?,
@@ -1618,10 +1744,10 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
             None => (),
         }
         ticks = ticks.wrapping_add(1);
-        if refresh.elapsed() >= Duration::from_millis(750) {
-            app.send(&output, Intent::Refresh);
-            refresh = Instant::now();
-        }
+        // Publishing is kernel-driven: serve() pushes a full view on its own
+        // cadence and picks up config.json writes itself, so no TUI-side
+        // refresh timer duplicates publishes. Ctrl-L and /reload still send
+        // an explicit Intent::Refresh.
     }
     Ok(())
 }

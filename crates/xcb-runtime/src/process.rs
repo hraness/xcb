@@ -554,12 +554,26 @@ pub async fn inspect(provider: Provider, explicit: Option<&Path>, home: &Path) -
     })
 }
 
+/// Bytes a provider may write to stderr before the host reports the excess.
+/// Volume never fails a join: a chatty child must not turn a proven kill,
+/// reap and group-absence check into an unsettled run.
+pub const STDERR_NOTICE_BYTES: u64 = 1024 * 1024;
+
+/// Outcome of draining one child stream to EOF. `complete` is false only for
+/// a real read failure, never for volume.
+#[derive(Debug, Clone, Copy, Default)]
+struct Drained {
+    bytes: u64,
+    complete: bool,
+}
+
 pub struct StreamProcess {
     pub(crate) stdin: ChildStdin,
     pub(crate) stdout: BufReader<ChildStdout>,
     child: Child,
     group: Option<Pid>,
-    stderr: JoinHandle<bool>,
+    stderr: JoinHandle<Drained>,
+    stderr_bytes: Option<u64>,
     frame_buffer: Vec<u8>,
 }
 impl StreamProcess {
@@ -580,13 +594,14 @@ impl StreamProcess {
         let stdin = child.stdin.take().ok_or(Error::Protocol("child stdin"))?;
         let stdout = BufReader::new(child.stdout.take().ok_or(Error::Protocol("child stdout"))?);
         let stderr = child.stderr.take().ok_or(Error::Protocol("child stderr"))?;
-        let stderr = tokio::spawn(async move { drain(stderr, 1024 * 1024).await.is_ok() });
+        let stderr = tokio::spawn(drain_to_eof(stderr));
         Ok(Self {
             stdin,
             stdout,
             child,
             group: Some(pid),
             stderr,
+            stderr_bytes: None,
             frame_buffer: Vec::new(),
         })
     }
@@ -646,6 +661,13 @@ impl StreamProcess {
             let _ = kill_process_group(group, Signal::KILL);
         }
     }
+    /// Total stderr bytes the child wrote when that exceeded
+    /// `STDERR_NOTICE_BYTES`; known only after `join`. The bytes themselves
+    /// are never retained: provider stderr can carry credentials or paths.
+    pub fn stderr_overflow(&self) -> Option<u64> {
+        self.stderr_bytes
+            .filter(|bytes| *bytes > STDERR_NOTICE_BYTES)
+    }
     pub async fn join(&mut self) -> bool {
         self.signal();
         let Some(group) = self.group.take() else {
@@ -655,10 +677,12 @@ impl StreamProcess {
             let _ = self.stdin.shutdown().await;
             let (exit, stdout, stderr) = tokio::join!(
                 self.child.wait(),
-                drain(&mut self.stdout, 16 * 1024 * 1024),
+                drain_to_eof(&mut self.stdout),
                 &mut self.stderr
             );
-            exit.is_ok() && stdout.is_ok() && matches!(stderr, Ok(true))
+            let stderr = stderr.unwrap_or_default();
+            self.stderr_bytes = Some(stderr.bytes);
+            exit.is_ok() && stdout.complete && stderr.complete
         })
         .await
         .unwrap_or(false);
@@ -697,6 +721,24 @@ pub fn prove_process_group_absent(pid: u32) -> Result<()> {
     }
 }
 
+/// Read a stream until EOF, counting but never retaining bytes. Only a read
+/// failure leaves `complete` false; the caller decides what volume means.
+async fn drain_to_eof(mut source: impl AsyncRead + Unpin) -> Drained {
+    let mut buffer = [0u8; 8192];
+    let mut drained = Drained::default();
+    loop {
+        match source.read(&mut buffer).await {
+            Ok(0) => {
+                drained.complete = true;
+                return drained;
+            }
+            Ok(read) => drained.bytes = drained.bytes.saturating_add(read as u64),
+            Err(_) => return drained,
+        }
+    }
+}
+
+/// Bounded drain for one-shot captures whose whole output budget is fixed.
 async fn drain(mut source: impl AsyncRead + Unpin, max: usize) -> Result<()> {
     let mut buffer = [0u8; 8192];
     let mut count = 0;
@@ -882,16 +924,15 @@ pub(crate) async fn capture_supervised(
             custody.0 = None;
             status
         };
-        tokio::join!(
-            exit,
-            drain(&mut stdout, 16 * 1024 * 1024),
-            drain(&mut stderr, 16 * 1024 * 1024)
-        )
+        tokio::join!(exit, drain_to_eof(&mut stdout), drain_to_eof(&mut stderr))
     })
     .await;
-    let Ok((Ok(status), Ok(()), Ok(()))) = cleanup else {
+    let Ok((Ok(status), stdout, stderr)) = cleanup else {
         return CaptureOutcome::Unproven;
     };
+    if !stdout.complete || !stderr.complete {
+        return CaptureOutcome::Unproven;
+    }
     if !group_absent(group).await {
         return CaptureOutcome::Unproven;
     }
@@ -1414,5 +1455,27 @@ mod tests {
             serde_json::json!({"ok":true})
         );
         assert!(process.join().await);
+    }
+    #[tokio::test]
+    async fn stderr_volume_never_leaves_a_proven_join_unsettled() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "head -c 2000000 /dev/zero >&2; echo '{}'"]);
+        let mut process = StreamProcess::spawn(command).unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(10), process.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame, b"{}\n");
+        assert!(process.stderr_overflow().is_none(), "unknown before join");
+        assert!(process.join().await);
+        assert_eq!(process.stderr_overflow(), Some(2_000_000));
+
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "echo quiet >&2; echo '{}'"]);
+        let mut process = StreamProcess::spawn(command).unwrap();
+        assert!(process.frame().await.unwrap().is_some());
+        assert!(process.join().await);
+        assert!(process.stderr_overflow().is_none());
     }
 }

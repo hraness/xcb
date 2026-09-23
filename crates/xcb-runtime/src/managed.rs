@@ -75,6 +75,22 @@ impl TaskState {
             Self::Uncertain => "uncertain",
         }
     }
+    /// Display label shared by `xcb tasks`, the TUI task surfaces, and the
+    /// supervisor's status text. `as_str` stays the stored wire value; the
+    /// queued label carries its waiting-for-a-route annotation so a queued
+    /// task never reads as a live worker. Callers that classify rather than
+    /// display match the leading word (`queued`, `running`, …).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued — waiting for a route",
+            Self::Running => "running",
+            Self::NeedsInput => "needs input",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Uncertain => "uncertain",
+        }
+    }
     fn terminal(self) -> bool {
         matches!(
             self,
@@ -2689,7 +2705,7 @@ fn task_status(task: &ManagedTask) -> String {
     let mut line = format!(
         "- **{}** · {} · {} · {}",
         task.title,
-        task.state.as_str().replace('_', " "),
+        task.state.label(),
         project,
         task.detail
     );
@@ -3938,8 +3954,10 @@ fn managed_view(
                 id: task.id.clone(),
                 title: task.title.clone(),
                 state: task_state(task),
+                status: Some(task.state.label().into()),
                 detail,
                 route: task.route.clone(),
+                route_reason: task.route_reason.clone(),
                 workspace: task.workspace.clone(),
                 updated_at_ms: task.updated_at_ms,
             }
@@ -5944,6 +5962,70 @@ mod tests {
             )
             .await
             .unwrap();
+    }
+
+    /// Task rows carry the supervisor's wire phase and dispatched route so the
+    /// CLI and TUI can tell queued from running without re-deriving custody.
+    #[tokio::test]
+    async fn managed_view_task_rows_carry_phase_and_route() {
+        use xcb_core::models::{Mode, ModelChoice};
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = managed
+            .create_task(
+                &chat,
+                message("m_view_phase"),
+                "queued work".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        let view = managed_view(&xcb, &managed, &chat, &workspace).unwrap();
+        let row = view
+            .tasks
+            .iter()
+            .find(|row| row.id == task.id)
+            .expect("queued task row");
+        // Both phases map to `State::Working`; the status label keeps queued
+        // visually distinct from a dispatched worker.
+        assert_eq!(row.state, State::Working);
+        assert_eq!(row.status.as_deref(), Some("queued — waiting for a route"));
+        assert_eq!(row.route, None);
+
+        let account = xcb.add_account(Provider::Claude, "Test", 1, None).unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("sonnet").unwrap(),
+            label: "Sonnet".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: Some(Id::new("high").unwrap()),
+            observed_at_ms: 1,
+        };
+        let session = xcb
+            .create_session(&account.id, model.clone(), &workspace, 1)
+            .unwrap();
+        let route = format!("{} · {}", model.key(), account.id);
+        managed
+            .prepare(&task, session.id, route.clone(), "fixture reason".into(), 0)
+            .await
+            .unwrap();
+        let view = managed_view(&xcb, &managed, &chat, &workspace).unwrap();
+        let row = view
+            .tasks
+            .iter()
+            .find(|row| row.id == task.id)
+            .expect("running task row");
+        assert_eq!(row.status.as_deref(), Some("running"));
+        assert_eq!(row.route.as_deref(), Some(route.as_str()));
+        assert_eq!(row.route_reason.as_deref(), Some("fixture reason"));
     }
 
     /// The managed view is rebuilt and sent only when its cheap change stamp

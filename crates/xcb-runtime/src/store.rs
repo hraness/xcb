@@ -383,6 +383,66 @@ fn sql(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| xcb_core::Error::Invalid("database integer").into())
 }
 
+fn settle_tool_in(tx: &Transaction<'_>, run: &RunRecord, call: &str) -> Result<()> {
+    if tx.execute(
+        "UPDATE tool_effects SET settled=1 WHERE run=?1 AND call=?2 AND settled=0",
+        params![run.id.as_str(), call],
+    )? != 1
+    {
+        return Err(Error::Conflict("tool receipt changed"));
+    }
+    Ok(())
+}
+fn append_message_in(
+    tx: &Transaction<'_>,
+    id: &Id,
+    expected_revision: Option<u64>,
+    message: &Message,
+) -> Result<Session> {
+    let mut session = session_from(tx, id)?.ok_or(Error::Unavailable("session not found"))?;
+    let expected = session.revision;
+    if expected_revision.is_some_and(|expected_revision| expected_revision != expected) {
+        return Err(Error::Conflict("session revision changed"));
+    }
+    let count: i64 = tx.query_row(
+        "SELECT count(*) FROM messages WHERE session=?1",
+        [id.as_str()],
+        |row| row.get(0),
+    )?;
+    if count >= MAX_MESSAGES {
+        return Err(xcb_core::Error::Limit("session messages").into());
+    }
+    tx.execute(
+        "INSERT INTO messages VALUES(?1,?2,?3,?4)",
+        params![
+            message.id.as_str(),
+            id.as_str(),
+            count + 1,
+            serde_json::to_string(message)?
+        ],
+    )?;
+    session.revision = session
+        .revision
+        .checked_add(1)
+        .ok_or(Error::Conflict("revision overflow"))?;
+    session.last_active_at_ms = session.last_active_at_ms.max(message.at_ms);
+    if session.title == "New session" && message.role == xcb_core::session::Role::User {
+        session.title = message
+            .text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(80)
+            .collect();
+        session.title = xcb_core::display_text(&session.title, 160);
+        if session.title.is_empty() {
+            session.title = "Image message".into();
+        }
+    }
+    update_session(tx, &session, expected)?;
+    Ok(session)
+}
 fn update_session(transaction: &Transaction<'_>, session: &Session, expected: u64) -> Result<()> {
     session.validate()?;
     if transaction.execute(
@@ -858,47 +918,36 @@ impl Store {
         message.validate()?;
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut session = session_from(&tx, id)?.ok_or(Error::Unavailable("session not found"))?;
-        if session.revision != expected_revision {
-            return Err(Error::Conflict("session revision changed"));
-        }
-        let count: i64 = tx.query_row(
-            "SELECT count(*) FROM messages WHERE session=?1",
-            [id.as_str()],
-            |row| row.get(0),
-        )?;
-        if count >= MAX_MESSAGES {
-            return Err(xcb_core::Error::Limit("session messages").into());
-        }
-        tx.execute(
-            "INSERT INTO messages VALUES(?1,?2,?3,?4)",
-            params![
-                message.id.as_str(),
-                id.as_str(),
-                count + 1,
-                serde_json::to_string(message)?
-            ],
-        )?;
-        session.revision = session
-            .revision
-            .checked_add(1)
-            .ok_or(Error::Conflict("revision overflow"))?;
-        session.last_active_at_ms = session.last_active_at_ms.max(message.at_ms);
-        if session.title == "New session" && message.role == xcb_core::session::Role::User {
-            session.title = message
-                .text
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .chars()
-                .take(80)
-                .collect();
-            session.title = xcb_core::display_text(&session.title, 160);
-            if session.title.is_empty() {
-                session.title = "Image message".into();
-            }
-        }
-        update_session(&tx, &session, expected_revision)?;
+        let session = append_message_in(&tx, id, Some(expected_revision), message)?;
+        tx.commit()?;
+        Ok(session)
+    }
+    /// Append a tool transcript message at the session's current revision.
+    /// Tool results are appended by the run owner, so the revision read and
+    /// the append share one transaction instead of two fsync'd commits.
+    pub(crate) fn append_tool_message(&self, id: &Id, message: &Message) -> Result<Session> {
+        message.validate()?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let session = append_message_in(&tx, id, None, message)?;
+        tx.commit()?;
+        Ok(session)
+    }
+    /// Settle a tool receipt and append its transcript message in one
+    /// durable transaction. Either both land or neither does, so a settled
+    /// receipt is never separated from its recorded result.
+    pub(crate) fn settle_tool_and_append(
+        &self,
+        run: &RunRecord,
+        call: &str,
+        id: &Id,
+        message: &Message,
+    ) -> Result<Session> {
+        message.validate()?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        settle_tool_in(&tx, run, call)?;
+        let session = append_message_in(&tx, id, None, message)?;
         tx.commit()?;
         Ok(session)
     }
@@ -1960,13 +2009,10 @@ impl Store {
         Ok(())
     }
     pub(crate) fn settle_tool(&self, run: &RunRecord, call: &str) -> Result<()> {
-        if self.db()?.execute(
-            "UPDATE tool_effects SET settled=1 WHERE run=?1 AND call=?2 AND settled=0",
-            params![run.id.as_str(), call],
-        )? != 1
-        {
-            return Err(Error::Conflict("tool receipt changed"));
-        }
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        settle_tool_in(&tx, run, call)?;
+        tx.commit()?;
         Ok(())
     }
     pub fn record_velocity(

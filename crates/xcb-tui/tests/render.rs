@@ -2,10 +2,10 @@ use ratatui::{Terminal, backend::TestBackend};
 use xcb_core::{
     Id, Provider,
     models::{Mode, ModelChoice},
-    panes::Pane,
+    panes::{Node, Pane, Source},
     session::{Attachment, Message, MessageProvenance, Role, Session, State},
 };
-use xcb_tui::{App, render};
+use xcb_tui::{App, Modal, render};
 
 fn app() -> App {
     let mut app = App::default();
@@ -122,9 +122,28 @@ fn attachment_chips_help_and_paused_follow_state_are_visible() {
 
 #[test]
 fn tiny_terminal_and_large_text_cannot_panic_the_renderer() {
-    for (width, height) in [(0, 0), (1, 1), (20, 5), (40, 8), (200, 60)] {
+    for (width, height) in [
+        (0, 0),
+        (1, 1),
+        (20, 5),
+        (24, 7),
+        (30, 8),
+        (40, 8),
+        (200, 60),
+    ] {
         let mut app = app();
-        app.stream = "long text\n".repeat(10_000);
+        // Three attachments shrink the composer budget to zero at these
+        // heights; a 70k-row body stresses every saturating offset.
+        for _ in 0..3 {
+            app.attachments.push(Attachment {
+                digest: "a".repeat(64),
+                media_type: "image/png".into(),
+                bytes: 2048,
+                width: 640,
+                height: 480,
+            });
+        }
+        app.stream = "x\n".repeat(70_000);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| render::draw(frame, &mut app, 0))
@@ -591,8 +610,10 @@ fn global_conversation_shows_managed_tasks_instead_of_provider_chrome() {
         id: Id::new("t_login").unwrap(),
         title: "Fix login redirect".into(),
         state: State::NeedsAnswer,
+        status: Some("needs input".into()),
         detail: "the worker needs your input".into(),
         route: Some("claude/default/high · user@example.com".into()),
+        route_reason: None,
         workspace: "/project".into(),
         updated_at_ms: 1,
     }];
@@ -612,6 +633,162 @@ fn global_conversation_shows_managed_tasks_instead_of_provider_chrome() {
     assert!(contents.contains("Fix login redirect"));
     assert!(contents.contains("1 needs you"));
     assert!(!contents.contains("Choose an account"));
+}
+
+fn managed_task(
+    id: &str,
+    title: &str,
+    status: &str,
+    route: Option<&str>,
+    updated_at_ms: u64,
+) -> xcb_core::ui::TaskRow {
+    xcb_core::ui::TaskRow {
+        id: Id::new(id).unwrap(),
+        title: title.into(),
+        state: State::Working,
+        status: Some(status.into()),
+        detail: format!("detail for {title}"),
+        route: route.map(str::to_owned),
+        route_reason: None,
+        workspace: "/project".into(),
+        updated_at_ms,
+    }
+}
+
+#[test]
+fn managed_tasks_show_phase_and_routed_model_in_rows_and_footer() {
+    let mut app = app();
+    app.view.session = None;
+    app.view
+        .extensions
+        .insert(0, ("algal supervisor".into(), "on".into()));
+    app.view.tasks = vec![
+        managed_task(
+            "t_run",
+            "Build feature",
+            "running",
+            Some("devin/swe-2-high · a_01234567"),
+            2,
+        ),
+        managed_task(
+            "t_wait",
+            "Write docs",
+            "queued — waiting for a route",
+            None,
+            1,
+        ),
+    ];
+    app.view.pane = Pane::focus();
+    let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    // Queued and running are distinct phases, and the dispatched route
+    // surfaces on the row and in the footer.
+    assert!(
+        contents.contains("◌ Write docs"),
+        "queued marker: {contents}"
+    );
+    assert!(
+        contents.contains("● Build feature"),
+        "running marker: {contents}"
+    );
+    assert!(
+        contents.contains("queued — waiting for a route"),
+        "queued phase: {contents}"
+    );
+    assert!(
+        contents.contains("· running ·"),
+        "running phase: {contents}"
+    );
+    assert!(
+        contents.contains("devin/swe-2-high · a_01234567"),
+        "routed model and account: {contents}"
+    );
+    assert!(contents.contains("1 running"), "running count: {contents}");
+    assert!(contents.contains("1 queued"), "queued count: {contents}");
+}
+
+#[test]
+fn long_notices_wrap_to_the_viewport_instead_of_truncating() {
+    let mut app = app();
+    app.notice = "a managed task inspect answer that used to lose everything past \
+        the first row: worker could not start because the selected account hit \
+        its session cap — tail of the notice"
+        .into();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    // The phrase wraps across two rows, so assert on the trailing segment
+    // that a single truncated row could never reach.
+    assert!(
+        contents.contains("of the notice"),
+        "the wrapped tail must render: {contents}"
+    );
+    assert!(contents.contains("past the first row"));
+    // The notice stays bounded: extra rows never consume the composer.
+    assert!(contents.contains("? needs answer") || contents.contains("needs answer"));
+}
+
+#[test]
+fn task_inspect_modal_renders_route_detail_and_scrolls() {
+    let mut app = app();
+    let mut lines = vec![
+        "Fix login".into(),
+        "running · updated 2m ago".into(),
+        String::new(),
+        "task       t_one".into(),
+        "workspace  /project".into(),
+        "route      devin/swe-2-high · a_01234567".into(),
+        "routing    learned workspace preference for devin".into(),
+        String::new(),
+    ];
+    lines.extend((1..=40).map(|index| format!("detail row {index:02}")));
+    app.modal = Some(Modal::Inspect {
+        title: "t_one · running".into(),
+        lines,
+        scroll: 0,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    assert!(contents.contains("devin/swe-2-high · a_01234567"));
+    assert!(contents.contains("learned workspace preference"));
+    assert!(contents.contains("detail row 01"));
+    assert!(
+        !contents.contains("detail row 40"),
+        "the tail stays below the initial viewport"
+    );
+
+    // End jumps to the tail; the header rows leave the viewport.
+    app.handle(
+        crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::End,
+            crossterm::event::KeyModifiers::NONE,
+        )),
+        &std::sync::mpsc::sync_channel(1).0,
+    );
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    assert!(
+        contents.contains("detail row 40"),
+        "scrolled tail: {contents}"
+    );
+    assert!(
+        !contents.contains("detail row 01"),
+        "scrolled head: {contents}"
+    );
+    match &app.modal {
+        Some(Modal::Inspect { scroll, .. }) => assert!(*scroll > 0),
+        _ => panic!("inspect modal"),
+    }
 }
 
 #[test]
@@ -657,4 +834,370 @@ fn managed_work_does_not_advertise_direct_session_followups() {
         .collect();
     assert!(contents.contains("Describe new work or ask for status"));
     assert!(!contents.contains("Type a follow-up"));
+}
+
+/// A pane whose transcript column is 1/`columns` of the terminal width — word
+/// wrap accuracy only matters at widths the built-in presets never produce.
+fn narrow_transcript_pane(columns: u32) -> Pane {
+    let mut children = vec![Node::Widget {
+        source: Source::Responses,
+        lines: None,
+    }];
+    while (children.len() as u32) < columns {
+        children.push(Node::Spacer { lines: 0 });
+    }
+    Pane {
+        version: 1,
+        id: Id::new("narrow").unwrap(),
+        title: "narrow".into(),
+        root: Node::Row { children },
+    }
+}
+
+fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+    terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect()
+}
+
+#[test]
+fn wrapped_tail_follow_shows_the_newest_row_at_word_boundaries() {
+    let mut app = app();
+    app.view.pane = narrow_transcript_pane(3);
+    // At width 10 "abcde fghijk lmnopq" wraps to three rows, not the two a
+    // cell count suggests — the old estimate hid the newest row at the tail.
+    app.stream = (1..=20)
+        .map(|line| format!("fill-{line:02}\n"))
+        .collect::<String>()
+        + "abcde fghijk lmnopq";
+    let mut terminal = Terminal::new(TestBackend::new(30, 12)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    assert!(
+        contents.contains("lmnopq"),
+        "the newest wrapped row must be visible while following:\n{contents}"
+    );
+}
+
+#[test]
+fn cjk_and_wide_grapheme_lines_wrap_on_cell_boundaries() {
+    let mut app = app();
+    app.view.pane = narrow_transcript_pane(3);
+    // 19 cells wide but three wrapped rows (4 + 10 + 6): a two-cell estimate
+    // drops the tail row.
+    app.stream = (1..=20)
+        .map(|line| format!("fill-{line:02}\n"))
+        .collect::<String>()
+        + "あい うえおかきくけこ";
+    let mut terminal = Terminal::new(TestBackend::new(30, 12)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    // Two-cell graphemes occupy a symbol cell plus a padding cell, so the
+    // buffer spells the row "く け こ".
+    assert!(
+        contents.contains("く け こ"),
+        "the tail row of a wide-grapheme line must be visible:\n{contents}"
+    );
+    // Emoji measure two cells per grapheme too; the stream's last row shows.
+    app.stream = (1..=20)
+        .map(|line| format!("fill-{line:02}\n"))
+        .collect::<String>()
+        + "ok 🙂";
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    assert!(buffer_text(&terminal).contains("🙂"));
+}
+
+#[test]
+fn tail_follow_reaches_rows_beyond_the_u16_scroll_limit() {
+    let mut app = app();
+    let mut stream = "x\n".repeat(69_999);
+    stream.push_str("LAST\n");
+    app.stream = stream;
+    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    assert!(
+        app.scroll_tail() > u16::MAX as u32,
+        "the tail must index beyond the old u16 scroll ceiling"
+    );
+    let contents = buffer_text(&terminal);
+    assert!(
+        contents.contains("LAST"),
+        "the newest row is still rendered past 65,535 wrapped rows"
+    );
+}
+
+#[test]
+fn tabs_expand_to_the_next_four_column_stop() {
+    let mut app = app();
+    app.view.pane = Pane::focus();
+    app.show_history = true;
+    app.show_activity = true;
+    app.view.messages = vec![
+        Message {
+            id: Id::new("m1").unwrap(),
+            role: Role::Assistant,
+            text: "a\tb\tmid\tx".into(),
+            attachments: vec![],
+            at_ms: 1,
+            provenance: None,
+        },
+        Message {
+            id: Id::new("t1").unwrap(),
+            role: Role::Tool,
+            text: "exec: out\tput".into(),
+            attachments: vec![],
+            at_ms: 2,
+            provenance: None,
+        },
+    ];
+    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    // "a\tb\tmid\tx" lands on stops 4/8/12; the expanded tool cell indents two.
+    assert!(
+        contents.contains("a   b   mid x"),
+        "tabs must expand: {contents}"
+    );
+    assert!(
+        contents.contains("out   put"),
+        "tool cells expand tabs too: {contents}"
+    );
+}
+
+#[test]
+fn hardware_cursor_tracks_the_composer_cell() {
+    use ratatui::layout::Position;
+    let mut app = app();
+    app.composer.set_text("hello");
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    // The composer occupies rows 20..23; its TOP|BOTTOM borders leave the text
+    // row at y=21 and the cursor five cells in.
+    assert_eq!(
+        terminal.get_cursor_position().unwrap(),
+        Position::new(5, 21)
+    );
+    // Two lines grow the composer to rows 19..23; the cursor sits on line 2.
+    app.composer.set_text("ab\ncd");
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    assert_eq!(
+        terminal.get_cursor_position().unwrap(),
+        Position::new(2, 21)
+    );
+}
+
+#[test]
+fn hardware_cursor_tracks_modal_editor_and_picker_cells() {
+    use ratatui::layout::Position;
+    use ratatui_textarea::{CursorMove, TextArea};
+    use xcb_tui::{EditorKind, Modal, PickAction, PickItem};
+    let mut app = app();
+    let mut textarea = TextArea::from(vec!["hello".to_string()]);
+    textarea.move_cursor(CursorMove::End);
+    app.modal = Some(Modal::Editor {
+        title: "Prompt".into(),
+        textarea: Box::new(textarea),
+        kind: EditorKind::Prompt,
+        error: None,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    // The 76x22 modal sits at (2,1); its border leaves text at (3,2) and the
+    // end-of-line cursor lands on cell 8 of that row.
+    assert_eq!(terminal.get_cursor_position().unwrap(), Position::new(8, 2));
+
+    app.modal = Some(Modal::Picker {
+        title: "Accounts · select an account".into(),
+        query: "en".into(),
+        items: vec![PickItem {
+            label: "personal".into(),
+            action: PickAction::Account(Id::new("personal").unwrap()),
+        }],
+        selected: 0,
+    });
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    // The title " Accounts · select an account · en " measures 35 cells; the
+    // cursor tracks its end on the border row.
+    assert_eq!(
+        terminal.get_cursor_position().unwrap(),
+        Position::new(37, 1)
+    );
+}
+
+/// The application-side wrapper must produce exactly the rows ratatui's
+/// `WordWrapper { trim: false }` would — this renders the same body through
+/// both paths and compares every cell of the transcript column.
+#[test]
+fn transcript_rows_match_ratatui_word_wrap() {
+    use ratatui::layout::Rect;
+    use ratatui::widgets::{Paragraph, Wrap};
+    let cases: Vec<String> = vec![
+        "abcde fghijk lmnopq".into(),
+        "あい うえおかきくけこ".into(),
+        "aaaaa  bb ccc dd".into(),
+        "   leading   spaces   ".into(),
+        "trailing   ".into(),
+        "one".into(),
+        "word ".repeat(31),
+        "x".repeat(47),
+        "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂".into(),
+        "ends with  two  spaces  ".into(),
+        "m i x e d  spaces  everywhere".into(),
+        "🙂🙂 🙂🙂🙂🙂🙂".into(),
+        "word,another.yet-more;stuff".into(),
+        "ながいことばがながいことばがながいことば".into(),
+    ];
+    // `columns` splits a 30-wide terminal into that many equal columns; the
+    // transcript takes the first, so the wrap width is 30/columns.
+    for columns in [30u32, 15, 10, 6, 5, 3, 2, 1] {
+        let width = (30 / columns) as u16;
+        for case in &cases {
+            let body = format!("{case}\nZ");
+            let mut app = app();
+            app.view.pane = narrow_transcript_pane(columns);
+            app.stream = body.clone();
+            let mut terminal = Terminal::new(TestBackend::new(30, 200)).unwrap();
+            terminal
+                .draw(|frame| render::draw(frame, &mut app, 0))
+                .unwrap();
+            // Transcript body rows start one row under the widget's heading.
+            let got: Vec<String> = (2..200)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| {
+                            terminal
+                                .backend()
+                                .buffer()
+                                .cell((x, y))
+                                .unwrap()
+                                .symbol()
+                                .to_owned()
+                        })
+                        .collect::<String>()
+                })
+                .collect();
+            // Reference: ratatui's own Paragraph wrapper on the same text. The
+            // buffer is wider than the rect so over-wide unbreakable rows do
+            // not hit buffer bounds; we compare only inside the wrap width.
+            let mut reference = Terminal::new(TestBackend::new(64, 200)).unwrap();
+            reference
+                .draw(|frame| {
+                    frame.render_widget(
+                        Paragraph::new(body.clone()).wrap(Wrap { trim: false }),
+                        Rect::new(0, 0, width, 198),
+                    );
+                })
+                .unwrap();
+            let want: Vec<String> = (0..198)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| {
+                            reference
+                                .backend()
+                                .buffer()
+                                .cell((x, y))
+                                .unwrap()
+                                .symbol()
+                                .to_owned()
+                        })
+                        .collect::<String>()
+                })
+                .collect();
+            let last_row = want
+                .iter()
+                .position(|row| row.starts_with('Z'))
+                .expect("the sentinel row must render");
+            assert_eq!(
+                &got[..=last_row],
+                &want[..=last_row],
+                "wrapped rows diverge at width {width} for case {case:?}"
+            );
+        }
+    }
+}
+
+/// Micro-benchmark for the transcript hot path: 200 frames over a 128-message
+/// transcript of 4 KiB each, with history expanded so every message takes part.
+/// Run with `cargo test -p xcb-tui --test render -- --ignored --nocapture
+/// transcript_frame_benchmark`; the elapsed times print to stdout.
+#[test]
+#[ignore]
+fn transcript_frame_benchmark() {
+    let mut app = app();
+    app.show_history = true;
+    app.view.pane = Pane::focus();
+    let mut body = String::new();
+    let mut word = 0;
+    while body.len() < 4096 - 16 {
+        body.push_str(&format!("word{word} "));
+        word += 1;
+        if word % 12 == 0 {
+            body.push('\n');
+        }
+    }
+    assert!(body.len() >= 4000 && body.len() <= 4096);
+    app.view.messages = (0..128)
+        .map(|index| Message {
+            id: Id::new(format!("m{index}")).unwrap(),
+            role: if index % 2 == 0 {
+                Role::User
+            } else {
+                Role::Assistant
+            },
+            text: body.clone(),
+            attachments: vec![],
+            at_ms: index as u64,
+            provenance: None,
+        })
+        .collect();
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    // Warm-up frame so caches (if any) are populated before timing steady state.
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let started = std::time::Instant::now();
+    for tick in 0..200u64 {
+        terminal
+            .draw(|frame| render::draw(frame, &mut app, tick))
+            .unwrap();
+    }
+    let steady = started.elapsed();
+    // A streaming tail changes every frame; only the tail should re-wrap.
+    let started = std::time::Instant::now();
+    for tick in 0..200u64 {
+        app.stream.push_str("delta token ");
+        terminal
+            .draw(|frame| render::draw(frame, &mut app, tick))
+            .unwrap();
+    }
+    let streaming = started.elapsed();
+    println!(
+        "transcript benchmark: 200 steady frames {:?} ({:?}/frame); 200 streaming frames {:?} ({:?}/frame)",
+        steady,
+        steady / 200,
+        streaming,
+        streaming / 200
+    );
 }

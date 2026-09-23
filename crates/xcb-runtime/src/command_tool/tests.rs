@@ -41,6 +41,8 @@ async fn cancelled_wait_preserves_owner_until_independent_cleanup_finishes() {
         });
         let mut commands = CommandTools {
             active: Some(Active { cancel, task }),
+            preparing: None,
+            blocking: None,
         };
         started.await.unwrap();
         let mut pending = Box::pin(commands.wait());
@@ -84,6 +86,8 @@ async fn dropping_command_collection_requests_cancellation_without_aborting_owne
     });
     let commands = CommandTools {
         active: Some(Active { cancel, task }),
+        preparing: None,
+        blocking: None,
     };
     drop(commands);
     assert!(
@@ -106,6 +110,8 @@ async fn command_owner_panic_is_uncertain_and_never_joined() {
         tokio::spawn(async { panic!("synthetic command owner panic") });
     let mut commands = CommandTools {
         active: Some(Active { cancel, task }),
+        preparing: None,
+        blocking: None,
     };
     let result = commands.wait().await;
     assert!(!result.joined);

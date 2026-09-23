@@ -1,6 +1,6 @@
 //! Offline Linux commands in a separately owned VM. SSH exit is not worker
 //! custody: only the trusted guest's exact cgroup/stream receipt can join it.
-use crate::{Error, Result, digest, private, process};
+use crate::{Error, Result, broker::snapshot::VerifiedSnapshot, digest, private, process};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -81,7 +81,9 @@ pub struct CommandInput {
     pub run_id: Id,
     pub workspace_id: String,
     pub snapshot_path: PathBuf,
-    pub snapshot_sha256: String,
+    /// The snapshot bytes already encoded and verified by the caller; the
+    /// backend compares digests instead of re-reading the snapshot file.
+    pub snapshot: VerifiedSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -347,6 +349,61 @@ pub struct CommandBackend {
     identity: String,
 }
 
+const PENDING: &str = "pending";
+const PENDING_MARKER: &[u8] = b"{\"pending\":true}\n";
+/// Written last by a complete marker migration. A pending directory without
+/// it may be a crashed partial migration and is rebuilt by merging, never by
+/// deleting markers a live command may have created.
+const PENDING_READY: &str = "pending-ready";
+const PENDING_LIMIT: usize = 16384;
+const LEGACY_SCAN_LIMIT: usize = 16384;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobState {
+    /// No start record: the command never reached the guest.
+    Unstarted,
+    /// A receipt with matching custody proves the guest command joined.
+    Joined,
+    Unjoined,
+}
+/// Verify one retained job exactly as admission always has: a started job
+/// counts as joined only with a joined receipt bound to its custody.
+fn job_joined(job: &Path) -> Result<JobState> {
+    private::check_directory(job)?;
+    match std::fs::symlink_metadata(job.join("started.json")) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(JobState::Unstarted);
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => (),
+    }
+    let custody: CommandCustody =
+        serde_json::from_slice(&private::read(&job.join("custody.json"), 8192)?)?;
+    for name in ["outcome.json", "recovered.json"] {
+        match private::read(&job.join(name), 2 * 1024 * 1024) {
+            Ok(bytes) => {
+                let outcome: CommandOutcome = serde_json::from_slice(&bytes)?;
+                if outcome.custody == custody && outcome.joined {
+                    return Ok(JobState::Joined);
+                }
+            }
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(JobState::Unjoined)
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneReport {
+    pub candidates: Vec<String>,
+    pub archived: usize,
+    pub retained_unjoined: usize,
+    pub retained_cleanup_pending: usize,
+    pub retained_recent: usize,
+}
+
 fn hash(value: &str) -> bool {
     value.len() == 64
         && value
@@ -509,38 +566,183 @@ impl CommandBackend {
             Error::Unavailable("command runner is busy; retry after its current command joins")
         })?;
         private::same_file(&path, &file)?;
-        let jobs = self.root.join("jobs");
-        for (count, entry) in std::fs::read_dir(jobs)?.enumerate() {
-            if count >= 16384 {
-                return Err(Error::Unavailable("command receipt retention limit"));
+        // Only pending markers are scanned, so admission cost follows the
+        // number of unjoined commands, not the retained job history. Each
+        // named job is still verified against its exact receipts.
+        let pending = self.pending_directory()?;
+        for (count, entry) in std::fs::read_dir(&pending)?.enumerate() {
+            if count >= PENDING_LIMIT {
+                return Err(Error::Unavailable("command pending marker limit"));
             }
-            let job = entry?.path();
-            private::check_directory(&job)?;
-            match std::fs::symlink_metadata(job.join("started.json")) {
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-                Ok(_) => (),
+            let marker = entry?;
+            if !marker.file_type()?.is_file() {
+                return Err(Error::PrivateState);
             }
-            let custody: CommandCustody =
-                serde_json::from_slice(&private::read(&job.join("custody.json"), 8192)?)?;
-            let mut joined = false;
-            for name in ["outcome.json", "recovered.json"] {
-                match private::read(&job.join(name), 2 * 1024 * 1024) {
-                    Ok(bytes) => {
-                        let outcome: CommandOutcome = serde_json::from_slice(&bytes)?;
-                        joined |= outcome.custody == custody && outcome.joined;
-                    }
-                    Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(error) => return Err(error),
+            let name = marker.file_name();
+            let Some(name) = name.to_str().filter(|name| !name.is_empty()) else {
+                return Err(Error::PrivateState);
+            };
+            if name == PENDING_READY {
+                continue;
+            }
+            match job_joined(&self.root.join("jobs").join(name))? {
+                // A crash between the submission records, or between a joined
+                // receipt and the marker unlink, leaves a stale marker; the
+                // durable receipts are the truth, so it is unlinked here.
+                JobState::Unstarted | JobState::Joined => self.clear_pending_name(name)?,
+                JobState::Unjoined => {
+                    return Err(Error::Unavailable(
+                        "command runner has an unjoined command; recover its custody before retrying",
+                    ));
                 }
-            }
-            if !joined {
-                return Err(Error::Unavailable(
-                    "command runner has an unjoined command; recover its custody before retrying",
-                ));
             }
         }
         Ok(file)
+    }
+
+    /// The pending-marker directory. A root created before markers existed
+    /// is migrated once: every retained job is scanned the old way and
+    /// unjoined jobs receive markers, so the legacy refusal is preserved.
+    /// The ready record is written last, after every marker; a pending
+    /// directory without it is rebuilt by merging, so a crash mid-migration
+    /// or a racing mark cannot lose an unjoined command's marker.
+    fn pending_directory(&self) -> Result<PathBuf> {
+        let jobs = self.root.join("jobs");
+        let pending = match std::fs::symlink_metadata(jobs.join(PENDING)) {
+            Ok(_) => {
+                let pending = private::check_directory(&jobs.join(PENDING))?;
+                if pending.join(PENDING_READY).exists() {
+                    return Ok(pending);
+                }
+                pending
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                private::directory(&jobs.join(PENDING))?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut unjoined = Vec::new();
+        for (count, entry) in std::fs::read_dir(&jobs)?.enumerate() {
+            if count >= LEGACY_SCAN_LIMIT {
+                return Err(Error::Unavailable("command receipt retention limit"));
+            }
+            let job = entry?.path();
+            if job.file_name().and_then(|name| name.to_str()) == Some(PENDING) {
+                continue;
+            }
+            private::check_directory(&job)?;
+            if job_joined(&job)? == JobState::Unjoined {
+                let name = job
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or(Error::PrivateState)?;
+                unjoined.push(name.to_owned());
+            }
+        }
+        let create_marker = |name: &str| -> Result<()> {
+            match private::create(&pending.join(name), PENDING_MARKER) {
+                Ok(()) => Ok(()),
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        };
+        for name in unjoined {
+            create_marker(&name)?;
+        }
+        create_marker(PENDING_READY)?;
+        std::fs::File::open(&pending)?.sync_all()?;
+        Ok(pending)
+    }
+    fn mark_pending(&self, command: &Id) -> Result<()> {
+        let pending = self.pending_directory()?;
+        match private::create(&pending.join(command.as_str()), PENDING_MARKER) {
+            Ok(()) => Ok(()),
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+    fn clear_pending(&self, command: &Id) -> Result<()> {
+        self.clear_pending_name(command.as_str())
+    }
+    fn clear_pending_name(&self, name: &str) -> Result<()> {
+        let pending = self.pending_directory()?;
+        match std::fs::remove_file(pending.join(name)) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        std::fs::File::open(&pending)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Move joined, acknowledged jobs whose newest receipt is older than
+    /// `before_ms` into `jobs-archive/`. Jobs with a pending marker, without
+    /// a joined receipt (including never-started ones), or whose guest
+    /// scratch cleanup is still pending are retained. Nothing is deleted.
+    pub fn prune_joined_jobs(root: &Path, before_ms: u64, apply: bool) -> Result<PruneReport> {
+        let root = private::check_directory(root)?;
+        let marker = private::read(&root.join("xcb-owner.json"), 256)?;
+        if marker != b"{\"owner\":\"xcb-command-v1\"}\n" {
+            return Err(Error::Unavailable("command root is not owned by xcb"));
+        }
+        let jobs = private::check_directory(&root.join("jobs"))?;
+        let admission = root.join("admission.lock");
+        let lock = private::open_file(&admission, 64)?;
+        lock.try_lock().map_err(|_| {
+            Error::Unavailable("command runner is busy; retry after its current command joins")
+        })?;
+        let pending = jobs.join(PENDING);
+        let mut report = PruneReport::default();
+        let mut archive = None;
+        for entry in std::fs::read_dir(&jobs)? {
+            let job = entry?.path();
+            let Some(name) = job.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if name == PENDING || !std::fs::symlink_metadata(&job)?.is_dir() {
+                continue;
+            }
+            if pending.join(name).exists() || job_joined(&job)? != JobState::Joined {
+                report.retained_unjoined += 1;
+                continue;
+            }
+            let started = job.join("started.json").exists();
+            if started && !job.join("acknowledged.json").exists() {
+                report.retained_cleanup_pending += 1;
+                continue;
+            }
+            let newest = ["recovered.json", "outcome.json"]
+                .into_iter()
+                .filter_map(|receipt| std::fs::symlink_metadata(job.join(receipt)).ok())
+                .filter_map(|metadata| metadata.modified().ok())
+                .filter_map(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|age| age.as_millis().min(u128::from(u64::MAX)) as u64)
+                .max()
+                .unwrap_or(u64::MAX);
+            if newest >= before_ms {
+                report.retained_recent += 1;
+                continue;
+            }
+            report.candidates.push(name.to_owned());
+            if apply {
+                let archive = match &archive {
+                    Some(archive) => archive,
+                    None => archive.insert(private::directory(&root.join("jobs-archive"))?),
+                };
+                let destination = archive.join(name);
+                if destination.exists() {
+                    return Err(Error::Conflict("archived command job already exists"));
+                }
+                std::fs::rename(&job, &destination)?;
+                report.archived += 1;
+            }
+        }
+        if apply {
+            std::fs::File::open(&jobs)?.sync_all()?;
+        }
+        Ok(report)
     }
 
     fn unstarted(
@@ -672,13 +874,10 @@ impl CommandBackend {
         if !identifier(&input.command_id)
             || !identifier(&input.run_id)
             || !hash(&input.workspace_id)
-            || !hash(&input.snapshot_sha256)
+            || !hash(input.snapshot.sha256())
+            || input.snapshot.bytes().len() > MAX_SNAPSHOT
         {
             return Err(Error::Unavailable("invalid command authority"));
-        }
-        let snapshot = private::read(&input.snapshot_path, MAX_SNAPSHOT)?;
-        if digest(&snapshot) != input.snapshot_sha256 {
-            return Err(Error::Conflict("command snapshot changed"));
         }
         // Value serializes object keys in the same canonical lexical order as
         // the guest, avoiding a dependency on struct declaration order.
@@ -688,7 +887,7 @@ impl CommandBackend {
             command_id: input.command_id.clone(),
             run_id: input.run_id.clone(),
             workspace_id: input.workspace_id.clone(),
-            snapshot_sha256: input.snapshot_sha256.clone(),
+            snapshot_sha256: input.snapshot.sha256().to_owned(),
             request_sha256: digest(request_bytes),
             backend_sha256: self.identity.clone(),
             boot_id: self.manifest.boot_id.clone(),
@@ -748,7 +947,7 @@ impl CommandBackend {
             || custody.command_id != input.command_id
             || custody.run_id != input.run_id
             || custody.workspace_id != input.workspace_id
-            || custody.snapshot_sha256 != input.snapshot_sha256
+            || custody.snapshot_sha256 != input.snapshot.sha256()
             || custody.boot_id != self.manifest.boot_id
         {
             return Err(Error::Conflict("command authority changed"));
@@ -776,13 +975,14 @@ impl CommandBackend {
                 return Err(Error::Conflict("command transport executable changed"));
             }
             self.inspect().await?;
-            let snapshot = private::read(&input.snapshot_path, MAX_SNAPSHOT)?;
-            if digest(&snapshot) != custody.snapshot_sha256 {
+            // The bytes were verified when encoded; the custody digest binds
+            // them without another read of the snapshot file.
+            if input.snapshot.sha256() != custody.snapshot_sha256 {
                 return Err(Error::Conflict("command snapshot changed"));
             }
             Ok(serde_json::to_vec(
                 &serde_json::json!({"custody":custody,"request":request,
-                "snapshotBase64":base64::engine::general_purpose::STANDARD.encode(snapshot)}),
+                "snapshotBase64":base64::engine::general_purpose::STANDARD.encode(input.snapshot.bytes())}),
             )?)
         }
         .await;
@@ -790,6 +990,10 @@ impl CommandBackend {
             Ok(envelope) => envelope,
             Err(error) => return self.unstarted(&job, custody, error),
         };
+        // The pending marker and the start record are one submission step:
+        // admission scans only pending markers, so the marker must exist
+        // before guest work can begin and stays until a joined receipt.
+        self.mark_pending(&custody.command_id)?;
         private::create(&job.join("started.json"), b"{\"started\":true}")?;
         let run = process::capture_with_input(
             self.transport("run", None),
@@ -817,6 +1021,7 @@ impl CommandBackend {
                 change = dropped.changed(), if !cancellation_sent => { channel_closed |= change.is_err(); },
             }
         };
+        let custody_id = custody.command_id.clone();
         let mut outcome = match result {
             Ok(bytes) => match self.accept(&custody, &bytes) {
                 Ok(value) => value,
@@ -836,6 +1041,7 @@ impl CommandBackend {
         };
         private::create(&job.join("outcome.json"), &serde_json::to_vec(&outcome)?)?;
         if outcome.joined {
+            self.clear_pending(&custody_id)?;
             // Resource reclamation is allowed only after the joined result,
             // decoded changes and host outcome are independently durable.
             self.acknowledge_or_record_pending(&mut outcome, "outcome.json")
@@ -1029,6 +1235,7 @@ impl CommandBackend {
                 }
                 _ => return Err(Error::Conflict("command recovery receipt changed")),
             }
+            self.clear_pending(&custody.command_id)?;
             self.acknowledge_or_record_pending(&mut outcome, "recovered.json")
                 .await;
         }
@@ -1085,7 +1292,7 @@ mod tests {
             run_id: crate::new_id("run"),
             workspace_id: "a".repeat(64),
             snapshot_path,
-            snapshot_sha256: digest(snapshot),
+            snapshot: VerifiedSnapshot::new(snapshot.to_vec()),
         };
         let request = CommandRequest {
             argv: vec!["true".into()],
@@ -1123,6 +1330,9 @@ mod tests {
         drop(guard);
         let (_, _, custody) = prepared(&backend);
         let job = backend.root.join("jobs").join(custody.command_id.as_str());
+        // Submission creates the pending marker and the start record as one
+        // step; fabrication mirrors that so admission sees the unjoined job.
+        backend.mark_pending(&custody.command_id).unwrap();
         private::create(&job.join("started.json"), b"{}").unwrap();
         let mut outcome = CommandOutcome {
             custody,
@@ -1329,7 +1539,7 @@ mod tests {
             run_id: crate::new_id("run"),
             workspace_id,
             snapshot_path,
-            snapshot_sha256: digest(snapshot),
+            snapshot: VerifiedSnapshot::new(snapshot),
         };
         let request = CommandRequest {
             argv: vec![
@@ -1424,5 +1634,148 @@ mod tests {
             canonical(&request).unwrap(),
             "{\"argv\":[\"é\"],\"cwd\":\".\",\"network\":\"none\",\"timeoutMs\":1000}".as_bytes()
         );
+    }
+
+    /// Fabricate one retained job with a start record and a durable outcome,
+    /// exactly what `job_joined` verifies. Returns its command id.
+    fn synthetic_finished_job(backend: &CommandBackend, joined: bool) -> String {
+        let custody = CommandCustody {
+            version: 1,
+            command_id: crate::new_id("cmd"),
+            run_id: crate::new_id("run"),
+            workspace_id: "a".repeat(64),
+            snapshot_sha256: "b".repeat(64),
+            request_sha256: "c".repeat(64),
+            backend_sha256: backend.identity.clone(),
+            boot_id: backend.manifest.boot_id.clone(),
+        };
+        let job = backend.root.join("jobs").join(custody.command_id.as_str());
+        private::directory(&job).unwrap();
+        private::create(
+            &job.join("custody.json"),
+            &serde_json::to_vec(&custody).unwrap(),
+        )
+        .unwrap();
+        private::create(&job.join("started.json"), b"{\"started\":true}").unwrap();
+        let outcome = CommandOutcome {
+            custody,
+            joined,
+            output: None,
+            error: (!joined).then(|| "synthetic transport loss".to_owned()),
+        };
+        private::create(
+            &job.join("outcome.json"),
+            &serde_json::to_vec(&outcome).unwrap(),
+        )
+        .unwrap();
+        outcome.custody.command_id.as_str().to_owned()
+    }
+
+    #[test]
+    fn admission_scans_pending_markers_not_retained_job_history() {
+        let (_temporary, backend) = fixture();
+        let jobs = backend.root.join("jobs");
+        let pending = jobs.join(PENDING);
+        let mut joined = Vec::new();
+        for _ in 0..96 {
+            joined.push(synthetic_finished_job(&backend, true));
+        }
+        let unjoined = synthetic_finished_job(&backend, false);
+        // A root without markers is migrated once: the unjoined job receives
+        // its marker and still refuses admission, while joined jobs do not.
+        assert!(!pending.exists());
+        assert!(backend.admission().is_err());
+        assert!(pending.join(&unjoined).exists());
+        assert!(pending.join(PENDING_READY).exists());
+        assert!(backend.admission().is_err());
+        // The joined receipt is the truth: fabricating it clears the stale
+        // marker during the next pending-only scan.
+        let job = jobs.join(&unjoined);
+        let custody: CommandCustody =
+            serde_json::from_slice(&private::read(&job.join("custody.json"), 8192).unwrap())
+                .unwrap();
+        let outcome = CommandOutcome {
+            custody,
+            joined: true,
+            output: None,
+            error: None,
+        };
+        private::create(
+            &job.join("recovered.json"),
+            &serde_json::to_vec(&outcome).unwrap(),
+        )
+        .unwrap();
+        drop(backend.admission().unwrap());
+        assert!(!pending.join(&unjoined).exists());
+        // Once migrated, admission never opens retained job dirs: a corrupt
+        // job outside pending does not even get read, proving the scan is
+        // proportional to pending markers, not job history.
+        let corrupt = jobs.join("cmd_corrupt");
+        private::directory(&corrupt).unwrap();
+        private::create(&corrupt.join("custody.json"), b"not json").unwrap();
+        private::create(&corrupt.join("started.json"), b"{}").unwrap();
+        drop(backend.admission().unwrap());
+        // A stale marker for a joined job is unlinked during the scan.
+        private::create(&pending.join(&joined[0]), PENDING_MARKER).unwrap();
+        drop(backend.admission().unwrap());
+        assert!(!pending.join(&joined[0]).exists());
+    }
+
+    #[test]
+    fn prune_archives_only_old_joined_acknowledged_jobs() {
+        let (_temporary, backend) = fixture();
+        let jobs = backend.root.join("jobs");
+        private::create(
+            &backend.root.join("xcb-owner.json"),
+            b"{\"owner\":\"xcb-command-v1\"}\n",
+        )
+        .unwrap();
+        drop(backend.admission().unwrap());
+        let archive_candidate = synthetic_finished_job(&backend, true);
+        let job = jobs.join(&archive_candidate);
+        private::create(&job.join("acknowledged.json"), b"{}").unwrap();
+        let cleanup_pending = synthetic_finished_job(&backend, true);
+        let recent = synthetic_finished_job(&backend, true);
+        private::create(&jobs.join(&recent).join("acknowledged.json"), b"{}").unwrap();
+        let unjoined = synthetic_finished_job(&backend, false);
+        backend.mark_pending(&Id::new(&unjoined).unwrap()).unwrap();
+        // Age the two archivable outcomes behind the cutoff; the recent one
+        // keeps its fresh receipt time.
+        let cutoff_ms = crate::now_ms() - 30 * 86_400_000;
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(40 * 86_400);
+        for id in [&archive_candidate, &cleanup_pending] {
+            std::fs::File::options()
+                .write(true)
+                .open(jobs.join(id).join("outcome.json"))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        let report = CommandBackend::prune_joined_jobs(&backend.root, cutoff_ms, false).unwrap();
+        assert_eq!(report.candidates, [archive_candidate.as_str()]);
+        assert_eq!(report.archived, 0);
+        assert_eq!(report.retained_unjoined, 1);
+        assert_eq!(report.retained_cleanup_pending, 1);
+        assert_eq!(report.retained_recent, 1);
+        assert!(job.exists());
+        let applied = CommandBackend::prune_joined_jobs(&backend.root, cutoff_ms, true).unwrap();
+        assert_eq!(applied.archived, 1);
+        assert!(!job.exists());
+        assert!(
+            backend
+                .root
+                .join("jobs-archive")
+                .join(&archive_candidate)
+                .exists()
+        );
+        // Nothing is deleted and nothing unjoined is ever archived.
+        let after = CommandBackend::prune_joined_jobs(&backend.root, cutoff_ms, true).unwrap();
+        assert!(after.candidates.is_empty());
+        assert_eq!(after.retained_unjoined, 1);
+        assert!(jobs.join(&unjoined).exists());
+        // Archived and joined jobs are never scanned; the unjoined job's
+        // live pending marker still refuses admission.
+        assert!(backend.admission().is_err());
+        assert!(jobs.join(PENDING).join(&unjoined).exists());
     }
 }

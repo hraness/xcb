@@ -193,6 +193,11 @@ enum Commands {
         #[arg(long = "launch-artifacts")]
         launch_artifacts: bool,
     },
+    /// Inspect or archive retained offline command jobs.
+    Command {
+        #[command(subcommand)]
+        command: CommandJobs,
+    },
     /// Internal: run the managed supervisor (spawned by xcb, not for users).
     #[command(name = "managed-daemon", hide = true)]
     ManagedDaemon,
@@ -368,6 +373,20 @@ enum SessionCommand {
         #[arg(default_value_t = 30, value_parser = clap::value_parser!(u16).range(1..=3650))]
         days: u16,
         /// Apply the prune; without it the command only reports candidates.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+#[derive(Subcommand)]
+enum CommandJobs {
+    /// Move joined, acknowledged command jobs older than --days into
+    /// jobs-archive/. Records are never deleted; unjoined, cleanup-pending
+    /// and recent jobs are retained.
+    Prune {
+        /// Archive only jobs whose newest receipt is older than this many days.
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+        /// Apply the archive; without it only the dry-run report prints.
         #[arg(long)]
         yes: bool,
     },
@@ -1559,11 +1578,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     } else {
                         for task in tasks {
                             println!(
-                                "{}  {} · {} · {}",
+                                "{}  {} · {} · {}{}",
                                 task.id,
-                                task.state.as_str(),
+                                task.state.label(),
                                 task.title,
-                                task.detail
+                                task.detail,
+                                task.route
+                                    .as_deref()
+                                    .map(|route| format!(" · {route}"))
+                                    .unwrap_or_default()
                             );
                         }
                     }
@@ -2046,6 +2069,35 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         "Use `xcb recover <run-id> --yes` after the original host and process group have stopped; unresolved credentials must reconcile safely."
                     );
                 }
+            }
+            Ok(0)
+        }
+        Some(Commands::Command {
+            command: CommandJobs::Prune { days, yes },
+        }) => {
+            let root = xcb_runtime::command_tool::default_root()?;
+            let report = xcb_runtime::command::CommandBackend::prune_joined_jobs(
+                &root,
+                now_ms().saturating_sub(u64::from(days) * 86_400_000),
+                yes,
+            )?;
+            if cli.json {
+                print_json(report)?;
+            } else {
+                println!(
+                    "{} {} joined command job(s) older than {days} days into {}. {} unjoined, {} cleanup-pending and {} recent job(s) retained.{}",
+                    if yes { "Archived" } else { "Would archive" },
+                    report.candidates.len(),
+                    root.join("jobs-archive").display(),
+                    report.retained_unjoined,
+                    report.retained_cleanup_pending,
+                    report.retained_recent,
+                    if yes {
+                        ""
+                    } else {
+                        " Repeat with --yes to apply."
+                    }
+                );
             }
             Ok(0)
         }
@@ -2662,6 +2714,27 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn command_prune_cli_shape_defaults_to_dry_run() {
+        let cli = Cli::try_parse_from(["xcb", "command", "prune"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Command {
+                command: CommandJobs::Prune {
+                    days: 30,
+                    yes: false
+                }
+            })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "command", "prune", "--days", "7", "--yes"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Command {
+                command: CommandJobs::Prune { days: 7, yes: true }
+            })
+        ));
     }
 
     #[test]
