@@ -1563,7 +1563,17 @@ pub(crate) async fn handshake(
                 {
                     if value.pointer("/response/subtype").and_then(Value::as_str) != Some("success")
                     {
-                        return Err(Error::Protocol("initialization failed"));
+                        // The error text is the provider's; only its fixed
+                        // classification crosses into host state.
+                        let detail = value
+                            .pointer("/response/error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        return Err(if claude::authentication_cue(detail) {
+                            Error::Unavailable(crate::category::AUTHENTICATION)
+                        } else {
+                            Error::Protocol("initialization failed")
+                        });
                     }
                     return parse_models(
                         value
@@ -1572,6 +1582,10 @@ pub(crate) async fn handshake(
                         now_ms(),
                     );
                 }
+                Event::Result {
+                    failure: Some(Failure::Authentication),
+                    ..
+                } => return Err(Error::Unavailable(crate::category::AUTHENTICATION)),
                 Event::Notice => (),
                 _ => return Err(Error::Protocol("unexpected frame before initialization")),
             }
@@ -2051,12 +2065,15 @@ pub(crate) async fn run_prepared<P: Protocol>(
                     }
                     TurnEvent::Assistant(text) if admitted => answer.completed(text)?,
                     TurnEvent::Attention => pending_attention = true,
+                    // Quota is an observation, not provider work: an account
+                    // rejected before admission still settles as a quota or
+                    // authentication failure rather than an unknown one.
                     TurnEvent::Quota {
                         window,
                         used_percent,
                         resets_at_ms,
                         failure,
-                    } if admitted => {
+                    } => {
                         // A subsequent quota meter update is not evidence
                         // that an explicit provider failure was rescinded.
                         quota_failure = failure.or(quota_failure);
@@ -2277,7 +2294,13 @@ pub(crate) async fn run_prepared<P: Protocol>(
             let detail = Diagnostic::from_error(&error);
             observer(Progress::Notice(detail.as_str().to_owned()));
             diagnostic = Some(detail);
-            (Terminal::Failed, vec![], Some(Failure::Unknown))
+            // The codec's fixed category names the account failure; an
+            // earlier explicit provider rejection is the next best evidence.
+            let failure = match error.failure() {
+                Failure::Unknown => quota_failure.unwrap_or(Failure::Unknown),
+                failure => failure,
+            };
+            (Terminal::Failed, vec![], Some(failure))
         }
         Err(_) => {
             let detail = Diagnostic::from_error(&Error::Unavailable("provider deadline reached"));
