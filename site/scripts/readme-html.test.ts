@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { LANDING_END, LANDING_START, readmeLanding, renderReadmeHtml } from "./readme-html.ts";
+import { LANDING_END, LANDING_START, readmeLanding, renderReadmeHtml, renderReadmeMarkdown } from "./readme-html.ts";
 
 const repository = join(import.meta.dir, "..", "..");
 
@@ -22,8 +22,20 @@ test("extracts the landing block between the shared Hraness markers", async () =
   expect(source.indexOf(LANDING_END)).toBeGreaterThan(source.indexOf(LANDING_START));
   const landing = readmeLanding(source);
   expect(landing.title).toBe("xcb");
-  expect(landing.lead).toContain("local terminal workspace");
+  expect(landing.lead).toContain("one local terminal");
   expect(landing.markdown).toContain("customizable panes");
+});
+
+test("serves the README as markdown with repository-rooted relative links", async () => {
+  const source = await readFile(join(repository, "README.md"), "utf8");
+  const markdown = renderReadmeMarkdown(source);
+  expect(markdown).toContain("# xcb");
+  expect(markdown).not.toContain("hraness:xcb-landing");
+  expect(markdown).toContain("[Compatibility reference](https://github.com/hraness/xcb/blob/main/docs/compatibility.md)");
+  expect(markdown).toContain("[MIT](https://github.com/hraness/xcb/blob/main/LICENSE)");
+  expect(markdown).toContain("[Project site](https://xcb.sh)");
+  expect(() => renderReadmeMarkdown("[x](javascript:alert(1))")).toThrow();
+  expect(() => renderReadmeMarkdown("[x](//evil.example)")).toThrow();
 });
 
 test("rejects unsafe README link targets", () => {
