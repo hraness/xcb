@@ -105,7 +105,7 @@ jobs:
           printf 'npm_path=%s\ngithub_path=%s\n' "$npm_writer_root" "$github_writer_root" >> "$GITHUB_OUTPUT"
       - name: Preserve the reviewed dependency-free npm writer
         id: writer_artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: xcb-release-writer-${{ github.run_attempt }}
           path: ${{ steps.writer_roots.outputs.npm_path }}
@@ -113,7 +113,7 @@ jobs:
           retention-days: 30
       - name: Preserve the reviewed dependency-free GitHub Release writer
         id: github_writer_artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: xcb-github-release-writer-${{ github.run_attempt }}
           path: ${{ steps.writer_roots.outputs.github_path }}
@@ -156,7 +156,7 @@ jobs:
           bun run ./scripts/release-artifact-checksum.ts write artifacts/*.tgz artifacts/SHA256SUMS
       - name: Preserve the exact release bytes
         id: release_artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: xcb-release-${{ github.run_attempt }}
           path: artifacts/
@@ -246,7 +246,7 @@ jobs:
         with:
           subject-path: artifacts/*.tar.gz
       - name: Preserve the exact native release assets
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: xcb-native-${{ matrix.os }}-${{ github.run_attempt }}
           path: artifacts/
