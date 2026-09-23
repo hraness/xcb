@@ -1,4 +1,4 @@
-import { publishedRelease } from "../publication";
+import { publicationMarkdown, publishedRelease } from "../publication";
 
 // llms.txt is a machine-readable site summary. Its release claim comes from
 // the same signed-off datum as every public page, so it cannot drift.
@@ -6,7 +6,8 @@ export const dynamic = "force-static";
 
 const releaseLine = publishedRelease === null
   ? "No native xcb binary or @hraness/xcb npm package is published yet; the source build is the installation path."
-  : `Latest verified release: v${publishedRelease.version}, with native archives and checksums verified by ${publishedRelease.verificationRun}.`;
+  : `Latest verified release: v${publishedRelease.version}, verified by ${publishedRelease.verificationRun}.`;
+const releaseDetails = publicationMarkdown(publishedRelease);
 
 const body = `# xcb
 
@@ -18,7 +19,7 @@ Native xcb is an MIT-licensed Rust source preview. ${releaseLine} Releases tagge
 
 A route candidate needs a supported provider build, an enabled, signed-in, idle account outside any known quota window, and a model recently seen in that provider's catalog. Candidates are ranked by task type and by relative quality, cost, and latency (Pareto tiers); an optional judge can inform that ranking but cannot add a route. The workspace broker can read and edit files. A separately configured Linux ARM64 command runner supports offline tests/builds, prepared public Cargo/Bun dependencies, and filtered read-only Git inspection. It does not run native macOS commands, arbitrary network operations, private dependency installs, commits, or pushes. Model requests still go to the selected provider; local state does not mean offline inference. xcb is not an unlimited parallel agent fleet.
 
-## Pages
+${releaseDetails === "" ? "" : `## Verified release\n\n${releaseDetails}\n\n`}## Pages
 
 - [Overview](https://xcb.sh/): the router, the JSON command and SDK, how routes are chosen, and source installation.
 - [Download](https://xcb.sh/download): latest verified native release, per-platform archives, and the source build.
