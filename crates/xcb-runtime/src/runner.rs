@@ -2121,7 +2121,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
                             &run,
                             &call_id,
                             &name,
-                            &digest(serde_json::to_vec(&arguments)?),
+                            &digest(serde_json::to_vec(&arguments).unwrap_or_default()),
                         )?;
                         observer(Progress::Tool(name.clone()));
                         if *cancel.borrow() {
@@ -2137,14 +2137,21 @@ pub(crate) async fn run_prepared<P: Protocol>(
                             )?;
                             return Ok((Terminal::Cancelled, vec![]));
                         }
-                        let output = if name == "workspace_exec" {
-                            match commands.start(
-                                store.clone(),
-                                run.clone(),
-                                workspace.clone(),
-                                call_id.clone(),
-                                &arguments,
-                            ) {
+                        // `settle` stays None for workspace_exec: the command
+                        // tool settles its own receipt inside finish_command.
+                        // Every other tool settles its receipt together with
+                        // the transcript append in one durable transaction.
+                        let (output, settle) = if name == "workspace_exec" {
+                            match commands
+                                .start(
+                                    store.clone(),
+                                    run.clone(),
+                                    workspace.clone(),
+                                    call_id.clone(),
+                                    &arguments,
+                                )
+                                .await
+                            {
                                 Ok(()) => {
                                     let command = commands.wait().await;
                                     commands_joined &= command.joined;
@@ -2154,7 +2161,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
                                             "command stop is unproven; account custody retained",
                                         ));
                                     }
-                                    command.output
+                                    (command.output, None)
                                 }
                                 Err(error) => {
                                     settle_tool_effects(
@@ -2164,7 +2171,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
                                         EffectState::None,
                                         &mut effects,
                                     )?;
-                                    Err(error)
+                                    (Err(error), None)
                                 }
                             }
                         } else if name.starts_with("xcb_") {
@@ -2175,51 +2182,80 @@ pub(crate) async fn run_prepared<P: Protocol>(
                                 &name,
                                 &arguments,
                             );
-                            settle_tool_effects(
-                                &store,
-                                &run,
-                                &call_id,
-                                call_effects,
-                                &mut effects,
-                            )?;
-                            output
+                            (output, Some(call_effects))
                         } else {
-                            let (output, call_effects) = workspace.call_observed(&name, &arguments);
-                            settle_tool_effects(
-                                &store,
-                                &run,
-                                &call_id,
-                                call_effects,
-                                &mut effects,
-                            )?;
-                            output
+                            // Workspace tools do bounded filesystem and SQLite
+                            // work on a blocking thread; a dropped provider
+                            // wait still settles this receipt via
+                            // cancel_and_join.
+                            let (output, call_effects) = commands
+                                .workspace_call(
+                                    store.clone(),
+                                    run.clone(),
+                                    call_id.clone(),
+                                    workspace.clone(),
+                                    name.clone(),
+                                    arguments.clone(),
+                                )
+                                .await;
+                            (output, Some(call_effects))
                         };
+                        // Result shaping never aborts the turn: legal tool
+                        // output that cannot ride the transcript bound is a
+                        // tool rejection with guidance, not a protocol failure.
                         let (text, failed) = match output {
-                            Ok(output) => (serde_json::to_string(&output)?, false),
+                            Ok(output) => match serde_json::to_string(&output) {
+                                Ok(text) => (text, false),
+                                Err(_) => ("tool result could not be encoded".to_owned(), true),
+                            },
                             Err(error) => (error.to_string(), true),
                         };
-                        if text.len() > MAX_TEXT_BYTES {
-                            return Err(Error::Protocol("tool result limit"));
+                        let (text, failed) = if text.len() > MAX_TEXT_BYTES {
+                            (
+                                "tool result exceeds 256 KiB; read a smaller file or a range"
+                                    .to_owned(),
+                                true,
+                            )
+                        } else {
+                            (text, failed)
+                        };
+                        // The durable transcript carries display-safe text;
+                        // the provider still receives the exact result.
+                        let message = Message {
+                            id: new_id("tool"),
+                            role: Role::Tool,
+                            text: xcb_core::display_text(
+                                &format!("{name}: {text}"),
+                                MAX_TEXT_BYTES,
+                            ),
+                            at_ms: now_ms(),
+                            attachments: vec![],
+                            provenance: Some(MessageProvenance {
+                                account: session.account.clone(),
+                                model: session.model.clone(),
+                                run: Some(run.id.clone()),
+                            }),
+                        };
+                        if let Some(call_effects) = settle {
+                            let previous = effects;
+                            // A receipt write can fail after the tool ran.
+                            // Until that receipt is durable, retain custody
+                            // even when the filesystem result was known.
+                            effects = EffectState::Uncertain;
+                            if call_effects == EffectState::Uncertain {
+                                store.append_tool_message(&session.id, &message)?;
+                            } else {
+                                store.settle_tool_and_append(
+                                    &run,
+                                    &call_id,
+                                    &session.id,
+                                    &message,
+                                )?;
+                                effects = combine_effects(previous, call_effects);
+                            }
+                        } else {
+                            store.append_tool_message(&session.id, &message)?;
                         }
-                        let current = store
-                            .session(&session.id)?
-                            .ok_or(Error::Unavailable("session not found"))?;
-                        store.append_message(
-                            &session.id,
-                            current.revision,
-                            &Message {
-                                id: new_id("tool"),
-                                role: Role::Tool,
-                                text: format!("{name}: {text}"),
-                                at_ms: now_ms(),
-                                attachments: vec![],
-                                provenance: Some(MessageProvenance {
-                                    account: session.account.clone(),
-                                    model: session.model.clone(),
-                                    run: Some(run.id.clone()),
-                                }),
-                            },
-                        )?;
                         protocol
                             .reply(
                                 &mut process,
@@ -3101,6 +3137,182 @@ mod tests {
             }
         }
     }
+    /// Legal file content and oversized tool results must produce `isError`
+    /// tool replies while the provider turn still completes; the persisted
+    /// transcript is sanitized and bounded.
+    struct ToolReadProtocol {
+        model: ModelChoice,
+        ready: bool,
+        calls: std::collections::VecDeque<(String, serde_json::Value, bool)>,
+        current: Option<(String, bool)>,
+    }
+    impl Protocol for ToolReadProtocol {
+        async fn initialize(&mut self, _: &mut StreamProcess, _: &str) -> Result<Vec<ModelChoice>> {
+            Ok(vec![self.model.clone()])
+        }
+        async fn start(&mut self, process: &mut StreamProcess, _: Prompt) -> Result<()> {
+            process.send(&json!({"step":0})).await
+        }
+        async fn receive(&mut self, _: &mut StreamProcess, _: &[u8]) -> Result<Vec<TurnEvent>> {
+            let mut events = vec![];
+            if self.ready {
+                self.ready = false;
+                events.push(TurnEvent::Ready);
+            }
+            if let Some((id, arguments, expect_error)) = self.calls.pop_front() {
+                self.current = Some((id.clone(), expect_error));
+                events.push(TurnEvent::Tool {
+                    id,
+                    name: "workspace_read".into(),
+                    arguments,
+                });
+            } else {
+                events.push(TurnEvent::Result {
+                    terminal: Terminal::Completed,
+                    text: "Done".into(),
+                    models: vec![],
+                });
+            }
+            Ok(events)
+        }
+        async fn reply(
+            &mut self,
+            process: &mut StreamProcess,
+            id: &str,
+            result: Value,
+        ) -> Result<()> {
+            let Some((expected_id, expect_error)) = self.current.take() else {
+                panic!("unexpected tool reply {id}");
+            };
+            assert_eq!(id, expected_id);
+            assert_eq!(result["isError"], expect_error, "reply for {id}");
+            let text = result["content"][0]["text"].as_str().unwrap_or_default();
+            match id {
+                // The provider sees the raw result for a successful call —
+                // including legal control characters — while the transcript
+                // carries the sanitized copy.
+                "ctrl" => assert!(text.contains('\u{0085}') && text.contains('\u{202e}')),
+                "lines" => assert_eq!(
+                    text,
+                    "tool result exceeds 256 KiB; read a smaller file or a range"
+                ),
+                "big" => assert!(text.contains("exceeds the 128 KiB read limit")),
+                _ => (),
+            }
+            process.send(&json!({"step":1})).await
+        }
+    }
+
+    #[tokio::test]
+    async fn legal_or_oversized_tool_output_is_a_tool_error_not_a_turn_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let workspace = base.join("work");
+        std::fs::create_dir(&workspace).unwrap();
+        // A legal 256 KiB file is rejected by the read limit, not the turn.
+        std::fs::write(workspace.join("big.txt"), "\n".repeat(256 * 1024)).unwrap();
+        // A legal 128 KiB file of newlines serializes past the transcript
+        // bound: the oversize result becomes an isError reply with guidance.
+        std::fs::write(workspace.join("lines.txt"), "\n".repeat(128 * 1024)).unwrap();
+        // Legal control characters ride the provider reply; only the
+        // transcript copy is sanitized.
+        std::fs::write(
+            workspace.join("ctrl.txt"),
+            "before \u{0085} nel and \u{202e} bidi after",
+        )
+        .unwrap();
+        let store = Arc::new(Store::open(&base.join("state")).unwrap());
+        let account = store
+            .add_account(Provider::Claude, "Fixture", now_ms(), None)
+            .unwrap();
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("fixture-model").unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: now_ms(),
+        };
+        let session = store
+            .create_session(&account.id, model.clone(), &workspace, now_ms())
+            .unwrap();
+        let message = Message {
+            id: new_id("message"),
+            role: Role::User,
+            text: "Read the files".into(),
+            at_ms: now_ms(),
+            attachments: vec![],
+            provenance: None,
+        };
+        let session = store
+            .append_message(&session.id, session.revision, &message)
+            .unwrap();
+        let artifacts = LaunchArtifacts::create(store.root()).unwrap();
+        let launch = Launch {
+            command: Command::new("/bin/cat"),
+            cwd: base.clone(),
+            bridge: None,
+            artifacts,
+            prepared_run: None,
+            codex_credentials: None,
+        };
+        let (_cancel, cancellation) = watch::channel(false);
+        let outcome = run_prepared(
+            store.clone(),
+            RunInput {
+                session: session.clone(),
+                message,
+                config: Config::default(),
+                pane_generation: false,
+            },
+            cancellation,
+            Arc::new(|_| {}),
+            launch,
+            ToolReadProtocol {
+                model,
+                ready: true,
+                calls: [
+                    ("big", json!({"path":"big.txt"}), true),
+                    ("lines", json!({"path":"lines.txt"}), true),
+                    ("ctrl", json!({"path":"ctrl.txt"}), false),
+                ]
+                .into_iter()
+                .map(|(id, arguments, expect_error)| (id.to_owned(), arguments, expect_error))
+                .collect(),
+                current: None,
+            },
+            Workspace::open_with_coordination(&workspace, &base.join("coordination")).unwrap(),
+        )
+        .await
+        .unwrap();
+        // Every call completed the turn; nothing propagated as a turn failure.
+        assert_eq!(outcome.facts.terminal, Terminal::Completed);
+        assert_eq!(outcome.text, "Done");
+        assert!(outcome.facts.joined);
+        let db = rusqlite::Connection::open(store.root().join("xcb.sqlite")).unwrap();
+        let pending: i64 = db
+            .query_row(
+                "SELECT count(*) FROM tool_effects WHERE settled=0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 0);
+        // The durable transcript is sanitized and bounded; the raw control
+        // characters never persisted.
+        let transcript = store.messages(&session.id, 512).unwrap();
+        let tool_text: String = transcript
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .map(|message| message.text.clone())
+            .collect();
+        assert_eq!(tool_text.matches("workspace_read:").count(), 3);
+        assert!(!tool_text.contains('\u{0085}'));
+        assert!(!tool_text.contains('\u{202e}'));
+        assert!(tool_text.len() <= 4 * MAX_TEXT_BYTES);
+    }
+
     #[tokio::test]
     async fn cancellation_during_initialization_joins_and_releases_without_submitting_a_turn() {
         let root = tempfile::tempdir().unwrap();
