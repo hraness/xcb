@@ -33,7 +33,7 @@ test("public entry pages keep one optional support footer and no product signup"
 test("the homepage clearly separates source installation from verified releases", () => {
   const html = renderToStaticMarkup(<Home />);
   expect(html.match(/<h1\b/gu)).toHaveLength(1);
-  expect(html).toContain("One terminal. Your coding agents.");
+  expect(html).toContain("All your AI subscriptions. One router.");
   expect(html).toContain("./scripts/install-native.sh");
   if (publishedRelease === null) {
     expect(html).toContain("No native release is published yet; install from source");
@@ -66,17 +66,43 @@ test("the release state renders verified native downloads from the fixture datum
   expect(archive).toContain(`href="${release.archiveUrl}"`);
 });
 
-test("the product example is illustrative, with accessible working view controls", () => {
+test("the product examples are illustrative, with accessible view controls", () => {
   const html = renderToStaticMarkup(<Home />);
-  const buttons: string[] = [];
-  new HTMLRewriter().on('button[aria-controls="workspace-example"]', {
-    element(element) { buttons.push(element.getAttribute("aria-pressed") ?? ""); },
-  }).transform(html);
-  expect(buttons).toEqual(["true", "false", "false"]);
+  const routeButtons: string[] = [];
+  const workspaceButtons: string[] = [];
+  new HTMLRewriter()
+    .on('button[aria-controls="route-example"]', {
+      element(element) { routeButtons.push(element.getAttribute("aria-pressed") ?? ""); },
+    })
+    .on('button[aria-controls="workspace-example"]', {
+      element(element) { workspaceButtons.push(element.getAttribute("aria-pressed") ?? ""); },
+    })
+    .transform(html);
+  expect(routeButtons).toEqual(["true", "false"]);
+  expect(workspaceButtons).toEqual(["true", "false", "false"]);
   expect(html).toContain("Illustrative workspace");
   expect(html).toContain("no live provider calls");
   expect(html).toContain('aria-live="polite"');
   expect(html).not.toContain("Subagents");
+});
+
+test("the router leads and the experimental harness comes last", () => {
+  const html = renderToStaticMarkup(<Home />);
+  expect(html).toContain("xcb --json route");
+  expect(html).toContain("createSubscriptionRouter");
+  expect(html).toContain('href="/docs/route"');
+  for (const [before, after] of [
+    ['id="why"', 'id="router"'],
+    ['id="router"', 'id="interfaces"'],
+    ['id="interfaces"', 'id="routing"'],
+    ['id="routing"', 'id="workspace"'],
+    ['id="workspace"', 'id="harness"'],
+    ['id="harness"', 'id="readiness"'],
+  ] as const) {
+    expect(html.indexOf(before)).toBeLessThan(html.indexOf(after));
+  }
+  expect(html).toContain("Experimental");
+  expect(html).toContain("does not execute self-modifying orchestration policies");
 });
 
 test("support boundaries appear before installation without implying offline inference", () => {

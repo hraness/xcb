@@ -67,6 +67,8 @@ pub struct RouteRequest<'a> {
     pub task: &'a str,
     pub required_provider: Option<Provider>,
     pub preferred_provider: Option<Provider>,
+    /// An exact observed model key restricts the route to that model alone.
+    pub required_model: Option<&'a str>,
     pub excluded_routes: &'a BTreeSet<String>,
     pub excluded_accounts: &'a BTreeSet<Id>,
     pub account: Option<&'a Id>,
@@ -413,6 +415,7 @@ async fn route_with_admitted(
         task,
         required_provider,
         preferred_provider,
+        required_model,
         excluded_routes,
         excluded_accounts,
         account: account_hint,
@@ -449,10 +452,11 @@ async fn route_with_admitted(
         })
         .collect();
     let profile_by_key = eligible_profiles(&models, &offers, now, task, |model| {
-        accounts.iter().any(|account| {
-            account.provider == model.provider
-                && !excluded_routes.contains(&format!("{} · {}", model.key(), account.id))
-        })
+        required_model.is_none_or(|key| model.key() == key)
+            && accounts.iter().any(|account| {
+                account.provider == model.provider
+                    && !excluded_routes.contains(&format!("{} · {}", model.key(), account.id))
+            })
     });
     let class = classify_task(task);
     let mut candidates = Vec::new();
@@ -651,6 +655,7 @@ mod tests {
             task: "Use Codex. Fix a test",
             required_provider: Some(Provider::Codex),
             preferred_provider: None,
+            required_model: None,
             excluded_routes: &none,
             excluded_accounts: &excluded_accounts,
             account: None,
@@ -714,6 +719,7 @@ mod tests {
             task: "fix a test",
             required_provider: None,
             preferred_provider: None,
+            required_model: None,
             excluded_routes: &routes,
             excluded_accounts: &accounts,
             account: None,
