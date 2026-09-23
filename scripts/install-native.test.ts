@@ -72,7 +72,7 @@ if [ -n "$install_root" ] && [ "\${FIXTURE_CARGO_SKIP_INSTALL:-}" != yes ]; then
   cp "$artifact_dir/xcb" "$install_root/bin/xcb"
 fi
 `, { mode: 0o755 });
-  writeFileSync(join(stubs, "curl"), `#!/bin/sh\n[ "$#" = 4 ] && [ "$1" = -fsSL ] && [ "$2" = -o ] || exit 19\ncase "$4" in\n *.tar.gz.sha256) cp "$FIXTURE_CHECKSUM" "$3" ;;\n *.tar.gz) cp "$FIXTURE_ARCHIVE" "$3" ;;\n *) exit 20 ;;\nesac\n`, { mode: 0o755 });
+  writeFileSync(join(stubs, "curl"), `#!/bin/sh\n[ "$1" = -fsSL ] || exit 19\nout=\nurl=\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in\n    -o) out=$2; shift 2 ;;\n    *) url=$1; shift ;;\n  esac\ndone\n[ -n "$out" ] || exit 19\ncase "$url" in\n *.tar.gz.sha256) cp "$FIXTURE_CHECKSUM" "$out" ;;\n *.tar.gz) cp "$FIXTURE_ARCHIVE" "$out" ;;\n *) exit 20 ;;\nesac\n`, { mode: 0o755 });
   writeFileSync(join(stubs, "tar"), `#!/bin/sh\nif [ "$1" = -xzOf ]; then printf 'extract\\n' > "$FIXTURE_EXTRACT_LOG"; fi\nexec /usr/bin/tar "$@"\n`, { mode: 0o755 });
   const archivePath = join(root, "archive.tar.gz"), checksum = join(root, "checksum");
   function release(entries: readonly Entry[] = [{ name: "xcb", contents: binary(version) }], corruptChecksum = false) {
@@ -263,11 +263,35 @@ test("native upgrade refuses a symlink destination and leaves its target untouch
   expect(readFileSync(target, "utf8")).toBe("preserve unrelated data");
 });
 
-test("native install does not bypass an existing installation owner", () => {
+test("native install does not bypass a live installation owner", () => {
   const f = fixture();
-  mkdirSync(join(f.prefix, "bin/.xcb-install-lock"));
+  const lock = join(f.prefix, "bin/.xcb-install-lock");
+  mkdirSync(lock);
+  // This test process is alive for the install attempt, so its pid is a real
+  // live owner the installer must not reclaim or bypass.
+  writeFileSync(join(lock, "pid"), `${process.pid}\n`);
   expect(f.run().status).not.toBe(0);
   expect(readFileSync(f.destination, "utf8")).toBe(f.previous);
   expect(existsSync(join(f.root, "cargo.log"))).toBe(false);
-  expect(existsSync(join(f.prefix, "bin/.xcb-install-lock"))).toBe(true);
+  expect(readFileSync(join(lock, "pid"), "utf8")).toBe(`${process.pid}\n`);
+});
+
+test("native install reclaims a stale lock from a dead installer", () => {
+  const f = fixture();
+  const lock = join(f.prefix, "bin/.xcb-install-lock");
+  mkdirSync(lock);
+  // A pid that cannot be a live process: well above every platform's pid
+  // ceiling, so kill -0 always reports it dead.
+  writeFileSync(join(lock, "pid"), "99999999\n");
+  expect(f.run().status).toBe(0);
+  expect(readFileSync(f.destination, "utf8")).toBe(binary("0.4.0"));
+  expect(existsSync(lock)).toBe(false);
+});
+
+test("native install reclaims a lock whose owner died before recording its pid", () => {
+  const f = fixture();
+  mkdirSync(join(f.prefix, "bin/.xcb-install-lock"));
+  const result = f.run();
+  expect(result.status).toBe(0);
+  expect(readFileSync(f.destination, "utf8")).toBe(binary("0.4.0"));
 });

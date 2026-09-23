@@ -228,19 +228,25 @@ fn command_publication_updates_creates_removes_and_preserves_permission_bits() {
         fs::metadata(fixture.root.join("script")).unwrap().mode() & 0o777,
         0o640
     );
+    // New entries take the ordinary create bits for their kind under the
+    // process umask; a plain create_dir probes the same kernel derivation.
+    let probe = fixture.root.join("umask-probe");
+    fs::create_dir(&probe).unwrap();
+    let dir_mode = fs::metadata(&probe).unwrap().mode() & 0o777;
+    fs::remove_dir(&probe).unwrap();
     assert_eq!(
         fs::metadata(fixture.root.join("new/nested/program"))
             .unwrap()
             .mode()
             & 0o777,
-        0o700
+        dir_mode
     );
     assert_eq!(
         fs::metadata(fixture.root.join("new/nested"))
             .unwrap()
             .mode()
             & 0o777,
-        0o700
+        dir_mode
     );
     assert!(!fixture.root.join("remove").exists());
     assert_eq!(
