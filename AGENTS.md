@@ -80,6 +80,13 @@
 - Keep the public repository independently buildable. Do not reference
   sibling checkouts, private packages, or monorepo paths.
 
+<!-- hraness-public-copy:start -->
+- Public copy (websites, READMEs, docs, package and GitHub descriptions, CLI help, `llms.txt`, generated pages) follows `STYLE.md`, synced from hraness/.github. Text a model writes for publication also follows `GENERATION_STYLE.md`.
+- The delivery vocabulary in this file (admission, qualification, custody, receipt, bounded, lane, gate, surface, projection) is internal. Translate it into what the reader gets.
+- Take one-line product and sibling descriptions from the portfolio registry and versions from the release record. Tests pin facts, not prose.
+- Run `bun run check:copy` before handoff when the repository has it.
+<!-- hraness-public-copy:end -->
+
 <!-- oompa-local-efficiency:start -->
 - Treat the user's request to change this repository as standing authorization for routine task-owned commits, pushes, pull requests, merges, releases, deployments, and production verification after the gates applicable to that action pass. Do not ask for duplicate confirmation. Build confidence through relevant automated checks, bounded diagnostics, and independent review, not another human approval. Passing checks does not expand task scope or authority.
 - Prefer agentic service provisioning for new infrastructure. Check Vercel Marketplace for a native product that can provision the required resource first; use Stripe Projects as a supported alternative when it better covers the service or the Marketplace route only connects an existing account. Verify the current catalog, account, region, plan, recurring cost and resource capabilities before selecting a route. Prefer supported provider CLIs or APIs over browser-only setup when neither catalog fits, and explain the concrete exception. Reuse existing owner-controlled resources where appropriate; this preference alone does not authorize migrations, duplicate accounts, paid upgrades or wider access. Continue setup already authorized by the task and budget without duplicate confirmation. Keep provider credentials and generated environment files private, complete required interactive authentication, and verify deployment, persistence and recovery separately from successful provisioning.
@@ -94,6 +101,59 @@
 - When a CI or policy gate scans complete Git history, check out the exact governed SHA and fetch only the fully qualified governed refs before scanning. Preserve the complete-history gate and reject unexpected refs instead of importing unrelated concurrent heads.
 - At closeout, record applicable branch, PR, check, merge, release, deployment, and production evidence. Archive only conclusively finished tasks, never from silence alone, and reclaim only freshly revalidated clean merged worktrees through the guarded exact-path flow.
 <!-- oompa-local-efficiency:end -->
+
+# Public copy
+
+Public copy is the site, README, `docs/`, `llms.txt`, `package.json` and GitHub
+descriptions, CLI help, and TUI text. Follow `STYLE.md` and `WRITING.md`.
+
+- The canonical one-line description, taken from the home page hero, is
+  “xcb routes coding tasks across the Claude, Codex, and Devin subscriptions
+  you already pay for.” The page descriptions, README lead, `llms.txt` lead,
+  `package.json` description, support value proposition, and CLI `about` use
+  this sentence or a shortening of it. The portfolio registry line lives in
+  hraness/jungle; propose changes there.
+- Write the product as `xcb` (lowercase, also at the start of a sentence) or
+  Excalibur. Never write XCB or Xcb in prose; `Xcb` is only the TypeScript
+  class name. Sibling names follow the registry: Textbutler, AI Charts,
+  PeopleBlade, Gobstopper, Ghostget, Soulscrape, Wordcell, ALGAL.
+- State the release status once per page, from `site/published-release.json`
+  through `site/app/release-state.tsx`. Put each other limit beside the feature
+  it limits.
+- `xcb --json route` picks the account and model. The TypeScript SDK's
+  `createSubscriptionRouter` does not: the host names the account and model,
+  and the router holds that account while the task runs. Do not describe the
+  SDK as the same router.
+- The self-tuning managed harness is in development. The current build does
+  not run self-modifying routing policies; say so wherever the harness appears.
+- Describe a sibling product with its registry line, and claim an integration
+  only when shipped code supports it.
+- Keep `↗` for links that leave xcb.sh. Internal links use `→` or no glyph.
+- Tests pin facts (no release yet, supported platforms, tested providers,
+  commands), not headings or sentences.
+
+Internal terms and what to write on public pages instead:
+
+| Internal term | Public wording |
+| --- | --- |
+| admitted runtime, provider admission | a supported provider build (xcb has checked its exact executable, tools, configuration isolation, and file access) |
+| qualified, qualification | tested and approved for the exact build, account, and model |
+| credentialed, connected | signed in |
+| eligible, eligible set | able to take the task now: supported build, signed in, idle, not at a known quota limit, with a recently seen model |
+| custody, lease, generation-fenced | xcb holds the account so no other task can use it |
+| settled, settlement | the provider process has exited and xcb has recorded how the run ended |
+| joined | the provider's processes have exited |
+| unproven custody, uncertain outcome | xcb could not confirm how the run ended, so it keeps the account held and does not retry |
+| receipt, transition receipt | the task's local record, which `xcb tasks verify` replays |
+| bounded | name the limit: one turn, a deadline, 256 KiB of returned text |
+| closed contract, route contract | the JSON request and result of `xcb --json route` |
+| fails closed | refuses and changes nothing |
+| routing manifest, promoted | routing rule, kept or adopted |
+| credential-free boundary proof | sandbox checks run without signing in |
+| authenticated coding acceptance | a coding session confirmed on a signed-in account |
+| reference host | xcb's own terminal workspace |
+| surface | the page, command, or API, by name |
+| Pareto tier | models ranked by relative quality, cost, and latency (define it on first use) |
 
 # Workspace write coordination
 

@@ -1,6 +1,6 @@
 # Managed harness
 
-Native XCB separates a user's control conversations from provider worker
+Native xcb separates a user's control conversations from provider worker
 sessions. Each terminal has its own transcript and draft. Conversations share
 durable tasks; each task retains its originating conversation, workspace,
 original goal, explicit follow-ups, worker history, and transition receipts.

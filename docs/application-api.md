@@ -1,6 +1,6 @@
 # Build applications with an AI subscription
 
-XCB owns coding-agent sign-in, provider confinement and process/account custody.
+xcb owns coding-agent sign-in, provider confinement and process/account custody.
 An application supplies a bounded prompt and receives untrusted text. Its own
 code decides which files, network operations or messages that text can propose.
 [Textbutler](https://github.com/hraness/textbutler) is the reference consumer: it
@@ -11,7 +11,7 @@ The application route is separate from `xcb run`. It creates no saved session,
 reads no conversation history and enables no tools, hooks, plugins, judge,
 continuation or account fallback. Private run records preserve account/process
 custody, selected model and timing without storing application prompts or replies.
-Provider authentication remains in XCB; applications never pass credentials.
+Provider authentication remains in xcb; applications never pass credentials.
 
 For Devin ACP, the host instructions and application prompt are combined in one
 text content block, separated by a blank line; there is no separate system-role
@@ -77,14 +77,14 @@ match `xcb accounts`. Catalog observations expire after 24 hours. A reason is
 
 A qualified account additionally carries `qualification` with `runtimeVersion`,
 `runtimeDigest`, `evidenceDigest` and `expiresAt` (Unix milliseconds).
-`runtimeDigest` identifies the exact XCB executable. The separately reviewed
+`runtimeDigest` identifies the exact xcb executable. The separately reviewed
 evidence binds its provider pin, isolation controls and live application tests.
 An application must reject missing, expired or mismatched evidence; neither
 account sign-in nor caller JSON can issue it.
 
 ## Generate one response
 
-Start the exact admitted XCB executable directly, write one UTF-8 JSON document
+Start the exact admitted xcb executable directly, write one UTF-8 JSON document
 to stdin, close stdin and read its bounded stdout:
 
 ```json
@@ -103,9 +103,9 @@ Success is one JSON object and exit code zero:
 {"version":1,"status":"completed","requestId":"application_generated_id","account":"a_selected_account","model":"claude/observed-model/observed-effort","text":"application response","outcome":{"terminal":"completed","joined":true,"effects":"none"}}
 ```
 
-XCB emits success only after native process-group, protocol and egress joins,
+xcb emits success only after native process-group, protocol and egress joins,
 credential persistence and durable account lease settlement. `effects: none`
-means no application tools or actions were performed; required XCB authentication
+means no application tools or actions were performed; required xcb authentication
 and custody maintenance still occurs. Validate `text` against your application's
 own schema before using it. The provider is not claimed to enforce arbitrary JSON
 schemas.
@@ -149,17 +149,17 @@ entitlement; use the command's settlement fields and normal qualification gates.
 
 ## Cancellation and recovery
 
-Send SIGINT or SIGTERM and wait for the command to finish its cleanup. XCB
+Send SIGINT or SIGTERM and wait for the command to finish its cleanup. xcb
 continues joining processes and settling credential/account custody after the
 inference deadline. A deadline is not a promise that cleanup finishes at the
-same instant. Killing XCB, dropping its future or seeing its root process exit
+same instant. Killing xcb, dropping its future or seeing its root process exit
 does not prove that a provider has stopped. An uncertain outcome retains the
 account's custody record and blocks new work; do not delete it or blindly retry.
 
 Applications own their own durable request records, privacy controls, output
 validation and external effects. Textbutler's recipient-bound grants, final
-takeover checks and send journal remain necessary even when XCB has successfully
-generated a response. XCB never sends messages for the application.
+takeover checks and send journal remain necessary even when xcb has successfully
+generated a response. xcb never sends messages for the application.
 
 ## Qualification and expiry
 
@@ -204,6 +204,6 @@ launching a provider or changing local state:
 xcb --json qualify-application --inspect --account ACCOUNT_ID --model claude/sonnet/low
 ```
 
-Inspection returns the XCB and provider versions and SHA-256 digests, OS,
+Inspection returns the xcb and provider versions and SHA-256 digests, OS,
 architecture, effective policy/configuration digests, and selected account/model.
 It does not grant qualification or extend a receipt.

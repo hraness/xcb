@@ -2,6 +2,6 @@
 export const supportProfile = {
   id: "xcb",
   name: "xcb",
-  valueProposition: "Support ongoing development of a local, composable terminal workspace for coding agents.",
+  valueProposition: "Support ongoing development of xcb, a router for your coding-agent subscriptions.",
   updates: false,
 } as const;

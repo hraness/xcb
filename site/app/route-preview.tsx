@@ -41,10 +41,10 @@ const result = await router.run({
 }, broker);
 
 // result.outcome.status === "completed"
-// custody released only after stop is proven`}</code></pre>}
+// the account is released only after the provider stops`}</code></pre>}
         </div>
       </div>
-      <figcaption>Closed contracts · source-built SDK with host-supplied qualification. <a href="/docs/route">Route contract ↗</a></figcaption>
+      <figcaption>Illustrative requests · the SDK is built from source. <a href="/docs/route">Route tasks →</a></figcaption>
     </figure>
   );
 }

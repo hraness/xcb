@@ -1,19 +1,20 @@
 <!-- hraness:xcb-landing:start -->
 # xcb
 
-Excalibur (`xcb`) is a subscription router for coding agents. It selects an
-eligible account/model route across your own Claude, Codex, and Devin
-accounts, runs one bounded turn, and proves account custody when the work
-settles. Another agent calls `xcb --json route`; an application embeds the
-TypeScript SDK. The terminal workspace is the reference host, and the managed
-harness — being rebuilt as a self-evolving ALGAL harness — is experimental.
+Excalibur (`xcb`) routes coding tasks across the Claude, Codex, and Devin
+subscriptions you already pay for. For each task it picks one of your accounts
+that is signed in, idle, and not at a known quota limit, and keeps that account
+locked until the provider process has exited. Another agent can call
+`xcb --json route`, and an application can embed the TypeScript SDK. The
+terminal workspace is built on the same router. The managed harness, which is
+being rebuilt as a self-evolving ALGAL harness, is experimental.
 
-It is for developers who work with more than one coding agent and want one
-workflow around them. The native Rust app is a source preview for supported
-Claude, Codex, and Devin runtimes. It includes workspace file tools, an
-isolated Linux command runner, customizable panes, and a separate application
-API. Provider support and execution boundaries are explicit; it is not a
-replacement for every feature of the original provider tools.
+It is for developers who use more than one coding agent and want one workflow
+around them. The native Rust app is a source preview for supported Claude,
+Codex, and Devin runtimes. It includes workspace file tools, an isolated Linux
+command runner, customizable panes, and a separate application API. It does not
+replace every feature of the providers' own tools; provider support and limits
+are listed below.
 <!-- hraness:xcb-landing:end -->
 
 [Project site](https://xcb.sh) · [Getting started](https://xcb.sh/docs/getting-started) ·
@@ -324,7 +325,7 @@ durably settled commands remove their verified input snapshot.
 The [application API](docs/application-api.md) provides bounded, ephemeral
 inference with no tools or hooks. It requires evidence for the exact xcb binary,
 provider, account and model before accepting application traffic.
-[TextButler](https://github.com/hraness/textbutler), an MIT-licensed reference
+[Textbutler](https://github.com/hraness/textbutler), an MIT-licensed reference
 application, keeps its contact access and messaging approval in its own host.
 Sign-in and a successful `doctor` alone do not qualify the application route.
 

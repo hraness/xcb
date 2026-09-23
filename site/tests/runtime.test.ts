@@ -135,6 +135,9 @@ describe("built xcb site", () => {
         const body = await response.text();
         expect(body.match(/<h1\b/gu)).toHaveLength(1);
         expect(body).toContain('href="https://xcb.sh' + (path === "/" ? "" : path) + '"');
+        // Every page that declares a large social card must also carry its image.
+        expect(body).toMatch(/<meta property="og:image" content="https:\/\/xcb\.sh\/opengraph-image/u);
+        expect(body).toMatch(/<meta name="twitter:image" content="https:\/\/xcb\.sh\/opengraph-image/u);
         documents.set(path, body);
       }
       for (const [path, body] of documents) {
