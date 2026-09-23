@@ -12,6 +12,7 @@ use crate::{
     Error, Result, broker, category, now_ms,
     process::StreamProcess,
     protocol::{Batch, Event, MAX_TURN_FRAMES, Prompt, Protocol},
+    wire_helpers::require,
 };
 use serde_json::{Value, json};
 use std::{
@@ -23,7 +24,7 @@ use xcb_core::{
     Id, MAX_JSON_BYTES, MAX_TEXT_BYTES, Provider,
     models::{Mode, ModelChoice},
     policy::{Failure, Terminal},
-    usage::{COUNTER_LIMIT, Counters, QuotaPoint},
+    usage::{Counters, QuotaPoint},
 };
 
 const MAX_CALLS: usize = 1024;
@@ -72,6 +73,8 @@ pub(crate) struct CodexProtocol {
     ready: bool,
     completed: bool,
     remote_disabled: bool,
+    /// One bounded notice per turn for tolerated unknown item kinds.
+    unrecognized_item: bool,
     descriptors: Vec<Value>,
     names: BTreeSet<String>,
     items: BTreeMap<String, Item>,
@@ -89,13 +92,6 @@ pub(crate) struct CodexProtocol {
     observed_plan: Option<String>,
 }
 
-fn require(ok: bool, reason: &'static str) -> Result<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(Error::Protocol(reason))
-    }
-}
 // Provider errors can contain account identifiers, request headers or URLs.
 // Retain only the host-selected operation, numeric code and a fixed category.
 fn rpc_failure(method: &'static str, error: &Value) -> Error {
@@ -183,47 +179,31 @@ fn error_tag(error: &Value) -> &str {
 }
 
 fn object(value: &Value) -> Result<&serde_json::Map<String, Value>> {
-    value
-        .as_object()
-        .filter(|v| v.len() <= 256)
-        .ok_or(Error::Protocol("Codex object bound"))
+    crate::wire_helpers::object(value, "Codex object bound")
 }
 fn closed(value: &Value, keys: &[&str]) -> Result<()> {
-    require(
-        object(value)?.keys().all(|k| keys.contains(&k.as_str())),
+    crate::wire_helpers::closed(
+        value,
+        keys,
+        "Codex object bound",
+        "Codex object bound",
         "Codex unexpected field",
     )
 }
 fn text(value: &Value, max: usize) -> Result<&str> {
-    value
-        .as_str()
-        .filter(|s| s.len() <= max)
-        .ok_or(Error::Protocol("Codex text bound"))
+    crate::wire_helpers::text(value, max, "Codex text bound")
 }
 fn identity(value: &Value) -> Result<String> {
-    let value = text(value, 160)?;
-    require(
-        !value.is_empty() && !value.chars().any(char::is_control),
-        "Codex identity",
-    )?;
-    Ok(value.into())
+    crate::wire_helpers::identity(value, "Codex text bound", "Codex identity")
 }
 fn count(value: &Value) -> Result<u64> {
-    value
-        .as_u64()
-        .filter(|v| *v <= COUNTER_LIMIT)
-        .ok_or(Error::Protocol("Codex counter"))
+    crate::wire_helpers::counter(value, "Codex counter")
 }
 fn optional_count(value: &Value) -> Result<u64> {
-    if value.is_null() { Ok(0) } else { count(value) }
+    crate::wire_helpers::counter_or_null(value, "Codex counter")
 }
 fn response_id(value: &Value) -> Result<String> {
-    if value.is_string() {
-        identity(value)?;
-    } else {
-        require(value.as_i64().is_some(), "Codex RPC id")?;
-    }
-    Ok(serde_json::to_string(value)?)
+    crate::wire_helpers::rpc_key(value, "Codex text bound", "Codex identity", "Codex RPC id")
 }
 
 pub fn parse_models(value: &Value, observed_at_ms: u64) -> Result<Vec<ModelChoice>> {
@@ -456,6 +436,7 @@ impl CodexProtocol {
             ready: false,
             completed: false,
             remote_disabled: false,
+            unrecognized_item: false,
             descriptors,
             names,
             items: BTreeMap::new(),
@@ -981,7 +962,27 @@ impl CodexProtocol {
                             }
                         }
                     }
-                    _ => return Err(Error::Protocol("Codex native executable item denied")),
+                    // Native execution records stay fatal: these kinds mean
+                    // the provider ran something outside the admitted tool
+                    // boundary. Other item kinds are opaque display traffic;
+                    // tolerate each unknown kind once as a bounded diagnostic
+                    // rather than failing a turn whose tools already ran.
+                    "commandExecution"
+                    | "fileChange"
+                    | "mcpToolCall"
+                    | "webSearch"
+                    | "collabAgentToolCall"
+                    | "functionCallOutput" => {
+                        return Err(Error::Protocol("Codex native executable item denied"));
+                    }
+                    _ => {
+                        if !completed && !self.unrecognized_item {
+                            self.unrecognized_item = true;
+                            events.push(Event::Diagnostic(crate::runner::Diagnostic::notice(
+                                "Codex sent an unrecognized item kind; it was ignored",
+                            )));
+                        }
+                    }
                 }
             }
             "item/agentMessage/delta"
@@ -1227,6 +1228,20 @@ impl Protocol for CodexProtocol {
     /// The email/plan the provider reported for the connected account, if any.
     fn account_identity(&self) -> (Option<String>, Option<String>) {
         (self.observed_email.clone(), self.observed_plan.clone())
+    }
+    /// `turn/interrupt` names the exact admitted turn; before admission the
+    /// provider has nothing to interrupt and the runner falls back to the
+    /// bounded stdin-close grace and kill.
+    fn interruption(&mut self) -> Option<Value> {
+        if self.completed {
+            return None;
+        }
+        let thread = self.thread_id.as_ref()?;
+        let turn = self.turn_id.as_ref()?;
+        self.next_id += 1;
+        Some(
+            json!({"id":self.next_id,"method":"turn/interrupt","params":{"threadId":thread,"turnId":turn}}),
+        )
     }
     async fn next(&mut self, process: &mut StreamProcess) -> Result<Batch> {
         let frame = process

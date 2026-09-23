@@ -110,6 +110,86 @@ fn native_execution_and_permission_requests_are_not_granted() {
 }
 
 #[test]
+fn unknown_non_executable_items_become_one_bounded_diagnostic() {
+    let mut c = started();
+    // A display-only item kind the pinned schema does not list: tolerated once
+    // inside an admitted turn instead of failing work already underway.
+    let item = json!({"id":"odd1","type":"mysteryWidget","secret":"SYNTHETIC_SECRET","text":"provider controlled text"});
+    let (events, replies) = c.accept(notice("item/started", item.clone())).unwrap();
+    assert!(replies.is_empty());
+    assert!(
+        matches!(&events[..], [Event::Diagnostic(detail)] if detail.as_str() == "Codex sent an unrecognized item kind; it was ignored")
+    );
+    // Completion of the tolerated item resolves without another notice, and a
+    // second unknown kind does not spam the diagnostic channel.
+    let (events, _) = c.accept(notice("item/completed", item)).unwrap();
+    assert!(events.is_empty());
+    let (events, _) = c
+        .accept(notice(
+            "item/started",
+            json!({"id":"odd2","type":"otherWidget"}),
+        ))
+        .unwrap();
+    assert!(events.is_empty());
+    // The admitted turn continues normally.
+    c.accept(notice("item/started", call_item())).unwrap();
+    // Every kind that records native execution stays fatal, started or
+    // completed alike.
+    for kind in [
+        "commandExecution",
+        "fileChange",
+        "mcpToolCall",
+        "webSearch",
+        "collabAgentToolCall",
+        "functionCallOutput",
+    ] {
+        let mut c = started();
+        assert!(
+            c.accept(notice("item/started", json!({"id":"native1","type":kind})))
+                .is_err(),
+            "{kind}"
+        );
+        let mut c = started();
+        c.items.insert(
+            "native1".into(),
+            Item {
+                kind: kind.into(),
+                completed: false,
+            },
+        );
+        assert!(
+            c.accept(notice(
+                "item/completed",
+                json!({"id":"native1","type":kind})
+            ))
+            .is_err(),
+            "{kind} completion"
+        );
+    }
+}
+
+#[test]
+fn interruption_names_only_the_admitted_turn() {
+    // Turn RPC minted but not yet admitted: the provider owns nothing to
+    // interrupt, so the runner's stdin-close grace is the whole signal.
+    let mut c = codec();
+    c.initialized = true;
+    c.thread_id = Some("thread1".into());
+    c.turn_rpc = Some(7);
+    assert!(c.interruption().is_none());
+    // Admission pins the exact thread/turn pair into the request.
+    let mut c = started();
+    let frame = c.interruption().unwrap();
+    assert_eq!(frame["method"], "turn/interrupt");
+    assert_eq!(frame["params"]["threadId"], "thread1");
+    assert_eq!(frame["params"]["turnId"], "turn1");
+    assert_eq!(frame["id"], json!(c.next_id));
+    // Once the turn has completed there is nothing left to interrupt.
+    c.completed = true;
+    assert!(c.interruption().is_none());
+}
+
+#[test]
 fn readiness_requires_the_matching_rpc_and_rejects_early_execution() {
     let mut c = codec();
     c.thread_id = Some("thread1".into());
