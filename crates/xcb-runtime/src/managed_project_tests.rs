@@ -262,7 +262,7 @@ async fn schema_upgrade_is_additive_and_repeat_open_keeps_grants() {
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
 }
 
 fn planner() -> crate::managed_program::AdmittedProgram {
@@ -735,7 +735,7 @@ async fn live_legacy_supervisor_blocks_schema_upgrade_without_mutation() {
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
     assert!(reopened.conversation(&f.conversation).unwrap().is_some());
 }
 

@@ -52,6 +52,9 @@ pub use habitat::{HabitatSchedule, WorkMemory};
 #[path = "managed_project.rs"]
 mod project;
 pub use project::{MemoryBinding, ProjectPolicy, ProjectProposal};
+#[path = "managed_inbox.rs"]
+mod inbox;
+pub use inbox::{InboxEvent, InboxWatch};
 
 #[cfg(test)]
 #[path = "managed_mailbox_tests.rs"]
@@ -410,6 +413,7 @@ struct ViewStamp {
     messages: i64,
     schedules: (i64, i64),
     projects: (i64, i64, i64),
+    inbox: (i64, i64),
     config: Option<std::time::SystemTime>,
     fault: Option<std::time::SystemTime>,
     progress: Option<std::time::SystemTime>,
@@ -548,7 +552,7 @@ impl ManagedStore {
         }
         connection.pragma_update(None, "synchronous", "FULL")?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 3 {
+        if version > 4 {
             return Err(Error::Unavailable(
                 "managed state was written by a newer xcb",
             ));
@@ -556,7 +560,7 @@ impl ManagedStore {
         // A prior supervisor owns the old writer contract until all its work
         // settles. Never advance the schema underneath that admitted writer.
         // The daemon itself opens/migrates before taking its dispatch lock.
-        let _migration_guard = if version < 3 {
+        let _migration_guard = if version < 4 {
             Some(managed_migration_guard(&root)?)
         } else {
             None
@@ -610,6 +614,7 @@ impl ManagedStore {
         }
         habitat::migrate(&mut connection)?;
         project::migrate(&mut connection)?;
+        inbox::migrate(&mut connection)?;
         let mut store = Self {
             root,
             connection: Mutex::new(connection),
@@ -718,13 +723,14 @@ impl ManagedStore {
                 )? as u64;
                 let stale_tasks: Vec<String> = {
                     let mut query = tx.prepare(
-                        "SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled') AND updated_at<?1 AND id NOT IN (SELECT last_task FROM habitat_schedules WHERE last_task IS NOT NULL) AND id NOT IN (SELECT json_extract(payload,'$.project_proposal.parent') FROM tasks WHERE json_valid(payload) AND json_extract(payload,'$.project_proposal.parent') IS NOT NULL AND state IN ('queued','running','needs_input','uncertain')) LIMIT ?2",
+                        "SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled') AND updated_at<?1 AND id NOT IN (SELECT task FROM inbox_batches) AND id NOT IN (SELECT task FROM inbox_events WHERE status='waiting' OR updated_at>=?1) AND id NOT IN (SELECT source FROM inbox_watches w JOIN tasks target ON target.id=w.task WHERE (target.state NOT IN ('completed','failed','cancelled') OR target.updated_at>=?1)) AND id NOT IN (SELECT last_task FROM habitat_schedules WHERE last_task IS NOT NULL) AND id NOT IN (SELECT json_extract(payload,'$.project_proposal.parent') FROM tasks WHERE json_valid(payload) AND json_extract(payload,'$.project_proposal.parent') IS NOT NULL AND state IN ('queued','running','needs_input','uncertain')) LIMIT ?2",
                     )?;
                     query
                         .query_map(params![sql(cutoff)?, RETENTION_BATCH], |row| row.get(0))?
                         .collect::<rusqlite::Result<Vec<_>>>()?
                 };
                 for id in &stale_tasks {
+                    inbox::retain_task(&tx, id)?;
                     removed +=
                         tx.execute("DELETE FROM receipts WHERE task=?1", [id.as_str()])? as u64;
                     removed += tx.execute(
@@ -1008,6 +1014,11 @@ impl ManagedStore {
             [sql(now_ms())?],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
+        let inbox = db.query_row(
+            "SELECT count(*),COALESCE(sum(revision),0) FROM inbox_events",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
         drop(db);
         let modified = |path: PathBuf| fs::metadata(path).and_then(|meta| meta.modified()).ok();
         Ok(ViewStamp {
@@ -1017,6 +1028,7 @@ impl ManagedStore {
             messages,
             schedules,
             projects,
+            inbox,
             config: modified(state_root.join("config.json")),
             fault: modified(self.root.join(SUPERVISOR_FAULT_FILE)),
             progress: modified(self.root.join(PROGRESS_FILE)),
@@ -1179,16 +1191,6 @@ impl ManagedStore {
         Ok(ids)
     }
 
-    fn mailbox_tail(&self, task: &Id, limit: usize) -> Result<Vec<MailboxMessage>> {
-        let latest: i64 = self.db()?.query_row(
-            "SELECT COALESCE(max(sequence),0) FROM mailbox_messages WHERE target_task=?1",
-            [task.as_str()],
-            |row| row.get(0),
-        )?;
-        let latest =
-            u64::try_from(latest).map_err(|_| xcb_core::Error::Invalid("mailbox sequence"))?;
-        self.mailbox(task, latest.saturating_sub(limit as u64), limit)
-    }
     pub fn mailbox(&self, task: &Id, after: u64, limit: usize) -> Result<Vec<MailboxMessage>> {
         if !(1..=64).contains(&limit) {
             return Err(xcb_core::Error::Invalid("mailbox page").into());
@@ -1333,6 +1335,9 @@ impl ManagedStore {
                 created_at_ms: now_ms(),
             };
             message.validate()?;
+            // The inbox reservation can reject bounded, deterministic input.
+            // It is still uncommitted, so such rejection has no external effect.
+            inbox::mailbox_event(&tx, &message, &current_target)?;
             effects = EffectState::Uncertain;
             tx.execute(
                 "INSERT INTO mailbox_messages(id,source_task,target_task,sequence,created_at,payload) VALUES(?1,?2,?3,?4,?5,?6)",
@@ -1771,11 +1776,28 @@ impl ManagedStore {
     async fn transition_project(
         &self,
         expected: &ManagedTask,
+        next: ManagedTask,
+        message: Option<Message>,
+        additional: &[(Id, Message)],
+        mutation: Option<&habitat::WorkerMutation>,
+        admission: Option<&project::ProjectAdmission>,
+    ) -> Result<ManagedTask> {
+        self.transition_inbox(
+            expected, next, message, additional, mutation, admission, None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn transition_inbox(
+        &self,
+        expected: &ManagedTask,
         mut next: ManagedTask,
         message: Option<Message>,
         additional: &[(Id, Message)],
         mutation: Option<&habitat::WorkerMutation>,
         admission: Option<&project::ProjectAdmission>,
+        inbox_change: Option<&inbox::Change<'_>>,
     ) -> Result<ManagedTask> {
         next.validate()?;
         if !next.same_identity(expected) || next.revision != expected.revision + 1 {
@@ -1824,6 +1846,7 @@ impl ManagedStore {
         if let Some(mutation) = mutation {
             mutation.record(&tx, &next)?;
         }
+        inbox::transition(&tx, expected, &next, inbox_change)?;
         tx.commit()?;
         Ok(next)
     }
@@ -2711,6 +2734,7 @@ impl ManagedStore {
         self.transition(task, next, Some(message)).await
     }
 
+    #[cfg(test)]
     async fn prepare(
         &self,
         task: &ManagedTask,
@@ -2720,7 +2744,35 @@ impl ManagedStore {
         message_count: usize,
         delivered_preferences: String,
     ) -> Result<ManagedTask> {
+        self.prepare_inbox(
+            task,
+            session,
+            route,
+            route_reason,
+            message_count,
+            delivered_preferences,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_inbox(
+        &self,
+        task: &ManagedTask,
+        session: Id,
+        route: String,
+        route_reason: String,
+        message_count: usize,
+        delivered_preferences: String,
+        batch: Option<&inbox::Batch>,
+    ) -> Result<ManagedTask> {
         let mut next = task.clone();
+        if let Some(batch) = batch
+            && !batch.events.is_empty()
+        {
+            next.user_inputs.push(inbox::render(&batch.events));
+        }
         if next.session.as_ref() != Some(&session) {
             // A replacement session starts with an empty transcript: nothing
             // it never received can be treated as carried.
@@ -2753,7 +2805,9 @@ impl ManagedStore {
         next.cancel_requested = false;
         next.revision += 1;
         next.updated_at_ms = now_ms();
-        self.transition(task, next, None).await
+        let change = batch.map(inbox::Change::Prepare);
+        self.transition_inbox(task, next, None, &[], None, None, change.as_ref())
+            .await
     }
 
     async fn finish(&self, store: &Store, id: &Id, result: Result<Outcome>) -> Result<ManagedTask> {
@@ -2802,7 +2856,19 @@ impl ManagedStore {
         } else {
             (false, 0, None)
         };
-        let dispatch_unstarted = !unsettled && message_count == task.message_count_before;
+        let prepared_batch = self.inbox_batch(&task.id)?;
+        let submission = match &prepared_batch {
+            Some(batch) => store.settled_input_submission(&batch.session, batch.message_count)?,
+            None => None,
+        };
+        let known_unsubmitted = submission == Some(false)
+            && result.as_ref().is_ok_and(|outcome| {
+                outcome.facts.joined
+                    && outcome.facts.effects == EffectState::None
+                    && !outcome.facts.pending_attention
+            });
+        let dispatch_unstarted =
+            !unsettled && (message_count == task.message_count_before || known_unsubmitted);
         let cancellation_settled =
             !unsettled && (dispatch_unstarted || session_state == Some(State::Cancelled));
         let config = Config::load(store.root())?.0;
@@ -2843,12 +2909,44 @@ impl ManagedStore {
             Ok(outcome) if !unsettled => settle_decision(store, &config, outcome).await,
             _ => None,
         };
+        let inbox_stamp = self.inbox_stamp(&task.id)?;
+        let pending_inbox = self.inbox_pending(&task)?;
+        let inbox_input_present = match &prepared_batch {
+            Some(batch) => store.input_matches_digest(
+                &batch.session,
+                batch.message_count,
+                &batch.prompt_digest,
+            )?,
+            None => false,
+        };
+        let inbox_delivered = if let Some(batch) = &prepared_batch {
+            !unsettled
+                && result.as_ref().is_ok_and(|outcome| {
+                    outcome.facts.joined && outcome.facts.effects != EffectState::Uncertain
+                })
+                && inbox_input_present
+                && submission == Some(true)
+                && store
+                    .settled_outcome(&batch.session, batch.message_count)?
+                    .is_some_and(|outcome| {
+                        outcome.facts.joined && outcome.facts.effects != EffectState::Uncertain
+                    })
+        } else {
+            false
+        };
+        let inbox_requested = !pending_inbox.is_empty()
+            && result
+                .as_ref()
+                .is_ok_and(|outcome| inbox::may_wake(&config, &task, outcome))
+            && self.project_dispatch_block(&task)?.is_none();
         let continue_task = match result {
             Ok(outcome) if !unsettled => {
-                task_should_continue(store, &task, outcome, settle.as_ref()).await?
+                task_should_continue_inbox(store, &task, outcome, settle.as_ref(), inbox_requested)
+                    .await?
             }
             _ => false,
         };
+        let inbox_continue = inbox_requested && continue_task;
         let budget_exhausted = match result {
             Ok(outcome) if !unsettled && !continue_task => {
                 continuation_budget_exhausted(&config, &task, outcome)
@@ -2862,9 +2960,14 @@ impl ManagedStore {
         // neither, and without a recorded session there is no transcript to
         // carry the context, so the next prompt conservatively resends
         // everything.
-        if result.is_ok() && next.session.is_some() {
+        if result.is_ok()
+            && next.session.is_some()
+            && (prepared_batch.is_none() || (inbox_input_present && submission == Some(true)))
+        {
             next.context_carried = true;
-            next.delivered_inputs = next.user_inputs.len();
+            next.delivered_inputs = prepared_batch
+                .as_ref()
+                .map_or(next.user_inputs.len(), |batch| batch.input_count);
         }
         if let Some(account) = failed_account
             && !next.failed_accounts.contains(&account)
@@ -2879,7 +2982,8 @@ impl ManagedStore {
             Ok(outcome)
                 if unsettled
                     || !outcome.facts.joined
-                    || outcome.facts.effects == EffectState::Uncertain =>
+                    || outcome.facts.effects == EffectState::Uncertain
+                    || (prepared_batch.as_ref().is_some_and(|b| !b.events.is_empty()) && !inbox_delivered && !dispatch_unstarted) =>
             {
                 (
                     TaskState::Uncertain,
@@ -2901,7 +3005,17 @@ impl ManagedStore {
             ),
             Ok(outcome) if continue_task => (
                 TaskState::Queued,
-                "the supervisor is continuing unfinished work in the same session".into(),
+                if inbox_continue { "queued inbox events request the next authorized turn" } else { "the supervisor is continuing unfinished work in the same session" }.into(),
+                Some(outcome.text.clone()),
+            ),
+            Ok(outcome) if dispatch_unstarted && prepared_batch.is_some() => (
+                if next.attempts < task.max_attempts { TaskState::Queued } else { TaskState::NeedsInput },
+                if next.attempts < task.max_attempts { "dispatch did not cross the provider boundary; inbox input is queued again within the existing attempt budget" } else { "inbox delivery did not cross the provider boundary; repair the route and reply to retry" }.into(),
+                Some(outcome.text.clone()),
+            ),
+            Ok(outcome) if !pending_inbox.is_empty() && settled_completion(outcome) && !task.cancel_requested => (
+                TaskState::NeedsInput,
+                "inbox guidance is held: automatic continuation is disabled, its budget is exhausted, project authority is unavailable, or continuation was vetoed; reply explicitly to resume".into(),
                 Some(outcome.text.clone()),
             ),
             Ok(outcome) => {
@@ -2960,6 +3074,18 @@ impl ManagedStore {
             ),
         };
         next.state = state;
+        // A failed/unadmitted dispatch cannot consume its accepted inputs.
+        // Remove the staged batch text before it is rebuilt from queued rows.
+        if dispatch_unstarted
+            && !inbox_delivered
+            && let Some(batch) = &prepared_batch
+            && !batch.events.is_empty()
+            && next.user_inputs.last() == Some(&inbox::render(&batch.events))
+        {
+            next.user_inputs.pop();
+            next.delivered_inputs = next.delivered_inputs.min(next.user_inputs.len());
+            next.delivered_preferences.clear();
+        }
         next.attention = if state == TaskState::NeedsInput {
             Some(match result {
                 Ok(outcome)
@@ -3033,7 +3159,21 @@ impl ManagedStore {
                 next.revision,
             ))
         };
-        let finished = self.transition(&task, next, message).await?;
+        let finished = self
+            .transition_inbox(
+                &task,
+                next,
+                message,
+                &[],
+                None,
+                None,
+                Some(&inbox::Change::Finish {
+                    delivered: inbox_delivered,
+                    unstarted: dispatch_unstarted,
+                    stamp: Some(inbox_stamp),
+                }),
+            )
+            .await?;
         let _ = self
             .record_route_observation(&finished, failover_route.then_some("failed"))
             .await;
@@ -3126,7 +3266,20 @@ impl ManagedStore {
             next.context_carried = false;
             next.revision += 1;
             next.updated_at_ms = now_ms();
-            self.transition(task, next, None).await?;
+            self.transition_inbox(
+                task,
+                next,
+                None,
+                &[],
+                None,
+                None,
+                Some(&inbox::Change::Finish {
+                    delivered: false,
+                    unstarted: true,
+                    stamp: None,
+                }),
+            )
+            .await?;
             return Ok(());
         };
         if unsettled
@@ -3157,7 +3310,27 @@ impl ManagedStore {
             next.detail = "dispatch stopped before provider admission; queued again".into();
             next.revision += 1;
             next.updated_at_ms = now_ms();
-            self.transition(task, next, None).await?;
+            if let Some(batch) = self.inbox_batch(&task.id)?
+                && !batch.events.is_empty()
+                && next.user_inputs.last() == Some(&inbox::render(&batch.events))
+            {
+                next.user_inputs.pop();
+                next.delivered_inputs = next.delivered_inputs.min(next.user_inputs.len());
+            }
+            self.transition_inbox(
+                task,
+                next,
+                None,
+                &[],
+                None,
+                None,
+                Some(&inbox::Change::Finish {
+                    delivered: false,
+                    unstarted: true,
+                    stamp: None,
+                }),
+            )
+            .await?;
             return Ok(());
         }
         if let Some(outcome) = store.settled_outcome(session_id, task.message_count_before)? {
@@ -3436,11 +3609,22 @@ fn continuation_prompt(settle: Option<&reflex::Decision>) -> String {
     }
 }
 
+#[cfg(test)]
 async fn task_should_continue(
     store: &Store,
     task: &ManagedTask,
     outcome: &Outcome,
     settle: Option<&reflex::Decision>,
+) -> Result<bool> {
+    task_should_continue_inbox(store, task, outcome, settle, false).await
+}
+
+async fn task_should_continue_inbox(
+    store: &Store,
+    task: &ManagedTask,
+    outcome: &Outcome,
+    settle: Option<&reflex::Decision>,
+    inbox_requested: bool,
 ) -> Result<bool> {
     let repeated =
         task.last_output.as_deref() == Some(xcb_core::display_text(&outcome.text, 8192).as_str());
@@ -3451,7 +3635,7 @@ async fn task_should_continue(
         || outcome.facts.effects == EffectState::Uncertain
         || outcome.facts.pending_attention
         || outcome.facts.failure.is_some()
-        || repeated
+        || (repeated && !inbox_requested)
     {
         return Ok(false);
     }
@@ -3468,7 +3652,7 @@ async fn task_should_continue(
         && config.extensions.auto_continue.enabled
         && task.attempts < config.extensions.auto_continue.max_consecutive
         && elapsed < config.extensions.auto_continue.max_elapsed_ms;
-    if !deterministic && !semantic {
+    if !deterministic && !semantic && !inbox_requested {
         return Ok(false);
     }
     // In active mode, a completed turn the settle reflex categorizes as
@@ -3477,7 +3661,7 @@ async fn task_should_continue(
     let stopped_short = semantic
         && config.extensions.reflexes.settle == ReflexMode::Active
         && settle.is_some_and(|decision| decision.value == "stopped_short");
-    let verdict = deterministic || stopped_short;
+    let verdict = deterministic || stopped_short || inbox_requested;
     if !config.extensions.judge.enabled {
         return Ok(verdict);
     }
@@ -3508,6 +3692,7 @@ async fn task_should_continue(
                 "attempt": task.attempts + 1,
                 "maximum_attempts": task.max_attempts,
                 "elapsed_ms": elapsed,
+                "pending_host_inbox": inbox_requested,
             }),
             &questions,
         ),
@@ -4252,6 +4437,24 @@ impl Supervisor {
             });
             return Ok(Dispatch::Started);
         }
+        let pending_events = managed.inbox_pending(task)?;
+        let preferences = managed.preferences(Path::new(&task.workspace))?;
+        let (events, prompt_task) = inbox::fit(task, pending_events.clone(), &preferences);
+        if !pending_events.is_empty() && events.is_empty() {
+            let mut next = task.clone();
+            next.state = TaskState::NeedsInput;
+            next.attention = Some(State::NeedsAction);
+            next.detail = "inbox context limit reached; accepted guidance is held intact. Start a new task with the needed context.".into();
+            next.revision += 1;
+            next.updated_at_ms = now_ms();
+            let notice =
+                ManagedStore::assistant(next.detail.clone(), Some(&task.id), next.revision);
+            return match managed.transition(task, next, Some(notice)).await {
+                Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
+                Err(error) => Err(error),
+            };
+        }
+        let routing_prompt = worker_prompt(&prompt_task, &preferences, &[], false);
         let config = Config::load(store.root())?.0;
         let created_session = task.session.is_none();
         let mut route_reason = task
@@ -4296,7 +4499,7 @@ impl Supervisor {
                 &store,
                 &config,
                 routing::RouteRequest {
-                    task: task.effective_prompt(),
+                    task: &routing_prompt,
                     required_provider,
                     preferred_provider: provider_preference,
                     required_model: None,
@@ -4392,13 +4595,7 @@ impl Supervisor {
         let carried = task.session.is_some()
             && task.context_carried
             && message_count > task.message_count_before;
-        let preferences = managed.preferences(Path::new(&task.workspace))?;
-        let mut prompt = worker_prompt(
-            task,
-            &preferences,
-            &managed.mailbox_tail(&task.id, 16)?,
-            carried,
-        );
+        let mut prompt = worker_prompt(&prompt_task, &preferences, &[], carried);
         append_context(&mut prompt, &managed.project_context(&task.conversation)?);
         if !carried {
             append_context(
@@ -4423,14 +4620,22 @@ impl Supervisor {
                 Err(error) => Err(error),
             };
         }
+        let batch = inbox::Batch {
+            events,
+            session: session.id.clone(),
+            message_count,
+            input_count: prompt_task.user_inputs.len(),
+            prompt_digest: digest(&prompt),
+        };
         let prepared = match managed
-            .prepare(
+            .prepare_inbox(
                 task,
                 session.id.clone(),
                 route,
                 route_reason,
                 message_count,
                 preferences_fingerprint(&preferences),
+                (!batch.events.is_empty()).then_some(&batch),
             )
             .await
         {
@@ -4770,6 +4975,7 @@ fn managed_view(
         .map(habitat::backlog_row)
         .collect();
     view.projects = managed.project_rows()?;
+    view.inbox = managed.inbox_rows()?;
     view.schedules = managed
         .schedules(None)?
         .into_iter()
@@ -5685,7 +5891,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         let count: i64 = migrated
             .db()
             .unwrap()

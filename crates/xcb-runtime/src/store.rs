@@ -50,6 +50,10 @@ struct SettledOutcome {
     input_sequence: u64,
     message_count: u64,
     session_revision: u64,
+    /// Some(true) after successful protocol submission; Some(false) only if
+    /// submission was never attempted. Failed attempts and legacy are unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_submission: Option<bool>,
     outcome: crate::runner::Outcome,
 }
 
@@ -971,6 +975,34 @@ impl Store {
         )?;
         usize::try_from(count).map_err(|_| xcb_core::Error::Invalid("message count").into())
     }
+    /// Prove the exact managed dispatch prompt at its durable transcript
+    /// boundary. Message counts alone do not identify the inserted input.
+    pub(crate) fn input_matches_digest(
+        &self,
+        session: &Id,
+        before: usize,
+        expected: &str,
+    ) -> Result<bool> {
+        let sequence = before
+            .checked_add(1)
+            .ok_or(xcb_core::Error::Limit("input sequence"))?;
+        let payload: Option<(String, String)> = self
+            .db()?
+            .query_row(
+                "SELECT id,payload FROM messages WHERE session=?1 AND sequence=?2",
+                params![session.as_str(), sequence as i64],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((id, payload)) = payload else {
+            return Ok(false);
+        };
+        let message: Message = decode(&payload)?;
+        message.validate()?;
+        Ok(message.id.as_str() == id
+            && message.role == xcb_core::session::Role::User
+            && crate::digest(&message.text) == expected)
+    }
     pub fn messages(&self, id: &Id, limit: usize) -> Result<Vec<Message>> {
         if !(1..=512).contains(&limit) {
             return Err(xcb_core::Error::Invalid("message page limit").into());
@@ -1316,6 +1348,7 @@ impl Store {
         self.settle_inner(run, state, now, None, None)
     }
 
+    #[cfg(test)]
     pub(crate) fn settle_outcome(
         &self,
         run: &RunRecord,
@@ -1323,8 +1356,25 @@ impl Store {
         outcome: &crate::runner::Outcome,
         now: u64,
     ) -> Result<()> {
+        self.settle_outcome_submitted(run, input, outcome, None, now)
+    }
+
+    pub(crate) fn settle_outcome_submitted(
+        &self,
+        run: &RunRecord,
+        input: &Id,
+        outcome: &crate::runner::Outcome,
+        prompt_submission: Option<bool>,
+        now: u64,
+    ) -> Result<()> {
         validate_outcome(outcome)?;
-        self.settle_inner(run, outcome.state, now, Some((input, outcome)), None)
+        self.settle_inner(
+            run,
+            outcome.state,
+            now,
+            Some((input, outcome, prompt_submission)),
+            None,
+        )
     }
 
     /// Application inference persists no prompt, output, or diagnostic payload.
@@ -1358,7 +1408,7 @@ impl Store {
         run: &RunRecord,
         state: State,
         now: u64,
-        outcome: Option<(&Id, &crate::runner::Outcome)>,
+        outcome: Option<(&Id, &crate::runner::Outcome, Option<bool>)>,
         application: Option<&xcb_core::policy::TurnFacts>,
     ) -> Result<()> {
         let mut db = self.db()?;
@@ -1369,7 +1419,10 @@ impl Store {
                 "command guest stop is unproven; reconcile command custody before settling",
             ));
         }
-        if let Some(facts) = outcome.map(|(_, outcome)| &outcome.facts).or(application) {
+        if let Some(facts) = outcome
+            .map(|(_, outcome, _)| &outcome.facts)
+            .or(application)
+        {
             use xcb_core::policy::{Failure, Terminal};
             if facts.terminal == Terminal::Failed && facts.failure == Some(Failure::Authentication)
             {
@@ -1402,7 +1455,7 @@ impl Store {
                 .ok_or(Error::Conflict("revision overflow"))?;
             session.state = state;
             session.last_active_at_ms = session.last_active_at_ms.max(now);
-            if let Some((input, outcome)) = outcome {
+            if let Some((input, outcome, prompt_submission)) = outcome {
                 let input_sequence: u32 = tx.query_row(
                     "SELECT sequence FROM messages WHERE id=?1 AND session=?2",
                     params![input.as_str(), id.as_str()],
@@ -1421,6 +1474,7 @@ impl Store {
                     input_sequence: input_sequence.into(),
                     message_count: message_count.into(),
                     session_revision: session.revision,
+                    prompt_submission,
                     outcome: outcome.clone(),
                 };
                 tx.execute(
@@ -1461,6 +1515,29 @@ impl Store {
         session_id: &Id,
         message_count_before: usize,
     ) -> Result<Option<crate::runner::Outcome>> {
+        Ok(self
+            .settled_record(session_id, message_count_before)?
+            .map(|record| record.outcome))
+    }
+
+    /// Prompt submission is proven only by an exact current terminal receipt.
+    /// Legacy receipts and superseded turns cannot prove either submission
+    /// or its absence. A failed submission attempt is likewise unknown.
+    pub(crate) fn settled_input_submission(
+        &self,
+        session_id: &Id,
+        message_count_before: usize,
+    ) -> Result<Option<bool>> {
+        Ok(self
+            .settled_record(session_id, message_count_before)?
+            .and_then(|record| record.prompt_submission))
+    }
+
+    fn settled_record(
+        &self,
+        session_id: &Id,
+        message_count_before: usize,
+    ) -> Result<Option<SettledOutcome>> {
         let before = u64::try_from(message_count_before)
             .map_err(|_| xcb_core::Error::Invalid("message count"))?;
         if before >= MAX_MESSAGES as u64 {
@@ -1525,7 +1602,7 @@ impl Store {
         {
             return Ok(None);
         }
-        Ok(Some(record.outcome))
+        Ok(Some(record))
     }
     pub fn unsettled_runs(&self) -> Result<Vec<RunRecord>> {
         let db = self.db()?;
@@ -2298,6 +2375,10 @@ mod tests {
 
         let reader = Store::open_read_only(&state).unwrap();
         let recovered = reader.settled_outcome(&session.id, 0).unwrap().unwrap();
+        assert_eq!(
+            reader.settled_input_submission(&session.id, 0).unwrap(),
+            None
+        );
         assert_eq!(recovered.facts.terminal, Terminal::TurnLimit);
         assert_eq!(recovered.state, State::Idle);
         assert_eq!(recovered.text, outcome.text);

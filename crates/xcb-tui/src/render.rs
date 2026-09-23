@@ -574,7 +574,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         .set_cursor_line_style(Style::default());
     app.composer.textarea.set_placeholder_text(
         if app.managed_mode() && app.view.state == State::Working {
-            "Describe new work or ask for status · /backlog · /attention"
+            "Describe new work · /steer <task> <guidance> · /inbox · /attention"
         } else if app.view.remote_active {
             "Running in another terminal · your draft is kept here"
         } else if app.view.state == State::Working {
@@ -1582,6 +1582,7 @@ fn render_modal(
                 [
                     "/tasks /t · /new /n · /attach <path> · /sessions /s",
                     "/backlog /b [all|add|edit|run] · /attention · /reply <id> <answer>",
+                    "/steer <task> <guidance> · /watch <target> <source> · /inbox [all|task]",
                     "/schedule [all|every|pause|resume] · /help /h · /quit /q · /exit /e",
                 ]
             } else {
@@ -1589,6 +1590,7 @@ fn render_modal(
                     "/tasks /t · /new /n · /model /m · /accounts /a · /sessions /s · /pane /p",
                     "/pane [edit|generate …] · /attach <path> · /default /d · /help /h",
                     "/plugin <name> on|off · /reload /r · /quit /q · /exit /e",
+                    "Managed guidance and inbox controls are available in xcb chat",
                 ]
             };
             let block = Block::bordered()
@@ -1616,6 +1618,7 @@ fn render_modal(
                         commands[0],
                         commands[1],
                         commands[2],
+                        commands[3],
                     ]
                     .join("\n"),
                 )
@@ -1674,13 +1677,16 @@ fn render_modal(
             let body: Vec<Line<'static>> = lines
                 .iter()
                 .enumerate()
-                .map(|(index, line)| {
+                .flat_map(|(index, line)| {
                     let style = if index == 0 {
                         Style::default().add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     };
-                    Line::from(Span::styled(expand_tabs(line), style))
+                    clean(line)
+                        .split('\n')
+                        .map(|line| Line::from(Span::styled(expand_tabs(line), style)))
+                        .collect::<Vec<_>>()
                 })
                 .collect();
             let rows = wrap_rows(&body, inner.width.max(1));

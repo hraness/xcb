@@ -156,6 +156,41 @@ enum Commands {
         #[arg(long)]
         conversation: Option<Id>,
     },
+    /// Queue guidance for a task's next safe turn without interrupting its worker.
+    Steer {
+        /// Existing nonclosed task from `xcb backlog`; attention gates still apply.
+        task: Id,
+        /// Guidance to include within the task's existing authority and budget.
+        text: String,
+        /// Stable event identity for an idempotent retry; generated when omitted.
+        #[arg(long)]
+        id: Option<Id>,
+    },
+    /// Request a task's completion report in another task's durable inbox.
+    Watch {
+        /// Task that will receive the report at an authorized turn boundary.
+        target: Id,
+        /// Task to observe in the same conversation and workspace.
+        source: Id,
+        /// Stable subscription identity for an idempotent retry.
+        #[arg(long)]
+        id: Option<Id>,
+    },
+    /// Inspect accepted guidance and reports, with their delivery evidence.
+    Inbox {
+        /// Filter by target task; otherwise show all targets.
+        #[arg(long, conflicts_with = "conversation")]
+        task: Option<Id>,
+        /// Filter by conversation; cannot be combined with --task.
+        #[arg(long)]
+        conversation: Option<Id>,
+        /// Read older events before this sequence from the previous page.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=i64::MAX as u64))]
+        before: Option<u64>,
+        /// Maximum events, newest first, from 1 to 256.
+        #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u16).range(1..=256))]
+        limit: u16,
+    },
     /// Manage local recurring wake-ups for persistent conversations.
     Schedules {
         #[command(subcommand)]
@@ -1820,6 +1855,25 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             command,
             conversation,
         }) => habitat::backlog(store.root(), command, conversation.as_ref(), cli.json).await,
+        Some(Commands::Steer { task, text, id }) => {
+            habitat::steer(store.root(), &task, id, text, cli.json)
+        }
+        Some(Commands::Watch { target, source, id }) => {
+            habitat::watch(store.root(), &target, &source, id, cli.json)
+        }
+        Some(Commands::Inbox {
+            task,
+            conversation,
+            before,
+            limit,
+        }) => habitat::inbox(
+            store.root(),
+            task.as_ref(),
+            conversation.as_ref(),
+            before,
+            usize::from(limit),
+            cli.json,
+        ),
         Some(Commands::Schedules {
             command,
             conversation,
@@ -3200,6 +3254,75 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn inbox_controls_preserve_explicit_target_and_retry_identity() {
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "steer",
+            "task_target",
+            "Keep the existing interface",
+            "--id",
+            "event_retry",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Steer { task, text, id: Some(id) })
+            if task.as_str() == "task_target" && text == "Keep the existing interface" && id.as_str() == "event_retry")
+        );
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "watch",
+            "task_target",
+            "task_source",
+            "--id",
+            "watch_retry",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Watch { target, source, id: Some(id) })
+            if target.as_str() == "task_target" && source.as_str() == "task_source" && id.as_str() == "watch_retry")
+        );
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "inbox",
+            "--task",
+            "task_target",
+            "--before",
+            "42",
+            "--limit",
+            "3",
+            "--json",
+        ])
+        .unwrap();
+        assert!(cli.json);
+        assert!(
+            matches!(cli.command, Some(Commands::Inbox { task: Some(task), conversation: None, before: Some(42), limit: 3 })
+            if task.as_str() == "task_target")
+        );
+    }
+
+    #[test]
+    fn inbox_filters_and_pagination_fail_closed() {
+        for args in [
+            vec![
+                "xcb",
+                "inbox",
+                "--task",
+                "task_a",
+                "--conversation",
+                "conv_a",
+            ],
+            vec!["xcb", "inbox", "--before", "0"],
+            vec!["xcb", "inbox", "--before", "9223372036854775808"],
+            vec!["xcb", "inbox", "--limit", "0"],
+            vec!["xcb", "inbox", "--limit", "257"],
+            vec!["xcb", "steer", "task_a"],
+            vec!["xcb", "watch", "task_a"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
     }
 
     #[test]

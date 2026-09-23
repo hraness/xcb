@@ -39,6 +39,61 @@ has a conclusive outcome and all worker runs have settled. Missing process IDs o
 elapsed time alone cannot prove arbitrary effects completed. If evidence is
 missing, the item remains visible and blocks automatic progression.
 
+## Steering and the durable inbox
+
+```sh
+xcb steer <task-id> "Keep the public API unchanged" --id <event-id>
+xcb watch <target-task-id> <source-task-id> --id <watch-id>
+xcb inbox --task <task-id> --json
+xcb inbox --conversation <conversation-id> --limit 64 --json
+```
+
+Use `/steer <task-id> <text>`, `/watch <target-task-id> <source-task-id>`, and
+`/inbox [all|task-id]` in the TUI. Explicit steering queues guidance for that task;
+ordinary chat still creates work. The optional CLI `--id` lets a caller retry the
+same operation without duplicating it. Reusing an ID with changed input fails.
+Inbox queries are newest first. `--task` and `--conversation` are mutually
+exclusive; `--before <sequence>` pages older results within the selected scope,
+and `--limit` accepts 1–256 rows, defaulting to 64.
+
+Acceptance means xcb persisted the event. Preparation means an exact set of
+events was selected for a worker turn. Settled delivery means that set was
+included in a proven worker turn; it does not prove the model understood or
+followed the guidance. Events accepted after preparation remain pending for a
+later turn. Reading the inbox or a worker's mailbox does not acknowledge prompt
+delivery.
+
+Guidance reaches a running task at its next safe turn boundary. It does not
+interrupt a provider turn, answer an approval, release deferred work, reset an
+attempt budget, or expand a project grant. Existing cancellation, attention,
+project pause and expiry, provider constraints, and custody checks still apply.
+Held events remain visible while a gate prevents another turn. Closed tasks and
+tasks with immutable ALGAL program inputs reject new guidance. Resolve a question
+or approval through its existing attention flow; steering cannot substitute for
+that response.
+
+A watch requests the source task's terminal report for the target task in the
+same project and workspace. Its stable identity prevents duplicate reports when
+registration or settlement is replayed. A waiting inbox entry reserves the report
+until its source settles conclusively. A report arriving after the target closes
+remains visible history and does not reopen the task. Explicit guidance and
+subscribed reports may request another authorized turn, but available events
+share a bounded batch instead of each creating its own dispatch. Overflow remains
+pending; text omitted by the prompt limit is not marked delivered. Cancellation,
+answers and approvals acquire no batching delay.
+
+The inbox records context and delivery evidence, not additional execution
+authority. Unknown worker settlement retains custody and prevents an automatic
+retry. See [inbox measurement](inbox-measurement.md) for what event batching can
+demonstrate and how to compare it without assuming token or cost savings.
+
+The additive upgrade preserves the existing mailbox and imports messages for
+open recipients with stable event IDs. Earlier versions did not record prompt
+consumption, so a previously read message may appear in a worker prompt once
+after upgrade. Imported messages have no invented delivery receipt and still
+respect deferred work, attention and custody gates. Migration waits for exclusive
+supervisor custody; provider adapters and their qualification remain unchanged.
+
 ## Bounded autonomy
 
 ```sh
@@ -150,4 +205,7 @@ future agents can distinguish a past report from current evidence.
 `xcb_swarm_status`, `xcb_message_list`, and `xcb_message_send` provide durable
 coordination between active tasks in the same workspace. Backlog tools are scoped
 to the owning project. Messages do not expand authority or expose other workspaces.
-Never wait synchronously for another task blocked on the same workspace lock.
+Inter-agent messages enter the target's durable inbox and share its bounded
+delivery batches. Use an explicit watch when a task needs another task's terminal
+report. Never wait synchronously for another task blocked on the same workspace
+lock.
