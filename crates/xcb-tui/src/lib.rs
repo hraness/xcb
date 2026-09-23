@@ -367,6 +367,10 @@ pub struct App {
     slash_dismissed: Cell<bool>,
     /// Composer text the menu state belongs to; any edit resets selection.
     slash_text: std::cell::RefCell<String>,
+    /// Per-frame render state: wrapped transcript rows per message, the
+    /// streaming tail's last wrap, and textarea viewport mirrors. Interior
+    /// mutability lets the render tree read `&App` while refreshing it.
+    pub(crate) render_cache: std::cell::RefCell<render::RenderCache>,
     dirty: bool,
     view_fingerprint: u64,
     /// Mouse capture is off by default so terminal-native drag selection and
@@ -978,7 +982,17 @@ impl App {
         true
     }
     pub fn handle(&mut self, event: Event, output: &SyncSender<Intent>) -> bool {
-        if !matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Release) {
+        // Only inputs that can change the view schedule a repaint: painting a
+        // frame per pointer-motion or focus event is pure churn.
+        let repaints = match &event {
+            Event::Key(key) => key.kind != KeyEventKind::Release,
+            Event::Mouse(mouse) => {
+                !matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Drag(_))
+            }
+            Event::FocusGained | Event::FocusLost => false,
+            _ => true,
+        };
+        if repaints {
             self.dirty = true;
         }
         // A key press or paste acknowledges whatever notice was showing; the
@@ -1609,8 +1623,16 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
             needs_draw = false;
             blink = phase;
         }
-        if event::poll(Duration::from_millis(50))? && !app.handle(event::read()?, &output) {
-            break;
+        if event::poll(Duration::from_millis(50))? {
+            // Coalesce bursts: drain every queued event before the next draw
+            // so a paste storm or mouse flood paints once, not once per event.
+            let mut quit = !app.handle(event::read()?, &output);
+            while !quit && event::poll(Duration::ZERO)? {
+                quit = !app.handle(event::read()?, &output);
+            }
+            if quit {
+                break;
+            }
         }
         match app.take_mouse_toggle() {
             Some(true) => execute!(io::stdout(), EnableMouseCapture)?,
@@ -1618,7 +1640,9 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
             None => (),
         }
         ticks = ticks.wrapping_add(1);
-        if refresh.elapsed() >= Duration::from_millis(750) {
+        // The kernel publishes ~1s views on its own; the TUI's extra refresh
+        // only needs to catch what slips through, so 5s is plenty.
+        if refresh.elapsed() >= Duration::from_secs(5) {
             app.send(&output, Intent::Refresh);
             refresh = Instant::now();
         }
