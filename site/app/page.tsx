@@ -52,7 +52,9 @@ export default function Home() {
               heading="Run coding tasks on the subscriptions you already pay for." headingId="hero-title" summary={summary}
               actions={[{ href: "/docs/getting-started", label: "Get started" }, { href: "/docs/route", label: "Route tasks" }]}
               boundary="Open source · MIT licensed · Source preview"
-              notice={<div className="xcb-hero-install"><p>Build from source. You need Git, rustup, and your platform’s build tools.</p><pre className="install-command" tabIndex={0}><code>{threeCommandInstall}</code></pre><ReleaseSummary release={publishedRelease} /></div>}
+              notice={<div className="xcb-hero-install"><p>{publishedRelease === null
+                ? "Build from source. You need Git, rustup, and your platform’s build tools."
+                : <>Build from source with Git, rustup, and your platform’s build tools, or <a href="/download">download a verified release</a>.</>}</p><pre className="install-command" tabIndex={0}><code>{threeCommandInstall}</code></pre><ReleaseSummary release={publishedRelease} /></div>}
               frame={<HeroGraphic />}
             />
           </div>
