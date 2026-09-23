@@ -1998,10 +1998,23 @@ pub(crate) async fn run_prepared<P: Protocol>(
         // serialize every parallel terminal on one writer, so stream samples
         // are decimated and the true total is written once at the result.
         let mut last_velocity_ms = started;
-        for _ in 0..16_384 {
+        let mut frames = 0usize;
+        loop {
             if *cancel.borrow() {
                 return Ok((Terminal::Cancelled, vec![]));
             }
+            if frames >= crate::protocol::MAX_TURN_FRAMES {
+                // Volume is not a protocol violation: the tools that already
+                // ran are settled and the partial answer is kept. The turn
+                // ends like any other provider turn limit.
+                let detail = Diagnostic::notice(
+                    "provider frame count reached the per-turn limit; the turn was ended as a turn limit",
+                );
+                observer(Progress::Notice(detail.as_str().to_owned()));
+                diagnostic = Some(detail);
+                return Ok((Terminal::TurnLimit, vec![]));
+            }
+            frames += 1;
             let batch = tokio::select! {
                 _ = cancel.changed() => return Ok((Terminal::Cancelled, vec![])),
                 batch = protocol.next(&mut process) => batch?,
@@ -2254,7 +2267,6 @@ pub(crate) async fn run_prepared<P: Protocol>(
                 }
             }
         }
-        Err(Error::Protocol("provider frame count limit"))
     };
     let deadline = Duration::from_millis(input.config.turn_timeout_ms);
     let result = tokio::select! {
