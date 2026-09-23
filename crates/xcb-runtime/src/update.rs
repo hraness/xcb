@@ -151,7 +151,7 @@ fn fetch_releases() -> Result<Vec<Release>> {
             "--proto",
             "=https",
             "--user-agent",
-            "xcb-update/0.4",
+            concat!("xcb-update/", env!("CARGO_PKG_VERSION")),
             API_URL,
         ])
         .output()
