@@ -2,7 +2,7 @@
   "contract": "algal.organism.v1",
   "key": "organism:xcb-settle-reflex",
   "name": "XCB settle reflex",
-  "note": "How a settled worker turn ended. Non-idle deterministic states map to their category; an interrupted limit is unfinished; an idle report with a blocked cue and no completion claim is blocked; otherwise the learned head separates done from stopped short.",
+  "note": "How a settled worker turn ended. Non-idle deterministic states map to their category; an interrupted limit is unfinished; an idle report with a blocked cue and no completion claim is blocked; an idle report the confirm head scores over its threshold is waiting for the operator's go-ahead; otherwise the unfinished head separates done from stopped short.",
   "budgets": {
     "maxSteps": 6,
     "maxAgentCalls": 0,
@@ -55,78 +55,149 @@
         "contract": "algal.expr.v1",
         "program": [
           "let",
-          "h",
+          "u",
           [
             "get",
             "params",
             "unfinished"
           ],
-          {
-            "head": "unfinished",
-            "z": [
-              "fold",
-              [
-                "get",
-                "h",
-                "terms"
-              ],
-              [
-                "get",
-                "h",
-                "bias"
-              ],
-              "acc",
-              "t",
-              [
-                "add",
+          [
+            "let",
+            "c",
+            [
+              "get",
+              "params",
+              "confirm"
+            ],
+            {
+              "u": [
+                "fold",
                 [
                   "get",
-                  "acc"
+                  "u",
+                  "terms"
                 ],
                 [
-                  "mul",
+                  "get",
+                  "u",
+                  "bias"
+                ],
+                "acc",
+                "t",
+                [
+                  "add",
                   [
                     "get",
-                    "t",
-                    "w"
+                    "acc"
                   ],
                   [
-                    "let",
-                    "v",
+                    "mul",
                     [
                       "get",
-                      "features",
-                      [
-                        "get",
-                        "t",
-                        "f"
-                      ]
+                      "t",
+                      "w"
                     ],
                     [
-                      "if",
+                      "let",
+                      "v",
                       [
-                        "isNum",
+                        "get",
+                        "features",
                         [
                           "get",
-                          "v"
+                          "t",
+                          "f"
                         ]
                       ],
                       [
-                        "get",
-                        "v"
-                      ],
-                      0
+                        "if",
+                        [
+                          "isNum",
+                          [
+                            "get",
+                            "v"
+                          ]
+                        ],
+                        [
+                          "get",
+                          "v"
+                        ],
+                        0
+                      ]
                     ]
                   ]
                 ]
+              ],
+              "ucut": [
+                "get",
+                "u",
+                "cut"
+              ],
+              "c": [
+                "fold",
+                [
+                  "get",
+                  "c",
+                  "terms"
+                ],
+                [
+                  "get",
+                  "c",
+                  "bias"
+                ],
+                "acc",
+                "t",
+                [
+                  "add",
+                  [
+                    "get",
+                    "acc"
+                  ],
+                  [
+                    "mul",
+                    [
+                      "get",
+                      "t",
+                      "w"
+                    ],
+                    [
+                      "let",
+                      "v",
+                      [
+                        "get",
+                        "features",
+                        [
+                          "get",
+                          "t",
+                          "f"
+                        ]
+                      ],
+                      [
+                        "if",
+                        [
+                          "isNum",
+                          [
+                            "get",
+                            "v"
+                          ]
+                        ],
+                        [
+                          "get",
+                          "v"
+                        ],
+                        0
+                      ]
+                    ]
+                  ]
+                ]
+              ],
+              "ccut": [
+                "get",
+                "c",
+                "cut"
               ]
-            ],
-            "cut": [
-              "get",
-              "h",
-              "cut"
-            ]
-          }
+            }
+          ]
         ]
       },
       "output": {
@@ -196,7 +267,7 @@
                   [
                     "get",
                     "scored",
-                    "z"
+                    "u"
                   ],
                   1000
                 ]
@@ -224,7 +295,7 @@
                     [
                       "get",
                       "scored",
-                      "z"
+                      "u"
                     ],
                     1000
                   ]
@@ -264,46 +335,79 @@
                       [
                         "get",
                         "scored",
-                        "z"
+                        "u"
                       ],
                       1000
                     ]
                   ]
                 },
-                {
-                  "category": [
-                    "if",
+                [
+                  "if",
+                  [
+                    "gte",
                     [
-                      "gte",
-                      [
-                        "get",
-                        "scored",
-                        "z"
-                      ],
-                      [
-                        "get",
-                        "scored",
-                        "cut"
-                      ]
+                      "get",
+                      "scored",
+                      "c"
                     ],
-                    "stopped_short",
-                    "done"
-                  ],
-                  "gate": "head",
-                  "head": "unfinished",
-                  "score": [
-                    "round",
                     [
-                      "mul",
-                      [
-                        "get",
-                        "scored",
-                        "z"
-                      ],
-                      1000
+                      "get",
+                      "scored",
+                      "ccut"
                     ]
-                  ]
-                }
+                  ],
+                  {
+                    "category": "confirm",
+                    "gate": "head",
+                    "head": "confirm",
+                    "score": [
+                      "round",
+                      [
+                        "mul",
+                        [
+                          "get",
+                          "scored",
+                          "c"
+                        ],
+                        1000
+                      ]
+                    ]
+                  },
+                  {
+                    "category": [
+                      "if",
+                      [
+                        "gte",
+                        [
+                          "get",
+                          "scored",
+                          "u"
+                        ],
+                        [
+                          "get",
+                          "scored",
+                          "ucut"
+                        ]
+                      ],
+                      "stopped_short",
+                      "done"
+                    ],
+                    "gate": "head",
+                    "head": "unfinished",
+                    "score": [
+                      "round",
+                      [
+                        "mul",
+                        [
+                          "get",
+                          "scored",
+                          "u"
+                        ],
+                        1000
+                      ]
+                    ]
+                  }
+                ]
               ]
             ]
           ]

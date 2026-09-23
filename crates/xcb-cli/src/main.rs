@@ -403,23 +403,23 @@ enum ModelCommand {
 }
 #[derive(Subcommand)]
 enum ReflexCommand {
-    /// Show the active generation, program digest, evidence and holdout metrics.
+    /// Show the active generation, program digest, live metrics and open trials.
     Status {
         /// Only this reflex (route or settle).
         reflex: Option<ReflexName>,
     },
-    /// Fit candidates on local labels and promote any that beat the active generation on holdout.
+    /// Decide finished trials and fit new challengers; a challenger is promoted only after it beats the active generation on labels that arrived after it was fitted.
     Train {
         /// Reflex to train (route or settle).
         reflex: ReflexName,
     },
-    /// Label a task's latest decision: route frontier|standard, settle unfinished|done.
+    /// Label a task's latest decision: route frontier|standard, settle unfinished|confirm|done.
     Label {
         /// Reflex the label is for (route or settle).
         reflex: ReflexName,
         /// Managed task id.
         task: Id,
-        /// frontier or standard (route); unfinished or done (settle).
+        /// frontier or standard (route); unfinished, confirm or done (settle).
         label: String,
     },
     /// Reactivate an earlier generation; 0 restores the shipped prior.
@@ -429,12 +429,17 @@ enum ReflexCommand {
         /// Generation to activate.
         version: u32,
     },
-    /// Import labeled JSONL ({id,text,label[,weight][,judge]}); only derived features are stored.
+    /// Import labeled JSONL ({id,text,label[,weight][,judge|head,tool_calls]}), oldest first.
+    /// The examples are replayed as a forward trial from the shipped prior; heads that won
+    /// promotion in the replay are adopted. Only derived features are stored.
     Import {
         /// Reflex the examples are for (route or settle).
         reflex: ReflexName,
         /// JSONL file to import.
         file: PathBuf,
+        /// Replay and report without storing or adopting anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Check that a reflex program file is admissible and print its digest.
     Check {
@@ -649,6 +654,23 @@ fn human_age(now_ms: u64, then_ms: u64) -> String {
     } else {
         format!("{}d ago", minutes / (60 * 24))
     }
+}
+
+/// One line of reflex metrics: examples, accuracy, precision and recall at
+/// the head's threshold, and AUC when both classes are present.
+fn metrics_line(metrics: &xcb_core::reflex::Metrics) -> String {
+    let rate = |value: Option<f64>| value.map_or_else(|| "–".into(), |value| format!("{value:.2}"));
+    format!(
+        "{} labels · accuracy {:.3} · precision {} · recall {}{}",
+        metrics.n,
+        metrics.accuracy,
+        rate(metrics.precision),
+        rate(metrics.recall),
+        metrics
+            .auc
+            .map(|auc| format!(" · AUC {auc:.3}"))
+            .unwrap_or_default(),
+    )
 }
 
 fn print_json(value: impl serde::Serialize) -> Result<()> {
@@ -1607,23 +1629,17 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                                 println!("  ! {fault}");
                             }
                             for (head, row) in status.heads {
-                                match row.holdout {
-                                    Some(metrics) => println!(
-                                        "  {head}: {} labels ({} positive) · holdout {} · accuracy {:.3} · log loss {:.3}{}",
-                                        row.labeled,
-                                        row.positives,
-                                        metrics.n,
-                                        metrics.accuracy,
-                                        metrics.log_loss,
-                                        metrics
-                                            .auc
-                                            .map(|auc| format!(" · AUC {auc:.3}"))
-                                            .unwrap_or_default(),
-                                    ),
-                                    None => println!(
-                                        "  {head}: {} labels, none held out yet",
-                                        row.labeled
-                                    ),
+                                println!(
+                                    "  {head}: {} labels ({} positive) · live {}",
+                                    row.labeled,
+                                    row.positives,
+                                    row.live
+                                        .as_ref()
+                                        .map(metrics_line)
+                                        .unwrap_or_else(|| "none since activation".into()),
+                                );
+                                if let Some(trial) = row.trial {
+                                    println!("    challenger {}", trial.reason);
                                 }
                             }
                         }
@@ -1637,6 +1653,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     } else {
                         for (head, comparison) in &report.heads {
                             println!("{head}: {}", comparison.reason);
+                        }
+                        for head in &report.started {
+                            println!("{head}: fitted a challenger; it trials on the next labels");
                         }
                         match report.promoted_version {
                             Some(version) => println!(
@@ -1661,13 +1680,28 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let value = reflex::parse_label(reflex, &label).ok_or(Error::Unavailable(
                         match reflex {
                             Reflex::Route => "route labels are frontier or standard",
-                            Reflex::Settle => "settle labels are unfinished or done",
+                            Reflex::Settle => "settle labels are unfinished, confirm or done",
                         },
                     ))?;
-                    if !reflexes.label(reflex, task.as_str(), value, 1.0, "explicit")? {
+                    if reflexes.latest(reflex, task.as_str())?.is_none() {
                         return Err(Error::Unavailable("no decision recorded for that task"));
                     }
-                    println!("labeled {task} {label} for {}", reflex.as_str());
+                    let mut changed = false;
+                    for (head, value) in value {
+                        changed |= reflexes.label(
+                            reflex,
+                            task.as_str(),
+                            *head,
+                            *value,
+                            1.0,
+                            "explicit",
+                        )?;
+                    }
+                    if changed {
+                        println!("labeled {task} {label} for {}", reflex.as_str());
+                    } else {
+                        println!("{task} was already labeled {label} for {}", reflex.as_str());
+                    }
                 }
                 ReflexCommand::Rollback { reflex, version } => {
                     reflexes.rollback(reflex.into(), version)?;
@@ -1676,15 +1710,63 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         Reflex::from(reflex).as_str()
                     );
                 }
-                ReflexCommand::Import { reflex, file } => {
+                ReflexCommand::Import {
+                    reflex: name,
+                    file,
+                    dry_run,
+                } => {
+                    let reflex = Reflex::from(name);
                     let source = std::fs::read_to_string(&file)?;
-                    let rows = reflex::parse_import(reflex.into(), &source)?;
-                    let inserted = reflexes.import(reflex.into(), &rows)?;
-                    println!(
-                        "imported {inserted} of {} examples; run `xcb reflex train {}`",
-                        rows.len(),
-                        Reflex::from(reflex).as_str()
-                    );
+                    let rows = reflex::parse_import(reflex, &source)?;
+                    let active = reflexes.active(reflex)?;
+                    let replays = reflex::replay_import(&active, &rows)?;
+                    if cli.json && dry_run {
+                        print_json(&replays)?;
+                        return Ok(0);
+                    }
+                    if !cli.json {
+                        for (head, replay) in &replays {
+                            println!(
+                                "{head}: replayed {} · {} trial{}, {} promoted",
+                                metrics_line(&replay.prequential),
+                                replay.trials,
+                                if replay.trials == 1 { "" } else { "s" },
+                                replay.promotions,
+                            );
+                        }
+                    }
+                    if dry_run {
+                        println!("dry run: nothing stored");
+                        return Ok(0);
+                    }
+                    let inserted = reflexes.import(reflex, &rows)?;
+                    // Adopt only for new history: re-importing the same file
+                    // must not append another generation.
+                    let won = replays
+                        .into_iter()
+                        .filter(|(_, replay)| inserted > 0 && replay.promotions > 0)
+                        .filter_map(|(head, replay)| Some((head, (replay.head, replay.evidence?))))
+                        .collect();
+                    let adopted = reflexes.adopt(reflex, won, inserted)?;
+                    if cli.json {
+                        print_json(serde_json::json!({
+                            "inserted": inserted,
+                            "examples": rows.len(),
+                            "adopted_version": adopted,
+                        }))?;
+                    } else {
+                        println!("imported {inserted} of {} examples", rows.len());
+                        match adopted {
+                            Some(version) => println!(
+                                "adopted the replay's promoted heads as generation {version}; `xcb reflex rollback {} {}` restores the previous one",
+                                reflex.as_str(),
+                                active.version
+                            ),
+                            None => println!(
+                                "no head won a replayed trial; the active generation is unchanged"
+                            ),
+                        }
+                    }
                 }
                 ReflexCommand::Check { file } => {
                     let source: serde_json::Value = serde_json::from_slice(&std::fs::read(&file)?)?;
@@ -2900,6 +2982,7 @@ mod tests {
     #[test]
     fn json_run_output_includes_its_resumable_session_id() {
         let mut result = runner::Outcome {
+            tool_calls: Some(0),
             diagnostic: None,
             text: "Completed response".into(),
             facts: xcb_core::policy::TurnFacts {
@@ -2936,6 +3019,7 @@ mod tests {
             session::State,
         };
         let mut result = runner::Outcome {
+            tool_calls: Some(0),
             diagnostic: None,
             text: "Provider said done".into(),
             facts: TurnFacts {

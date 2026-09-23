@@ -114,6 +114,13 @@ pub struct Outcome {
     pub text: String,
     pub facts: TurnFacts,
     pub state: State,
+    /// Distinct tool calls the turn admitted. The settle reflex reads it:
+    /// a turn that did a lot of work and then stopped is the turn most
+    /// often answered with "continue". Not persisted, so the settled-outcome
+    /// record keeps the format older builds decode; a turn reconciled after a
+    /// restart has no count, and the settle reflex skips it.
+    #[serde(skip)]
+    pub tool_calls: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<Diagnostic>,
 }
@@ -1922,6 +1929,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
     // One managed mailbox connection per worker run rather than one open
     // (and migration probe) per `xcb_*` tool call.
     let mut managed_bridge = None;
+    let tool_calls = std::sync::atomic::AtomicU32::new(0);
     let execution = async {
         spawned?;
         let baseline = store
@@ -2147,6 +2155,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         if seen_calls.len() >= 128 || !seen_calls.insert(call_id.clone()) {
                             return Err(Error::Protocol("duplicate or excessive tool call"));
                         }
+                        tool_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         store.begin_tool(
                             &run,
                             &call_id,
@@ -2423,6 +2432,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
     let state = classify(&final_text, &facts);
     facts.pending_attention |= state.attention();
     let outcome = Outcome {
+        tool_calls: Some(tool_calls.load(std::sync::atomic::Ordering::Relaxed)),
         text: final_text.clone(),
         facts,
         state,
@@ -2512,6 +2522,7 @@ mod tests {
     #[test]
     fn diagnostic_is_legacy_compatible_and_bounded() {
         let original = Outcome {
+            tool_calls: Some(0),
             text: String::new(),
             facts: TurnFacts {
                 terminal: Terminal::Failed,
