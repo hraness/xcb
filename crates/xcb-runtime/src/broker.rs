@@ -34,13 +34,19 @@ pub struct Listing {
 /// `workspace_read` accepts half of the transcript text bound so that JSON
 /// escaping of newlines and quotes still leaves headroom in the tool result.
 pub const READ_LIMIT: usize = MAX_TEXT_BYTES / 2;
+/// `workspace_list` returns at most this many sorted entries.
 pub const LIST_LIMIT: usize = 512;
+/// Directory entries are read up to this bound before sorting. A larger
+/// directory is reported truncated; its page is drawn from the entries read.
 const LIST_SCAN_LIMIT: usize = 65_536;
+/// `workspace_search` scans files up to the full text bound; larger or
+/// non-UTF-8 files are skipped rather than failing the search.
+const SEARCH_FILE_LIMIT: usize = MAX_TEXT_BYTES;
 
 pub struct Workspace {
     root: PathBuf,
     directory: File,
-    coordination_root: PathBuf,
+    coordination: coordination::Coordination,
 }
 
 fn io(error: rustix::io::Errno) -> Error {
@@ -65,7 +71,9 @@ fn regular(file: &File) -> Result<()> {
     }
     Ok(())
 }
-fn file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
+/// A checked regular single-link file without a size bound; callers apply
+/// their own limit so an oversized read can carry guided tool errors.
+fn opened_file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
     let file = File::from(
         rustix::fs::openat(
             parent,
@@ -75,6 +83,14 @@ fn file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
         )
         .map_err(io)?,
     );
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.nlink() != 1 {
+        return Err(xcb_core::Error::Invalid("workspace file").into());
+    }
+    Ok(file)
+}
+fn file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
+    let file = opened_file_at(parent, name)?;
     regular(&file)?;
     Ok(file)
 }
@@ -104,23 +120,28 @@ fn revision_file_at(parent: &File, name: &std::ffi::OsStr, expected: &str) -> Re
 }
 
 fn read_bytes_at(parent: &File, name: &std::ffi::OsStr, limit: usize) -> Result<Vec<u8>> {
-    let file = file_at(parent, name)?;
+    let file = opened_file_at(parent, name)?;
     let mut bytes = Vec::new();
     file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > limit {
-        return Err(if limit == READ_LIMIT {
-            Error::Unavailable("workspace file exceeds the 128 KiB read limit; read a smaller file")
-        } else {
-            xcb_core::Error::Limit("workspace file").into()
-        });
+        return Err(xcb_core::Error::Limit("workspace file").into());
     }
     Ok(bytes)
 }
 fn utf8(bytes: Vec<u8>) -> Result<String> {
     String::from_utf8(bytes).map_err(|_| xcb_core::Error::Invalid("UTF-8 workspace file").into())
 }
+/// A legal but oversized file is a tool rejection with guidance, never a
+/// provider-turn failure.
 fn read_at(parent: &File, name: &std::ffi::OsStr) -> Result<ReadResult> {
-    let bytes = read_bytes_at(parent, name, READ_LIMIT)?;
+    let bytes = match read_bytes_at(parent, name, READ_LIMIT) {
+        Err(Error::Core(xcb_core::Error::Limit(_))) => {
+            return Err(Error::Unavailable(
+                "workspace file exceeds the 128 KiB read limit; read a smaller file",
+            ));
+        }
+        other => other?,
+    };
     let revision = digest(&bytes);
     Ok(ReadResult {
         text: utf8(bytes)?,
@@ -129,7 +150,7 @@ fn read_at(parent: &File, name: &std::ffi::OsStr) -> Result<ReadResult> {
 }
 /// Text without a revision for search: no digest pass per scanned file.
 fn read_text_at(parent: &File, name: &std::ffi::OsStr) -> Result<String> {
-    utf8(read_bytes_at(parent, name, READ_LIMIT)?)
+    utf8(read_bytes_at(parent, name, SEARCH_FILE_LIMIT)?)
 }
 /// The current revision of a file up to the full write bound, so an existing
 /// file above the read limit can still be replaced with its exact revision.
@@ -189,11 +210,7 @@ impl Workspace {
             return Err(Error::PrivateState);
         }
         let root = root.canonicalize()?;
-        if coordination_root.starts_with(&root) || root.starts_with(coordination_root) {
-            return Err(Error::Conflict(
-                "write coordination must be outside the workspace",
-            ));
-        }
+        let coordination = coordination::Coordination::new(&root, coordination_root)?;
         let fd = rustix::fs::open(
             &root,
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
@@ -203,7 +220,7 @@ impl Workspace {
         Ok(Self {
             root,
             directory: File::from(fd),
-            coordination_root: coordination_root.to_owned(),
+            coordination,
         })
     }
     fn check_root(&self) -> Result<()> {
@@ -255,7 +272,7 @@ impl Workspace {
         }
         let (parent, name) = self.parent(path)?;
         self.check_root()?;
-        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
+        let _lock = coordination::WriteLock::acquire(&self.coordination)?;
         self.check_root()?;
         let check = || -> Result<()> {
             match revision_at(&parent, name) {
@@ -333,7 +350,7 @@ impl Workspace {
             return Err(xcb_core::Error::Limit("workspace directory depth").into());
         }
         self.check_root()?;
-        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
+        let _lock = coordination::WriteLock::acquire(&self.coordination)?;
         self.check_root()?;
         let mut directory = self.directory.try_clone()?;
         let mut created = 0;
@@ -390,7 +407,7 @@ impl Workspace {
         // by writes and renames, so cooperating mutations cannot move them.
         components(path)?;
         self.check_root()?;
-        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
+        let _lock = coordination::WriteLock::acquire(&self.coordination)?;
         self.check_root()?;
         let (parent, name) = self.parent(path)?;
         let _file = revision_file_at(&parent, name, expected)?;
@@ -414,7 +431,7 @@ impl Workspace {
         components(from)?;
         components(to)?;
         self.check_root()?;
-        let _lock = coordination::WriteLock::acquire(&self.root, &self.coordination_root)?;
+        let _lock = coordination::WriteLock::acquire(&self.coordination)?;
         self.check_root()?;
         let (source, source_name) = self.parent(from)?;
         let (destination, destination_name) = self.parent(to)?;

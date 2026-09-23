@@ -79,8 +79,11 @@ Snapshots exclude conventional secret/configuration paths such as `.env`,
 provider profiles, `.ssh`, and credential dotfiles; `.env.example`, `.env.sample`,
 and `.env.template` remain source inputs. Dependency trees, build products, and
 `.xcb-*` staging names are excluded. This is a path policy, not a general secret
-scanner. Binary regular files are supported; symlinks, hard links, and special
-files fail closed.
+scanner. Binary regular files are supported. Symlinks, sockets, FIFOs and other
+special entries are never inputs: they are reported as labeled exclusions and
+the snapshot continues, so a stray link no longer aborts an otherwise valid
+command. Hard-linked or oversized regular files still fail capture closed, and
+publication refuses to write through any excluded path.
 
 ## Dependencies and Git
 

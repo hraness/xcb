@@ -102,7 +102,9 @@ The chat keeps the model's entire tool surface inside the opened directory:
 `workspace.list`, `workspace.read`, `workspace.search`, `workspace.write`, and
 bounded public `web.fetch`. There is no shell, process, or arbitrary-path
 operation. Writes are atomic and require the file's current revision, so a
-stale or speculative edit fails instead of clobbering. `/help` lists the
+stale or speculative edit fails instead of clobbering. Reads are limited to
+128 KiB per file with a guided error, and listings or searches that reach
+their bounds report `truncated` instead of failing. `/help` lists the
 in-session commands; Ctrl-C cancels a running turn and Ctrl-D exits.
 
 State lives under `~/.xcb` (mode `0700`, override with
