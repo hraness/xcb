@@ -49,7 +49,17 @@ fn malformed_recognized_events_refuse_and_unknown_events_are_inert() {
         parse_event(br#"{"type":"future_notification"}"#).unwrap(),
         Event::Notice
     ));
-    assert!(parse_event(br#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":2.0}}"#).is_err());
+    // Telemetry drift is not malformed: an out-of-range meter clamps, and a
+    // rejection still classifies its quota failure.
+    assert!(matches!(
+        parse_event(br#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":2.0}}"#).unwrap(),
+        Event::Quota {
+            utilization: Some(1.0),
+            failure: Some(Failure::AccountQuota),
+            ..
+        }
+    ));
+    assert!(parse_event(br#"{"type":"rate_limit_event"}"#).is_err());
 }
 
 #[test]

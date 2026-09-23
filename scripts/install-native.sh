@@ -32,11 +32,31 @@ bin_dir="$XCB_INSTALL_PREFIX/bin"
 mkdir -p "$bin_dir"
 bin_dir=$(cd "$bin_dir" && pwd -P)
 lock="$bin_dir/.xcb-install-lock"
-mkdir "$lock" 2>/dev/null || fail "another installation owns $lock; retain it until that installer has stopped"
+# The lock records its owner's pid so an installer killed by SIGKILL, a lost
+# SSH session or a reboot cannot block every future install. A live owner is
+# never disturbed: reclaim only fires when the recorded pid is gone (or absent
+# past a grace window covering the mkdir->pid-write race).
+if ! mkdir "$lock" 2>/dev/null; then
+  owner=$(cat "$lock/pid" 2>/dev/null || true)
+  if [ -z "$owner" ]; then
+    # The pid file is written immediately after mkdir; one grace window keeps
+    # a still-alive installer that has not written it yet from losing its lock.
+    sleep 2
+    owner=$(cat "$lock/pid" 2>/dev/null || true)
+  fi
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    fail "another installation is in progress (pid $owner) owns $lock"
+  fi
+  rm -f "$lock/pid" 2>/dev/null || true
+  rmdir "$lock" 2>/dev/null || fail "another installation owns $lock; retain it until that installer has stopped"
+  mkdir "$lock" 2>/dev/null || fail "another installation owns $lock; retain it until that installer has stopped"
+fi
+echo "$$" > "$lock/pid" || fail "cannot record installer pid in $lock"
 stage=
 cleanup() {
   if [ -n "$stage" ]; then rm -rf "$stage"; fi
-  rmdir "$lock"
+  rm -f "$lock/pid"
+  rmdir "$lock" 2>/dev/null || true
 }
 trap cleanup 0
 trap 'exit 1' HUP INT TERM
@@ -52,6 +72,10 @@ fi
 [ -n "$sha256_cmd" ] || fail "neither sha256sum nor shasum found"
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$os" in
+  darwin|linux) ;;
+  *) fail "unsupported operating system: $os (release archives exist for darwin and linux)" ;;
+esac
 arch=$(uname -m)
 case "$arch" in
   x86_64) arch=x86_64 ;;
@@ -62,10 +86,13 @@ esac
 install_from_release() {
   expected_version=$XCB_VERSION
   version_valid "$expected_version" || fail "release version must be a stable semantic version"
+  command -v curl >/dev/null 2>&1 || fail "curl is required to fetch release archives (or install from source: unset XCB_VERSION)"
   asset="xcb-${expected_version}-${os}-${arch}.tar.gz"
   base_url="https://github.com/$XCB_GITHUB/releases/download/v$expected_version"
-  curl -fsSL -o "$stage/archive.tar.gz" "$base_url/$asset"
-  curl -fsSL -o "$stage/checksum" "$base_url/$asset.sha256"
+  curl -fsSL --proto '=https' --connect-timeout 15 --max-time 600 -o "$stage/archive.tar.gz" "$base_url/$asset" \
+    || fail "download failed for $asset"
+  curl -fsSL --proto '=https' --connect-timeout 15 --max-time 60 -o "$stage/checksum" "$base_url/$asset.sha256" \
+    || fail "download failed for $asset.sha256"
   expected=$(tr -d '[:space:]' < "$stage/checksum")
   [ "${#expected}" -eq 64 ] || fail "invalid release checksum"
   case "$expected" in *[!0-9a-f]*) fail "invalid release checksum" ;; esac

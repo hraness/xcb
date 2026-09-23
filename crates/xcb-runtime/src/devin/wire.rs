@@ -3,25 +3,33 @@ use super::{
     config::NATIVE_TOOLS,
 };
 use crate::{
-    Error, Result, broker, now_ms,
+    Error, Result, broker, category, now_ms,
     process::StreamProcess,
-    protocol::{Batch, Event, Prompt, Protocol},
+    protocol::{Batch, Event, INIT_DEADLINE, MAX_TURN_FRAMES, Prompt, Protocol},
+    wire_helpers::require,
 };
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
+    time::Duration,
 };
 use tokio::sync::oneshot;
 use xcb_core::{
     Id, MAX_JSON_BYTES, MAX_TEXT_BYTES, Provider,
     models::{Mode, ModelChoice},
     policy::Terminal,
-    usage::{COUNTER_LIMIT, Counters},
+    usage::Counters,
 };
 
 const MAX_CALLS: usize = 128;
-const MAX_FRAMES: usize = 16384;
+// Server-to-client request ids: every declared call may carry one permission
+// request, and denied foreign requests (any method) are counted here too, so
+// this bound is deliberately wider than MAX_CALLS.
+const MAX_CALLBACKS: usize = 8 * MAX_CALLS;
+// Backstop only: the host ends a turn gracefully at MAX_TURN_FRAMES, and this
+// count also covers initialization traffic, so it must never trip first.
+const MAX_FRAMES: usize = 2 * MAX_TURN_FRAMES;
 // Match the native catalog/store bound; the observed live catalog has 385 choices.
 const MAX_MODEL_CHOICES: usize = 4096;
 // ACP can carry the same 10 MiB image accepted by the attachment importer.
@@ -79,15 +87,10 @@ pub(crate) struct DevinProtocol {
     compaction_observations: Vec<Value>,
     listed: bool,
     output_tokens: u64,
+    /// Per-request initialization deadline; tests shorten it.
+    init_deadline: Duration,
 }
 
-fn require(ok: bool, reason: &'static str) -> Result<()> {
-    if ok {
-        Ok(())
-    } else {
-        Err(Error::Protocol(reason))
-    }
-}
 // Provider error messages/data may contain credentials or private paths. Only
 // the host-selected operation, numeric code, and fixed category can leave here.
 fn initialization_response(value: &Value, id: u64, method: &'static str) -> Result<Value> {
@@ -108,9 +111,9 @@ fn initialization_response(value: &Value, id: u64, method: &'static str) -> Resu
         let resource_limit = error["code"].as_i64() == Some(-32011)
             || error["data"]["cognition.ai/errorKind"].as_str() == Some("resource_exhausted");
         let category = if resource_limit {
-            "provider quota or resource limit reached"
+            category::DEVIN_RESOURCE_LIMIT
         } else if contains(&["certificate", "tls", "ssl"]) {
-            "TLS certificate or transport failure"
+            category::TLS
         } else if contains(&[
             "unauthorized",
             "unauthenticated",
@@ -120,7 +123,7 @@ fn initialization_response(value: &Value, id: u64, method: &'static str) -> Resu
             "invalid token",
         ]) || error["code"].as_i64() == Some(-32000) && message.contains("auth required")
         {
-            "authentication rejected; reconnect this account"
+            category::AUTHENTICATION
         } else if contains(&["permission denied", "operation not permitted"]) {
             "local provider access denied"
         } else if contains(&[
@@ -131,7 +134,7 @@ fn initialization_response(value: &Value, id: u64, method: &'static str) -> Resu
             "timed out",
             "timeout",
         ]) {
-            "provider request or network failure"
+            category::NETWORK
         } else {
             "provider rejected the operation"
         };
@@ -145,39 +148,30 @@ fn initialization_response(value: &Value, id: u64, method: &'static str) -> Resu
 }
 
 fn text(value: &Value, max: usize) -> Result<&str> {
-    value
-        .as_str()
-        .filter(|s| s.len() <= max)
-        .ok_or(Error::Protocol("Devin text bound"))
+    crate::wire_helpers::text(value, max, "Devin text bound")
 }
 fn identity(value: &Value) -> Result<String> {
-    let s = text(value, 160)?;
-    require(
-        !s.is_empty() && !s.chars().any(char::is_control),
-        "Devin identity",
-    )?;
-    Ok(s.to_owned())
+    crate::wire_helpers::identity(value, "Devin text bound", "Devin identity")
 }
 fn rpc_key(id: &Value) -> Result<String> {
-    if id.is_string() {
-        identity(id)?;
-    } else {
-        require(id.as_i64().is_some(), "Devin RPC identity")?;
-    }
-    Ok(serde_json::to_string(id)?)
+    crate::wire_helpers::rpc_key(
+        id,
+        "Devin text bound",
+        "Devin identity",
+        "Devin RPC identity",
+    )
 }
 fn closed(value: &Value, keys: &[&str]) -> Result<()> {
-    let o = value.as_object().ok_or(Error::Protocol("Devin object"))?;
-    require(
-        o.len() <= 256 && o.keys().all(|k| keys.contains(&k.as_str())),
+    crate::wire_helpers::closed(
+        value,
+        keys,
+        "Devin object",
+        "Devin unknown field",
         "Devin unknown field",
     )
 }
 fn counter(value: &Value) -> Result<u64> {
-    value
-        .as_u64()
-        .filter(|n| *n <= COUNTER_LIMIT)
-        .ok_or(Error::Protocol("Devin token counter"))
+    crate::wire_helpers::counter(value, "Devin token counter")
 }
 
 pub fn parse_models(result: &Value, observed_at_ms: u64) -> Result<Vec<ModelChoice>> {
@@ -280,6 +274,7 @@ impl DevinProtocol {
             compaction_observations: Vec::new(),
             listed: false,
             output_tokens: 0,
+            init_deadline: INIT_DEADLINE,
         })
     }
     fn prompt_wire(&self, prompt: Prompt, id: u64) -> Result<Value> {
@@ -366,27 +361,33 @@ impl DevinProtocol {
         process
             .send(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
             .await?;
-        for _ in 0..1024 {
-            let packet = self.packet(process).await?;
-            match packet {
-                Packet::Mcp(request) => {
-                    let events = self.mcp(request)?;
-                    require(events.is_empty(), "Devin tool during initialization")?;
-                }
-                Packet::Acp(bytes) => {
-                    let v = self.envelope(&bytes)?;
-                    if v.get("method").is_none() {
-                        return initialization_response(&v, id, method);
+        // A session that never answers must not hold the account lease for
+        // the whole turn deadline; the caller joins the process afterwards.
+        tokio::time::timeout(self.init_deadline, async {
+            for _ in 0..1024 {
+                let packet = self.packet(process).await?;
+                match packet {
+                    Packet::Mcp(request) => {
+                        let events = self.mcp(request)?;
+                        require(events.is_empty(), "Devin tool during initialization")?;
                     }
-                    let (events, replies) = self.accept(v)?;
-                    require(events.is_empty(), "Devin early event")?;
-                    for reply in replies {
-                        process.send(&reply).await?;
+                    Packet::Acp(bytes) => {
+                        let v = self.envelope(&bytes)?;
+                        if v.get("method").is_none() {
+                            return initialization_response(&v, id, method);
+                        }
+                        let (events, replies) = self.accept(v)?;
+                        require(events.is_empty(), "Devin early event")?;
+                        for reply in replies {
+                            process.send(&reply).await?;
+                        }
                     }
                 }
             }
-        }
-        Err(Error::Protocol("Devin initialization frame bound"))
+            Err(Error::Protocol("Devin initialization frame bound"))
+        })
+        .await
+        .map_err(|_| Error::Unavailable("Devin initialization timed out"))?
     }
     async fn packet(&mut self, process: &mut StreamProcess) -> Result<Packet> {
         if let Some(bridge) = &mut self.bridge {
@@ -494,14 +495,29 @@ impl DevinProtocol {
                 Some("refusal") => Terminal::Failed,
                 _ => return Err(Error::Protocol("Devin stop reason")),
             };
+            // A host-side pending reply is never abandoned. Only a completed
+            // turn must have settled every approved call; a cancelled, refused
+            // or limited turn abandons the rest so its real classification
+            // survives instead of becoming a protocol error.
             require(
-                self.pending.is_empty()
-                    && self
-                        .calls
-                        .values()
-                        .all(|c| !c.approved || (c.bridged && c.replied && c.finished)),
+                self.pending.is_empty(),
                 "Devin result before broker settlement",
             )?;
+            let unsettled = self
+                .calls
+                .values()
+                .filter(|c| c.approved && !(c.bridged && c.replied && c.finished))
+                .count();
+            if terminal == Terminal::Completed {
+                require(unsettled == 0, "Devin result before broker settlement")?;
+            } else if unsettled > 0 {
+                for call in self.calls.values_mut() {
+                    call.finished = true;
+                }
+                events.push(Event::Diagnostic(crate::runner::Diagnostic::notice(
+                    "Devin ended the turn with unsettled tool calls; they were abandoned",
+                )));
+            }
             let mut models = Vec::new();
             if let Some(u) = r.get("usage").filter(|v| !v.is_null()) {
                 let input = counter(&u["inputTokens"])?;
@@ -534,7 +550,7 @@ impl DevinProtocol {
         let p = &v["params"];
         if let Some(id) = v.get("id") {
             require(
-                self.callback_ids.len() < 1024 && self.callback_ids.insert(rpc_key(id)?),
+                self.callback_ids.len() < MAX_CALLBACKS && self.callback_ids.insert(rpc_key(id)?),
                 "Devin duplicate callback",
             )?;
             if method == "session/request_permission" {
@@ -974,6 +990,15 @@ impl Protocol for DevinProtocol {
             .map_err(|_| Error::Protocol("Devin tool reply channel closed"))?;
         call.replied = true;
         Ok(())
+    }
+    /// The ACP `session/cancel` notification the compatibility client also
+    /// sends, naming the admitted session while a prompt is in flight.
+    fn interruption(&mut self) -> Option<Value> {
+        if !self.ready || self.completed {
+            return None;
+        }
+        let session = self.session.as_ref()?;
+        Some(json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}}))
     }
     async fn shutdown(&mut self) -> bool {
         self.pending.clear();

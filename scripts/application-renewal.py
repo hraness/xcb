@@ -222,7 +222,9 @@ def command(argv, cwd, env, timeout, maximum=MAX_OUTPUT):
         if not reaped and child.returncode is None:
             try:
                 os.killpg(child.pid, signal.SIGTERM)
-            except ProcessLookupError:
+            except (ProcessLookupError, PermissionError):
+                # macOS answers EPERM, not ESRCH, for a group whose leader
+                # already exited; either way no live member remains to signal.
                 pass
             try:
                 child.wait(timeout=60)
@@ -230,7 +232,7 @@ def command(argv, cwd, env, timeout, maximum=MAX_OUTPUT):
                 # Keep durable intent. A forced exit is never recovery proof.
                 try:
                     os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     pass
                 child.wait(timeout=5)
         child.stdout.close()

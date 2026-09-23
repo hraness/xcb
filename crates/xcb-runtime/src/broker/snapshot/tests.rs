@@ -127,12 +127,11 @@ fn snapshot_round_trips_binary_and_excludes_controls_dependencies_and_secrets() 
 }
 
 #[test]
-fn snapshot_rejects_symlinks_hardlinks_and_oversized_files() {
-    for kind in ["symlink", "hardlink", "oversized"] {
+fn snapshot_rejects_hardlinks_and_oversized_files() {
+    for kind in ["hardlink", "oversized"] {
         let fixture = Fixture::new();
         fixture.write("input", b"unchanged", 0o600);
         match kind {
-            "symlink" => symlink("input", fixture.root.join("alias")).unwrap(),
             "hardlink" => {
                 fs::hard_link(fixture.root.join("input"), fixture.root.join("alias")).unwrap()
             }
@@ -144,6 +143,48 @@ fn snapshot_rejects_symlinks_hardlinks_and_oversized_files() {
         assert!(fixture.workspace.command_snapshot().is_err(), "{kind}");
         assert_eq!(fs::read(fixture.root.join("input")).unwrap(), b"unchanged");
     }
+}
+
+#[test]
+fn snapshot_excludes_symlinks_and_special_files_without_aborting() {
+    let fixture = Fixture::new();
+    fixture.write("input", b"unchanged", 0o600);
+    symlink("input", fixture.root.join("alias")).unwrap();
+    symlink("/outside/absolute", fixture.root.join("escape")).unwrap();
+    let _socket = std::os::unix::net::UnixListener::bind(fixture.root.join("sock")).unwrap();
+    let snapshot = fixture.workspace.command_snapshot().unwrap();
+    // Only the regular file is an input; the others are labeled exclusions.
+    assert_eq!(snapshot.document.files.len(), 1);
+    assert_eq!(snapshot.document.files[0].path, "input");
+    assert!(
+        snapshot
+            .excluded
+            .iter()
+            .any(|path| path == "alias [symlink]" || path == "escape [symlink]")
+    );
+    assert_eq!(
+        snapshot
+            .excluded
+            .iter()
+            .filter(|p| p.ends_with("[symlink]"))
+            .count(),
+        2
+    );
+    assert!(
+        snapshot
+            .excluded
+            .iter()
+            .any(|path| path == "sock [special file]")
+    );
+    // The excluded entries are not staged and publication through them stays
+    // refused: a change naming a symlink path is rejected.
+    let (result, effects) = fixture.workspace.publish_command_changes(
+        &snapshot,
+        fixture.changes(&snapshot, vec![write("alias", b"must not publish", false)]),
+    );
+    assert!(result.is_err());
+    assert_eq!(effects, EffectState::None);
+    assert_eq!(fs::read(fixture.root.join("input")).unwrap(), b"unchanged");
 }
 
 #[test]
@@ -187,19 +228,25 @@ fn command_publication_updates_creates_removes_and_preserves_permission_bits() {
         fs::metadata(fixture.root.join("script")).unwrap().mode() & 0o777,
         0o640
     );
+    // New entries take the ordinary create bits for their kind under the
+    // process umask; a plain create_dir probes the same kernel derivation.
+    let probe = fixture.root.join("umask-probe");
+    fs::create_dir(&probe).unwrap();
+    let dir_mode = fs::metadata(&probe).unwrap().mode() & 0o777;
+    fs::remove_dir(&probe).unwrap();
     assert_eq!(
         fs::metadata(fixture.root.join("new/nested/program"))
             .unwrap()
             .mode()
             & 0o777,
-        0o700
+        dir_mode
     );
     assert_eq!(
         fs::metadata(fixture.root.join("new/nested"))
             .unwrap()
             .mode()
             & 0o777,
-        0o700
+        dir_mode
     );
     assert!(!fixture.root.join("remove").exists());
     assert_eq!(

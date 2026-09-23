@@ -1,20 +1,24 @@
 <!-- hraness:xcb-landing:start -->
 # xcb
 
-Excalibur (`xcb`) brings your coding-agent accounts, model choices, sessions,
-and usage into one local terminal workspace. Choose an account, work on your
-project, and pick up where you left off without changing interfaces.
+Excalibur (`xcb`) is a subscription router for coding agents. It selects an
+eligible account/model route across your own Claude, Codex, and Devin
+accounts, runs one bounded turn, and proves account custody when the work
+settles. Another agent calls `xcb --json route`; an application embeds the
+TypeScript SDK. The terminal workspace is the reference host, and the managed
+harness — being rebuilt as a self-evolving ALGAL harness — is experimental.
 
-The native Rust app is a source preview for supported Claude, Codex, and Devin
-runtimes. It includes workspace file tools, an isolated Linux command runner,
-customizable panes, and a separate application API. Provider support and
-execution boundaries are explicit; it is not a replacement for every feature
-of the original provider tools.
+It is for developers who work with more than one coding agent and want one
+workflow around them. The native Rust app is a source preview for supported
+Claude, Codex, and Devin runtimes. It includes workspace file tools, an
+isolated Linux command runner, customizable panes, and a separate application
+API. Provider support and execution boundaries are explicit; it is not a
+replacement for every feature of the original provider tools.
 <!-- hraness:xcb-landing:end -->
 
 [Project site](https://xcb.sh) · [Getting started](https://xcb.sh/docs/getting-started) ·
 [Compare tools](https://xcb.sh/compare) · [Source](https://github.com/hraness/xcb) ·
-[Application API](docs/application-api.md) · [Compatibility reference](docs/compatibility.md) · [Contributing](CONTRIBUTING.md)
+[Route contract](docs/route.md) · [Application API](docs/application-api.md) · [Compatibility reference](docs/compatibility.md) · [Contributing](CONTRIBUTING.md)
 
 ## Readiness
 
@@ -39,7 +43,7 @@ for setup, supported boundaries, and current limits.
 
 A successful `doctor` or a visible model does not prove a working coding session.
 The current Devin CLI can be authenticated and can return its model catalog, but
-that provider login is separate from XCB's explicit credential import and from
+that provider login is separate from xcb's explicit credential import and from
 an admitted coding turn. Devin validates the selected model against the
 connected account's fresh catalog before each turn. The September 20, 2026
 quota result is historical evidence, not a statement of current availability.
@@ -52,11 +56,28 @@ Codex and Devin task routes remain unqualified and disabled.
 
 ## Native xcb
 
-The source build is the current installation path. As of September 19, 2026,
-GitHub's latest published release is **AgentMixer v0.3.0**, with an AgentMixer
-package archive. No native xcb release or `@hraness/xcb` npm package is published.
-Source version 0.4.0 is not a published release. Check the
-[release assets](https://github.com/hraness/xcb/releases) before downloading.
+Native release binaries are built for macOS ARM64 (`darwin-aarch64`) and
+Linux x86_64 (`linux-x86_64`) as `xcb-<version>-<platform>.tar.gz` with an
+adjacent `.sha256` checksum; other hosts build from source. The
+[release assets](https://github.com/hraness/xcb/releases) show the latest
+verified version and the [project site](https://xcb.sh/download) reflects the
+same datum. The source version number is a build identity, not a published
+release. Releases tagged v0.3.0 and earlier are AgentMixer package archives,
+not native xcb binaries.
+
+### Install a verified release
+
+On a supported platform, download the archive and checksum for your host from
+the release assets, or let the installer fetch and verify one exact version
+from a source checkout:
+
+```sh
+XCB_VERSION=<version> ./scripts/install-native.sh
+```
+
+The installer refuses a missing archive, a checksum mismatch, or an archive
+that contains anything other than the `xcb` binary. When no verified native
+release exists yet, install from source instead.
 
 ### Install from source
 
@@ -77,10 +98,10 @@ xcb --help
 
 The installer builds with the lockfile and installs `~/.local/bin/xcb`.
 `XCB_INSTALL_PREFIX` changes the prefix; `XCB_ADD_PATH=yes` appends the bin
-directory to your shell profile when it is not already on `PATH`.
-The TypeScript compatibility package installs its CLI as `xcb-compat`, so it
-cannot shadow the native `xcb`; use `command -v xcb` to check which binary is
-active.
+directory to your shell profile when it is not already on `PATH`. The
+TypeScript compatibility CLI installs as `xcb-compat`, so it does not shadow
+the native `xcb`; an older compatibility install that still used the `xcb`
+name should be removed, and `command -v xcb` shows which binary answers.
 The installer also records a private install manifest under the prefix and
 keeps the exact installer beside the binary, so later upgrades use the same
 verified path.
@@ -88,25 +109,29 @@ verified path.
 ### Updates and global operation
 
 The native binary is a user-global install when it lives in `~/.local/bin` and
-that directory is on `PATH`. XCB follows an OpenCode-style policy: `notify` is
+that directory is on `PATH`. xcb follows an OpenCode-style policy: `notify` is
 the default, `auto` installs only an exact stable release with its checksum,
-and `disable` turns checks off. A macOS LaunchAgent runs the check once a day
-when you enable it; it never reads project settings or updates from `main`.
+and `disable` turns checks off. Scheduled checks are macOS-only: a LaunchAgent
+runs the check once a day when you enable it, and it never reads project
+settings or updates from `main`. On Linux, run `xcb update check` from your
+own user timer; `xcb update enable` reports that scheduling is unavailable.
 
 ```sh
 xcb update check
-xcb update enable --policy notify   # check daily and tell you when a release exists
-xcb update enable --policy auto     # check daily and install verified releases
+xcb update enable --policy notify   # macOS only: check daily and tell you when a release exists
+xcb update enable --policy auto     # macOS only: check daily and install verified releases
 xcb update status
 xcb upgrade                         # install the latest verified native release
 xcb update disable
 ```
 
-There is currently no published native xcb release, so the updater fails closed
-and leaves the source-installed binary alone until the first verified
-`xcb-<version>-<platform>-<arch>.tar.gz` release is available. After any
-replacement, restart open terminals and rerun `xcb doctor`; provider and
-application qualification is bound to the exact installed executable bytes.
+Native release binaries are built for macOS ARM64 (`darwin-aarch64`) and
+Linux x86_64 (`linux-x86_64`). The updater installs only a verified
+`xcb-<version>-<platform>.tar.gz` asset with its matching checksum for the
+running host; on any other host, or when no such release exists yet, it fails
+closed and leaves the installed binary alone. After any replacement, restart
+open terminals and rerun `xcb doctor`; provider and application qualification
+is bound to the exact installed executable bytes.
 
 Managed supervisors record their exact executable identity. When that binary
 is replaced, a current supervisor stops starting new turns, retains custody of
@@ -128,8 +153,9 @@ sessions or establish fresh live acceptance across all three providers.
 Install an admitted Claude Code binary (major 2, version 2.1.268 or newer).
 xcb performs its own account sign-in below; it does
 not silently import your existing provider login. Replace `<account-id>` below
-with the generated ID printed by `accounts add` or `accounts import-*` (also
-listed by `xcb accounts`). Account names come from observed provider identities;
+with the generated ID printed by `accounts add` or `accounts import-*` (the
+`xcb accounts` ID column is shortened; `xcb accounts --json` lists full IDs).
+Account names come from observed provider identities;
 custom labels are not accepted.
 
 ```sh
@@ -279,7 +305,7 @@ durably settled commands remove their verified input snapshot.
 ### Application integration
 
 The [application API](docs/application-api.md) provides bounded, ephemeral
-inference with no tools or hooks. It requires evidence for the exact XCB binary,
+inference with no tools or hooks. It requires evidence for the exact xcb binary,
 provider, account and model before accepting application traffic.
 [TextButler](https://github.com/hraness/textbutler), an MIT-licensed reference
 application, keeps its contact access and messaging approval in its own host.
@@ -309,13 +335,19 @@ xcb doctor
 xcb completions zsh > /path/to/completions/_xcb
 ```
 
+For another program — typically a coding agent — `xcb --json route` is the
+closed machine contract: one JSON task document on stdin selects an eligible
+account/model route and runs exactly one bounded turn, returning the selected
+route, saved session id, and settled outcome facts as bounded JSON. See
+[the route contract](docs/route.md).
+
 `xcb chat --resume` reopens a control conversation; `xcb resume` opens a saved
 direct provider session and its workspace. Neither is a headless continuation
 command. `/help` lists terminal commands. Conversations, tasks, provider
 sessions, and credentials live in the private native state root
 `~/.local/share/xcb`; `--state /absolute/path` or `XCB_STATE` overrides it.
-The compatibility CLI uses `~/.xcb` instead. Do not point both implementations
-at the same state directory. `xcb --json run` includes the native session ID
+The `xcb-compat` compatibility CLI uses `~/.xcb` instead. Do not point both
+implementations at the same state directory. `xcb --json run` includes the native session ID
 in its result so it can be reopened with `xcb resume <session-id>`.
 
 One provider turn has a 30-minute default deadline, including initialization.
@@ -374,10 +406,11 @@ an explicit environment key; the vaulted key remains bound to System One.
 The native command imports **one Claude credential**, preserving the source:
 
 ```sh
-xcb accounts import-agentmixer --source /absolute/path/to/.agentmixer --label imported
+xcb accounts import-agentmixer --source /absolute/path/to/.agentmixer
 ```
 
-It does not migrate transcripts or sessions. The compatibility source has its
+The account name comes from the observed provider identity. It does not
+migrate transcripts or sessions. The `xcb-compat` compatibility CLI has its
 own `migrate` command and identifier changes; see the
 [compatibility migration reference](docs/compatibility.md#migrating-from-agentmixer).
 Do not run compatibility migration commands against the native state root.

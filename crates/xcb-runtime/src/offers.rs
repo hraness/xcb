@@ -88,11 +88,7 @@ impl OfferState {
             || if self.checked_at_ms == 0 {
                 self.next_check_ms != 0 || !self.source_sha256.is_empty() || !self.offers.is_empty()
             } else {
-                self.source_sha256.len() != 64
-                    || !self
-                        .source_sha256
-                        .bytes()
-                        .all(|byte| byte.is_ascii_hexdigit())
+                !xcb_core::hex64_any(&self.source_sha256)
             }
         {
             return Err(xcb_core::Error::Invalid("offer state").into());
