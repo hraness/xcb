@@ -1044,3 +1044,20 @@ async fn stalled_initialization_fails_fast_inside_the_init_deadline() {
     assert!(started.elapsed() < Duration::from_secs(10));
     assert!(process.join().await);
 }
+
+#[test]
+fn session_cancel_names_only_a_live_prompt_session() {
+    let mut p = protocol();
+    let frame = p.interruption().unwrap();
+    assert_eq!(frame["method"], "session/cancel");
+    assert_eq!(frame["params"]["sessionId"], "fixture-session");
+    // ACP cancel is a notification: no request id to forge or await.
+    assert!(frame.get("id").is_none());
+    // Before prompt start and after turn completion there is nothing to cancel.
+    let mut p = protocol();
+    p.ready = false;
+    assert!(p.interruption().is_none());
+    let mut p = protocol();
+    p.completed = true;
+    assert!(p.interruption().is_none());
+}

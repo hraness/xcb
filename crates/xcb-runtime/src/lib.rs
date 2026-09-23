@@ -35,6 +35,7 @@ pub mod sandbox;
 pub mod store;
 pub mod summary;
 pub mod update;
+mod wire_helpers;
 
 use sha2::{Digest, Sha256};
 use xcb_core::Id;

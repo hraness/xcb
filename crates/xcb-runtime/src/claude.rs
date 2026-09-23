@@ -79,14 +79,7 @@ pub enum Event {
     Notice,
 }
 fn string<'a>(value: &'a Value, key: &str, max: usize) -> Result<&'a str> {
-    let text = value
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or(Error::Protocol("missing string"))?;
-    if text.len() > max {
-        return Err(Error::Protocol("oversized string"));
-    }
-    Ok(text)
+    crate::wire_helpers::field_text(value, key, max, "missing string", "oversized string")
 }
 fn optional_string(value: &Value, key: &str, max: usize) -> Result<Option<String>> {
     value
@@ -96,16 +89,10 @@ fn optional_string(value: &Value, key: &str, max: usize) -> Result<Option<String
         .transpose()
 }
 fn number(value: &Value, key: &str) -> Result<u64> {
-    value
-        .get(key)
-        .and_then(Value::as_u64)
-        .ok_or(Error::Protocol("missing counter"))
+    crate::wire_helpers::field_counter(value, key, "missing counter")
 }
 fn maybe_count(value: &Value, key: &str) -> Result<u64> {
-    match value.get(key) {
-        None | Some(Value::Null) => Ok(0),
-        Some(value) => value.as_u64().ok_or(Error::Protocol("invalid counter")),
-    }
+    crate::wire_helpers::optional_field_counter(value, key, "invalid counter")
 }
 fn counters(value: &Value) -> Result<Counters> {
     let value = Counters {

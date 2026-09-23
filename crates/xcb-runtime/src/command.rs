@@ -46,12 +46,7 @@ pub enum CommandNetwork {
 
 fn relative(value: &str) -> bool {
     value == "."
-        || (!value.is_empty()
-            && value.len() <= 4096
-            && !value.chars().any(char::is_control)
-            && value
-                .split('/')
-                .all(|part| !part.is_empty() && part != "." && part != "..")
+        || (xcb_core::relative_path(value)
             && Path::new(value)
                 .components()
                 .all(|part| matches!(part, Component::Normal(_)))
@@ -405,10 +400,7 @@ pub struct PruneReport {
 }
 
 fn hash(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    xcb_core::hex64(value)
 }
 fn identifier(value: &Id) -> bool {
     let text = value.as_str();

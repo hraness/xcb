@@ -129,6 +129,15 @@ fn blocked_until_from(
     ))
 }
 
+/// A quota meter update buffered during streaming. The account's pool is
+/// bound inside the recording transaction, not at observation time.
+pub(crate) struct PendingQuota {
+    pub window: Id,
+    pub used_percent: f64,
+    pub observed_at_ms: u64,
+    pub resets_at_ms: u64,
+}
+
 fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
     point.validate()?;
     let json = serde_json::to_string(point)?;
@@ -308,12 +317,7 @@ impl RunRecord {
 }
 
 fn validate_command_custody(run_id: &Id, custody: &crate::command::CommandCustody) -> Result<()> {
-    let hash = |value: &str| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    };
+    let hash = xcb_core::hex64;
     let id = custody.command_id.as_str();
     if custody.version != 1
         || custody.run_id != *run_id
@@ -346,6 +350,10 @@ pub struct UsageObservation {
 
 pub struct Store {
     root: PathBuf,
+    /// Test-only count of fsync'd observability commits, proving a batch of
+    /// N stream events lands in one transaction rather than N.
+    #[cfg(test)]
+    pub(crate) observation_commits: std::sync::atomic::AtomicUsize,
     /// Unique identity of this open handle — one per terminal process — stamped
     /// on every run this store prepares so other terminals can recognise
     /// foreign-owned live runs.
@@ -491,6 +499,8 @@ impl Store {
             instance: new_id("i").to_string(),
             connection: Mutex::new(connection),
             managed: Mutex::new(None),
+            #[cfg(test)]
+            observation_commits: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -603,6 +613,8 @@ impl Store {
             instance: new_id("i").to_string(),
             connection: Mutex::new(connection),
             managed: Mutex::new(None),
+            #[cfg(test)]
+            observation_commits: std::sync::atomic::AtomicUsize::new(0),
         })
     }
     fn db(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -1886,6 +1898,102 @@ impl Store {
             return Err(Error::Conflict("account identity changed"));
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Batched observability checkpoint for the streaming path: pending
+    /// velocity samples and quota observations land in ONE immediate
+    /// transaction instead of a commit per event. Every check the per-event
+    /// recorders run still applies — monotonicity, bounded history, run
+    /// custody, generation stability and payload compare-and-set — so a
+    /// batch of N events costs one fsync'd commit without weakening
+    /// durability or observation semantics.
+    pub(crate) fn record_observations(
+        &self,
+        run: &RunRecord,
+        session: &Id,
+        samples: &[xcb_core::usage::VelocitySample],
+        observations: &[PendingQuota],
+    ) -> Result<()> {
+        for sample in samples {
+            if sample.output_tokens > xcb_core::usage::COUNTER_LIMIT {
+                return Err(xcb_core::Error::Limit("velocity counter").into());
+            }
+        }
+        if samples.is_empty() && observations.is_empty() {
+            return Ok(());
+        }
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !samples.is_empty() {
+            let mut previous: Option<(i64, i64)> = tx.query_row("SELECT at_ms,output_total FROM velocity WHERE session=?1 ORDER BY at_ms DESC LIMIT 1", [session.as_str()], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            for sample in samples {
+                if previous.is_some_and(|(at, count)| {
+                    at > sample.at_ms as i64 || count > sample.output_tokens as i64
+                }) {
+                    return Err(Error::Conflict("velocity counter regressed"));
+                }
+                tx.execute("INSERT INTO velocity VALUES(?1,?2,?3) ON CONFLICT(session,at_ms) DO UPDATE SET output_total=excluded.output_total", params![session.as_str(), sql(sample.at_ms)?, sql(sample.output_tokens)?])?;
+                previous = Some((sample.at_ms as i64, sample.output_tokens as i64));
+            }
+            tx.execute("DELETE FROM velocity WHERE session=?1 AND at_ms NOT IN (SELECT at_ms FROM velocity WHERE session=?1 ORDER BY at_ms DESC LIMIT 2048)", [session.as_str()])?;
+        }
+        if !observations.is_empty() {
+            self.owned_run_from(&tx, run)?;
+            let payload: String = tx.query_row(
+                "SELECT payload FROM accounts WHERE id=?1",
+                [run.account.as_str()],
+                |row| row.get(0),
+            )?;
+            let mut account: Account = decode(&payload)?;
+            account.validate()?;
+            if account.id != run.account {
+                return Err(Error::Conflict("account identity changed"));
+            }
+            let pool = generation_pool(&self.root, &account)?;
+            if let Some(pool) = &pool {
+                account.quota_pool = pool.clone();
+            }
+            for observation in observations {
+                let point = QuotaPoint {
+                    pool: account.quota_pool.clone(),
+                    window: observation.window.clone(),
+                    used_percent: observation.used_percent,
+                    observed_at_ms: observation.observed_at_ms,
+                    resets_at_ms: observation.resets_at_ms,
+                };
+                // Malformed meter updates are dropped like the per-event path
+                // drops them; they never reach the table.
+                if point.validate().is_err() {
+                    continue;
+                }
+                if observation.observed_at_ms < run.created_at_ms {
+                    return Err(Error::Conflict(
+                        "quota observation predates its account lease",
+                    ));
+                }
+                insert_quota(&tx, &point)?;
+            }
+            if generation_pool(&self.root, &account)? != pool {
+                return Err(Error::Conflict("account credential generation changed"));
+            }
+            self.owned_run_from(&tx, run)?;
+            if tx.execute(
+                "UPDATE accounts SET payload=?1 WHERE id=?2 AND payload=?3",
+                params![
+                    serde_json::to_string(&account)?,
+                    account.id.as_str(),
+                    payload
+                ],
+            )? != 1
+            {
+                return Err(Error::Conflict("account identity changed"));
+            }
+        }
+        tx.commit()?;
+        #[cfg(test)]
+        self.observation_commits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -3327,6 +3435,176 @@ mod tests {
                 .command_custody
                 .as_ref(),
             Some(&custody)
+        );
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use xcb_core::{
+        Provider,
+        models::{Mode, ModelChoice},
+        usage::VelocitySample,
+    };
+
+    fn fixture() -> (tempfile::TempDir, Store, RunRecord, Session) {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("work")).unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let session = store
+            .create_session(
+                &account.id,
+                ModelChoice {
+                    provider: Provider::Codex,
+                    id: Id::new("gpt-6-astra").unwrap(),
+                    label: "Astra".into(),
+                    mode: Mode::Fixed,
+                    resolved: None,
+                    effort: None,
+                    observed_at_ms: 1,
+                },
+                &base.join("work"),
+                2,
+            )
+            .unwrap();
+        let run = store.prepare_run(&session.id, session.revision, 4).unwrap();
+        (directory, store, run, session)
+    }
+
+    #[test]
+    fn a_turns_observations_commit_once_not_once_per_event() {
+        let (_dir, store, run, session) = fixture();
+        // One streamed turn's worth of meters: a baseline, four decimated
+        // velocity samples and two quota updates all land in one commit.
+        let samples: Vec<VelocitySample> = (0..5)
+            .map(|i| VelocitySample {
+                at_ms: 1_000 + i * 250,
+                output_tokens: 40 + i * 20,
+            })
+            .collect();
+        let observations: Vec<PendingQuota> = ["primary", "secondary"]
+            .iter()
+            .enumerate()
+            .map(|(i, window)| PendingQuota {
+                window: Id::new(*window).unwrap(),
+                used_percent: 40.0 + i as f64,
+                observed_at_ms: 1_000 + i as u64,
+                resets_at_ms: 9_999_999,
+            })
+            .collect();
+        store
+            .record_observations(&run, &session.id, &samples, &observations)
+            .unwrap();
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "seven stream events must cost one fsync'd commit, not seven"
+        );
+        // Every buffered observation landed, velocity stayed monotonic and
+        // quota points were bound to the leased account's pool at record time.
+        let stored = store.velocities(&session.id, 0).unwrap();
+        assert_eq!(stored.len(), samples.len());
+        assert_eq!(stored.last().unwrap().output_tokens, 120);
+        let account = store.account(&run.account).unwrap();
+        let quotas = store.quotas(&account.quota_pool).unwrap();
+        assert_eq!(quotas.len(), 2);
+        assert_eq!(quotas[0].used_percent, 40.0);
+        // A second flush with new events is exactly one more commit; the
+        // empty flush common at turn end costs none.
+        store
+            .record_observations(&run, &session.id, &[], &[])
+            .unwrap();
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        store
+            .record_observations(
+                &run,
+                &session.id,
+                &[VelocitySample {
+                    at_ms: 2_000,
+                    output_tokens: 200,
+                }],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+    }
+
+    #[test]
+    fn a_regressed_observation_batch_is_atomic_and_uncommitted() {
+        let (_dir, store, run, session) = fixture();
+        store
+            .record_observations(
+                &run,
+                &session.id,
+                &[VelocitySample {
+                    at_ms: 1_000,
+                    output_tokens: 100,
+                }],
+                &[],
+            )
+            .unwrap();
+        // A later sample under an earlier counter regresses: the whole batch
+        // rolls back, no commit is counted and nothing partial persists.
+        let regressed = [
+            VelocitySample {
+                at_ms: 1_500,
+                output_tokens: 150,
+            },
+            VelocitySample {
+                at_ms: 1_600,
+                output_tokens: 90,
+            },
+        ];
+        assert!(
+            store
+                .record_observations(&run, &session.id, &regressed, &[])
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(store.velocities(&session.id, 0).unwrap().len(), 1);
+        // Quota observations predating their lease are rejected the same way.
+        assert!(
+            store
+                .record_observations(
+                    &run,
+                    &session.id,
+                    &[],
+                    &[PendingQuota {
+                        window: Id::new("primary").unwrap(),
+                        used_percent: 50.0,
+                        observed_at_ms: 1,
+                        resets_at_ms: 9_999_999,
+                    }],
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .observation_commits
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
         );
     }
 }

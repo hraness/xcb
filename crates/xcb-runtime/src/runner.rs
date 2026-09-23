@@ -10,7 +10,7 @@ use crate::{
     process::{Pin, StreamProcess},
     protocol::{Event as TurnEvent, ImageInput, Prompt, Protocol},
     sandbox,
-    store::{RunRecord, Store, UsageObservation},
+    store::{PendingQuota, RunRecord, Store, UsageObservation},
 };
 use base64::Engine;
 use serde_json::{Value, json};
@@ -208,6 +208,14 @@ async fn spawn_process(
 /// Serializes cleanup with the host owner. Its release proves neither that a
 /// provider descendant exited nor that its effects settled.
 pub(crate) const LAUNCH_OWNER_LOCK: &str = "owner.lock";
+
+/// How long a cancelled provider may exit on its own after its interruption
+/// frame and stdin close before the process group is killed.
+const CANCEL_GRACE: Duration = Duration::from_millis(1500);
+
+/// Minimum interval between fsync'd observability checkpoints during a turn.
+/// Velocity/quota events still arrive at provider pace; the commits do not.
+const OBSERVATION_FLUSH_MS: u64 = 2_000;
 
 /// Launch snapshots are disposable only before spawn or after independent
 /// process-join evidence and settled effects. Cancellation/drop alone never
@@ -1904,6 +1912,12 @@ pub(crate) async fn run_prepared<P: Protocol>(
     let workspace = Arc::new(workspace);
     let mut commands = crate::command_tool::CommandTools::default();
     let mut commands_joined = true;
+    // Velocity and quota observations are display meters, not custody: they
+    // accumulate in memory during the stream and land in one fsync'd commit
+    // per flush instead of one transaction per provider event.
+    let mut pending_velocity: Vec<VelocitySample> = Vec::new();
+    let mut pending_quota: Vec<PendingQuota> = Vec::new();
+    let mut last_observation_flush_ms = 0u64;
     // One managed mailbox connection per worker run rather than one open
     // (and migration probe) per `xcb_*` tool call.
     let mut managed_bridge = None;
@@ -1999,13 +2013,10 @@ pub(crate) async fn run_prepared<P: Protocol>(
             .await?;
         let started = now_ms();
         if input.config.extensions.usage {
-            store.record_velocity(
-                &session.id,
-                VelocitySample {
-                    at_ms: started,
-                    output_tokens: baseline,
-                },
-            )?;
+            pending_velocity.push(VelocitySample {
+                at_ms: started,
+                output_tokens: baseline,
+            });
         }
         let mut admitted = false;
         let mut seen_calls = BTreeSet::new();
@@ -2068,13 +2079,21 @@ pub(crate) async fn run_prepared<P: Protocol>(
                             && now.saturating_sub(last_velocity_ms) >= 250
                         {
                             last_velocity_ms = now;
-                            store.record_velocity(
+                            pending_velocity.push(VelocitySample {
+                                at_ms: now,
+                                output_tokens: baseline.saturating_add(output_tokens),
+                            });
+                        }
+                        if now.saturating_sub(last_observation_flush_ms) >= OBSERVATION_FLUSH_MS {
+                            last_observation_flush_ms = now;
+                            store.record_observations(
+                                &run,
                                 &session.id,
-                                VelocitySample {
-                                    at_ms: now,
-                                    output_tokens: baseline.saturating_add(output_tokens),
-                                },
+                                &pending_velocity,
+                                &pending_quota,
                             )?;
+                            pending_velocity.clear();
+                            pending_quota.clear();
                         }
                     }
                     TurnEvent::Delta {
@@ -2111,16 +2130,12 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         if let (Some(window), Some(used_percent), Some(resets_at_ms)) =
                             (window, used_percent, resets_at_ms)
                         {
-                            let point = QuotaPoint {
-                                pool: store.account(&session.account)?.quota_pool,
+                            pending_quota.push(PendingQuota {
                                 window: Id::new(window)?,
                                 used_percent,
                                 observed_at_ms: now_ms(),
                                 resets_at_ms,
-                            };
-                            if point.validate().is_ok() {
-                                store.record_account_quota(&run, &point)?;
-                            }
+                            });
                         }
                     }
                     TurnEvent::Tool {
@@ -2288,13 +2303,10 @@ pub(crate) async fn run_prepared<P: Protocol>(
                             answer.completed(text)?;
                         }
                         if input.config.extensions.usage {
-                            store.record_velocity(
-                                &session.id,
-                                VelocitySample {
-                                    at_ms: now_ms(),
-                                    output_tokens: baseline.saturating_add(output_tokens),
-                                },
-                            )?;
+                            pending_velocity.push(VelocitySample {
+                                at_ms: now_ms(),
+                                output_tokens: baseline.saturating_add(output_tokens),
+                            });
                         }
                         return Ok((terminal, models));
                     }
@@ -2324,18 +2336,40 @@ pub(crate) async fn run_prepared<P: Protocol>(
         }
     };
     let deadline = Duration::from_millis(input.config.turn_timeout_ms);
-    let result = tokio::select! {
+    let (cancelled, mut result) = tokio::select! {
         biased;
-        _ = async { if !*cancel_execution.borrow() { let _ = cancel_execution.changed().await; } } => Ok(Ok((Terminal::Cancelled, vec![]))),
-        result = tokio::time::timeout(deadline, execution) => result,
+        _ = async { if !*cancel_execution.borrow() { let _ = cancel_execution.changed().await; } } =>
+            (true, Ok(Ok((Terminal::Cancelled, vec![])))),
+        result = tokio::time::timeout(deadline, execution) => (false, result),
     };
+    if cancelled {
+        // Cooperative interruption first: a provider that understands it can
+        // settle the turn and exit inside the grace period below; everything
+        // else still gets the same bounded stdin-close grace and kill.
+        if let Some(frame) = protocol.interruption() {
+            let _ = process.send(&frame).await;
+        }
+    }
+    // Everything the turn observed lands in one commit here — completion,
+    // cancellation, limit and error paths alike. A write failure fails the
+    // turn exactly as the per-event record calls it replaces.
+    if let Err(error) =
+        store.record_observations(&run, &session.id, &pending_velocity, &pending_quota)
+        && result.is_ok()
+    {
+        result = Ok(Err(error));
+    }
     // Cancellation drops only the execution future. Never cancel independent
     // process/listener joins or credential persistence and custody settlement.
     if let Some(command) = commands.cancel_and_join().await {
         commands_joined &= command.joined;
         effects = combine_effects(effects, command.effects);
     }
-    let process_joined = process.join().await;
+    let process_joined = if cancelled {
+        process.join_graceful(CANCEL_GRACE).await
+    } else {
+        process.join().await
+    };
     if let Some(bytes) = process.stderr_overflow() {
         // Volume is reported, never retained: provider stderr is not a
         // bounded host diagnostic and may carry credentials or paths.

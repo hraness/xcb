@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     task::JoinHandle,
 };
@@ -147,31 +147,10 @@ fn digest_file(mut file: File, limit: u64) -> Result<String> {
 }
 
 /// The exact file identity a verified digest is bound to, read from the same
-/// descriptor the digest is computed on. An inode replacement changes `ino`;
-/// an in-place write or permission change changes `size`, `mtime`, or the
-/// unforgeable status-change time `ctime` — any difference re-digests. The
+/// descriptor the digest is computed on — any difference re-digests. The
 /// identity is a cache key, never a substitute for the checks
 /// `executable_file` runs on every call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileIdentity {
-    dev: u64,
-    ino: u64,
-    size: u64,
-    mtime: (i64, i64),
-    ctime: (i64, i64),
-}
-
-impl FileIdentity {
-    fn read(metadata: &fs::Metadata) -> Self {
-        Self {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-            size: metadata.len(),
-            mtime: (metadata.mtime(), metadata.mtime_nsec()),
-            ctime: (metadata.ctime(), metadata.ctime_nsec()),
-        }
-    }
-}
+type FileIdentity = xcb_core::FileIdentity;
 
 /// Process-wide verified digests keyed by canonical executable path. A route
 /// decision loads every provider's pin and each turn re-verifies the host and
@@ -206,7 +185,7 @@ pub fn executable_digest(path: &Path) -> Result<String> {
     let file = executable_file(path)?;
     // fstat of the open descriptor: the identity below names the inode the
     // digest is computed from, never a re-resolved path.
-    let identity = FileIdentity::read(&file.metadata()?);
+    let identity = FileIdentity::of(&file.metadata()?);
     let key = path.canonicalize().unwrap_or_else(|_| path.to_owned());
     {
         let cache = verified_digests()
@@ -568,12 +547,13 @@ struct Drained {
 }
 
 pub struct StreamProcess {
-    pub(crate) stdin: ChildStdin,
+    pub(crate) stdin: Option<ChildStdin>,
     pub(crate) stdout: BufReader<ChildStdout>,
     child: Child,
     group: Option<Pid>,
     stderr: JoinHandle<Drained>,
     stderr_bytes: Option<u64>,
+    exit_status: Option<std::process::ExitStatus>,
     frame_buffer: Vec<u8>,
 }
 impl StreamProcess {
@@ -596,12 +576,13 @@ impl StreamProcess {
         let stderr = child.stderr.take().ok_or(Error::Protocol("child stderr"))?;
         let stderr = tokio::spawn(drain_to_eof(stderr));
         Ok(Self {
-            stdin,
+            stdin: Some(stdin),
             stdout,
             child,
             group: Some(pid),
             stderr,
             stderr_bytes: None,
+            exit_status: None,
             frame_buffer: Vec::new(),
         })
     }
@@ -612,14 +593,11 @@ impl StreamProcess {
             .get() as u32
     }
     pub async fn send(&mut self, value: &serde_json::Value) -> Result<()> {
-        let mut bytes = serde_json::to_vec(value)?;
-        if bytes.len() > 16 * 1024 * 1024 {
-            return Err(Error::Protocol("input frame limit"));
-        }
-        bytes.push(b'\n');
-        self.stdin.write_all(&bytes).await?;
-        self.stdin.flush().await?;
-        Ok(())
+        let stdin = self
+            .stdin
+            .as_mut()
+            .ok_or(Error::Protocol("provider input closed"))?;
+        crate::wire_helpers::write_frame(stdin, value, 16 * 1024 * 1024, "input frame limit").await
     }
     pub async fn frame(&mut self) -> Result<Option<Vec<u8>>> {
         self.frame_bounded(MAX_JSON_BYTES).await
@@ -633,28 +611,16 @@ impl StreamProcess {
         if self.frame_buffer.len() > max {
             return Err(Error::Protocol("output frame limit"));
         }
-        loop {
-            let available = self.stdout.fill_buf().await?;
-            if available.is_empty() {
-                return if self.frame_buffer.is_empty() {
-                    Ok(None)
-                } else {
-                    Err(Error::Protocol("incomplete final frame"))
-                };
-            }
-            let end = available.iter().position(|byte| *byte == b'\n');
-            let count = end.map_or(available.len(), |end| end + 1);
-            if self.frame_buffer.len() + count > max {
-                return Err(Error::Protocol("output frame limit"));
-            }
-            // Retain consumed bytes across cancellation. An adapter may select
-            // ACP stdout against an independent MCP callback channel.
-            self.frame_buffer.extend_from_slice(&available[..count]);
-            self.stdout.consume(count);
-            if end.is_some() {
-                return Ok(Some(std::mem::take(&mut self.frame_buffer)));
-            }
-        }
+        // The retained buffer survives cancellation: an adapter may select
+        // ACP stdout against an independent MCP callback channel.
+        crate::wire_helpers::frame(
+            &mut self.stdout,
+            &mut self.frame_buffer,
+            max,
+            "output frame limit",
+            "incomplete final frame",
+        )
+        .await
     }
     fn signal(&self) {
         if let Some(group) = self.group {
@@ -668,13 +634,38 @@ impl StreamProcess {
         self.stderr_bytes
             .filter(|bytes| *bytes > STDERR_NOTICE_BYTES)
     }
+    /// The status observed when `join`/`join_graceful` reaped the child —
+    /// how callers prove a graceful settle exited on its own rather than
+    /// under SIGKILL.
+    pub fn exit_status(&self) -> Option<std::process::ExitStatus> {
+        self.exit_status
+    }
     pub async fn join(&mut self) -> bool {
         self.signal();
+        self.reap().await
+    }
+    /// The graceful settle cancellation asks for: close stdin first, give the
+    /// provider `grace` to exit on its own (after any interruption frame the
+    /// caller already sent), then kill the group exactly as `join` does. The
+    /// reaped-streams and group-absence proof is unchanged either way.
+    pub async fn join_graceful(&mut self, grace: Duration) -> bool {
+        // Dropping stdin is what sends EOF: shutdown on a child pipe is a
+        // no-op, so a provider that polls its input sees a real close.
+        self.stdin.take();
+        if tokio::time::timeout(grace, self.child.wait())
+            .await
+            .is_err()
+        {
+            self.signal();
+        }
+        self.reap().await
+    }
+    async fn reap(&mut self) -> bool {
         let Some(group) = self.group.take() else {
             return false;
         };
         let joined = tokio::time::timeout(Duration::from_secs(5), async {
-            let _ = self.stdin.shutdown().await;
+            self.stdin.take();
             let (exit, stdout, stderr) = tokio::join!(
                 self.child.wait(),
                 drain_to_eof(&mut self.stdout),
@@ -682,6 +673,7 @@ impl StreamProcess {
             );
             let stderr = stderr.unwrap_or_default();
             self.stderr_bytes = Some(stderr.bytes);
+            self.exit_status = exit.as_ref().ok().copied();
             exit.is_ok() && stdout.complete && stderr.complete
         })
         .await
