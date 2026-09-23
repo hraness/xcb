@@ -167,7 +167,8 @@ xcb models
 xcb --cwd /absolute/path/to/your/project
 ```
 
-Plain `xcb` opens a new persistent control conversation. Prompts become durable
+Plain `xcb` reopens the latest persistent control conversation for the workspace;
+`xcb chat --new` starts another. Prompts become durable
 managed tasks routed through admitted Codex, Claude, or Devin sessions; closing
 the terminal detaches without cancelling them. Open another terminal for an
 independent conversation over the same task swarm, use `/tasks` to inspect work,
@@ -177,6 +178,15 @@ Use `new task: …` to explicitly start separate work. Independent workspaces ca
 run concurrently; tasks in the same workspace run one at a time. Say
 `cancel <task-id>` to request cancellation and inspect `/tasks` for settlement.
 
+Use `/backlog` for this conversation's backlog and `/backlog all` to browse all
+projects. `/attention` collects questions, approvals and actions across agents.
+Deferred work can be edited and released when ready. `/schedule` manages local
+recurring prompts; each wake-up dispatches ordinary bounded work through the
+same router. Completed tasks retain their summaries as work history. Workers
+can propose deferred follow-ups and read recent project summaries with scoped
+backlog and memory tools. See [persistent project agents](docs/project-agents.md)
+for scheduling, attention, working memory and the Wordcell/ALGAL boundaries.
+
 The Rust supervisor owns scheduling and deterministic safety decisions. ALGAL
 records bounded transition receipts; it does not infer permissions, establish
 provider qualification, or replace the supervisor’s execution policy.
@@ -184,10 +194,13 @@ provider qualification, or replace the supervisor’s execution policy.
 it against the current record; it does not attest provider claims or real-world
 outcomes.
 
-Managed routing first filters for qualified, credentialed, idle, quota-usable
-accounts. It then ranks bounded model candidates by task fit, fresh remaining
-usage, relative quality/cost/latency and Pareto layer, while preserving explicit
-provider requests and soft workspace-learned preferences. Official temporary
+Managed routing and unpinned `xcb run` first filter for qualified, credentialed,
+idle, quota-usable accounts. ALGAL's fitted classifier can select a capability
+tier through one bounded typed judgment; routing works deterministically when
+that optional service is absent. Substantial prompts use the highest known
+quality among eligible models. Quota-driven downgrades are visible. Explicit
+provider/model requests remain constraints; routine work still considers
+relative cost, latency and workspace preferences. Official temporary
 offers are cached as expiring observations. They do not prove account entitlement
 or reduce a route’s estimated cost without that evidence. They never activate an
 unqualified provider or survive stale terms. Managed Claude, Codex and Devin workers share
@@ -208,10 +221,10 @@ usage metadata. Unknown or stale usage percentages remain unknown. A proven
 Claude account-wide quota exhaustion stays blocked until its reported reset,
 even when its percentage has gone stale. The account list shows a retry estimate;
 see [quota routing](docs/quota-routing.md) for the scope and credential binding.
-For direct sessions, select a model by copying its full observed key from
-`xcb models` and running `xcb models default <key>`. Managed tasks choose among
-eligible routes; begin a task with `Use Claude`, `Use Codex`, or `Use Devin` to
-require that provider.
+You do not need to select a model for managed chat or `xcb run`. To pin a model
+for a direct run, pass its full observed key with `--model`; stored direct
+sessions keep their existing binding. Begin a managed task with `Use Claude`,
+`Use Codex`, or `Use Devin` when you want to require that provider.
 
 If discovery finds the wrong binary, use
 `xcb doctor --provider claude --executable /absolute/path/to/claude`.
@@ -276,8 +289,9 @@ an explicitly connected account. Native Devin currently uses fixed ACP model
 choices. Adaptive and Fusion catalog representations in the compatibility
 package do not establish native support.
 
-For either provider, copy a full matching model key from `xcb models` and set it
-with `xcb models default <key>` for direct sessions. Select the account with
+For either provider, `xcb run` automatically selects an eligible model. An
+optional explicit default for direct interactive sessions can be set with a
+full matching key from `xcb models` using `xcb models default <key>`. Select the account with
 `xcb accounts default <account>` for new direct sessions, or pass
 `--account <account> --model <key>` to `xcb run`. Rerun `doctor` after a provider
 upgrade; a new version is not automatically admitted.
@@ -318,6 +332,9 @@ xcb --cwd /absolute/path/to/your/project       # new control conversation
 xcb conversations                                # resumable control conversations
 xcb chat --resume <conversation-id>
 xcb tasks                                        # global managed task swarm
+xcb backlog                                      # backlog and work history across projects
+xcb attention                                    # questions, approvals and actions
+xcb schedules                                    # durable recurring prompts
 xcb tasks verify <task-id>                       # verify local transition receipts
 xcb tasks messages <task-id>                     # durable cross-provider mailbox
 xcb offers --refresh                             # refresh official expiring offers

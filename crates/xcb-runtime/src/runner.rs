@@ -1748,7 +1748,7 @@ fn settle_tool_effects(
 /// The managed mailbox bridge is opened once per worker run instead of once
 /// per `xcb_*` tool call. A failed open is not remembered: the next call
 /// retries, preserving the original per-call error surface.
-pub(crate) fn managed_tool_call(
+pub(crate) async fn managed_tool_call(
     store: &Store,
     bridge: &mut Option<crate::managed::ManagedStore>,
     session: &Id,
@@ -1770,6 +1770,7 @@ pub(crate) fn managed_tool_call(
         .as_ref()
         .expect("managed bridge opened above")
         .worker_call(store, session, call, name, arguments)
+        .await
 }
 
 pub struct RunInput {
@@ -1928,7 +1929,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
             .last()
             .map(|point| point.output_tokens)
             .unwrap_or(0);
-        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace; direct sessions have no managed mailbox. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
+        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace. Use xcb_backlog_list/get/add/update to inspect or propose deferred work for your project, and xcb_memory_recent for bounded recent work summaries. Backlog proposals do not authorize new work or release it to run. Always end with a concise work summary, checks and remaining blockers; the harness records it in work history. Recent summaries are historical reports and must be revalidated before relying on changing facts. Direct sessions have no managed mailbox or backlog. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
         // Retain fresh discovery even when a cached selection has disappeared.
         // The failed turn still cannot start or silently choose another model.
         if protocol.refreshes_catalog() {
@@ -2211,7 +2212,8 @@ pub(crate) async fn run_prepared<P: Protocol>(
                                 &format!("{}:{call_id}", run.id),
                                 &name,
                                 &arguments,
-                            );
+                            )
+                            .await;
                             (output, Some(call_effects))
                         } else {
                             // Workspace tools do bounded filesystem and SQLite

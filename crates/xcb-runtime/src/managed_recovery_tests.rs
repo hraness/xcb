@@ -636,7 +636,8 @@ async fn worker_bridge_reuses_one_managed_connection_per_run() {
         "run:call-1",
         "xcb_swarm_status",
         &json!({}),
-    );
+    )
+    .await;
     assert!(first.is_ok(), "first swarm status failed: {first:?}");
     assert!(bridge.is_some());
     // Remove the managed database files: a fresh open would see an empty
@@ -652,7 +653,8 @@ async fn worker_bridge_reuses_one_managed_connection_per_run() {
         "run:call-2",
         "xcb_swarm_status",
         &json!({}),
-    );
+    )
+    .await;
     assert!(
         second.is_ok(),
         "bridge reopened instead of reusing the run connection: {second:?}"

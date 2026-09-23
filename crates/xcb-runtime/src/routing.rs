@@ -1,22 +1,13 @@
 use crate::{
     Error, Result, auth, config::Config, judge, now_ms, offers::OfferState, process::Pin, runner,
-    store::Store, summary,
+    store::Store, summary, task_classifier,
 };
 use serde::Serialize;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::collections::{BTreeMap, BTreeSet};
 use xcb_core::{
     Id, Provider,
     models::{Mode, ModelChoice},
 };
-
-/// The route-selection judge may only reorder already-admitted candidates, so
-/// its latency is bounded well under the backend request ceiling: a slow,
-/// failing or absent judge leaves the deterministic order intact and lets the
-/// supervisor tick proceed.
-const ROUTE_JUDGE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +53,9 @@ pub const NO_CONNECTED_ACCOUNT: &str = "no eligible account; add or reconnect on
 /// excluded for now; a later retry may succeed.
 pub const NO_ELIGIBLE_ROUTE: &str =
     "no eligible admitted route; connect an account, finish active work, or wait for quota reset";
+/// An otherwise matching admitted route has observed quota exhaustion, and no
+/// eligible fallback exists. This does not claim that busy routes lack quota.
+pub const NO_QUOTA_AVAILABLE_ROUTE: &str = "usage limits block a matching admitted route; no eligible fallback is available; wait for the reported quota reset or connect another account";
 
 pub struct RouteRequest<'a> {
     pub task: &'a str,
@@ -79,7 +73,6 @@ struct Candidate {
     account: Id,
     model: ModelChoice,
     profile: ModelProfile,
-    remaining: Option<f64>,
     utility: i32,
 }
 
@@ -323,6 +316,22 @@ pub fn profile_models(
     task: &str,
 ) -> Vec<ProfiledModel> {
     let class = classify_task(task);
+    profile_models_for_class(
+        models,
+        offers,
+        now,
+        class,
+        task_classifier::substantial(task) || class == TaskClass::Complex,
+    )
+}
+
+fn profile_models_for_class(
+    models: &[ModelChoice],
+    offers: &OfferState,
+    now: u64,
+    class: TaskClass,
+    frontier: bool,
+) -> Vec<ProfiledModel> {
     let mut by_provider: BTreeMap<Provider, Vec<ProfiledModel>> = BTreeMap::new();
     for model in models.iter().filter(|model| model.mode == Mode::Fixed) {
         by_provider
@@ -338,8 +347,9 @@ pub fn profile_models(
     let mut rows = Vec::new();
     for (_, mut provider) in by_provider {
         provider.sort_by(|left, right| {
-            utility(class, &right.profile)
-                .cmp(&utility(class, &left.profile))
+            quality_priority(frontier, &right.profile)
+                .cmp(&quality_priority(frontier, &left.profile))
+                .then_with(|| utility(class, &right.profile).cmp(&utility(class, &left.profile)))
                 .then_with(|| left.key.cmp(&right.key))
         });
         rows.extend(provider.into_iter().take(12));
@@ -376,6 +386,7 @@ fn eligible_profiles(
     offers: &OfferState,
     now: u64,
     task: &str,
+    frontier: bool,
     eligible: impl Fn(&ModelChoice) -> bool,
 ) -> BTreeMap<String, ModelProfile> {
     // Exclusions must precede the bounded shortlist. Otherwise exhausting the
@@ -385,7 +396,7 @@ fn eligible_profiles(
         .filter(|model| selectable_model(model) && eligible(model))
         .cloned()
         .collect();
-    profile_models(&models, offers, now, task)
+    profile_models_for_class(&models, offers, now, classify_task(task), frontier)
         .into_iter()
         .map(|row| (row.key, row.profile))
         .collect()
@@ -451,14 +462,43 @@ async fn route_with_admitted(
                 && !excluded_accounts.contains(&account.id)
         })
         .collect();
-    let profile_by_key = eligible_profiles(&models, &offers, now, task, |model| {
-        required_model.is_none_or(|key| model.key() == key)
-            && accounts.iter().any(|account| {
-                account.provider == model.provider
-                    && !excluded_routes.contains(&format!("{} · {}", model.key(), account.id))
-            })
-    });
+    let unavailable_reason = || {
+        unavailable_route_reason(
+            &models,
+            &connected,
+            now,
+            required_model,
+            excluded_routes,
+            excluded_accounts,
+        )
+    };
+    if accounts.is_empty() {
+        return Err(Error::Unavailable(unavailable_reason()));
+    }
     let class = classify_task(task);
+    let backend = if config.extensions.judge.enabled {
+        judge::resolve(store.root(), &config.extensions.judge)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    let classification =
+        task_classifier::classify(task, backend.as_deref(), class == TaskClass::Complex).await;
+    let profile_by_key = eligible_profiles(
+        &models,
+        &offers,
+        now,
+        task,
+        classification.frontier,
+        |model| {
+            required_model.is_none_or(|key| model.key() == key)
+                && accounts.iter().any(|account| {
+                    account.provider == model.provider
+                        && !excluded_routes.contains(&format!("{} · {}", model.key(), account.id))
+                })
+        },
+    );
     let mut candidates = Vec::new();
     for model in &models {
         let Some(profile) = profile_by_key.get(&model.key()).cloned() else {
@@ -480,11 +520,13 @@ async fn route_with_admitted(
                 account: account.id.clone(),
                 model: model.clone(),
                 profile: profile.clone(),
-                remaining: account.remaining_percent,
                 utility: score,
             });
         }
     }
+    // An expensive/favored route or an external judgment cannot displace the
+    // strongest known eligible quality tier when the task demands frontier.
+    retain_quality_tier(&mut candidates, classification.frontier);
     candidates.sort_by(|left, right| {
         right
             .utility
@@ -508,66 +550,24 @@ async fn route_with_admitted(
     });
     candidates.truncate(8);
     if candidates.is_empty() {
-        return Err(Error::Unavailable(if connected.is_empty() {
-            NO_CONNECTED_ACCOUNT
-        } else {
-            NO_ELIGIBLE_ROUTE
-        }));
+        return Err(Error::Unavailable(unavailable_reason()));
     }
-    let mut selected = 0usize;
-    let mut judged = false;
-    if candidates.len() > 1
-        && config.extensions.judge.enabled
-        && let Ok(Some(backend)) = judge::resolve(store.root(), &config.extensions.judge)
-    {
-        let mut criteria = BTreeMap::new();
-        for (index, candidate) in candidates.iter().enumerate() {
-            criteria.insert(
-                format!("route_{index}"),
-                Some(format!(
-                    "{} · {} · Pareto P{} · quality {} · relative cost {} · relative latency {}{}{}",
-                    candidate.model.provider,
-                    candidate.model.label,
-                    candidate.profile.pareto_layer,
-                    candidate.profile.quality,
-                    candidate.profile.relative_cost,
-                    candidate.profile.relative_latency,
-                    candidate
-                        .remaining
-                        .map(|remaining| format!(" · {remaining:.0}% quota remaining"))
-                        .unwrap_or_default(),
-                    candidate
-                        .profile
-                        .free_offer
-                        .as_ref()
-                        .map(|_| " · public promotion; account eligibility unverified".to_owned())
-                        .unwrap_or_default(),
-                )),
-            );
-        }
-        let mut questions = judge::JudgeQuestions::new();
-        questions.insert(
-            "route".into(),
-            judge::JudgeQuestion::Choice {
-                instructions: "Select the eligible Pareto-aware route most likely to complete the task well without wasting quota. Prefer lower relative cost/latency when capability is sufficient; use frontier quality for genuinely complex work.".into(),
-                criteria,
-            },
-        );
-        if let Some(index) =
-            judge_route_index(backend.as_ref(), task, class, &questions, candidates.len()).await
-        {
-            selected = index;
-            judged = true;
-        }
-    }
-    let candidate = candidates.swap_remove(selected);
+    let candidate = candidates.remove(0);
+    let warning = quota_degradation_warning(
+        &models,
+        &connected,
+        &offers,
+        now,
+        &candidate,
+        classification.frontier,
+        required_model,
+        excluded_routes,
+        excluded_accounts,
+    );
     let reason = format!(
-        "{} · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}",
-        if judged {
-            "judge-selected"
-        } else {
-            "deterministic"
-        },
+        "{}{} · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}",
+        warning.unwrap_or_default(),
+        classification.reason(),
         match class {
             TaskClass::Routine => "routine",
             TaskClass::Balanced => "balanced",
@@ -592,44 +592,435 @@ async fn route_with_admitted(
     })
 }
 
-/// Ask the judge to order the admitted candidates, bounded so a stalled judge
-/// cannot hold a supervisor tick. A timeout, transport failure or answer that
-/// does not name an in-range `route_N` option yields `None`, preserving the
-/// deterministic order already computed for the candidates.
-async fn judge_route_index(
-    backend: &dyn judge::Judge,
-    task: &str,
-    class: TaskClass,
-    questions: &judge::JudgeQuestions,
-    candidates: usize,
-) -> Option<usize> {
-    let asked = tokio::time::timeout(
-        ROUTE_JUDGE_TIMEOUT,
-        backend.ask(
-            &serde_json::json!({"task":xcb_core::display_text(task,8192),"class":class}),
-            questions,
-        ),
-    )
-    .await;
-    let Ok(Ok(answers)) = asked else {
+/// Unknown identities never acquire an invented frontier rank. When none of
+/// the observed routes has a known profile, ordinary utility remains the fallback.
+fn quality_priority(frontier: bool, profile: &ModelProfile) -> (bool, u16) {
+    if frontier && profile.recognized {
+        (true, profile.quality)
+    } else {
+        (false, 0)
+    }
+}
+
+fn retain_quality_tier(candidates: &mut Vec<Candidate>, frontier: bool) {
+    if frontier
+        && let Some(quality) = candidates
+            .iter()
+            .filter(|candidate| candidate.profile.recognized)
+            .map(|candidate| candidate.profile.quality)
+            .max()
+    {
+        candidates.retain(|candidate| {
+            candidate.profile.recognized && candidate.profile.quality == quality
+        });
+    }
+}
+
+/// `connected` has already applied provider/account constraints, admission,
+/// enabled state and current credential health. Do not infer a quota failure
+/// merely from an excluded, busy, unknown or unobserved route.
+fn unavailable_route_reason(
+    models: &[ModelChoice],
+    connected: &[&xcb_core::ui::AccountRow],
+    now: u64,
+    required_model: Option<&str>,
+    excluded_routes: &BTreeSet<String>,
+    excluded_accounts: &BTreeSet<Id>,
+) -> &'static str {
+    if connected.is_empty() {
+        NO_CONNECTED_ACCOUNT
+    } else if models.iter().any(|model| {
+        selectable_model(model)
+            && required_model.is_none_or(|key| model.key() == key)
+            && quota_blocks_model(model, connected, now, excluded_routes, excluded_accounts)
+    }) {
+        NO_QUOTA_AVAILABLE_ROUTE
+    } else {
+        NO_ELIGIBLE_ROUTE
+    }
+}
+
+fn quota_blocks_model(
+    model: &ModelChoice,
+    connected: &[&xcb_core::ui::AccountRow],
+    now: u64,
+    excluded_routes: &BTreeSet<String>,
+    excluded_accounts: &BTreeSet<Id>,
+) -> bool {
+    connected.iter().any(|account| {
+        account.provider == model.provider
+            && !excluded_accounts.contains(&account.id)
+            && !excluded_routes.contains(&format!("{} · {}", model.key(), account.id))
+            && (account
+                .quota_blocked_until_ms
+                .is_some_and(|until| until > now)
+                || account
+                    .remaining_percent
+                    .is_some_and(|remaining| remaining <= 0.0))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quota_degradation_warning(
+    models: &[ModelChoice],
+    connected: &[&xcb_core::ui::AccountRow],
+    offers: &OfferState,
+    now: u64,
+    selected: &Candidate,
+    frontier: bool,
+    required_model: Option<&str>,
+    excluded_routes: &BTreeSet<String>,
+    excluded_accounts: &BTreeSet<Id>,
+) -> Option<String> {
+    if !frontier {
         return None;
-    };
-    answers
-        .answers
-        .get("route")
-        .and_then(judge::JudgeAnswer::choice)
-        .and_then(|(value, _)| {
-            value
-                .strip_prefix("route_")
-                .and_then(|value| value.parse::<usize>().ok())
+    }
+    let blocked = models
+        .iter()
+        .filter(|model| {
+            selectable_model(model)
+                && required_model.is_none_or(|key| model.key() == key)
+                && quota_blocks_model(model, connected, now, excluded_routes, excluded_accounts)
         })
-        .filter(|index| *index < candidates)
+        .filter_map(|model| {
+            let profile = base_profile(model, offers, now);
+            (profile.recognized
+                && (!selected.profile.recognized || profile.quality > selected.profile.quality))
+                .then_some((model, profile.quality))
+        })
+        .max_by_key(|(_, quality)| *quality)?;
+    Some(format!(
+        "Warning: usage limits block higher-ranked {} · using best eligible route · ",
+        xcb_core::display_text(&blocked.0.key(), 96)
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use xcb_core::models::Mode;
+
+    #[tokio::test]
+    async fn no_fallback_reports_observed_quota_only_within_requested_routes() {
+        use crate::authentication_tests::{account, fail_authentication};
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let codex = account(&store, Provider::Codex);
+        let frontier = model(Provider::Codex, "gpt-6-astra", None, Some("ultra"));
+        let key = frontier.key();
+        store.set_models(Provider::Codex, &[frontier]).unwrap();
+        let now = now_ms().saturating_sub(1);
+        let quota = xcb_core::usage::QuotaPoint {
+            pool: store.account(&codex).unwrap().quota_pool,
+            window: Id::new("codex.primary").unwrap(),
+            used_percent: 100.0,
+            observed_at_ms: now,
+            resets_at_ms: now + 60_000,
+        };
+        store.record_quota(&quota).unwrap();
+        let config = Config::default();
+        let prompt = "details ".repeat(400);
+        let routes = BTreeSet::new();
+        let accounts = BTreeSet::new();
+        let admitted = [Provider::Codex, Provider::Claude].into();
+        let request = || RouteRequest {
+            task: &prompt,
+            required_provider: None,
+            preferred_provider: None,
+            required_model: None,
+            excluded_routes: &routes,
+            excluded_accounts: &accounts,
+            account: None,
+        };
+        async fn reason(
+            store: &Store,
+            config: &Config,
+            request: RouteRequest<'_>,
+            admitted: &BTreeSet<Provider>,
+        ) -> &'static str {
+            match route_with_admitted(store, config, request, admitted).await {
+                Err(Error::Unavailable(reason)) => reason,
+                result => panic!("expected unavailable route, got {result:?}"),
+            }
+        }
+        // No available account: the early return retains observed exhaustion.
+        assert_eq!(
+            reason(&store, &config, request(), &admitted).await,
+            NO_QUOTA_AVAILABLE_ROUTE
+        );
+        // A connected account without an observed model cannot provide a
+        // fallback. The empty-candidate return retains the same diagnosis.
+        let claude = account(&store, Provider::Claude);
+        assert_eq!(
+            reason(&store, &config, request(), &admitted).await,
+            NO_QUOTA_AVAILABLE_ROUTE
+        );
+        assert_eq!(
+            reason(
+                &store,
+                &config,
+                RouteRequest {
+                    required_model: Some(&key),
+                    account: Some(&codex),
+                    ..request()
+                },
+                &admitted
+            )
+            .await,
+            NO_QUOTA_AVAILABLE_ROUTE
+        );
+        for constrained in [
+            RouteRequest {
+                required_model: Some("codex/unobserved-model"),
+                ..request()
+            },
+            RouteRequest {
+                required_provider: Some(Provider::Claude),
+                ..request()
+            },
+            RouteRequest {
+                account: Some(&claude),
+                ..request()
+            },
+        ] {
+            assert_eq!(
+                reason(&store, &config, constrained, &admitted).await,
+                NO_ELIGIBLE_ROUTE
+            );
+        }
+        let excluded_routes = BTreeSet::from([format!("{key} · {codex}")]);
+        assert_eq!(
+            reason(
+                &store,
+                &config,
+                RouteRequest {
+                    excluded_routes: &excluded_routes,
+                    ..request()
+                },
+                &admitted
+            )
+            .await,
+            NO_ELIGIBLE_ROUTE
+        );
+        let excluded_accounts = BTreeSet::from([codex.clone()]);
+        assert_eq!(
+            reason(
+                &store,
+                &config,
+                RouteRequest {
+                    excluded_accounts: &excluded_accounts,
+                    ..request()
+                },
+                &admitted
+            )
+            .await,
+            NO_ELIGIBLE_ROUTE
+        );
+        assert_eq!(
+            reason(&store, &config, request(), &[Provider::Claude].into()).await,
+            NO_ELIGIBLE_ROUTE
+        );
+        // Authentication failure wins over old quota evidence. A new usable
+        // observation permits the synthetic failure turn, then exhaustion is
+        // observed again; the account is still not a connected route.
+        store
+            .record_quota(&xcb_core::usage::QuotaPoint {
+                used_percent: 0.0,
+                observed_at_ms: now_ms(),
+                ..quota.clone()
+            })
+            .unwrap();
+        fail_authentication(&store, &codex);
+        store
+            .record_quota(&xcb_core::usage::QuotaPoint {
+                window: Id::new("codex.secondary").unwrap(),
+                observed_at_ms: now_ms(),
+                ..quota
+            })
+            .unwrap();
+        assert_eq!(
+            reason(&store, &config, request(), &admitted).await,
+            NO_ELIGIBLE_ROUTE
+        );
+    }
+
+    #[tokio::test]
+    async fn large_prompt_selects_best_known_quality_before_cost_favorites_and_shortlist() {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let devin = account(&store, Provider::Devin);
+        let mut models: Vec<_> = (0..20)
+            .map(|n| model(Provider::Devin, &format!("swe-2-variant-{n}"), None, None))
+            .collect();
+        models.push(model(Provider::Devin, "gpt-6-astra-ultra", None, None));
+        store.set_models(Provider::Devin, &models).unwrap();
+        let mut config = Config::default();
+        config.favorites.insert(
+            0,
+            xcb_core::models::Preference {
+                provider: Provider::Devin,
+                model: models[0].id.clone(),
+                effort: None,
+            },
+        );
+        let prompt = "details ".repeat(400);
+        let excluded = BTreeSet::new();
+        let excluded_accounts = BTreeSet::new();
+        let admitted = [Provider::Devin].into();
+        let request = |required_model| RouteRequest {
+            task: &prompt,
+            required_provider: Some(Provider::Devin),
+            preferred_provider: Some(Provider::Devin),
+            required_model,
+            excluded_routes: &excluded,
+            excluded_accounts: &excluded_accounts,
+            account: Some(&devin),
+        };
+        let selected = route_with_admitted(&store, &config, request(None), &admitted)
+            .await
+            .unwrap();
+        assert_eq!(selected.model.id.as_str(), "gpt-6-astra-ultra");
+        assert!(selected.reason.contains("large prompt"));
+        let key = models[0].key();
+        let explicit = route_with_admitted(&store, &config, request(Some(&key)), &admitted)
+            .await
+            .unwrap();
+        assert_eq!(explicit.model.key(), key);
+        assert!(!explicit.reason.contains("Warning"));
+        // Once the exact route has been excluded, fallback remains reachable.
+        let excluded = BTreeSet::from([format!("{} · {}", selected.model.key(), devin)]);
+        let next = route_with_admitted(
+            &store,
+            &config,
+            RouteRequest {
+                excluded_routes: &excluded,
+                ..request(None)
+            },
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert!(next.model.id.as_str().starts_with("swe-2-"));
+    }
+
+    #[tokio::test]
+    async fn quota_warning_requires_quota_evidence_from_connected_admitted_routes() {
+        use crate::authentication_tests::{account, fail_authentication};
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let codex = account(&store, Provider::Codex);
+        account(&store, Provider::Devin);
+        store
+            .set_models(
+                Provider::Codex,
+                &[model(Provider::Codex, "gpt-6-astra", None, Some("ultra"))],
+            )
+            .unwrap();
+        store
+            .set_models(
+                Provider::Devin,
+                &[model(Provider::Devin, "swe-2-high", None, None)],
+            )
+            .unwrap();
+        let config = Config::default();
+        let prompt = "details ".repeat(400);
+        let excluded = BTreeSet::new();
+        let excluded_accounts = BTreeSet::new();
+        let request = || RouteRequest {
+            task: &prompt,
+            required_provider: None,
+            preferred_provider: None,
+            required_model: None,
+            excluded_routes: &excluded,
+            excluded_accounts: &excluded_accounts,
+            account: None,
+        };
+        let admitted = [Provider::Codex, Provider::Devin].into();
+        let work =
+            crate::private::directory(&root.path().canonicalize().unwrap().join("work")).unwrap();
+        let session = store
+            .create_session(
+                &codex,
+                model(Provider::Codex, "gpt-6-astra", None, Some("ultra")),
+                &work,
+                now_ms(),
+            )
+            .unwrap();
+        let run = store
+            .prepare_run(&session.id, session.revision, now_ms())
+            .unwrap();
+        let busy = route_with_admitted(&store, &config, request(), &admitted)
+            .await
+            .unwrap();
+        assert_eq!(busy.model.provider, Provider::Devin);
+        assert!(!busy.reason.contains("Warning"));
+        store
+            .settle(&run, xcb_core::session::State::Idle, now_ms())
+            .unwrap();
+        let now = now_ms().saturating_sub(1);
+        store
+            .record_quota(&xcb_core::usage::QuotaPoint {
+                pool: store.account(&codex).unwrap().quota_pool,
+                window: Id::new("codex.primary").unwrap(),
+                used_percent: 100.0,
+                observed_at_ms: now,
+                resets_at_ms: now + 60_000,
+            })
+            .unwrap();
+        let limited = route_with_admitted(&store, &config, request(), &admitted)
+            .await
+            .unwrap();
+        assert!(limited.reason.starts_with("Warning: usage limits"));
+        assert!(limited.reason.contains("codex/gpt-6-astra/ultra"));
+        let constrained = route_with_admitted(
+            &store,
+            &config,
+            RouteRequest {
+                required_provider: Some(Provider::Devin),
+                ..request()
+            },
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert!(!constrained.reason.contains("Warning"));
+        let unadmitted = route_with_admitted(&store, &config, request(), &[Provider::Devin].into())
+            .await
+            .unwrap();
+        assert!(!unadmitted.reason.contains("Warning"));
+        store
+            .record_quota(&xcb_core::usage::QuotaPoint {
+                pool: store.account(&codex).unwrap().quota_pool,
+                window: Id::new("codex.primary").unwrap(),
+                used_percent: 0.0,
+                observed_at_ms: now_ms(),
+                resets_at_ms: now + 60_000,
+            })
+            .unwrap();
+        fail_authentication(&store, &codex);
+        let unauthenticated = route_with_admitted(&store, &config, request(), &admitted)
+            .await
+            .unwrap();
+        assert!(!unauthenticated.reason.contains("Warning"));
+    }
+
+    #[test]
+    fn unknown_model_labels_cannot_displace_the_known_quality_tier() {
+        let build = |id, utility| {
+            let model = model(Provider::Devin, id, None, None);
+            Candidate {
+                profile: base_profile(&model, &OfferState::default(), 1),
+                model,
+                account: Id::new("account").unwrap(),
+                utility,
+            }
+        };
+        let mut candidates = vec![build("future-model", 10000), build("claude-haiku", -100)];
+        retain_quality_tier(&mut candidates, true);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].model.id.as_str(), "claude-haiku");
+    }
 
     #[tokio::test]
     async fn authentication_health_selects_other_account_without_crossing_provider_constraint() {
@@ -936,14 +1327,19 @@ mod tests {
                 )
             })
             .collect();
-        let profiles =
-            eligible_profiles(&models, &OfferState::default(), 2, "implement a fix", |m| {
-                m.id.as_str() == "swe-2-variant-19"
-            });
+        let profiles = eligible_profiles(
+            &models,
+            &OfferState::default(),
+            2,
+            "implement a fix",
+            false,
+            |m| m.id.as_str() == "swe-2-variant-19",
+        );
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles["devin/swe-2-variant-19"].pareto_layer, 1);
         assert!(
-            eligible_profiles(&models, &OfferState::default(), 2, "task", |_| false).is_empty()
+            eligible_profiles(&models, &OfferState::default(), 2, "task", false, |_| false)
+                .is_empty()
         );
     }
 
@@ -1032,138 +1428,5 @@ mod tests {
         ] {
             assert_eq!(explicit_provider_intent(task), None, "{task}");
         }
-    }
-
-    /// A judge that never answers inside the bound: the call must return so a
-    /// supervisor tick can keep its deterministic candidate order.
-    struct StalledJudge;
-    impl judge::Judge for StalledJudge {
-        fn ask<'a>(
-            &'a self,
-            _: &'a serde_json::Value,
-            _: &'a judge::JudgeQuestions,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<judge::JudgeAnswers>> + Send + 'a>,
-        > {
-            Box::pin(std::future::pending())
-        }
-    }
-
-    #[tokio::test]
-    async fn stalled_route_judge_cannot_hold_the_selection() {
-        let mut questions = judge::JudgeQuestions::new();
-        questions.insert(
-            "route".into(),
-            judge::JudgeQuestion::Choice {
-                instructions: "pick a route".into(),
-                criteria: BTreeMap::from([("route_0".into(), None), ("route_1".into(), None)]),
-            },
-        );
-        let started = std::time::Instant::now();
-        let index = judge_route_index(
-            &StalledJudge,
-            "fix the flaky test",
-            TaskClass::Balanced,
-            &questions,
-            2,
-        )
-        .await;
-        assert_eq!(index, None);
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed >= ROUTE_JUDGE_TIMEOUT && elapsed < Duration::from_secs(15),
-            "route judge returned after {elapsed:?}"
-        );
-    }
-
-    /// A fast judge that answers inside the bound still reorders candidates.
-    struct FastJudge;
-    impl judge::Judge for FastJudge {
-        fn ask<'a>(
-            &'a self,
-            _: &'a serde_json::Value,
-            _: &'a judge::JudgeQuestions,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<judge::JudgeAnswers>> + Send + 'a>,
-        > {
-            Box::pin(async {
-                Ok(judge::JudgeAnswers {
-                    answers: BTreeMap::from([(
-                        "route".into(),
-                        judge::JudgeAnswer::Choice {
-                            choice: "route_1".into(),
-                            confidence: 0.9,
-                            probabilities: BTreeMap::from([
-                                ("route_0".into(), 0.1),
-                                ("route_1".into(), 0.9),
-                            ]),
-                        },
-                    )]),
-                    model: None,
-                })
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn answered_route_judge_still_reorders_candidates() {
-        let mut questions = judge::JudgeQuestions::new();
-        questions.insert(
-            "route".into(),
-            judge::JudgeQuestion::Choice {
-                instructions: "pick a route".into(),
-                criteria: BTreeMap::from([("route_0".into(), None), ("route_1".into(), None)]),
-            },
-        );
-        assert_eq!(
-            judge_route_index(
-                &FastJudge,
-                "fix the flaky test",
-                TaskClass::Balanced,
-                &questions,
-                2
-            )
-            .await,
-            Some(1)
-        );
-        // Out-of-range answers are rejected, not clamped.
-        struct OutOfRange;
-        impl judge::Judge for OutOfRange {
-            fn ask<'a>(
-                &'a self,
-                _: &'a serde_json::Value,
-                _: &'a judge::JudgeQuestions,
-            ) -> std::pin::Pin<
-                Box<dyn std::future::Future<Output = Result<judge::JudgeAnswers>> + Send + 'a>,
-            > {
-                Box::pin(async {
-                    Ok(judge::JudgeAnswers {
-                        answers: BTreeMap::from([(
-                            "route".into(),
-                            judge::JudgeAnswer::Choice {
-                                choice: "route_7".into(),
-                                confidence: 0.9,
-                                probabilities: BTreeMap::from([
-                                    ("route_0".into(), 0.1),
-                                    ("route_7".into(), 0.9),
-                                ]),
-                            },
-                        )]),
-                        model: None,
-                    })
-                })
-            }
-        }
-        assert_eq!(
-            judge_route_index(
-                &OutOfRange,
-                "fix the flaky test",
-                TaskClass::Balanced,
-                &questions,
-                2
-            )
-            .await,
-            None
-        );
     }
 }

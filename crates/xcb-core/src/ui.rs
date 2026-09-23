@@ -83,6 +83,64 @@ pub struct RoutePreview {
     pub model: String,
 }
 
+/// Bounded durable work history, including work deliberately held for later.
+#[derive(Debug, Clone)]
+pub struct BacklogRow {
+    pub id: Id,
+    pub conversation: Id,
+    pub title: String,
+    pub prompt: String,
+    pub summary: String,
+    pub status: String,
+    pub state: State,
+    pub deferred: bool,
+    pub priority: u8,
+    pub revision: u64,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScheduleRow {
+    pub id: Id,
+    pub conversation: Id,
+    pub prompt: String,
+    pub interval_ms: u64,
+    pub next_due_ms: u64,
+    pub enabled: bool,
+    pub revision: u64,
+}
+
+pub enum HabitatCommand {
+    Enqueue {
+        prompt: String,
+        deferred: bool,
+        priority: u8,
+    },
+    Edit {
+        id: Id,
+        expected_revision: u64,
+        prompt: String,
+        priority: u8,
+    },
+    Release {
+        id: Id,
+        expected_revision: u64,
+    },
+    Reply {
+        id: Id,
+        text: String,
+    },
+    Schedule {
+        prompt: String,
+        interval_ms: u64,
+    },
+    ScheduleEnabled {
+        id: Id,
+        expected_revision: u64,
+        enabled: bool,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct View {
     pub conversation: Option<Id>,
@@ -93,6 +151,8 @@ pub struct View {
     pub models: Vec<ModelChoice>,
     pub messages: Vec<Message>,
     pub tasks: Vec<TaskRow>,
+    pub backlog: Vec<BacklogRow>,
+    pub schedules: Vec<ScheduleRow>,
     pub subagents: Vec<Subagent>,
     pub activity: Vec<String>,
     pub extensions: Vec<(String, String)>,
@@ -126,6 +186,8 @@ impl Default for View {
             models: vec![],
             messages: vec![],
             tasks: vec![],
+            backlog: vec![],
+            schedules: vec![],
             subagents: vec![],
             activity: vec![],
             extensions: vec![],
@@ -147,6 +209,7 @@ impl Default for View {
 }
 
 pub enum Intent {
+    Habitat(HabitatCommand),
     Submit {
         id: Id,
         text: String,

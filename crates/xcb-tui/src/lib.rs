@@ -24,7 +24,7 @@ use xcb_core::{
     Id,
     panes::Pane,
     session::{Attachment, State},
-    ui::{Intent, Update, View},
+    ui::{HabitatCommand, Intent, Update, View},
     usage::Estimate,
 };
 
@@ -40,6 +40,34 @@ pub struct SlashCommand {
     pub needs_args: bool,
 }
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        name: "/attention",
+        alias: "",
+        args: "",
+        summary: "questions, approvals and actions across agents",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/backlog",
+        alias: "/b",
+        args: "[all|add …|edit <id> …|run <id>]",
+        summary: "persistent work queue and completed work",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/reply",
+        alias: "",
+        args: "<task-id> <answer>",
+        summary: "answer a task; permissions still require approval",
+        needs_args: true,
+    },
+    SlashCommand {
+        name: "/schedule",
+        alias: "",
+        args: "[all|every <seconds> …|pause <id>|resume <id>]",
+        summary: "local recurring prompts for this agent",
+        needs_args: false,
+    },
     SlashCommand {
         name: "/accounts",
         alias: "/a",
@@ -149,6 +177,8 @@ pub enum PickAction {
     NewConversation,
     Session(Id),
     Task(Id),
+    Backlog(Id),
+    Schedule(Id),
     Text(String),
     EditPane,
 }
@@ -371,6 +401,16 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         task.route_reason.hash(&mut hasher);
         task.updated_at_ms.hash(&mut hasher);
     }
+    for task in &view.backlog {
+        task.id.as_str().hash(&mut hasher);
+        task.revision.hash(&mut hasher);
+        (task.state as u8).hash(&mut hasher);
+    }
+    for schedule in &view.schedules {
+        schedule.id.as_str().hash(&mut hasher);
+        schedule.revision.hash(&mut hasher);
+        schedule.next_due_ms.hash(&mut hasher);
+    }
     for agent in &view.subagents {
         agent.id.as_str().hash(&mut hasher);
         (agent.state as u8).hash(&mut hasher);
@@ -570,6 +610,10 @@ impl App {
             return Vec::new();
         }
         const MANAGED: &[&str] = &[
+            "/attention",
+            "/backlog",
+            "/reply",
+            "/schedule",
             "/attach",
             "/exit",
             "/help",
@@ -579,11 +623,24 @@ impl App {
             "/sessions",
             "/tasks",
         ];
-        SLASH_COMMANDS
+        let available =
+            |command: &SlashCommand| !self.managed_mode() || MANAGED.contains(&command.name);
+        // A complete alias is a command, not an ambiguous prefix. Adding
+        // /schedule or /attention must never steal /s or /a from users.
+        if let Some(command) = SLASH_COMMANDS.iter().find(|command| command.alias == text) {
+            return if available(command) {
+                vec![command]
+            } else {
+                vec![]
+            };
+        }
+        let mut matches: Vec<_> = SLASH_COMMANDS
             .iter()
-            .filter(|command| !self.managed_mode() || MANAGED.contains(&command.name))
+            .filter(|command| available(command))
             .filter(|command| command.name.starts_with(&text))
-            .collect()
+            .collect();
+        matches.sort_by_key(|command| command.name);
+        matches
     }
     /// The open typeahead menu as `(matches, selected)`, if any. Lazily resyncs
     /// menu state against the live composer text so any edit — typed, pasted,
@@ -869,6 +926,89 @@ impl App {
             self.pending_image_session = view_context(&self.view);
         }
     }
+    fn send_habitat(
+        &mut self,
+        output: &SyncSender<Intent>,
+        intent: Intent,
+        command: &str,
+        arguments: &str,
+    ) {
+        if !self.try_send(output, intent) {
+            self.composer.set_text(&format!("{command} {arguments}"));
+        }
+    }
+
+    fn habitat_command(&mut self, command: &str, arguments: &str, output: &SyncSender<Intent>) {
+        let (action, tail) = arguments.split_once(' ').unwrap_or((arguments, ""));
+        let tail = tail.trim();
+        match command {
+            "/attention" | "/backlog" if command == "/attention" || arguments.is_empty() || arguments == "all" => {
+                let attention = command == "/attention";
+                let all = attention || arguments == "all";
+                let items = self.view.backlog.iter()
+                    .filter(|task| all || self.view.conversation.as_ref() == Some(&task.conversation))
+                    .filter(|task| !attention || task.state.attention())
+                    .map(|task| PickItem {
+                        label: format!("{} · {} · P{} · {} · {}", xcb_core::display_text(&task.title, 52),
+                            if attention { task.state.label() } else { &task.status }, task.priority,
+                            xcb_core::display_text(task.conversation.as_str(), 12), xcb_core::display_text(task.id.as_str(), 12)),
+                        action: PickAction::Backlog(task.id.clone()),
+                    }).collect();
+                self.picker(if attention { "Attention · questions / approvals / actions" } else if all { "All agents · backlog and history" } else { "This agent · backlog and history" }, items);
+            }
+            "/backlog" if action == "add" && !tail.is_empty() => {
+                self.send_habitat(output, Intent::Habitat(HabitatCommand::Enqueue { prompt: tail.into(), deferred: true, priority: 5 }), command, arguments);
+            }
+            "/backlog" if action == "run" => {
+                if let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == tail) {
+                    self.send_habitat(output, Intent::Habitat(HabitatCommand::Release { id: task.id.clone(), expected_revision: task.revision }), command, arguments);
+                } else { self.notice = "Task not in the current backlog view. /backlog all lists task ids; /reload refreshes it.".into(); }
+            }
+            "/backlog" if action == "edit" => {
+                let (id, prompt) = tail.split_once(' ').unwrap_or((tail, ""));
+                if let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == id) {
+                    if prompt.trim().is_empty() {
+                        self.composer.set_text(&format!("/backlog edit {} {}", task.id, task.prompt));
+                    } else {
+                        self.send_habitat(output, Intent::Habitat(HabitatCommand::Edit { id: task.id.clone(), expected_revision: task.revision, prompt: prompt.trim().into(), priority: task.priority }), command, arguments);
+                    }
+                } else { self.notice = "Task not in the current backlog view. /backlog all lists task ids.".into(); }
+            }
+            "/reply" if !tail.is_empty() => {
+                if let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == action) {
+                    self.send_habitat(output, Intent::Habitat(HabitatCommand::Reply { id: task.id.clone(), text: tail.into() }), command, arguments);
+                } else { self.notice = "Task not in the current backlog view. /attention lists tasks needing you.".into(); }
+            }
+            "/schedule" if arguments.is_empty() || arguments == "all" => {
+                let all = arguments == "all";
+                self.picker(if all { "All agents · schedules" } else { "This agent · schedules" },
+                    self.view.schedules.iter()
+                        .filter(|schedule| all || self.view.conversation.as_ref() == Some(&schedule.conversation))
+                        .map(|schedule| PickItem {
+                            label: format!("{} · {} · every {}s · {} · {}", xcb_core::display_text(&schedule.prompt, 52),
+                                if schedule.enabled { "enabled" } else { "paused" }, schedule.interval_ms / 1000,
+                                xcb_core::display_text(schedule.conversation.as_str(), 12), xcb_core::display_text(schedule.id.as_str(), 16)),
+                            action: PickAction::Schedule(schedule.id.clone()),
+                        }).collect());
+            }
+            "/schedule" if action == "every" => {
+                let (seconds, prompt) = tail.split_once(' ').unwrap_or((tail, ""));
+                if let Ok(seconds) = seconds.parse::<u64>()
+                    && (60..=31_536_000).contains(&seconds) && !prompt.trim().is_empty() {
+                    self.send_habitat(output, Intent::Habitat(HabitatCommand::Schedule { prompt: prompt.trim().into(), interval_ms: seconds * 1000 }), command, arguments);
+                } else { self.notice = "Use /schedule every <seconds> <prompt>; interval must be 60 seconds to 365 days.".into(); }
+            }
+            "/schedule" if matches!(action, "pause" | "resume") => {
+                if let Some(schedule) = self.view.schedules.iter().find(|schedule| schedule.id.as_str() == tail) {
+                    self.send_habitat(output, Intent::Habitat(HabitatCommand::ScheduleEnabled { id: schedule.id.clone(), expected_revision: schedule.revision, enabled: action == "resume" }), command, arguments);
+                } else { self.notice = "Schedule not in the current view. /schedule all lists schedule ids.".into(); }
+            }
+            "/schedule" => self.notice = "Use /schedule [all], /schedule every <seconds> <prompt>, or /schedule pause|resume <id>.".into(),
+            "/reply" => self.notice = "Use /reply <task-id> <answer>. Approvals still use the existing permission gate.".into(),
+            _ => self.notice = "Use /backlog [all], /backlog add <prompt>, /backlog edit <id> [prompt], or /backlog run <id>.".into(),
+        }
+    }
+
     fn slash(&mut self, input: &str, output: &SyncSender<Intent>) -> bool {
         let (command, arguments) = input.split_once(' ').unwrap_or((input, ""));
         // Single-letter aliases resolve to the full command before dispatch.
@@ -877,6 +1017,16 @@ impl App {
             .find(|entry| entry.alias == command)
             .map_or(command, |entry| entry.name);
         let arguments = arguments.trim();
+        if matches!(command, "/backlog" | "/attention" | "/schedule" | "/reply") {
+            if self.managed_mode() {
+                self.habitat_command(command, arguments, output);
+            } else {
+                self.notice =
+                    "Open xcb chat to manage a persistent conversation's backlog and schedules."
+                        .into();
+            }
+            return true;
+        }
         match command {
             "/help" => self.open_help(false),
             "/mouse" => {
@@ -1651,6 +1801,80 @@ impl App {
                         self.modal = Some(inspect_task(task));
                     }
                 }
+                PickAction::Backlog(id) => {
+                    if let Some(task) = self.view.backlog.iter().find(|task| task.id == id) {
+                        let mut lines = vec![
+                            task.title.clone(),
+                            format!(
+                                "{} · {} · P{} · revision {}",
+                                task.conversation, task.status, task.priority, task.revision
+                            ),
+                            format!("attention: {}", task.state.label()),
+                            String::new(),
+                            "Prompt".into(),
+                            task.prompt.clone(),
+                            String::new(),
+                            "Latest summary".into(),
+                            task.summary.clone(),
+                            String::new(),
+                        ];
+                        if task.deferred {
+                            lines.push(format!("/backlog run {}", task.id));
+                            lines.push(format!("/backlog edit {} <new prompt>", task.id));
+                        }
+                        if task.state == State::NeedsAnswer {
+                            lines.push(format!("/reply {} <answer>", task.id));
+                        } else if matches!(
+                            task.state,
+                            State::NeedsApproval | State::NeedsAction | State::Uncertain
+                        ) {
+                            lines.push("Review the gated action or recovery detail above. A reply cannot grant host or provider permission.".into());
+                        }
+                        self.modal = Some(Modal::Inspect {
+                            title: format!("{} · {}", task.id, task.status),
+                            lines,
+                            scroll: 0,
+                        });
+                    }
+                }
+                PickAction::Schedule(id) => {
+                    if let Some(schedule) = self
+                        .view
+                        .schedules
+                        .iter()
+                        .find(|schedule| schedule.id == id)
+                    {
+                        self.modal = Some(Modal::Inspect {
+                            title: format!("Schedule {}", schedule.id),
+                            lines: vec![
+                                format!("conversation {}", schedule.conversation),
+                                format!(
+                                    "{} · every {} seconds · revision {}",
+                                    if schedule.enabled {
+                                        "enabled"
+                                    } else {
+                                        "paused"
+                                    },
+                                    schedule.interval_ms / 1000,
+                                    schedule.revision
+                                ),
+                                format!(
+                                    "next wake-up: {} (Unix milliseconds)",
+                                    schedule.next_due_ms
+                                ),
+                                String::new(),
+                                schedule.prompt.clone(),
+                                String::new(),
+                                format!(
+                                    "/schedule {} {}",
+                                    if schedule.enabled { "pause" } else { "resume" },
+                                    schedule.id
+                                ),
+                            ],
+                            scroll: 0,
+                        });
+                    }
+                }
                 PickAction::Text(text) => self.composer.set_text(&text),
                 PickAction::EditPane => {
                     self.edit_pane(&self.view.pane.clone(), self.view.pane_revision.clone())
@@ -1760,6 +1984,133 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
         // an explicit Intent::Refresh.
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod habitat_surface_tests {
+    use super::*;
+    use std::sync::mpsc::sync_channel;
+    use xcb_core::ui::BacklogRow;
+
+    fn app() -> App {
+        let conversation = Id::new("project_a").unwrap();
+        let mut app = App::default();
+        app.view.conversation = Some(conversation.clone());
+        app.view
+            .extensions
+            .push(("algal supervisor".into(), "enabled".into()));
+        app.view.backlog = vec![
+            BacklogRow {
+                id: Id::new("task_a").unwrap(),
+                conversation,
+                title: "Queued review".into(),
+                prompt: "Review the changes".into(),
+                summary: "Prior evidence".into(),
+                status: "backlog".into(),
+                state: State::Idle,
+                deferred: true,
+                priority: 7,
+                revision: 23,
+                updated_at_ms: 0,
+            },
+            BacklogRow {
+                id: Id::new("task_b").unwrap(),
+                conversation: Id::new("project_b").unwrap(),
+                title: "Publish".into(),
+                prompt: "Publish changes".into(),
+                summary: "Review deployment approval".into(),
+                status: "needs input".into(),
+                state: State::NeedsApproval,
+                deferred: false,
+                priority: 5,
+                revision: 11,
+                updated_at_ms: 0,
+            },
+        ];
+        app
+    }
+
+    #[test]
+    fn backlog_scope_and_attention_preserve_other_agents_approvals() {
+        let (tx, rx) = sync_channel(8);
+        let mut app = app();
+        app.slash("/backlog", &tx);
+        assert!(matches!(&app.modal, Some(Modal::Picker { items, .. }) if items.len() == 1));
+        app.slash("/backlog all", &tx);
+        assert!(matches!(&app.modal, Some(Modal::Picker { items, .. }) if items.len() == 2));
+        app.slash("/attention", &tx);
+        assert!(
+            matches!(&app.modal, Some(Modal::Picker { items, .. }) if items.len() == 1 && items[0].label.contains("needs approval"))
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "inspecting attention cannot grant permissions"
+        );
+    }
+
+    #[test]
+    fn backlog_mutations_carry_snapshot_revision_and_keep_priority() {
+        let (tx, rx) = sync_channel(8);
+        let mut app = app();
+        app.slash("/backlog edit task_a new plan", &tx);
+        assert!(
+            matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::Edit {
+            expected_revision: 23, priority: 7, prompt, ..
+        })) if prompt == "new plan")
+        );
+        app.slash("/backlog run task_a", &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Intent::Habitat(HabitatCommand::Release {
+                expected_revision: 23,
+                ..
+            }))
+        ));
+        app.slash("/backlog add investigate later", &tx);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Intent::Habitat(HabitatCommand::Enqueue {
+                deferred: true,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn schedule_rejects_invalid_intervals_without_submitting_prompt() {
+        let (tx, rx) = sync_channel(8);
+        let mut app = app();
+        for input in [
+            "/schedule every 0 task",
+            "/schedule every 59 task",
+            "/schedule every 18446744073709551615 task",
+            "/schedule every 60",
+        ] {
+            app.slash(input, &tx);
+            assert!(rx.try_recv().is_err());
+        }
+        app.slash("/schedule every 3600 follow project", &tx);
+        assert!(
+            matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::Schedule { interval_ms: 3_600_000, prompt })) if prompt == "follow project")
+        );
+    }
+
+    #[test]
+    fn new_backlog_revision_invalidates_view_fingerprint() {
+        let mut app = app();
+        let before = fingerprint_at(&app.view, 0);
+        app.view.backlog[0].revision += 1;
+        assert_ne!(before, fingerprint_at(&app.view, 0));
+    }
+
+    #[test]
+    fn full_command_queue_restores_backlog_draft() {
+        let (tx, _rx) = sync_channel(1);
+        tx.try_send(Intent::Refresh).unwrap();
+        let mut app = app();
+        app.slash("/backlog add retain this draft", &tx);
+        assert_eq!(app.composer.text(), "/backlog add retain this draft");
+    }
 }
 
 #[cfg(test)]

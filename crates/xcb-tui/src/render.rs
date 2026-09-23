@@ -574,7 +574,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         .set_cursor_line_style(Style::default());
     app.composer.textarea.set_placeholder_text(
         if app.managed_mode() && app.view.state == State::Working {
-            "Describe new work or ask for status · /tasks"
+            "Describe new work or ask for status · /backlog · /attention"
         } else if app.view.remote_active {
             "Running in another terminal · your draft is kept here"
         } else if app.view.state == State::Working {
@@ -648,12 +648,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     .iter()
                     .filter(|task| crate::task_queued(task))
                     .count();
-                let waiting = app
-                    .view
-                    .tasks
-                    .iter()
-                    .filter(|task| task.state.attention())
-                    .count();
+                let waiting = if app.view.backlog.is_empty() {
+                    app.view.tasks.iter().filter(|task| task.state.attention()).count()
+                } else {
+                    app.view.backlog.iter().filter(|task| task.state.attention()).count()
+                };
                 // The freshest running worker's `model · account` identifies
                 // the route the swarm is actually using.
                 let routed = app
@@ -690,7 +689,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     .or_else(|| lowest.map(|p| format!(" · quota {}%", p.round() as u32)))
                     .unwrap_or_default();
                 format!(
-                    "{running} running{} · {waiting} needs you · {} chats{}{}{} · /t tasks · ? help",
+                    "{running} running{} · {waiting} needs you (/attention) · {} chats{}{}{} · /b backlog · ? help",
                     if queued > 0 {
                         format!(" · {queued} queued")
                     } else {
@@ -1582,8 +1581,8 @@ fn render_modal(
             let commands = if managed {
                 [
                     "/tasks /t · /new /n · /attach <path> · /sessions /s",
-                    "/help /h · /quit /q · /exit /e",
-                    "`remember: …` saves a preference · ask `agent messages`",
+                    "/backlog /b [all|add|edit|run] · /attention · /reply <id> <answer>",
+                    "/schedule [all|every|pause|resume] · /help /h · /quit /q · /exit /e",
                 ]
             } else {
                 [
