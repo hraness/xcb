@@ -971,11 +971,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     },
                 )
                 .await?;
-                eprintln!(
-                    "xcb: {} · {}",
-                    decision.model.key(),
-                    xcb_core::display_text(&decision.reason, 4096)
-                );
+                eprintln!("xcb: {}", automatic_route_notice(&decision.reason));
                 account = Some(decision.account);
                 model = Some(decision.model.key());
             }
@@ -2285,8 +2281,30 @@ async fn main() {
     std::process::exit(code);
 }
 
+/// Stderr is often retained by callers. Keep this notice independent of
+/// account-bearing route records and provider-supplied model metadata.
+fn automatic_route_notice(reason: &str) -> &'static str {
+    if reason.starts_with("Warning: usage limits") {
+        "Usage limits block a higher-ranked model; using the best eligible route."
+    } else {
+        "Automatically selected an admitted route."
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn automatic_route_notice_does_not_echo_route_record_data() {
+        assert_eq!(
+            automatic_route_notice("Warning: usage limits block private-provider-metadata"),
+            "Usage limits block a higher-ranked model; using the best eligible route."
+        );
+        assert_eq!(
+            automatic_route_notice("private-account-and-model-metadata"),
+            "Automatically selected an admitted route."
+        );
+    }
+
     #[test]
     fn habitat_commands_require_revision_and_bound_schedule_intervals() {
         use clap::Parser;

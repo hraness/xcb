@@ -740,7 +740,7 @@ mod tests {
         ) -> &'static str {
             match route_with_admitted(store, config, request, admitted).await {
                 Err(Error::Unavailable(reason)) => reason,
-                result => panic!("expected unavailable route, got {result:?}"),
+                _ => panic!("expected unavailable route"),
             }
         }
         // No available account: the early return retains observed exhaustion.
