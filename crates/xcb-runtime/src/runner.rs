@@ -118,9 +118,9 @@ pub struct Outcome {
     /// a turn that did a lot of work and then stopped is the turn most
     /// often answered with "continue". Not persisted, so the settled-outcome
     /// record keeps the format older builds decode; a turn reconciled after a
-    /// restart reads as zero.
+    /// restart has no count, and the settle reflex skips it.
     #[serde(skip)]
-    pub tool_calls: u32,
+    pub tool_calls: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<Diagnostic>,
 }
@@ -2432,7 +2432,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
     let state = classify(&final_text, &facts);
     facts.pending_attention |= state.attention();
     let outcome = Outcome {
-        tool_calls: tool_calls.load(std::sync::atomic::Ordering::Relaxed),
+        tool_calls: Some(tool_calls.load(std::sync::atomic::Ordering::Relaxed)),
         text: final_text.clone(),
         facts,
         state,
@@ -2522,7 +2522,7 @@ mod tests {
     #[test]
     fn diagnostic_is_legacy_compatible_and_bounded() {
         let original = Outcome {
-            tool_calls: 0,
+            tool_calls: Some(0),
             text: String::new(),
             facts: TurnFacts {
                 terminal: Terminal::Failed,

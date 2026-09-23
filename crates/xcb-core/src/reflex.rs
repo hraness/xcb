@@ -683,6 +683,82 @@ fn contains_word(text: &str, cue: &str) -> bool {
     })
 }
 
+/// Word stems that veto answering a go-ahead request on the operator's
+/// behalf. Broader than the [`RISK`] feature cues, matched as word prefixes so
+/// inflections count ("deleting", "tokens"), and read over the whole report
+/// rather than its end, so a risky plan cannot hide above a short question.
+const CONFIRM_VETO: &[&str] = &[
+    "delet",
+    "drop",
+    "destroy",
+    "wipe",
+    "truncat",
+    "remov",
+    "rm -",
+    "purg",
+    "overwrit",
+    "force-push",
+    "force push",
+    "reset --hard",
+    "revert",
+    "rollback",
+    "roll back",
+    "deploy",
+    "release",
+    "publish",
+    "promot",
+    "migrat",
+    "push to main",
+    "push to master",
+    "production",
+    "prod ",
+    "live ",
+    "spend",
+    "purchas",
+    "pay",
+    "charg",
+    "billing",
+    "invoice",
+    "subscri",
+    "upgrad",
+    "credential",
+    "password",
+    "secret",
+    "token",
+    "api key",
+    "private key",
+    "ssh key",
+    "permission",
+    "access",
+    "sudo",
+    "send",
+    "email",
+    "post ",
+    "tweet",
+    "message ",
+    "invite",
+    "share",
+    "public",
+];
+
+/// Whether a worker's request for a go-ahead names anything xcb must not
+/// approve on the operator's behalf: deletion, deployment or release,
+/// production, money, credentials or access, or sending something to people.
+/// Deliberately over-inclusive; a veto only leaves the question for the
+/// operator.
+pub fn confirm_vetoed(text: &str) -> bool {
+    let text = tail(text, 16 * 1024);
+    CONFIRM_VETO.iter().any(|stem| {
+        text.match_indices(stem).any(|(start, _)| {
+            !text[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_alphanumeric)
+        })
+    }) || any(&text, RISK)
+        || any(&text, USER_ACT)
+}
+
 fn flag(value: bool) -> f64 {
     f64::from(u8::from(value))
 }
@@ -1602,6 +1678,31 @@ mod tests {
             unfinished.probability(&report)
         );
         assert!(!confirm.decide(&report), "{}", confirm.probability(&report));
+    }
+
+    #[test]
+    fn confirm_veto_reads_the_whole_report_and_inflections() {
+        assert!(!confirm_vetoed(
+            "The fix is ready on the branch. Should I open the PR and merge it?"
+        ));
+        for risky in [
+            "Should I go ahead with deleting the old rows?",
+            "Want me to rotate the tokens?",
+            "Shall I deploy it?",
+            "Ready to publish the package. Proceed?",
+            "Should I email the list?",
+        ] {
+            assert!(confirm_vetoed(risky), "{risky}");
+        }
+        let hidden = format!(
+            "Plan: drop legacy_users.\n\n{}\n\nShall I proceed?",
+            "detail ".repeat(80)
+        );
+        assert!(confirm_vetoed(&hidden));
+        // Prefixes match at word starts only.
+        assert!(!confirm_vetoed(
+            "Should I update the undeployable flag docs?"
+        ));
     }
 
     #[test]

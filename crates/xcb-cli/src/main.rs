@@ -1683,12 +1683,25 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             Reflex::Settle => "settle labels are unfinished, confirm or done",
                         },
                     ))?;
-                    for (head, value) in value {
-                        if !reflexes.label(reflex, task.as_str(), *head, *value, 1.0, "explicit")? {
-                            return Err(Error::Unavailable("no decision recorded for that task"));
-                        }
+                    if reflexes.latest(reflex, task.as_str())?.is_none() {
+                        return Err(Error::Unavailable("no decision recorded for that task"));
                     }
-                    println!("labeled {task} {label} for {}", reflex.as_str());
+                    let mut changed = false;
+                    for (head, value) in value {
+                        changed |= reflexes.label(
+                            reflex,
+                            task.as_str(),
+                            *head,
+                            *value,
+                            1.0,
+                            "explicit",
+                        )?;
+                    }
+                    if changed {
+                        println!("labeled {task} {label} for {}", reflex.as_str());
+                    } else {
+                        println!("{task} was already labeled {label} for {}", reflex.as_str());
+                    }
                 }
                 ReflexCommand::Rollback { reflex, version } => {
                     reflexes.rollback(reflex.into(), version)?;
@@ -1727,9 +1740,11 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         return Ok(0);
                     }
                     let inserted = reflexes.import(reflex, &rows)?;
+                    // Adopt only for new history: re-importing the same file
+                    // must not append another generation.
                     let won = replays
                         .into_iter()
-                        .filter(|(_, replay)| replay.promotions > 0)
+                        .filter(|(_, replay)| inserted > 0 && replay.promotions > 0)
                         .filter_map(|(head, replay)| Some((head, (replay.head, replay.evidence?))))
                         .collect();
                     let adopted = reflexes.adopt(reflex, won, inserted)?;
@@ -2967,7 +2982,7 @@ mod tests {
     #[test]
     fn json_run_output_includes_its_resumable_session_id() {
         let mut result = runner::Outcome {
-            tool_calls: 0,
+            tool_calls: Some(0),
             diagnostic: None,
             text: "Completed response".into(),
             facts: xcb_core::policy::TurnFacts {
@@ -3004,7 +3019,7 @@ mod tests {
             session::State,
         };
         let mut result = runner::Outcome {
-            tool_calls: 0,
+            tool_calls: Some(0),
             diagnostic: None,
             text: "Provider said done".into(),
             facts: TurnFacts {

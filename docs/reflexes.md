@@ -221,10 +221,14 @@ reports without storing anything. Only the derived features are stored.
 - `active`: the decision acts. For route it sets the tier; for settle a
   `stopped_short` completed turn is continued.
 - `confirm`: whether a `confirm` turn is answered "yes, go ahead". It acts
-  only when both `settle` and `confirm` are `active`, the request contains no
-  risk cue and nothing is handed to the user, and a configured judge agrees
+  only when both `settle` and `confirm` are `active`, nothing is handed to
+  the user, and the whole report names nothing on the veto list (deleting,
+  dropping or removing, deploying, releasing or publishing, production,
+  migrations, spending or billing, credentials, tokens or access, sending or
+  sharing, matched with their inflections), and a configured judge agrees
   that the step stays within the task, is reversible and needs no new
-  permissions, credentials, spending, deletion or publication.
+  permissions. A vetoed request is never sent to the judge, so the judge
+  cannot turn it into a "yes".
 - `learn`: automatic training after labels. Explicit `xcb reflex train` works
   regardless.
 
@@ -244,6 +248,8 @@ behalf is a larger step than continuing, so turn it on separately.
   attempt/time budget. A configured judge keeps its veto. The confirm risk
   veto is in the runtime, not the replaceable program, so a custom program
   cannot remove it.
+- A turn reconciled after a restart has no tool-call count, so settle leaves
+  it uncategorized rather than scoring it as a turn that did no work.
 - Any reflex failure (unreadable ledger, rejected program, runtime error)
   falls back to the pre-reflex behavior. Learning never fails a task.
 - The ledger `<state>/reflex.sqlite` stores numeric features, decisions,

@@ -669,6 +669,11 @@ impl ReflexStore {
                 inserted += 1;
             }
         }
+        // Imported history arrives after any open challenger was fitted but
+        // is not forward evidence, so it must not decide a trial.
+        if inserted > 0 {
+            tx.execute("DELETE FROM trials WHERE reflex=?1", [reflex.as_str()])?;
+        }
         tx.commit()?;
         Ok(inserted)
     }
@@ -770,7 +775,7 @@ impl ReflexStore {
         let mut labeled = 0u32;
         for (name, head) in &current.heads {
             let rows = self.labeled(reflex, name)?;
-            labeled += rows.len() as u32;
+            labeled = labeled.max(rows.len() as u32);
             let mut open = self.trial(reflex, name)?;
             if let Some((candidate, through)) = &open {
                 let fresh: Vec<Example> = rows
@@ -1007,6 +1012,19 @@ fn append_generation(
     evidence: BTreeMap<String, Comparison>,
 ) -> Result<u32> {
     let reflex = current.reflex;
+    // Another writer (the supervisor's automatic pass and a CLI `train`, say)
+    // may have promoted since `current` was read; appending on a stale parent
+    // would decide the same trial twice.
+    let active: Option<u32> = tx
+        .query_row(
+            "SELECT version FROM generations WHERE reflex=?1 AND active=1",
+            [reflex.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if active.unwrap_or(0) != current.version {
+        return Err(Error::Conflict("reflex generation changed; train again"));
+    }
     let latest: i64 = tx.query_row(
         "SELECT COALESCE(max(version),0) FROM generations WHERE reflex=?1",
         [reflex.as_str()],

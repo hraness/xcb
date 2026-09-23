@@ -1493,7 +1493,7 @@ mod tests {
         let candidates = vec![same_account, candidate(2)];
         let tried = BTreeSet::new();
         let mut outcome = Outcome {
-            tool_calls: 0,
+            tool_calls: Some(0),
             diagnostic: None,
             text: "Saved the migration; remaining tests need to run".into(),
             state: State::Failed,
