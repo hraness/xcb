@@ -375,16 +375,35 @@ def validate_boundary(data, context, source):
                 and value["provider_sha256"] == context["provider_sha256"] and value["helper_sha256"] == context["runtime_sha256"], "Devin exact provider/helper mismatch")
         require(value["credential_free"] is True and value["live_provider_qualification"] is False
                 and value["harness_sha256"] == file_hash(source / "qualification/devin-native.ts"), "Devin fixture scope/source")
+        require(value.get("passed") is True and value.get("candidate") is False, "Devin fixture did not pass the admitted path")
         require(value["host"]["platform"] == "darwin" and context["os"] == "macos"
                 and {"arm64": "aarch64", "x86_64": "x86_64"}.get(value["host"]["arch"]) == context["arch"], "Devin platform mismatch")
         rows = value["scenarios"]
-        require(len(rows) == 5 and {r["scenario"] for r in rows} == {"broker", "exec", "write", "config_write", "webfetch"}, "incomplete Devin scenarios")
+        require(isinstance(rows, list) and len(rows) == 6
+                and all(isinstance(row, dict) and isinstance(row.get("scenario"), str) for row in rows)
+                and {row["scenario"] for row in rows} == {"broker", "exec", "write", "config_write", "webfetch", "compaction"}, "incomplete Devin scenarios")
         for row in rows:
-            require(row["status"] == "passed" and row["process_joined"] is True and row["bridge_joined"] is True
+            require(row.get("passed") is True and row["status"] == "passed" and row["process_joined"] is True and row["bridge_joined"] is True
                     and row["provider_sha256"] == context["provider_sha256"] and row["helper_sha256"] == context["runtime_sha256"], "Devin scenario/custody mismatch")
             checks = row["checks"]
             require(checks["capture_error"] is None and all(checks[key] is True for key in ("no_canary_leak", "no_native_webfetch", "exact_inventory", "expected_steps", "no_overflow")), "Devin boundary observations failed")
             require(row["stopped"]["code"] == 0 and row["stopped"]["signal"] is None, "Devin fixture did not exit successfully")
+            if row["scenario"] == "compaction":
+                require(checks.get("compaction_verified") is True, "Devin compaction verification failed")
+                observations = row.get("compaction_observations")
+                # The current Rust fixture records at most64 notifications;
+                # completed summaries obey xcb-core's256 KiB text bound. The
+                # summary flag alone cannot replace the actual paired evidence.
+                require(isinstance(observations, list) and 2 <= len(observations) <= 64
+                        and len(observations) % 2 == 0, "Devin compaction observations missing or unpaired")
+                for index, observation in enumerate(observations):
+                    require(isinstance(observation, dict)
+                            and set(observation) == {"status", "summary_bytes", "session_matched"}, "Devin compaction observation schema")
+                    require(observation["status"] == ("started" if index % 2 == 0 else "completed")
+                            and observation["session_matched"] is True, "Devin compaction status/session mismatch")
+                    summary = observation["summary_bytes"]
+                    require(summary is None if index % 2 == 0 else type(summary) is int and 0 < summary <= 256 * 1024,
+                            "Devin compaction summary mismatch")
         return observed_time(value["observed_at"])
     raise ValueError("unsupported native boundary schema")
 
@@ -537,6 +556,7 @@ def bundle(args, capture_dir, target=None):
 def self_test():
     """Hermetic parser/file/bundle tests. Never run Cargo, XCB or a provider."""
     import contextlib
+    import copy
     import io
     import tempfile
     import unittest
@@ -676,6 +696,124 @@ def self_test():
             blocked = decode(output)
             self.assertNotIn(int(signal.SIGTERM), blocked)
             self.assertNotIn(int(signal.SIGINT), blocked)
+
+        def devin_fixture(self):
+            # The historical, credential-free fixture is parser input only. Its
+            # timestamp is preserved; this test cannot renew or qualify it.
+            source = Path(__file__).resolve().parent.parent
+            raw = read_file(source / "qualification/devin-native-3000.11.1-macos-arm64.json", MAX_LOG)
+            value = decode(raw)
+            context = {"provider": "devin", "provider_version": value["runtime_version"],
+                       "provider_sha256": value["provider_sha256"], "runtime_sha256": value["helper_sha256"],
+                       "os": "macos", "arch": "aarch64"}
+            return raw, value, context, source
+
+        def test_devin_recorded_six_scenario_boundary_preserves_observation_time(self):
+            raw, value, context, source = self.devin_fixture()
+            self.assertEqual(validate_boundary(raw, context, source), observed_time(value["observed_at"]))
+            self.assertEqual([row["scenario"] for row in value["scenarios"]],
+                             ["broker", "exec", "write", "config_write", "webfetch", "compaction"])
+
+        def test_devin_scenarios_require_exact_complete_unique_inventory(self):
+            _, value, context, source = self.devin_fixture()
+            rows = value["scenarios"]
+            invalid = [rows[:-1], rows + [rows[-1]], [rows[-1], *rows[1:]],
+                       [*rows[:-1], {**rows[-1], "scenario": "extra"}], None, {}]
+            for scenarios in invalid:
+                with self.subTest(scenarios=scenarios and [row["scenario"] for row in scenarios]):
+                    changed = {**value, "scenarios": scenarios}
+                    with self.assertRaisesRegex(ValueError, "Devin scenarios"):
+                        validate_boundary(encoded(changed), context, source)
+
+        def test_devin_compaction_requires_its_own_bounded_paired_observations(self):
+            _, value, context, source = self.devin_fixture()
+            rows = value["scenarios"][-1]["compaction_observations"]
+            invalid = [None, {}, [], rows[:1], rows[:3], rows[:2] * 33,
+                       [rows[1], rows[0]], [rows[0], rows[0]]]
+            for observations in invalid:
+                with self.subTest(observations=observations):
+                    changed = copy.deepcopy(value)
+                    changed["scenarios"][-1]["compaction_observations"] = observations
+                    with self.assertRaisesRegex(ValueError, "Devin compaction"):
+                        validate_boundary(encoded(changed), context, source)
+            changed = copy.deepcopy(value)
+            del changed["scenarios"][-1]["compaction_observations"]
+            with self.assertRaisesRegex(ValueError, "Devin compaction"):
+                validate_boundary(encoded(changed), context, source)
+            # Observations from another scenario cannot stand in for this one.
+            changed = copy.deepcopy(value)
+            changed["scenarios"][0]["compaction_observations"] = rows
+            changed["scenarios"][-1]["compaction_observations"] = []
+            with self.assertRaisesRegex(ValueError, "Devin compaction"):
+                validate_boundary(encoded(changed), context, source)
+
+        def test_devin_compaction_checks_raw_status_session_and_summary_evidence(self):
+            _, value, context, source = self.devin_fixture()
+            invalid = [(0, "status", "completed"), (1, "status", "started"),
+                       (0, "session_matched", False), (1, "session_matched", 1),
+                       (0, "summary_bytes", 0)]
+            invalid.extend((1, "summary_bytes", summary) for summary in (None, False, True, 0, -1, 1.5, "207", 262145))
+            for index, key, replacement in invalid:
+                with self.subTest(index=index, key=key, replacement=replacement):
+                    changed = copy.deepcopy(value)
+                    changed["scenarios"][-1]["compaction_observations"][index][key] = replacement
+                    # A claimed true summary flag cannot override raw evidence.
+                    self.assertIs(changed["scenarios"][-1]["checks"]["compaction_verified"], True)
+                    with self.assertRaisesRegex(ValueError, "Devin compaction"):
+                        validate_boundary(encoded(changed), context, source)
+            for field in ("status", "summary_bytes", "session_matched", "extra"):
+                with self.subTest(field=field):
+                    changed = copy.deepcopy(value)
+                    observation = changed["scenarios"][-1]["compaction_observations"][0]
+                    if field == "extra":
+                        observation[field] = True
+                    else:
+                        del observation[field]
+                    with self.assertRaisesRegex(ValueError, "Devin compaction"):
+                        validate_boundary(encoded(changed), context, source)
+            for replacement in (None, {}, "started"):
+                changed = copy.deepcopy(value)
+                changed["scenarios"][-1]["compaction_observations"][0] = replacement
+                with self.assertRaisesRegex(ValueError, "Devin compaction"):
+                    validate_boundary(encoded(changed), context, source)
+
+        def test_devin_compaction_failed_verification_cannot_pass_with_valid_observations(self):
+            _, value, context, source = self.devin_fixture()
+            for flag in (None, False, 1):
+                changed = copy.deepcopy(value)
+                changed["scenarios"][-1]["checks"]["compaction_verified"] = flag
+                with self.assertRaisesRegex(ValueError, "Devin compaction"):
+                    validate_boundary(encoded(changed), context, source)
+            changed = copy.deepcopy(value)
+            del changed["scenarios"][-1]["checks"]["compaction_verified"]
+            with self.assertRaisesRegex(ValueError, "Devin compaction"):
+                validate_boundary(encoded(changed), context, source)
+
+        def test_devin_existing_identity_scope_denial_and_custody_gates_remain_required(self):
+            _, value, context, source = self.devin_fixture()
+            changes = [(('runtime_version',), 'changed'), (('provider_sha256',), '0' * 64),
+                       (('helper_sha256',), '0' * 64), (('harness_sha256',), '0' * 64),
+                       (('passed',), False), (('candidate',), True), (('candidate',), None),
+                       (('credential_free',), False), (('live_provider_qualification',), True),
+                       (('host', 'platform'), 'linux'), (('host', 'arch'), 'x86_64')]
+            for row in range(len(value["scenarios"])):
+                changes.extend((("scenarios", row, field), replacement) for field, replacement in
+                               (("passed", False), ("status", "protocol_failed"), ("process_joined", False), ("bridge_joined", False),
+                                ("provider_sha256", "0" * 64), ("helper_sha256", "0" * 64)))
+                changes.extend((("scenarios", row, "checks", field), False) for field in
+                               ("no_canary_leak", "no_native_webfetch", "exact_inventory", "expected_steps", "no_overflow"))
+                changes.extend([(("scenarios", row, "checks", "capture_error"), "failed"),
+                                (("scenarios", row, "stopped", "code"), 1),
+                                (("scenarios", row, "stopped", "signal"), "SIGTERM")])
+            for path, replacement in changes:
+                with self.subTest(path=path):
+                    changed = copy.deepcopy(value)
+                    target = changed
+                    for key in path[:-1]:
+                        target = target[key]
+                    target[path[-1]] = replacement
+                    with self.assertRaises(ValueError):
+                        validate_boundary(encoded(changed), context, source)
 
         def fixture(self):
             capture = private_directory(self.directory / "capture", True)
