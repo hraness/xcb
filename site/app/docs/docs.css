@@ -64,7 +64,7 @@
 .xcb-docs-lead { max-inline-size: 57ch; margin: 0; font-size: 1.15rem; line-height: 1.65; color: var(--muted); }
 .xcb-docs-note { padding: 1rem 1.2rem; margin-block: 1.5rem; border-inline-start: 2px solid var(--foreground); background: var(--hraness-material-warm-plane, var(--surface)); font-size: 0.94rem; line-height: 1.65; }
 .xcb-docs-note a,
-.xcb-docs-body a { color: var(--foreground); text-decoration: underline; text-decoration-color: color-mix(in oklch, var(--foreground) 35%, transparent); text-underline-offset: 0.2em; }
+.xcb-docs-body a { color: var(--foreground); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--foreground) 35%, transparent); text-underline-offset: 0.2em; }
 .xcb-docs-note a:hover,
 .xcb-docs-body a:hover { text-decoration-color: currentColor; }
 .xcb-docs-body { font-size: 1rem; line-height: 1.75; overflow-wrap: anywhere; }

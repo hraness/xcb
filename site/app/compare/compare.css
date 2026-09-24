@@ -80,7 +80,7 @@
 }
 
 .xcb-comparison-own-row {
-  background: color-mix(in oklch, var(--hraness-site-accent) 6%, transparent);
+  background: color-mix(in srgb, var(--hraness-site-accent) 6%, transparent);
 }
 
 .xcb-comparison-name,
@@ -119,7 +119,7 @@
 .xcb-compare-guide-link {
   color: var(--foreground);
   text-decoration: underline;
-  text-decoration-color: color-mix(in oklch, var(--foreground) 40%, transparent);
+  text-decoration-color: color-mix(in srgb, var(--foreground) 40%, transparent);
   text-underline-offset: 0.2em;
 }
 
