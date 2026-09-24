@@ -1,0 +1,104 @@
+{
+ "schema": "agentmixer.live-provider-smoke.v1",
+ "evidenceKind": "live-claude-subscription-cli-smoke",
+ "observedAt": "2026-09-24T20:19:51Z",
+ "platform": "darwin-arm64",
+ "host": {
+  "product": "macOS",
+  "version": "26.5.2",
+  "build": "25F84"
+ },
+ "supplements": "qualification/2026-09-22-live-claude-subscription.json",
+ "question": "Does the native Claude route complete on Claude Code 2.1.281, whose init lists the builtin agents-md plugin, once xcb disables that plugin at launch?",
+ "source": {
+  "branch": "codex/xcb-persistent-routing-20260923",
+  "commit": "7095a397da68aa51ff4008587619195b63d679e2",
+  "gitTree": "bf665e81d114d0596ff7fb2e9b6fd5b69dd30956",
+  "runnerSourceSha256": "35c852cefdb1ae73be4fb65690661817f6b0962cca79241f57329956f22d27cd",
+  "claudeProtocolSourceSha256": "963d59300e936381a2dd9c08f3a75f34ee0227b036fe4dfe465313674f237a49",
+  "trackedWorkingTreeCleanAgainstCommit": true,
+  "binaryBuiltFromThisCommit": true,
+  "sourceModifiedForThisRun": false
+ },
+ "runtime": {
+  "provider": "claude",
+  "version": "2.1.282",
+  "admittedBy": "version floor",
+  "minVersion": "2.1.268",
+  "maxMajor": 2,
+  "exactVersionPinned": false,
+  "executableSha256": "fcfd837103965c64de34a6b9b94370d77a347ea71819715a27d5f0ef01775ea4",
+  "xcbExecutableSha256": "0b3efc1d2a48efc00086fa1f87b92cef9594b7c80ad1b03943235fd08bafe7c3",
+  "xcbVersion": "xcb 0.8.1"
+ },
+ "admission": {
+  "route": "native",
+  "authentication": "subscription",
+  "boundaryAssertionsEnforcedAtRunTime": [
+   "claude_code_version is admitted by the floor and major ceiling",
+   "cwd equals the launched workspace",
+   "model is the exact identifier for a concrete choice, or any well-formed identifier for an alias",
+   "apiKeySource is none",
+   "permissionMode is dontAsk",
+   "effective tool inventory equals the expected broker manifest",
+   "skills is empty",
+   "plugins is empty (the builtin agents-md plugin is disabled through launch settings on 2.1.281)",
+   "mcp_servers count and identity match the broker"
+  ],
+  "priorFailureOnThisRuntime": "2026-09-24T17:47Z: without the launch setting, 2.1.281 reported plugins=[agents-md@builtin] and the route failed closed with 'effective runtime boundary mismatch'"
+ },
+ "sandbox": {
+  "backend": "seatbelt",
+  "policyGeneratedPerRun": true,
+  "unsandboxedFallbackAvailableOnDarwin": false
+ },
+ "request": {
+  "requestedModelKey": "automatic route",
+  "routedModel": "claude/opus[1m]/max",
+  "workspace": "disposable scratch repository",
+  "prompt": "create test_greet.py (unittest) for greet.py; no commands",
+  "expectedOutput": "file created and one-sentence reply",
+  "observedOutputSummary": "I added `test_greet.py`, which imports `greet` from `greet.py` and has a `unittest.TestCase` (`TestGreet.test_greet_xcb`) that checks `greet(\"xcb\") == \"Hello, xcb\"`.\n\n**Summary:** I read `greet.py` to",
+  "completed": true,
+  "liveProviderRequests": 1,
+  "billingImpact": "subscription-plan-consumption-not-measured"
+ },
+ "custody": {
+  "providerExitedAndJoinedBeforeCompletionPersisted": true,
+  "reportedEffects": "settled",
+  "pendingAttention": false
+ },
+ "privacy": {
+  "realCredentialUsed": true,
+  "credentialMaterialRecorded": false,
+  "accountIdentityRecorded": false,
+  "authorizationUrlRecorded": false,
+  "localFilesystemPathsRecorded": false,
+  "localSessionIdentifierRecorded": false
+ },
+ "claims": {
+  "authenticatedProviderTurnObserved": true,
+  "exactExpectedResponseObserved": true,
+  "boundaryAssertionsPassedOnThatRuntime": true,
+  "productionQualificationIssued": false,
+  "productionActivationIssued": false
+ },
+ "alsoPassedThisSession": [
+  {
+   "version": "2.1.281",
+   "executableSha256": "a922981f6f3b55a251ef9f9dbaa0621a5f99cbcb5ca67f8a797476ccfc83f626",
+   "observedAt": "2026-09-24T18:18:42Z",
+   "outcome": {
+    "terminal": "completed",
+    "joined": true,
+    "effects": "settled",
+    "pending_attention": false,
+    "failure": null
+   }
+  }
+ ],
+ "notEstablished": [
+  "that runtimes other than 2.1.281 list the same builtin plugins; the per-run boundary assertion remains the enforcement",
+  "any measurement of subscription usage, other models, other hosts, or production activation"
+ ]
+}
