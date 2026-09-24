@@ -1036,10 +1036,12 @@ mod tests {
     fn browsing_freezes_priority_but_updates_status_and_attention_count() {
         let mut app = fixture(6);
         let screen = draw(&mut app, 120, 40);
-        assert!(text(&screen).contains("1 needs attention"));
+        assert!(text(&screen).contains("0 need attention"));
         app.overview_event(&key(KeyCode::F(6)));
         app.view.agents[4].state = State::NeedsAnswer;
         app.view.agents[4].activity = "needs answer".into();
+        let screen = draw(&mut app, 120, 40);
+        assert!(text(&screen).contains("1 needs attention"));
         let mut new_row = app.view.agents[4].clone();
         new_row.context = TranscriptContext::Conversation(id("new_attention"));
         app.view.agents.insert(0, new_row);
