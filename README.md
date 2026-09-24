@@ -21,6 +21,13 @@ are listed below.
 [Compare tools](https://xcb.sh/compare) · [Source](https://github.com/hraness/xcb) ·
 [Route contract](docs/route.md) · [Application API](docs/application-api.md) · [Compatibility reference](docs/compatibility.md) · [Contributing](CONTRIBUTING.md)
 
+xcb picks one signed-in, idle account for each task and keeps it locked until
+the provider process has exited, so permission stays explicit: the design every
+Hraness project shares.
+[The thread through hraness](https://hraness.com/writing/the-thread-through-hraness)
+follows that design across the projects, and the
+[ALGAL vision](https://algal.computer/docs/vision/) states the bet behind it.
+
 ## Readiness
 
 **xcb is not yet a daily-driver replacement for Codex, Claude Code, and Devin.**
