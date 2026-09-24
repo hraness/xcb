@@ -532,7 +532,7 @@ fn provider_args(model: &ModelChoice, tools: bool) -> Vec<String> {
         args.push(effort.as_str().into());
     }
     args.push("--settings".into());
-    args.push(json!({"disableAllHooks":true,"disableClaudeAiConnectors":true,"autoMemoryEnabled":false,"disableBundledSkills":true,"disableSkillShellExecution":true,"enableWorkflows":false,"workflowKeywordTriggerEnabled":false,"skillOverrides":{"doctor":"off","checkup":"off"}}).to_string());
+    args.push(json!({"disableAllHooks":true,"disableClaudeAiConnectors":true,"autoMemoryEnabled":false,"disableBundledSkills":true,"disableSkillShellExecution":true,"enableWorkflows":false,"workflowKeywordTriggerEnabled":false,"skillOverrides":{"doctor":"off","checkup":"off"},"enabledPlugins":{"agents-md@builtin":false}}).to_string());
     if tools {
         args.push("--allowedTools".into());
         args.push(
@@ -1473,32 +1473,70 @@ pub fn validate_init(value: &Value, cwd: &Path, model: &ModelChoice, tools: bool
         .get("mcp_servers")
         .and_then(Value::as_array)
         .ok_or(Error::Protocol("MCP inventory"))?;
+    // Each boundary field fails on its own so the diagnostic names what the
+    // runtime changed. Field names only: values never leave the run record.
     if value
         .get("claude_code_version")
         .and_then(Value::as_str)
         .is_none_or(|version| !claude::version_admitted(version))
-        || value.get("cwd").and_then(Value::as_str) != cwd.to_str()
-        || match value.get("model").and_then(Value::as_str) {
-            // Alias choices (`value` ≠ `resolvedModel`, e.g. `default`) are
-            // resolved provider-side and can vary by effort — `default/low`
-            // was observed serving `claude-sonnet-5` while the catalog says
-            // `claude-opus-5[1m]`. The bound intent is the alias itself, so
-            // any well-formed reported model is within contract.
-            Some(reported) if model.resolved.is_some() => Id::new(reported).is_err(),
-            reported => reported != Some(model.id.as_str()),
-        }
-        || value.get("apiKeySource").and_then(Value::as_str) != Some("none")
-        || value.get("permissionMode").and_then(Value::as_str) != Some("dontAsk")
-        || actual != expected
-        || !empty("skills")
-        || !empty("plugins")
-        || servers.len() != usize::from(tools)
+    {
+        return Err(Error::Protocol(
+            "effective runtime boundary mismatch: claude_code_version",
+        ));
+    }
+    if value.get("cwd").and_then(Value::as_str) != cwd.to_str() {
+        return Err(Error::Protocol("effective runtime boundary mismatch: cwd"));
+    }
+    let model_mismatch = match value.get("model").and_then(Value::as_str) {
+        // Alias choices (`value` ≠ `resolvedModel`, e.g. `default`) are
+        // resolved provider-side and can vary by effort — `default/low`
+        // was observed serving `claude-sonnet-5` while the catalog says
+        // `claude-opus-5[1m]`. The bound intent is the alias itself, so
+        // any well-formed reported model is within contract.
+        Some(reported) if model.resolved.is_some() => Id::new(reported).is_err(),
+        reported => reported != Some(model.id.as_str()),
+    };
+    if model_mismatch {
+        return Err(Error::Protocol(
+            "effective runtime boundary mismatch: model",
+        ));
+    }
+    if value.get("apiKeySource").and_then(Value::as_str) != Some("none") {
+        return Err(Error::Protocol(
+            "effective runtime boundary mismatch: apiKeySource",
+        ));
+    }
+    if value.get("permissionMode").and_then(Value::as_str) != Some("dontAsk") {
+        return Err(Error::Protocol(
+            "effective runtime boundary mismatch: permissionMode",
+        ));
+    }
+    if actual != expected {
+        return Err(Error::Protocol(
+            "effective runtime boundary mismatch: tools",
+        ));
+    }
+    if !empty("skills") {
+        return Err(Error::Protocol(
+            "effective runtime boundary mismatch: skills",
+        ));
+    }
+    // Claude Code 2.1.281 started reporting its builtin `agents-md` plugin
+    // here; the launch settings disable it so the effective set stays empty.
+    if !empty("plugins") {
+        return Err(Error::Protocol(
+            "effective runtime boundary mismatch: plugins",
+        ));
+    }
+    if servers.len() != usize::from(tools)
         || servers.iter().any(|server| {
             server.get("name").and_then(Value::as_str) != Some("xcb")
                 || server.get("status").and_then(Value::as_str) != Some("connected")
         })
     {
-        return Err(Error::Protocol("effective runtime boundary mismatch"));
+        return Err(Error::Protocol(
+            "effective runtime boundary mismatch: mcp_servers",
+        ));
     }
     Ok(())
 }
@@ -2985,6 +3023,122 @@ mod tests {
         let concrete = choice("claude-fable-5-1", None);
         validate_init(&init("claude-fable-5-1"), cwd, &concrete, false).unwrap();
         assert!(validate_init(&init("claude-sonnet-5"), cwd, &concrete, false).is_err());
+    }
+    /// Each boundary field fails on its own so an operator can tell which
+    /// runtime property changed. Claude Code 2.1.281 started listing its
+    /// builtin `agents-md` plugin at init; the assertion must still reject a
+    /// non-empty plugin set, and the launch settings must disable that plugin.
+    #[test]
+    fn init_boundary_names_the_mismatched_field() {
+        let cwd = Path::new("/workspace");
+        let choice = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("claude-fable-5-1").unwrap(),
+            label: "Fable".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 0,
+        };
+        let good = json!({
+            "claude_code_version": "2.1.281",
+            "cwd": "/workspace",
+            "model": "claude-fable-5-1",
+            "apiKeySource": "none",
+            "permissionMode": "dontAsk",
+            "tools": [],
+            "skills": [],
+            "plugins": [],
+            "mcp_servers": []
+        });
+        validate_init(&good, cwd, &choice, false).unwrap();
+        let message = |mut init: Value, key: &str, value: Value| {
+            init[key] = value;
+            match validate_init(&init, cwd, &choice, false) {
+                Err(Error::Protocol(message)) => message,
+                other => panic!("expected a protocol error, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            message(
+                good.clone(),
+                "plugins",
+                json!([{"name": "agents-md", "path": "builtin", "source": "agents-md@builtin"}])
+            ),
+            "effective runtime boundary mismatch: plugins"
+        );
+        assert_eq!(
+            message(good.clone(), "skills", json!(["doctor"])),
+            "effective runtime boundary mismatch: skills"
+        );
+        assert_eq!(
+            message(good.clone(), "tools", json!(["Bash"])),
+            "effective runtime boundary mismatch: tools"
+        );
+        assert_eq!(
+            message(good.clone(), "permissionMode", json!("acceptEdits")),
+            "effective runtime boundary mismatch: permissionMode"
+        );
+        assert_eq!(
+            message(good.clone(), "apiKeySource", json!("ANTHROPIC_API_KEY")),
+            "effective runtime boundary mismatch: apiKeySource"
+        );
+        assert_eq!(
+            message(good.clone(), "cwd", json!("/elsewhere")),
+            "effective runtime boundary mismatch: cwd"
+        );
+        assert_eq!(
+            message(good.clone(), "model", json!("claude-sonnet-5")),
+            "effective runtime boundary mismatch: model"
+        );
+        assert_eq!(
+            message(good.clone(), "claude_code_version", json!("1.0.0")),
+            "effective runtime boundary mismatch: claude_code_version"
+        );
+        assert_eq!(
+            message(
+                good.clone(),
+                "mcp_servers",
+                json!([{"name": "other", "status": "connected"}])
+            ),
+            "effective runtime boundary mismatch: mcp_servers"
+        );
+        assert!(matches!(
+            validate_init(&json!({"tools": []}), cwd, &choice, false),
+            Err(Error::Protocol("MCP inventory"))
+        ));
+    }
+
+    #[test]
+    fn launch_settings_disable_builtin_plugins() {
+        let choice = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("opus[1m]").unwrap(),
+            label: "Opus".into(),
+            mode: Mode::Fixed,
+            resolved: Some(Id::new("claude-opus-5-5[1m]").unwrap()),
+            effort: Some(Id::new("max").unwrap()),
+            observed_at_ms: 0,
+        };
+        for tools in [false, true] {
+            let args = provider_args(&choice, tools);
+            let settings = args
+                .iter()
+                .position(|arg| arg == "--settings")
+                .map(|index| &args[index + 1])
+                .expect("settings argument");
+            let settings: Value = serde_json::from_str(settings).unwrap();
+            assert_eq!(
+                settings["enabledPlugins"]["agents-md@builtin"],
+                json!(false)
+            );
+            assert_eq!(settings["disableAllHooks"], json!(true));
+            assert_eq!(settings["disableBundledSkills"], json!(true));
+            assert_eq!(
+                args.iter().filter(|arg| *arg == "--allowedTools").count(),
+                usize::from(tools)
+            );
+        }
     }
     struct FixtureProtocol {
         model: ModelChoice,
