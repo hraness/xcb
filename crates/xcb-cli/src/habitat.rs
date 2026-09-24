@@ -14,13 +14,17 @@ use xcb_runtime::{
 pub enum BacklogCommand {
     /// Run a pinned ALGAL program now in an existing project conversation.
     Program {
+        /// Persistent project conversation from `xcb conversations`.
         conversation: Id,
+        /// Bounded ALGAL manifest to validate and pin for this run.
         manifest: PathBuf,
+        /// JSON object of typed inputs; defaults to an empty object.
         #[arg(long)]
         inputs: Option<PathBuf>,
         /// Admit managed agent calls under the current project grant.
         #[arg(long, value_parser = clap::value_parser!(u8).range(1..=8))]
         managed_calls: Option<u8>,
+        /// Human-readable title retained in the project's work history.
         #[arg(long, default_value = "ALGAL project program")]
         title: String,
         /// Stable operation identity for an idempotent submission retry.
@@ -28,7 +32,10 @@ pub enum BacklogCommand {
         id: Option<Id>,
     },
     /// Inspect a managed program's checkpoint and linked worker status.
-    ProgramStatus { id: Id },
+    ProgramStatus {
+        /// Managed controller or linked child task id from `xcb backlog`.
+        id: Id,
+    },
     /// Record that an unstarted deferred item is already done.
     Complete {
         /// Deferred item from `xcb backlog`.
