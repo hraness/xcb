@@ -1,3 +1,4 @@
+import { blogPostPath, indexableBlogPosts } from "../blog/posts";
 import { publicationMarkdown, publishedRelease } from "../publication";
 
 // llms.txt is a machine-readable site summary. Its release claim comes from
@@ -8,6 +9,8 @@ const releaseLine = publishedRelease === null
   ? "No native xcb binary or @hraness/xcb npm package is published yet; the source build is the installation path."
   : `Latest verified release: v${publishedRelease.version}, verified by ${publishedRelease.verificationRun}.`;
 const releaseDetails = publicationMarkdown(publishedRelease);
+// Only indexable posts are listed; quarantined posts stay out of machine-readable maps.
+const blogLines = indexableBlogPosts.map((entry) => `- [${entry.title}](https://xcb.sh${blogPostPath(entry)}): ${entry.dek}`).join("\n");
 
 const body = `# xcb
 
@@ -41,7 +44,12 @@ ${releaseDetails === "" ? "" : `## Verified release\n\n${releaseDetails}\n\n`}##
 - [Application API](https://xcb.sh/docs/application-api): one model response per call for your app, with no tools or saved history, once your exact build, account, and model pass xcb's application checks; separate from coding sessions.
 - [Reference](https://xcb.sh/docs/reference): full project README and compatibility source reference.
 - [README as Markdown](https://xcb.sh/README.md): machine-readable project contract.
+- [Blog](https://xcb.sh/blog): posts on how xcb works and how it uses other Hraness tools, with an [Atom feed](https://xcb.sh/blog/feed.xml).
 - [Sitemap](https://xcb.sh/sitemap.xml): indexable HTML pages.
+
+## Blog posts
+
+${blogLines}
 `;
 
 export function GET(): Response {
