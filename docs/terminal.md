@@ -29,6 +29,7 @@ keeps your draft. Type `?` on an empty prompt or press F1 for scrollable help.
 | Expand tool output | F4 |
 | Recall the most recently updated queued task if it has not started and supports recall | Alt-Up |
 | Open attention across agents | F2 or Alt-Down |
+| Focus the agent overview; Enter adds a reference, Escape returns to chat | F6 |
 | Switch conversations with an empty prompt | Alt-Left / Alt-Right |
 
 Ctrl-C closes a dialog, clears a nonempty draft, or requests cancellation when
@@ -43,6 +44,30 @@ Paste preserves multiple lines without sending them. Drafts accept up to
 `/detach [number|all]` removes it. With no number, `/detach` removes the last
 attachment. Mouse capture starts off so terminal selection works; `/mouse`
 enables wheel scrolling.
+
+## Keep an eye on agents
+
+The overview above chat shows sessions in the current project. Each card shows
+the session name, routed model, activity, and a preview of its latest response.
+Labels accompany the colors for questions, approvals, completed work, usage
+limits, and problems. A model is shown after routing; thinking is shown only
+when the provider reports it.
+
+The grid uses at most half the terminal height and scrolls when more sessions
+are present. Press F6, then use arrows or PageUp/PageDown to browse. Enter adds
+the selected agent's reference and a response snapshot to your draft. Escape
+returns to chat. With `/mouse` enabled, scroll over the grid to browse agents,
+scroll below it to browse the transcript, or click a card to add its reference.
+
+References identify the conversation or session and its observed task. Adding
+one sends nothing and keeps your current chat and guidance target. Edit the
+draft to describe what you want to do with that context, then send it from the
+main chat. Existing task, project, and approval controls still apply.
+
+Use `/overview all` to see other projects, `/overview project` to return to the
+current project, or `/overview hide` and `/overview show` to control visibility.
+The overview holds up to 128 sessions and 2,048 bytes per response preview.
+Short terminals use a compact strip to leave room for typing.
 
 ## Guide an agent
 

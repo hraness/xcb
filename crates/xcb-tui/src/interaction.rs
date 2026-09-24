@@ -854,6 +854,8 @@ impl App {
             "Ctrl-L  Clear display     F4  Expand tools     Alt-Up  Recall queued work".into(),
             "? / F1  Shortcuts     /resume  Sessions     /agents  Tasks".into(),
             "F2 / Alt-Down  Attention     Alt-Left/Right  Switch conversation (empty draft)".into(),
+            "F6  Focus agent grid; arrows/PgUp/PgDn browse, Enter adds a reference".into(),
+            "/overview project|all|hide|show     /mouse  Scroll panels and click references".into(),
             String::new(),
             "Commands".into(),
         ];

@@ -1019,6 +1019,7 @@ fn eligible_failover_routes(
 struct Activity {
     tools: Vec<String>,
     subagents: BTreeMap<Id, Subagent>,
+    phase: Option<String>,
 }
 struct Active {
     cancel: watch::Sender<bool>,
@@ -1125,6 +1126,24 @@ fn publish(
             view.state = State::Uncertain;
         }
     }
+    for row in &mut view.agents {
+        let xcb_core::ui::TranscriptContext::Session(id) = &row.context else {
+            continue;
+        };
+        if let Some(active) = active.get(id) {
+            row.state = State::Working;
+            row.activity = active
+                .activity
+                .lock()
+                .ok()
+                .and_then(|activity| activity.phase.clone())
+                .unwrap_or_else(|| "working".into());
+        } else if Some(id) == current {
+            row.state = view.state;
+            row.activity = view.state.label().into();
+        }
+    }
+    crate::agent_overview::sort(&mut view.agents);
     if current.is_none() {
         view.pending_route = usable_account(store, None, None, config)
             .ok()
@@ -1162,6 +1181,16 @@ fn start(
     let submission_outbox = outbox.clone();
     let observer: Observer = Arc::new(move |event| match event {
         Progress::Text { thinking, text } if !pane => {
+            if let Ok(mut activity) = activity_copy.lock() {
+                activity.phase = Some(
+                    if thinking {
+                        "thinking"
+                    } else {
+                        "writing response"
+                    }
+                    .into(),
+                );
+            }
             if let Ok(mut outbox) = outbox.lock() {
                 let buffered = outbox
                     .deltas
@@ -1173,6 +1202,7 @@ fn start(
         }
         Progress::Tool(name) => {
             if let Ok(mut activity) = activity_copy.lock() {
+                activity.phase = Some(xcb_core::display_text(&format!("running tool {name}"), 320));
                 if activity.tools.len() >= 128 {
                     activity.tools.remove(0);
                 }
@@ -1192,6 +1222,7 @@ fn start(
                     }
                 }
                 activity.subagents.insert(agent.id.clone(), agent);
+                activity.phase = Some("running subagent".into());
             }
         }
         Progress::Notice(message) => queue(&outbox, Update::Notice(message)),

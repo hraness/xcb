@@ -48,6 +48,8 @@ const POLICY: &str = include_str!("../managed-transition.algal.json");
 
 #[path = "managed_habitat.rs"]
 mod habitat;
+#[path = "managed_overview.rs"]
+mod overview;
 pub use habitat::{HabitatSchedule, WorkMemory};
 #[path = "managed_project.rs"]
 mod project;
@@ -449,6 +451,7 @@ struct ViewStamp {
     config: Option<std::time::SystemTime>,
     fault: Option<std::time::SystemTime>,
     progress: Option<std::time::SystemTime>,
+    progress_time: Option<u64>,
     unreadable: usize,
 }
 
@@ -1098,6 +1101,7 @@ impl ManagedStore {
         )?;
         drop(db);
         let modified = |path: PathBuf| fs::metadata(path).and_then(|meta| meta.modified()).ok();
+        let progress = modified(self.root.join(PROGRESS_FILE));
         Ok(ViewStamp {
             conversation: conversation.clone(),
             conversations,
@@ -1108,7 +1112,10 @@ impl ManagedStore {
             inbox,
             config: modified(state_root.join("config.json")),
             fault: modified(self.root.join(SUPERVISOR_FAULT_FILE)),
-            progress: modified(self.root.join(PROGRESS_FILE)),
+            progress,
+            // Expired heartbeats stop presenting a stale thinking/tool phase
+            // even when a supervisor stopped without rewriting the file.
+            progress_time: progress.map(|_| now_ms() / 15_000),
             unreadable: self.unreadable_tasks(),
         })
     }
@@ -5176,17 +5183,9 @@ impl Supervisor {
         let progress_task = id.clone();
         self.joins.spawn(async move {
             let observer: Observer = Arc::new(move |event| {
-                // Only host-selected identifiers and notices become a
-                // heartbeat; raw worker text is provider content and never
-                // becomes managed detail.
-                let text = match event {
-                    Progress::Tool(name) => format!("running tool {name}"),
-                    Progress::Notice(text) => text,
-                    Progress::Subagent(subagent) => {
-                        format!("running subagent {}", subagent.label)
-                    }
-                    Progress::Text { .. } => return,
-                };
+                // Only a generic phase is kept for text events, never the
+                // response or reasoning contents.
+                let text = overview::progress_label(event);
                 let Ok(mut beats) = progress.lock() else {
                     return;
                 };
@@ -5457,6 +5456,7 @@ fn managed_view(
     // rides along in the detail column; the settlement detail supersedes it
     // because that transition bumps `updated_at_ms` past the beat.
     let progress = read_progress(managed.root());
+    view.agents = managed.agent_overview(conversation, &progress, now)?;
     view.tasks = tasks
         .iter()
         .map(|task| {

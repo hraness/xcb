@@ -22,6 +22,9 @@ const MAX_MESSAGES: i64 = 10_000;
 pub(crate) const AUTHENTICATION_REQUIRED: &str =
     "account authentication failed; reconnect this account before running tasks";
 
+#[path = "store_overview.rs"]
+mod overview;
+
 fn authentication_required_from(db: &Connection, account: &Id) -> Result<bool> {
     let available: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_auth_failures')",

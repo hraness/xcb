@@ -1,7 +1,10 @@
+mod agent_grid;
 pub mod composer;
 pub mod external_editor;
 pub mod input_recovery;
 mod interaction;
+#[cfg(test)]
+mod overview_tests;
 mod recovery_ui;
 pub mod render;
 
@@ -126,6 +129,13 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         alias: "",
         args: "",
         summary: "inspect live managed agents and tasks",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/overview",
+        alias: "",
+        args: "[project|all|hide|show]",
+        summary: "show the agent grid; F6 selects a reference",
         needs_args: false,
     },
     SlashCommand {
@@ -612,6 +622,27 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         conversation.workspace.hash(&mut hasher);
         conversation.updated_at_ms.hash(&mut hasher);
     }
+    for agent in &view.agents {
+        match &agent.context {
+            TranscriptContext::Conversation(id) => {
+                0_u8.hash(&mut hasher);
+                id.hash(&mut hasher);
+            }
+            TranscriptContext::Session(id) => {
+                1_u8.hash(&mut hasher);
+                id.hash(&mut hasher);
+            }
+        }
+        agent.task.hash(&mut hasher);
+        agent.title.hash(&mut hasher);
+        agent.workspace.hash(&mut hasher);
+        agent.model.hash(&mut hasher);
+        (agent.state as u8).hash(&mut hasher);
+        agent.activity.hash(&mut hasher);
+        agent.response.hash(&mut hasher);
+        agent.category.hash(&mut hasher);
+        agent.updated_at_ms.hash(&mut hasher);
+    }
     if let Some(session) = &view.session {
         session.id.as_str().hash(&mut hasher);
         session.account.as_str().hash(&mut hasher);
@@ -788,6 +819,7 @@ impl InboxScope {
 #[derive(Default)]
 pub struct App {
     pub view: View,
+    pub(crate) agent_grid: agent_grid::AgentGrid,
     pub composer: Composer,
     pub stream: String,
     pub thinking: String,
@@ -989,6 +1021,7 @@ impl App {
             "/tools",
             "/thinking",
             "/agents",
+            "/overview",
             "/task",
             "/queue",
             "/cancel",
@@ -1796,11 +1829,12 @@ impl App {
         }
         match command {
             "/help" => self.open_help(false),
+            "/overview" => self.overview_command(arguments),
             "/mouse" => {
                 self.mouse_capture = !self.mouse_capture;
                 self.mouse_toggled = true;
                 self.notice = if self.mouse_capture {
-                    "Mouse capture on: the wheel scrolls the transcript; hold Shift (Option on macOS) to select text."
+                    "Mouse capture on: scroll the panel under the pointer; click an agent to add a reference. Hold Shift (Option on macOS) to select text."
                 } else {
                     "Mouse capture off: terminal text selection works; PageUp/PageDown scroll the transcript."
                 }
@@ -1991,6 +2025,11 @@ impl App {
         true
     }
     pub fn handle(&mut self, event: Event, output: &SyncSender<Intent>) -> bool {
+        // A resize can arrive while a dialog owns input; invalidate hidden
+        // grid coordinates before that dialog consumes the event.
+        if matches!(event, Event::Resize(_, _)) {
+            agent_grid::clear_geometry(self);
+        }
         // Only inputs that can change the view schedule a repaint: painting a
         // frame per pointer-motion or focus event is pure churn.
         let repaints = match &event {
@@ -2014,6 +2053,9 @@ impl App {
         }
         if self.modal.is_some() {
             return self.modal_event(event, output);
+        }
+        if self.overview_event(&event) {
+            return true;
         }
         if let Event::Key(key) = &event {
             if key.kind == KeyEventKind::Release {
@@ -2162,7 +2204,8 @@ impl App {
             }
         }
         if let Event::Mouse(mouse) = &event {
-            // The wheel always scrolls the transcript — never the composer.
+            // The grid consumes wheel events inside its rectangle above.
+            // Remaining wheel events scroll the transcript, never the composer.
             // Mouse events only arrive while `/mouse` capture is on; off, the
             // terminal keeps selection and turns the wheel into arrow keys.
             match mouse.kind {
@@ -2842,7 +2885,9 @@ pub fn run_with_options(
         if !needs_draw && app.view.state.attention() && !app.view.reduced_motion && phase != blink {
             needs_draw = true;
         }
-        let live = matches!(app.view.state, State::Working) || app.view.remote_active;
+        let live = matches!(app.view.state, State::Working)
+            || app.view.remote_active
+            || app.overview_animating();
         if !needs_draw && live && ticks.is_multiple_of(4) {
             needs_draw = true;
         }

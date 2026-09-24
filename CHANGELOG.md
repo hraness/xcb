@@ -4,6 +4,17 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.8.0
+
+- A session grid above chat shows agent names, routed models, activity, and
+  response previews with category labels and colors. It grows up to half the
+  terminal height, with independent scrolling and a compact view on short screens.
+- F6 browses the grid from the keyboard. With `/mouse` enabled, the wheel scrolls
+  the panel under the pointer and clicking a card adds an agent reference to the
+  draft. References preserve the current chat and task target and send nothing.
+- `/overview project|all|hide|show` controls scope and visibility. Questions and
+  approvals keep their existing controls above the overview.
+
 ## 0.7.0
 
 [Verified native release](https://github.com/hraness/xcb/releases/tag/v0.7.0)
