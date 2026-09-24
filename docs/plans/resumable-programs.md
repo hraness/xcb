@@ -53,12 +53,12 @@ provider account is activated by installation.
 
 - [x] Recover current source and remaining scope; preserve the assigned worktree.
 - [x] Identify pinned VM replay and managed lifecycle boundaries.
-- [ ] Deliver the upstream in-process executor API with offline replay tests.
+- [x] Deliver the upstream in-process executor API with offline replay tests.
 - [x] Admit and evaluate managed agent-call programs without provider subprocesses.
 - [x] Atomically persist suspension and children; resume, recover and cancel safely.
 - [x] Expose linked waiting work and explicit program controls in existing UI/CLI.
-- [ ] Validate all crash boundaries and operator flows; independent final review.
-- [ ] Pass required gates and publish verified release artifacts and site.
+- [x] Validate crash-boundary regressions and operator flows; independent final review.
+- [x] Pass required source gates and publish verified release artifacts.
 
 Synthetic checks establish orchestration and custody behavior. They do not
 qualify a live provider or demonstrate token/cost savings.
@@ -69,3 +69,22 @@ for bounded call records, resolve stable-ID retries before new admission checks,
 and reject overlapping immediate controllers. Regression coverage exercises each
 boundary. The CLI/PTY acceptance also covers a genuine no-account child, daemon
 restart, status inspection and settled cancellation without activating providers.
+
+## Release evidence
+
+The executor extension was delivered in [ALGAL PR #68](https://github.com/hraness/algal/pull/68);
+the controller integration and independent source review are recorded in
+[xcb PR #148](https://github.com/hraness/xcb/pull/148). Required native workspace
+tests, strict Clippy, formatting, compatibility checks and site checks passed.
+Isolated operator acceptance covered real no-account child publication, restart,
+TUI inspection and settled cancellation; a copied v0.5 schema-4 database also
+passed the upgrade check. These checks did not activate user providers.
+
+[Release v0.6.0](https://github.com/hraness/xcb/releases/tag/v0.6.0) is bound to
+commit `b87071c1c968078035552247c40881c30e7d217a` and the successful
+[Release workflow](https://github.com/hraness/xcb/actions/runs/35939241299). Independent artifact verification
+checked all six immutable assets, their exact checksums, both native build
+attestations, the compatibility archive identity and the macOS binary version.
+After the publication PR merges, production-site and installed-binary receipts
+are recorded separately in the integration owner's final delivery evidence.
+Release artifacts alone do not establish either outcome.

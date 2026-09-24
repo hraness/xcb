@@ -165,9 +165,9 @@ There are no imports, host effects, transports, or persistent VM store. Cancella
 joins bounded execution before settlement. Restart can replay pure work safely;
 proposal publication retains stable occurrence identity.
 
-Current source builds also support managed controllers that request ordinary
-worker tasks and resume from their completed reports. This profile is not in
-the published v0.5.0 binaries. Explicitly enable it with `--managed-calls`, bounded
+The v0.6.0 release adds managed controllers that request ordinary worker tasks
+and resume from their completed reports. Earlier v0.5.0 binaries support pure
+planners only. Explicitly enable managed calls with `--managed-calls`, bounded
 from 1 to 8 calls per run:
 
 ```sh

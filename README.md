@@ -189,11 +189,12 @@ retries and paginated JSON inspection.
 Deferred work can be edited, released, or completed with a summary. `/project
 grant <tasks> <hours> <goal>` delegates a bounded follow-up budget; `/project
 pause` holds future automatic work. `/schedule` manages recurring prompts, and
-`xcb schedules program` pins bounded ALGAL planners. Current source builds add
+`xcb schedules program` pins bounded ALGAL planners. Starting in v0.6.0, add
 `--managed-calls 2`
 to run a controller that can suspend for up to two ordinary worker tasks, or use
-`xcb backlog program` to run one immediately. `/program` shows its linked child,
-progress and receipt. Every occurrence retains its normal task history and
+`xcb backlog program` to run one immediately. `/program` and
+`xcb backlog program-status <task-id>` show its linked child, progress and
+receipt. Every occurrence retains its normal task history and
 attention states. Workers can propose follow-ups,
 read recent summaries, and search an explicitly bound Wordcell vault. Explicit
 note promotion keeps long-term knowledge separate from working memory. See
