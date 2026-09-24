@@ -353,7 +353,8 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
     } else {
         String::new()
     };
-    let heading = format!("{summary}{filter} · {attention} need attention{range} · {control}");
+    let need = if attention == 1 { "needs" } else { "need" };
+    let heading = format!("{summary}{filter} · {attention} {need} attention{range} · {control}");
     let header = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(
         Paragraph::new(heading).style(Style::default().add_modifier(if grid.focused {
@@ -1034,7 +1035,8 @@ mod tests {
     #[test]
     fn browsing_freezes_priority_but_updates_status_and_attention_count() {
         let mut app = fixture(6);
-        draw(&mut app, 120, 40);
+        let screen = draw(&mut app, 120, 40);
+        assert!(text(&screen).contains("1 needs attention"));
         app.overview_event(&key(KeyCode::F(6)));
         app.view.agents[4].state = State::NeedsAnswer;
         app.view.agents[4].activity = "needs answer".into();
