@@ -446,6 +446,36 @@ async fn overview_running_work_is_visible_over_a_newer_queued_sibling() {
 }
 
 #[tokio::test]
+async fn overview_failed_task_without_output_shows_its_detail() {
+    let f = fixture().await;
+    let mut done = f.task.clone();
+    done.state = TaskState::Completed;
+    put_task(&f, &done);
+    let mut task = another_task(&f, TaskState::Failed, 6);
+    task.detail = "provider protocol error: effective runtime boundary mismatch: plugins".into();
+    task.last_output = None;
+    task.settle = None;
+    // Same-priority tasks rank by recency; the failure is the newer one.
+    task.updated_at_ms = done.updated_at_ms + 1;
+    put_task(&f, &task);
+    let row = rows(&f)
+        .into_iter()
+        .find(|row| row.task.as_ref() == Some(&task.id))
+        .expect("failed task row");
+    assert_eq!(row.state, State::Failed);
+    assert_eq!(row.response, task.detail);
+    assert_eq!(row.category.as_deref(), Some("failed"));
+    // Recorded output still wins over the detail.
+    task.last_output = Some("Partial answer".into());
+    put_task(&f, &task);
+    let row = rows(&f)
+        .into_iter()
+        .find(|row| row.task.as_ref() == Some(&task.id))
+        .unwrap();
+    assert_eq!(row.response, "Partial answer");
+}
+
+#[tokio::test]
 async fn overview_running_work_is_visible_over_a_previous_failure() {
     let f = fixture().await;
     let mut failed = f.task.clone();

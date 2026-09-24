@@ -736,9 +736,21 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     .accounts
                     .iter()
                     .filter(|account| account.enabled && !account.authentication_required);
+                // Name the limited account: the label sits beside the route
+                // that is actually running, which may be another account.
                 let blocked = usable
                     .clone()
-                    .filter_map(|account| account.quota_block_label(now))
+                    .filter_map(|account| {
+                        let label = account.quota_block_label(now)?;
+                        let id = account.id.as_str();
+                        let prefix: String = id.chars().take(10).collect();
+                        Some(format!(
+                            "{} {}{} {label}",
+                            account.provider,
+                            prefix,
+                            if id.chars().count() > 10 { "…" } else { "" }
+                        ))
+                    })
                     .next();
                 let lowest = usable
                     .filter_map(|account| account.remaining_percent)

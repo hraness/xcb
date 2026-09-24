@@ -4,6 +4,19 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.8.2
+
+- The conversation you have open comes first in the session grid, ahead of
+  other sessions needing attention, so the work you just started is never
+  pushed off screen. Attention, active, and earlier sessions follow as before,
+  and positions still hold while you browse.
+- The status line names the account a usage limit belongs to
+  (`codex a_7042a73e… quota limited · retry in ~3d`) instead of showing the
+  limit beside whichever route is running.
+- A session that failed without a response shows its failure reason on its
+  card, such as the runtime boundary property that changed, instead of
+  "No response yet". Managed tasks show their recorded detail the same way.
+
 ## 0.8.1
 
 [Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.1)
