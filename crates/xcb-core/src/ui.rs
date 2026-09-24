@@ -54,6 +54,8 @@ pub struct ConversationRow {
 #[derive(Debug, Clone)]
 pub struct TaskRow {
     pub id: Id,
+    /// Exact durable task revision observed by this view.
+    pub revision: u64,
     pub title: String,
     pub state: State,
     /// Managed worker phase label (`queued — waiting for a route`,
@@ -152,7 +154,33 @@ pub struct InboxRow {
     pub receipt: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum TranscriptContext {
+    Conversation(Id),
+    Session(Id),
+}
+
+/// One retained transcript page in chronological order. Cursors are durable
+/// database sequences, never message counts (retention can leave gaps).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TranscriptPage {
+    pub context: TranscriptContext,
+    pub messages: Vec<Message>,
+    pub first_sequence: Option<u64>,
+    pub has_older: bool,
+}
+
 pub enum HabitatCommand {
+    CancelTask {
+        id: Id,
+        expected_revision: u64,
+    },
+    RecallQueued {
+        id: Id,
+        expected_revision: u64,
+        operation: Id,
+    },
     Steer {
         task: Id,
         event: Id,
@@ -188,6 +216,14 @@ pub enum HabitatCommand {
         query: String,
     },
     Enqueue {
+        id: Id,
+        prompt: String,
+        deferred: bool,
+        priority: u8,
+    },
+    EnqueueIn {
+        conversation: Id,
+        id: Id,
         prompt: String,
         deferred: bool,
         priority: u8,
@@ -204,6 +240,8 @@ pub enum HabitatCommand {
     },
     Reply {
         id: Id,
+        expected_revision: u64,
+        reply: Id,
         text: String,
     },
     Schedule {
@@ -226,6 +264,7 @@ pub struct View {
     pub accounts: Vec<AccountRow>,
     pub models: Vec<ModelChoice>,
     pub messages: Vec<Message>,
+    pub transcript: Option<TranscriptPage>,
     pub tasks: Vec<TaskRow>,
     pub backlog: Vec<BacklogRow>,
     pub schedules: Vec<ScheduleRow>,
@@ -264,6 +303,7 @@ impl Default for View {
             accounts: vec![],
             models: vec![],
             messages: vec![],
+            transcript: None,
             tasks: vec![],
             backlog: vec![],
             schedules: vec![],
@@ -291,8 +331,29 @@ impl Default for View {
 }
 
 pub enum Intent {
+    Rename {
+        context: TranscriptContext,
+        expected_title: String,
+        title: String,
+    },
+    TranscriptPage {
+        context: TranscriptContext,
+        before_sequence: u64,
+        request: Id,
+    },
     Habitat(HabitatCommand),
+    /// Bind conversation-level controls to the context the user inspected.
+    HabitatAt {
+        conversation: Id,
+        command: HabitatCommand,
+    },
     Submit {
+        id: Id,
+        text: String,
+        attachments: Vec<Attachment>,
+    },
+    SubmitTo {
+        context: TranscriptContext,
         id: Id,
         text: String,
         attachments: Vec<Attachment>,
@@ -325,6 +386,52 @@ pub enum Intent {
 }
 
 pub enum Update {
+    /// The original user input has been committed to this exact transcript.
+    Submitted {
+        id: Id,
+        context: TranscriptContext,
+    },
+    SubmitRejected {
+        id: Id,
+        context: Option<TranscriptContext>,
+        text: String,
+        attachments: Vec<Attachment>,
+        reason: String,
+    },
+    TranscriptPage {
+        request: Id,
+        page: TranscriptPage,
+    },
+    TranscriptPageRejected {
+        context: TranscriptContext,
+        request: Id,
+        reason: String,
+    },
+    /// Restore only the matching pending operation in this original context.
+    HabitatDraft {
+        context: Id,
+        task: Option<Id>,
+        operation: Id,
+        text: String,
+    },
+    HabitatAccepted {
+        context: Id,
+        task: Option<Id>,
+        operation: Id,
+        text: String,
+    },
+    QueuedDraft {
+        context: Id,
+        id: Id,
+        operation: Id,
+        text: String,
+    },
+    QueuedRecallRejected {
+        context: Id,
+        id: Id,
+        operation: Id,
+        reason: String,
+    },
     View(Box<View>),
     Delta {
         session: Id,

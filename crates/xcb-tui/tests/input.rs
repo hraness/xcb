@@ -64,7 +64,7 @@ fn help_and_tail_navigation_do_not_modify_the_draft() {
         Event::Key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)),
         &tx,
     );
-    assert!(matches!(app.modal, Some(Modal::Help)));
+    assert!(matches!(app.modal, Some(Modal::Help { .. })));
     app.handle(
         Event::Key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),
         &tx,
@@ -135,54 +135,34 @@ fn help_and_tail_navigation_do_not_modify_the_draft() {
 }
 
 #[test]
-fn ctrl_c_cancels_the_run_even_while_a_dialog_is_open() {
+fn ctrl_c_closes_a_dialog_before_cancelling_a_live_turn() {
     let (tx, rx) = sync_channel(4);
     let mut app = App::default();
     app.view.state = xcb_core::session::State::Working;
-    app.handle(
-        Event::Key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE)),
-        &tx,
-    );
-    assert!(matches!(app.modal, Some(Modal::Help)));
-    app.handle(
-        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-        &tx,
-    );
-    assert!(
-        matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)),
-        "Ctrl-C inside a dialog must reach the kernel as a cancel"
-    );
-    assert!(
-        matches!(app.modal, Some(Modal::Help)),
-        "the dialog stays open; Esc still closes it"
-    );
-    assert!(app.notice.contains("Stopping"));
-
-    // The same holds for a picker dialog.
-    app.handle(
-        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-        &tx,
-    );
+    app.modal = Some(Modal::Help { scroll: 0 });
+    let ctrl_c = || Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.handle(ctrl_c(), &tx));
     assert!(app.modal.is_none());
-    app.composer.set_text("/sessions");
-    app.handle(
-        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        &tx,
-    );
-    assert!(matches!(app.modal, Some(Modal::Picker { .. })));
-    app.handle(
-        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-        &tx,
-    );
+    assert!(rx.try_recv().is_err(), "closing help must not cancel work");
+    assert!(app.handle(ctrl_c(), &tx));
     assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
+
+    app.composer.set_text("/sessions");
+    picker_key(&mut app, &tx, KeyCode::Enter);
     assert!(matches!(app.modal, Some(Modal::Picker { .. })));
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(app.modal.is_none());
+    assert!(
+        rx.try_recv().is_err(),
+        "closing a picker must not cancel work"
+    );
 }
 
 #[test]
 fn ctrl_c_in_an_idle_dialog_closes_it_and_quits_on_a_second_press() {
     let (tx, rx) = sync_channel(4);
     let mut app = App::default();
-    app.modal = Some(Modal::Help);
+    app.modal = Some(Modal::Help { scroll: 0 });
     let ctrl_c = || Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
 
     // Idle: the first Ctrl-C closes the dialog instead of quitting, so an
@@ -263,11 +243,11 @@ fn ctrl_c_moves_the_draft_to_ctrl_r_history() {
         &tx
     ));
     match &app.modal {
-        Some(Modal::Picker { title, items, .. }) => {
-            assert_eq!(title, "Prompt history");
-            assert_eq!(items[0].label, "precious draft");
+        Some(Modal::HistorySearch { matches, query, .. }) => {
+            assert!(query.is_empty());
+            assert_eq!(matches[0], "precious draft");
         }
-        _ => panic!("history picker"),
+        _ => panic!("history search"),
     }
     // Enter restores it into the composer.
     assert!(app.handle(
@@ -353,7 +333,7 @@ fn a_rejected_submission_restores_text_and_attachments() {
 }
 
 #[test]
-fn removing_an_attachment_retains_the_prompt() {
+fn alt_backspace_edits_words_without_removing_attachments() {
     let (tx, _rx) = sync_channel(1);
     let mut app = App::default();
     app.composer.set_text("keep this prompt");
@@ -364,14 +344,15 @@ fn removing_an_attachment_retains_the_prompt() {
         width: 640,
         height: 480,
     });
-
     app.handle(
         Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT)),
         &tx,
     );
-
+    assert_eq!(app.attachments.len(), 1);
+    assert_eq!(app.composer.text(), "keep this ");
+    app.composer.set_text("/detach all");
+    picker_key(&mut app, &tx, KeyCode::Enter);
     assert!(app.attachments.is_empty());
-    assert_eq!(app.composer.text(), "keep this prompt");
 }
 
 fn view_for(session: &str) -> xcb_core::ui::View {
@@ -435,12 +416,17 @@ fn initial_context_preserves_a_partially_typed_quit_command() {
 
 #[test]
 fn initial_context_preserves_early_text_and_attachment_submission() {
+    use xcb_core::ui::TranscriptContext;
     let managed = xcb_core::ui::View {
         conversation: Some(xcb_core::Id::new("c_new").unwrap()),
         extensions: vec![("algal supervisor".into(), "on".into())],
         ..Default::default()
     };
     for view in [view_for("s_new"), managed] {
+        let expected_context = view.conversation.clone().map_or_else(
+            || TranscriptContext::Session(view.session.as_ref().unwrap().id.clone()),
+            TranscriptContext::Conversation,
+        );
         let mut app = App::default();
         let (tx, rx) = sync_channel(4);
         assert!(app.handle(Event::Paste("Review this image".into()), &tx));
@@ -460,9 +446,13 @@ fn initial_context_preserves_early_text_and_attachment_submission() {
             &tx,
         ));
         match rx.try_recv().unwrap() {
-            xcb_core::ui::Intent::Submit {
-                text, attachments, ..
+            xcb_core::ui::Intent::SubmitTo {
+                context,
+                text,
+                attachments,
+                ..
             } => {
+                assert_eq!(context, expected_context);
                 assert_eq!(text, "Review this image");
                 assert_eq!(attachments.len(), 1);
                 assert_eq!(attachments[0].digest, image.digest);
@@ -741,26 +731,19 @@ fn account_picker_rechecks_disabled_or_removed_accounts_after_refresh() {
 }
 
 #[test]
-fn remote_turn_cancellation_explains_ownership_in_composer_and_dialogs() {
-    for dialog in [false, true] {
-        let (tx, rx) = sync_channel(4);
-        let mut app = App::default();
-        app.view.remote_active = true;
-        app.view.state = xcb_core::session::State::Working;
-        if dialog {
-            app.modal = Some(Modal::Help);
-        }
-        app.handle(
-            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-            &tx,
-        );
-        assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
-        assert_eq!(
-            app.notice,
-            "This turn is running in another terminal; cancel it there."
-        );
-        assert_eq!(app.modal.is_some(), dialog);
-    }
+fn remote_turn_cancellation_explains_ownership_after_closing_dialogs() {
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    app.view.remote_active = true;
+    app.view.state = xcb_core::session::State::Working;
+    app.modal = Some(Modal::Help { scroll: 0 });
+    let ctrl_c = || Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    app.handle(ctrl_c(), &tx);
+    assert!(app.modal.is_none());
+    assert!(rx.try_recv().is_err());
+    app.handle(ctrl_c(), &tx);
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
+    assert!(app.notice.contains("another terminal"));
 }
 
 #[test]
@@ -867,7 +850,7 @@ fn slash_typeahead_lists_navigates_and_runs_commands() {
 fn slash_typeahead_runs_quit_and_ignores_unknown_commands() {
     let (tx, rx) = sync_channel(8);
     let mut app = App::default();
-    app.composer.set_text("/qu");
+    app.composer.set_text("/qui");
     assert!(
         !app.handle(
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -879,7 +862,7 @@ fn slash_typeahead_runs_quit_and_ignores_unknown_commands() {
 
     let mut app = App::default();
     app.composer.set_text("/zzz");
-    assert!(app.slash_menu().is_none());
+    assert!(app.slash_menu().is_some_and(|(items, _)| items.is_empty()));
     assert!(app.handle(
         Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         &tx
@@ -942,63 +925,43 @@ fn model_picker_filters_to_the_bound_sessions_provider() {
 }
 
 #[test]
-fn ctrl_c_cancels_a_live_turn_then_clears_a_draft_then_quits() {
+fn ctrl_c_clears_a_draft_before_cancelling_a_live_turn_then_quits_when_idle() {
     let (tx, rx) = sync_channel(8);
     let mut app = App::default();
     let mut view = view_for("s_one");
     view.state = xcb_core::session::State::Working;
-    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view))));
-
-    // While a turn runs, Ctrl-C cancels it and never touches the draft.
+    app.apply(xcb_core::ui::Update::View(Box::new(view)));
     app.composer.set_text("keep this draft");
-    assert!(app.handle(
-        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-        &tx
-    ));
-    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
-    assert_eq!(app.composer.text(), "keep this draft");
-    assert!(app.notice.contains("Stopping"));
-
-    // Esc inside a dialog closes the dialog first; once closed, Esc stops the
-    // live turn.
-    app.modal = Some(Modal::Help);
-    assert!(app.handle(
-        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-        &tx
-    ));
-    assert!(app.modal.is_none());
-    assert!(app.handle(
-        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-        &tx
-    ));
-    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
-
-    // Idle with a draft: Ctrl-C clears it and warns once.
-    let mut view = view_for("s_one");
-    view.state = xcb_core::session::State::Idle;
-    assert!(app.apply(xcb_core::ui::Update::View(Box::new(view))));
-    assert!(app.handle(
-        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-        &tx
-    ));
+    let ctrl_c = || Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+    assert!(app.handle(ctrl_c(), &tx));
     assert!(app.composer.text().is_empty());
-    assert!(app.notice.contains("Ctrl-C again to quit"));
     assert!(rx.try_recv().is_err());
+    assert!(app.composer.history().any(|text| text == "keep this draft"));
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
 
-    // Idle and empty: Ctrl-C quits.
-    assert!(!app.handle(
-        Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-        &tx
-    ));
+    app.composer.set_text("another draft");
+    app.modal = Some(Modal::Help { scroll: 0 });
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert!(app.modal.is_none());
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
+    assert_eq!(
+        app.composer.text(),
+        "another draft",
+        "Esc cancellation retains the draft"
+    );
+
+    app.apply(xcb_core::ui::Update::View(Box::new(view_for("s_one"))));
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(app.composer.text().is_empty());
+    assert!(rx.try_recv().is_err());
+    assert!(!app.handle(ctrl_c(), &tx));
     assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Quit)));
 
-    // Idle Esc is a quiet no-op — no stale "stopping" notice, no intent.
     let (tx, rx) = sync_channel(8);
     let mut app = App::default();
-    assert!(app.handle(
-        Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-        &tx
-    ));
+    picker_key(&mut app, &tx, KeyCode::Esc);
     assert!(app.notice.is_empty());
     assert!(rx.try_recv().is_err());
 }
@@ -1059,6 +1022,7 @@ fn single_letter_aliases_dispatch_the_full_command() {
     app.modal = None;
     app.view.tasks = vec![xcb_core::ui::TaskRow {
         id: xcb_core::Id::new("t_one").unwrap(),
+        revision: 1,
         title: "Fix login".into(),
         state: xcb_core::session::State::Working,
         status: Some("running".into()),
@@ -1090,29 +1054,25 @@ fn global_command_menu_only_shows_conversation_and_task_controls() {
         .iter()
         .map(|command| command.name)
         .collect();
-    assert_eq!(
-        names,
-        vec![
-            "/attach",
-            "/attention",
-            "/backlog",
-            "/exit",
-            "/help",
-            "/inbox",
-            "/memory",
-            "/mouse",
-            "/new",
-            "/program",
-            "/project",
-            "/quit",
-            "/reply",
-            "/schedule",
-            "/sessions",
-            "/steer",
-            "/tasks",
-            "/watch",
-        ]
-    );
+    for command in [
+        "/agents",
+        "/attention",
+        "/backlog",
+        "/cancel",
+        "/detach",
+        "/editor",
+        "/history",
+        "/queue",
+        "/rename",
+        "/reply",
+        "/steer",
+        "/tasks",
+    ] {
+        assert!(
+            names.contains(&command),
+            "missing managed command {command}"
+        );
+    }
     assert!(!names.contains(&"/model"));
     assert!(!names.contains(&"/pane"));
 }
@@ -1213,6 +1173,7 @@ fn task_inspect_opens_a_scrollable_modal_with_the_full_route() {
     app.view.extensions = vec![("algal supervisor".into(), "on".into())];
     app.view.tasks = vec![xcb_core::ui::TaskRow {
         id: xcb_core::Id::new("t_one").unwrap(),
+        revision: 1,
         title: "Fix login".into(),
         state: xcb_core::session::State::Working,
         status: Some("running".into()),
@@ -1339,9 +1300,13 @@ fn submitted_prompts_echo_instantly_then_reconcile_with_the_view() {
 
     app.composer.set_text("ship it");
     assert!(app.handle(enter(), &tx));
-    assert!(
-        matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Submit { text, .. }) if text == "ship it")
-    );
+    let submitted_id = match rx.try_recv().unwrap() {
+        xcb_core::ui::Intent::Submit { id, text, .. } => {
+            assert_eq!(text, "ship it");
+            id
+        }
+        _ => panic!("submitted prompt identity"),
+    };
     assert_eq!(app.pending_echoes().count(), 1, "echo is instant");
 
     // The kernel binds a session before the message lands — the echo follows.
@@ -1351,7 +1316,7 @@ fn submitted_prompts_echo_instantly_then_reconcile_with_the_view() {
 
     // Once the persisted message arrives the echo reconciles — no duplicates.
     view.messages.push(Message {
-        id: xcb_core::Id::new("m1").unwrap(),
+        id: submitted_id,
         role: Role::User,
         text: "ship it".into(),
         at_ms: 1,
@@ -1382,7 +1347,12 @@ fn rejected_cancel_never_claims_that_cancellation_was_sent() {
         let mut app = App::default();
         app.view.state = xcb_core::session::State::Working;
         if modal {
-            app.modal = Some(Modal::Help);
+            app.modal = Some(Modal::Help { scroll: 0 });
+            app.handle(
+                Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                &tx,
+            );
+            assert!(app.modal.is_none());
         }
         app.handle(
             Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -1414,18 +1384,16 @@ fn rejected_attachment_does_not_block_the_next_prompt() {
 }
 
 #[test]
-fn managed_cancellation_reports_a_request_not_confirmed_settlement() {
+fn managed_cancellation_reports_an_exact_task_request_not_settlement() {
+    use xcb_core::ui::{HabitatCommand, Intent};
     let (tx, rx) = sync_channel(1);
-    let mut app = App::default();
-    app.view.state = xcb_core::session::State::Working;
-    app.view.managed_cancel_available = true;
-    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    let mut app = managed_fixture(xcb_core::session::State::Working);
     picker_key(&mut app, &tx, KeyCode::Esc);
-    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
-    assert_eq!(
-        app.notice,
-        "Cancellation requested for this conversation; check the task status for settlement."
+    assert!(
+        matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::CancelTask { id, expected_revision: 7 })) if id.as_str() == "task_one")
     );
+    assert!(app.notice.contains("Cancellation requested"));
+    assert!(app.notice.contains("held"));
 }
 
 #[test]
@@ -1446,20 +1414,791 @@ fn work_in_another_conversation_does_not_intercept_ctrl_c() {
 
 #[test]
 fn managed_task_waiting_for_input_can_be_cancelled_without_losing_the_draft() {
+    use xcb_core::ui::{HabitatCommand, Intent};
     let (tx, rx) = sync_channel(2);
-    let mut app = App::default();
-    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
-    app.view.state = xcb_core::session::State::NeedsAnswer;
-    app.view.managed_cancel_available = true;
+    let mut app = managed_fixture(xcb_core::session::State::NeedsAnswer);
     app.composer.set_text("keep this draft");
     picker_key(&mut app, &tx, KeyCode::Esc);
-    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
+    assert!(
+        matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::CancelTask { id, expected_revision: 7 })) if id.as_str() == "task_one")
+    );
     assert_eq!(app.composer.text(), "keep this draft");
-    app.modal = Some(Modal::Help);
+    app.modal = Some(Modal::Help { scroll: 0 });
     assert!(app.handle(
         Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
         &tx
     ));
-    assert!(matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Cancel)));
+    assert!(app.modal.is_none());
+    assert!(rx.try_recv().is_err());
     assert_eq!(app.composer.text(), "keep this draft");
+}
+
+fn managed_fixture(state: xcb_core::session::State) -> App {
+    use xcb_core::{Id, ui::BacklogRow};
+    let mut app = App::default();
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    app.view.conversation = Some(Id::new("conversation_one").unwrap());
+    app.view.state = state;
+    app.view.managed_cancel_available = true;
+    app.view.backlog = vec![BacklogRow {
+        id: Id::new("task_one").unwrap(),
+        conversation: Id::new("conversation_one").unwrap(),
+        title: "First task".into(),
+        prompt: "Original task".into(),
+        summary: "Current question".into(),
+        status: if state == xcb_core::session::State::NeedsAnswer {
+            "needs input"
+        } else {
+            "running"
+        }
+        .into(),
+        state,
+        deferred: false,
+        priority: 5,
+        revision: 7,
+        updated_at_ms: 1,
+    }];
+    app
+}
+
+#[test]
+fn reverse_history_search_matches_the_full_prompt_and_escape_restores_the_draft() {
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    let full = format!(
+        "{}\nneedle in the second paragraph\nlast line",
+        "opening ".repeat(90)
+    );
+    app.composer.remember(&full);
+    app.composer.remember("a newer unrelated prompt");
+    app.composer.set_text("unfinished draft");
+    let ctrl_r = || Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+    app.handle(ctrl_r(), &tx);
+    app.handle(Event::Paste("needle".into()), &tx);
+    assert!(
+        matches!(&app.modal, Some(Modal::HistorySearch { matches, query, .. }) if query == "needle" && matches == &vec![full.clone()])
+    );
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert_eq!(app.composer.text(), "unfinished draft");
+    app.handle(ctrl_r(), &tx);
+    app.handle(Event::Paste("needle".into()), &tx);
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert_eq!(app.composer.text(), full);
+    assert!(app.modal.is_none());
+    assert!(
+        rx.try_recv().is_err(),
+        "accepting history must never submit it"
+    );
+}
+
+#[test]
+fn readline_editing_keys_do_not_open_panels_or_toggle_tools() {
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    app.composer.set_text("one1\ntwo2");
+    app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)),
+        &tx,
+    );
+    assert_eq!(app.composer.textarea.cursor(), (0, 4));
+    assert!(app.modal.is_none());
+    app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+        &tx,
+    );
+    assert_eq!(app.composer.text(), "\ntwo2");
+    assert!(!app.show_activity);
+    app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL)),
+        &tx,
+    );
+    assert_eq!(app.composer.text(), "one1\ntwo2");
+    picker_key(&mut app, &tx, KeyCode::F(4));
+    assert!(app.show_activity);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn unknown_slash_prefix_navigation_is_safe_and_picker_paste_is_a_filter() {
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    app.composer.set_text("/thereisnosuchcommand");
+    assert!(app.slash_menu().is_some_and(|(items, _)| items.is_empty()));
+    for code in [KeyCode::Up, KeyCode::Down, KeyCode::Tab] {
+        picker_key(&mut app, &tx, code);
+    }
+    assert_eq!(app.composer.text(), "/thereisnosuchcommand");
+    app.composer.set_text("/accounts");
+    app.view.accounts = vec![picker_account("personal", xcb_core::Provider::Claude, true)];
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    app.handle(Event::Paste("person\u{1b}".into()), &tx);
+    assert!(matches!(&app.modal, Some(Modal::Picker { query, .. }) if query == "person"));
+    assert!(rx.try_recv().is_err());
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(
+        matches!(rx.try_recv(), Ok(xcb_core::ui::Intent::Account(id)) if id.as_str() == "personal")
+    );
+}
+
+#[test]
+fn selected_target_guidance_and_tab_queue_have_distinct_intents() {
+    use xcb_core::ui::{HabitatCommand, Intent};
+    let (tx, rx) = sync_channel(8);
+    let mut app = managed_fixture(xcb_core::session::State::Working);
+    app.composer.set_text("/steer task_one");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(
+        app.composer_target_label()
+            .is_some_and(|label| label.contains("Guide task_one"))
+    );
+    app.composer.set_text("Focus on the regression");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(
+        matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::Steer { task, text, .. })) if task.as_str() == "task_one" && text == "Focus on the regression")
+    );
+    app.composer.set_text("Start independent work");
+    picker_key(&mut app, &tx, KeyCode::Tab);
+    assert!(
+        matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::EnqueueIn { conversation, prompt, deferred: false, .. })) if conversation.as_str() == "conversation_one" && prompt == "Start independent work")
+    );
+    assert!(app.composer.text().is_empty());
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn answer_target_retains_the_observed_question_revision_and_rejected_draft() {
+    use xcb_core::ui::{HabitatCommand, Intent, Update};
+    let (tx, rx) = sync_channel(8);
+    let mut app = managed_fixture(xcb_core::session::State::NeedsAnswer);
+    app.composer.set_text("/attention");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    picker_key(&mut app, &tx, KeyCode::Char('a'));
+    assert!(
+        app.composer_target_label()
+            .is_some_and(|label| label.contains("Answer task_one"))
+    );
+    // A concurrent refresh changes the question after the user chose it.
+    app.view.backlog[0].revision = 8;
+    app.view.backlog[0].summary = "Replacement question".into();
+    app.composer.set_text("Answer to the original question");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let operation = match rx.try_recv().unwrap() {
+        Intent::Habitat(HabitatCommand::Reply {
+            id,
+            expected_revision,
+            reply,
+            text,
+        }) => {
+            assert_eq!(id.as_str(), "task_one");
+            assert_eq!(expected_revision, 7);
+            assert_eq!(text, "Answer to the original question");
+            reply
+        }
+        _ => panic!("reply must carry the selected question revision"),
+    };
+    app.take_dirty();
+    app.apply(Update::HabitatDraft {
+        context: xcb_core::Id::new("conversation_one").unwrap(),
+        task: Some(xcb_core::Id::new("task_one").unwrap()),
+        operation,
+        text: "Answer to the original question".into(),
+    });
+    assert!(
+        app.take_dirty(),
+        "rejected answer must repaint the restored draft"
+    );
+    assert_eq!(app.composer.text(), "Answer to the original question");
+    assert!(
+        app.composer_target_label()
+            .is_some_and(|label| label.contains("task_one"))
+    );
+}
+
+#[test]
+fn accepted_answer_returns_to_guidance_and_the_next_input_steers_the_same_task() {
+    use xcb_core::ui::{HabitatCommand, Intent, Update};
+    let (tx, rx) = sync_channel(8);
+    let mut app = managed_fixture(xcb_core::session::State::NeedsAnswer);
+    select_answer_target(&mut app, &tx, "task_one");
+    let operation = submit_selected_answer(&mut app, &tx, &rx, "task_one", 7, "Use option A");
+    assert!(app.composer.text().is_empty());
+
+    for (ack_operation, ack_task) in [
+        (
+            xcb_core::Id::new("unmatched_operation").unwrap(),
+            "task_one",
+        ),
+        (operation.clone(), "different_task"),
+    ] {
+        app.apply(Update::HabitatAccepted {
+            context: xcb_core::Id::new("conversation_one").unwrap(),
+            task: Some(xcb_core::Id::new(ack_task).unwrap()),
+            operation: ack_operation,
+            text: "Use option A".into(),
+        });
+        assert!(
+            app.composer_target_label()
+                .is_some_and(|label| label.starts_with("Answer task_one")),
+            "an unmatched acknowledgement must not change the answer target"
+        );
+    }
+
+    app.take_dirty();
+    app.apply(Update::HabitatAccepted {
+        context: xcb_core::Id::new("conversation_one").unwrap(),
+        task: Some(xcb_core::Id::new("task_one").unwrap()),
+        operation,
+        text: "Use option A".into(),
+    });
+    assert!(
+        app.take_dirty(),
+        "accepted answer must repaint its new target"
+    );
+    assert!(app.composer.text().is_empty());
+    assert!(
+        app.composer_target_label()
+            .is_some_and(|label| label.starts_with("Guide task_one"))
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "acknowledgement must not send input"
+    );
+    app.composer.set_text("Also check the regression");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(
+        matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::Steer { task, text, .. })) if task.as_str() == "task_one" && text == "Also check the regression")
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn accepted_answer_preserves_a_newer_draft_and_its_answer_revision() {
+    use xcb_core::ui::Update;
+    let (tx, rx) = sync_channel(8);
+    let mut app = managed_fixture(xcb_core::session::State::NeedsAnswer);
+    select_answer_target(&mut app, &tx, "task_one");
+    let operation = submit_selected_answer(&mut app, &tx, &rx, "task_one", 7, "First answer");
+    app.handle(Event::Paste("Newer answer draft".into()), &tx);
+    app.take_dirty();
+    app.apply(Update::HabitatAccepted {
+        context: xcb_core::Id::new("conversation_one").unwrap(),
+        task: Some(xcb_core::Id::new("task_one").unwrap()),
+        operation,
+        text: "First answer".into(),
+    });
+    assert!(app.take_dirty(), "accepted answer notice must repaint");
+    assert_eq!(app.composer.text(), "Newer answer draft");
+    assert!(
+        app.composer_target_label()
+            .is_some_and(|label| label.starts_with("Answer task_one"))
+    );
+    assert!(rx.try_recv().is_err());
+    submit_selected_answer(&mut app, &tx, &rx, "task_one", 7, "Newer answer draft");
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn accepted_answer_preserves_a_newer_answer_selection_or_displayed_context() {
+    use xcb_core::{Id, ui::Update};
+    for scenario in ["new_question", "new_task", "other_conversation"] {
+        let (tx, rx) = sync_channel(8);
+        let mut app = managed_fixture(xcb_core::session::State::NeedsAnswer);
+        add_second_task(&mut app);
+        select_answer_target(&mut app, &tx, "task_one");
+        let operation = submit_selected_answer(&mut app, &tx, &rx, "task_one", 7, "First answer");
+        let (next_task, next_revision) = match scenario {
+            "new_question" => {
+                app.view.backlog[0].revision = 8;
+                app.view.backlog[0].summary = "New question".into();
+                ("task_one", 8)
+            }
+            "new_task" => ("task_two", 11),
+            _ => {
+                let mut next_view = app.view.clone();
+                next_view.conversation = Some(Id::new("conversation_two").unwrap());
+                app.apply(Update::View(Box::new(next_view)));
+                ("task_one", 7)
+            }
+        };
+        select_answer_target(&mut app, &tx, next_task);
+        assert!(app.composer.text().is_empty());
+        app.take_dirty();
+        app.apply(Update::HabitatAccepted {
+            context: Id::new("conversation_one").unwrap(),
+            task: Some(Id::new("task_one").unwrap()),
+            operation,
+            text: "First answer".into(),
+        });
+        assert!(app.take_dirty(), "accepted answer notice must repaint");
+        assert!(
+            app.composer_target_label()
+                .is_some_and(|label| label.starts_with(&format!("Answer {next_task}"))),
+            "accepted old answer must preserve {scenario} selection"
+        );
+        assert!(app.composer.text().is_empty());
+        assert!(rx.try_recv().is_err());
+        submit_selected_answer(&mut app, &tx, &rx, next_task, next_revision, "Next answer");
+        assert!(rx.try_recv().is_err());
+    }
+}
+
+fn select_answer_target(
+    app: &mut App,
+    tx: &std::sync::mpsc::SyncSender<xcb_core::ui::Intent>,
+    task: &str,
+) {
+    app.composer.set_text("/attention");
+    picker_key(app, tx, KeyCode::Enter);
+    app.handle(Event::Paste(task.into()), tx);
+    picker_key(app, tx, KeyCode::Enter);
+    picker_key(app, tx, KeyCode::Char('a'));
+    assert!(
+        app.composer_target_label()
+            .is_some_and(|label| label.starts_with(&format!("Answer {task}")))
+    );
+}
+
+fn submit_selected_answer(
+    app: &mut App,
+    tx: &std::sync::mpsc::SyncSender<xcb_core::ui::Intent>,
+    rx: &std::sync::mpsc::Receiver<xcb_core::ui::Intent>,
+    task: &str,
+    revision: u64,
+    answer: &str,
+) -> xcb_core::Id {
+    use xcb_core::ui::{HabitatCommand, Intent};
+    app.composer.set_text(answer);
+    picker_key(app, tx, KeyCode::Enter);
+    match rx.try_recv().unwrap() {
+        Intent::Habitat(HabitatCommand::Reply {
+            id,
+            expected_revision,
+            reply,
+            text,
+        }) => {
+            assert_eq!(id.as_str(), task);
+            assert_eq!(expected_revision, revision);
+            assert_eq!(text, answer);
+            reply
+        }
+        _ => panic!("expected an answer for {task}"),
+    }
+}
+
+#[test]
+fn ambiguous_managed_cancel_requires_selecting_an_exact_task() {
+    use xcb_core::ui::{HabitatCommand, Intent};
+    let (tx, rx) = sync_channel(8);
+    let mut app = managed_fixture(xcb_core::session::State::Working);
+    let mut second = app.view.backlog[0].clone();
+    second.id = xcb_core::Id::new("task_two").unwrap();
+    second.revision = 11;
+    app.view.backlog.push(second);
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert!(matches!(app.modal, Some(Modal::Picker { .. })));
+    assert!(rx.try_recv().is_err());
+    picker_key(&mut app, &tx, KeyCode::Down);
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(
+        matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::CancelTask { id, expected_revision: 11 })) if id.as_str() == "task_two")
+    );
+}
+
+fn text_message(id: &str, text: &str) -> xcb_core::session::Message {
+    xcb_core::session::Message {
+        id: xcb_core::Id::new(id).unwrap(),
+        role: xcb_core::session::Role::Assistant,
+        text: text.into(),
+        at_ms: 1,
+        attachments: Vec::new(),
+        provenance: None,
+    }
+}
+
+#[test]
+fn transcript_pages_are_context_bound_and_clear_display_preserves_messages() {
+    use xcb_core::{
+        Id,
+        ui::{Intent, TranscriptContext, TranscriptPage, Update},
+    };
+    let (tx, rx) = sync_channel(8);
+    let mut app = App::default();
+    let mut view = view_for("session_one");
+    let context = TranscriptContext::Session(Id::new("session_one").unwrap());
+    view.messages = vec![text_message("recent", "recent body")];
+    view.transcript = Some(TranscriptPage {
+        context: context.clone(),
+        messages: view.messages.clone(),
+        first_sequence: Some(50),
+        has_older: true,
+    });
+    app.apply(Update::View(Box::new(view)));
+    app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+        &tx,
+    );
+    assert!(matches!(
+        app.modal,
+        Some(Modal::Transcript { has_more: true, .. })
+    ));
+    picker_key(&mut app, &tx, KeyCode::Char('p'));
+    let request = match rx.try_recv().unwrap() {
+        Intent::TranscriptPage {
+            context: actual,
+            before_sequence: 50,
+            request,
+        } => {
+            assert_eq!(actual, context);
+            request
+        }
+        _ => panic!("request older transcript page"),
+    };
+    let page = TranscriptPage {
+        context: context.clone(),
+        messages: vec![text_message("old", "older needle")],
+        first_sequence: Some(1),
+        has_older: false,
+    };
+    app.apply(Update::TranscriptPage {
+        request: Id::new("unrelated").unwrap(),
+        page: page.clone(),
+    });
+    assert!(
+        matches!(&app.modal, Some(Modal::Transcript { lines, .. }) if !lines.iter().any(|line| line == "older needle"))
+    );
+    app.apply(Update::TranscriptPage { request, page });
+    assert!(
+        matches!(&app.modal, Some(Modal::Transcript { lines, has_more: false, .. }) if lines.iter().any(|line| line == "older needle"))
+    );
+    picker_key(&mut app, &tx, KeyCode::F(3));
+    app.handle(Event::Paste("needle".into()), &tx);
+    assert!(
+        matches!(&app.modal, Some(Modal::Transcript { query, matches, .. }) if query == "needle" && matches.len() == 1)
+    );
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+        &tx,
+    );
+    assert_eq!(app.view.messages.len(), 1);
+    assert_eq!(app.transcript_messages().count(), 0);
+    assert!(
+        rx.try_recv().is_err(),
+        "clear display must not mutate persisted history"
+    );
+}
+
+fn add_second_task(app: &mut App) {
+    let mut second = app.view.backlog[0].clone();
+    second.id = xcb_core::Id::new("task_two").unwrap();
+    second.title = "Second task".into();
+    second.revision = 11;
+    app.view.backlog.push(second);
+}
+
+#[test]
+fn disappearing_selected_task_never_redirects_cancellation_to_another_task() {
+    let (tx, rx) = sync_channel(4);
+    let mut app = managed_fixture(xcb_core::session::State::Working);
+    add_second_task(&mut app);
+    app.composer.set_text("/steer task_one");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    app.view.backlog.retain(|row| row.id.as_str() == "task_two");
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert!(
+        rx.try_recv().is_err(),
+        "an explicit stale target must not fall back to the remaining task"
+    );
+    assert!(
+        app.composer_target_label()
+            .is_some_and(|label| label.contains("task_one"))
+    );
+    assert!(app.notice.contains("outside") || app.notice.contains("changed"));
+}
+
+#[test]
+fn rejected_direct_submission_cannot_fill_a_newly_selected_task_composer() {
+    use xcb_core::ui::{Intent, TranscriptContext, Update};
+    let (tx, rx) = sync_channel(4);
+    let mut app = managed_fixture(xcb_core::session::State::Working);
+    add_second_task(&mut app);
+    app.composer.set_text("Earlier ordinary work");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let submitted = match rx.try_recv().unwrap() {
+        Intent::SubmitTo {
+            id,
+            context: TranscriptContext::Conversation(context),
+            ..
+        } => {
+            assert_eq!(context.as_str(), "conversation_one");
+            id
+        }
+        _ => panic!("ordinary submit"),
+    };
+    app.composer.set_text("/steer task_two");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    app.apply(Update::SubmitRejected {
+        id: submitted,
+        context: Some(TranscriptContext::Conversation(
+            xcb_core::Id::new("conversation_one").unwrap(),
+        )),
+        text: "Earlier ordinary work".into(),
+        attachments: Vec::new(),
+        reason: "Fixture rejection".into(),
+    });
+    assert!(app.composer.text().is_empty());
+    assert!(
+        app.composer_target_label()
+            .is_some_and(|label| label.contains("task_two"))
+    );
+    app.composer.set_text("/drafts");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(
+        matches!(&app.modal, Some(Modal::Picker { items, .. }) if items.iter().any(|item| item.label.contains("Earlier ordinary work")))
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn rejected_guidance_keeps_the_original_target_out_of_a_newly_selected_task() {
+    use xcb_core::ui::{HabitatCommand, Intent, Update};
+    let (tx, rx) = sync_channel(4);
+    let mut app = managed_fixture(xcb_core::session::State::Working);
+    add_second_task(&mut app);
+    app.composer.set_text("/steer task_one");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    app.composer.set_text("Guidance for first task");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let event = match rx.try_recv().unwrap() {
+        Intent::Habitat(HabitatCommand::Steer { event, .. }) => event,
+        _ => panic!("task guidance"),
+    };
+    app.composer.set_text("/steer task_two");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    app.apply(Update::HabitatDraft {
+        context: xcb_core::Id::new("conversation_one").unwrap(),
+        task: Some(xcb_core::Id::new("task_one").unwrap()),
+        operation: event,
+        text: "Guidance for first task".into(),
+    });
+    assert!(app.composer.text().is_empty());
+    assert!(
+        app.composer_target_label()
+            .is_some_and(|label| label.contains("task_two"))
+    );
+    app.composer.set_text("/drafts");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(
+        matches!(&app.modal, Some(Modal::Picker { items, .. }) if items.iter().any(|item| item.label.contains("Guidance for first task")))
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn rejected_guidance_uses_its_original_context_after_navigation() {
+    use xcb_core::{
+        Id,
+        ui::{HabitatCommand, Intent, Update},
+    };
+    let (tx, rx) = sync_channel(4);
+    let mut app = managed_fixture(xcb_core::session::State::Working);
+    let original_view = app.view.clone();
+    app.composer.set_text("/steer task_one");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    app.composer
+        .set_text("Guidance belonging to conversation one");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let event = match rx.try_recv().unwrap() {
+        Intent::Habitat(HabitatCommand::Steer { event, .. }) => event,
+        _ => panic!("task guidance"),
+    };
+    let mut next_view = original_view.clone();
+    next_view.conversation = Some(Id::new("conversation_two").unwrap());
+    next_view.backlog[0].conversation = Id::new("conversation_two").unwrap();
+    next_view.backlog[0].id = Id::new("task_two").unwrap();
+    app.apply(Update::View(Box::new(next_view)));
+
+    // The runtime reports its current context, which may have advanced since send.
+    app.apply(Update::HabitatDraft {
+        context: Id::new("conversation_two").unwrap(),
+        task: Some(Id::new("task_one").unwrap()),
+        operation: event,
+        text: "Guidance belonging to conversation one".into(),
+    });
+    assert!(app.composer.text().is_empty());
+    app.composer.set_text("/drafts");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(
+        matches!(&app.modal, Some(Modal::Picker { items, .. }) if items.iter().any(|item| item.label.contains("conversation_one") && item.label.contains("Guidance belonging")))
+    );
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(app.composer.text().is_empty());
+    assert!(app.notice.contains("conversation_one"));
+    assert!(app.modal.is_none());
+
+    app.apply(Update::View(Box::new(original_view)));
+    app.composer.set_text("/drafts");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert_eq!(
+        app.composer.text(),
+        "Guidance belonging to conversation one"
+    );
+    assert!(rx.try_recv().is_err(), "recovery must never send the input");
+}
+
+#[test]
+fn submitted_acknowledgement_matches_identity_across_context_navigation() {
+    use xcb_core::ui::{Intent, TranscriptContext, Update};
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    app.apply(Update::View(Box::new(view_for("session_a"))));
+    app.composer.set_text("identical text");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let first = match rx.try_recv().unwrap() {
+        Intent::SubmitTo {
+            id,
+            context: TranscriptContext::Session(context),
+            ..
+        } => {
+            assert_eq!(context.as_str(), "session_a");
+            id
+        }
+        _ => panic!("first submit"),
+    };
+    app.apply(Update::View(Box::new(view_for("session_b"))));
+    app.composer.set_text("identical text");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let second = match rx.try_recv().unwrap() {
+        Intent::SubmitTo {
+            id,
+            context: TranscriptContext::Session(context),
+            ..
+        } => {
+            assert_eq!(context.as_str(), "session_b");
+            id
+        }
+        _ => panic!("second submit"),
+    };
+    assert_ne!(first, second);
+    app.apply(Update::Submitted {
+        id: first,
+        context: TranscriptContext::Session(xcb_core::Id::new("session_a").unwrap()),
+    });
+    assert_eq!(
+        app.pending_echoes().count(),
+        1,
+        "the current equal-text submission still awaits acknowledgement"
+    );
+    app.apply(Update::View(Box::new(view_for("session_a"))));
+    assert_eq!(app.pending_echoes().count(), 0);
+    app.apply(Update::View(Box::new(view_for("session_b"))));
+    assert_eq!(app.pending_echoes().count(), 1);
+    app.apply(Update::Submitted {
+        id: second,
+        context: TranscriptContext::Session(xcb_core::Id::new("session_b").unwrap()),
+    });
+    assert_eq!(app.pending_echoes().count(), 0);
+}
+
+#[test]
+fn attention_shortcuts_preserve_drafts_and_conversation_navigation_requires_empty_input() {
+    use xcb_core::{
+        Id,
+        ui::{ConversationRow, Intent},
+    };
+    let (tx, rx) = sync_channel(4);
+    let mut app = managed_fixture(xcb_core::session::State::NeedsAnswer);
+    app.view.conversations = ["conversation_one", "conversation_two"]
+        .into_iter()
+        .map(|name| ConversationRow {
+            id: Id::new(name).unwrap(),
+            title: name.into(),
+            workspace: "/project".into(),
+            messages: 0,
+            updated_at_ms: 1,
+        })
+        .collect();
+    app.composer.set_text("keep my current draft");
+    app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT)),
+        &tx,
+    );
+    assert_eq!(app.composer.text(), "keep my current draft");
+    assert!(rx.try_recv().is_err());
+    picker_key(&mut app, &tx, KeyCode::F(2));
+    assert!(matches!(app.modal, Some(Modal::Picker { .. })));
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert_eq!(app.composer.text(), "keep my current draft");
+    app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT)),
+        &tx,
+    );
+    assert!(matches!(app.modal, Some(Modal::Picker { .. })));
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert_eq!(app.composer.text(), "keep my current draft");
+    app.composer.set_text("");
+    app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT)),
+        &tx,
+    );
+    assert!(
+        matches!(rx.try_recv(), Ok(Intent::Conversation(id)) if id.as_str() == "conversation_two")
+    );
+}
+
+#[test]
+fn navigation_burst_cannot_retarget_submission_before_the_new_view_arrives() {
+    use xcb_core::{
+        Id,
+        ui::{ConversationRow, HabitatCommand, Intent, TranscriptContext},
+    };
+    for submit in [KeyCode::Enter, KeyCode::Tab] {
+        let (tx, rx) = sync_channel(4);
+        let mut app = managed_fixture(xcb_core::session::State::Working);
+        app.view.conversations = ["conversation_one", "conversation_two"]
+            .into_iter()
+            .map(|name| ConversationRow {
+                id: Id::new(name).unwrap(),
+                title: name.into(),
+                workspace: "/project".into(),
+                messages: 0,
+                updated_at_ms: 1,
+            })
+            .collect();
+        app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT)),
+            &tx,
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(Intent::Conversation(id)) if id.as_str() == "conversation_two")
+        );
+        // A terminal burst can send more keys before the asynchronous View arrives.
+        app.handle(
+            Event::Paste("Work for the visible conversation".into()),
+            &tx,
+        );
+        picker_key(&mut app, &tx, submit);
+        match rx.try_recv().unwrap() {
+            Intent::SubmitTo {
+                context: TranscriptContext::Conversation(context),
+                text,
+                ..
+            } if submit == KeyCode::Enter => {
+                assert_eq!(context.as_str(), "conversation_one");
+                assert_eq!(text, "Work for the visible conversation");
+            }
+            Intent::Habitat(HabitatCommand::EnqueueIn {
+                conversation,
+                prompt,
+                ..
+            }) if submit == KeyCode::Tab => {
+                assert_eq!(conversation.as_str(), "conversation_one");
+                assert_eq!(prompt, "Work for the visible conversation");
+            }
+            _ => panic!("submitted input must carry the observed conversation identity"),
+        }
+    }
 }

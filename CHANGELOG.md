@@ -4,6 +4,24 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.7.0
+
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.7.0)
+for macOS ARM64 and Linux x86_64; [public verification run](https://github.com/hraness/xcb/actions/runs/35953085415).
+
+- The terminal uses a quieter prompt and transcript, Markdown and diff styling,
+  scrollable help, and searchable command menus. Editing keys, prompt history,
+  and the external editor follow familiar Codex CLI behavior.
+- Ctrl-T browses saved transcript pages, F3 searches, Ctrl-O copies the last
+  answer, and Ctrl-L clears the display. `/resume`, `/rename`, and `/status`
+  expose session controls; `xcb history` supports longer paged exports.
+- Agent lists update while open. Guidance names its target; ordinary chat
+  creates new work. Answers and cancellation check the task revision, queued
+  recall refuses started work, and submissions preserve their intended context.
+- Private input journals retain drafts, image references, prompt history, and
+  requests awaiting acknowledgement across restarts. Recovery never resends
+  input automatically. See the [terminal guide](docs/terminal.md).
+
 ## 0.6.0
 
 [Verified native release](https://github.com/hraness/xcb/releases/tag/v0.6.0)

@@ -67,6 +67,10 @@ mod mailbox_integrity_tests;
 #[path = "managed_recovery_tests.rs"]
 mod recovery_tests;
 
+#[cfg(test)]
+#[path = "managed_ui_tests.rs"]
+mod ui_tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
@@ -941,27 +945,70 @@ impl ManagedStore {
     }
 
     pub fn messages(&self, conversation: &Id, limit: usize) -> Result<Vec<Message>> {
-        if !(1..=512).contains(&limit) {
-            return Err(xcb_core::Error::Invalid("managed message page").into());
+        Ok(self.transcript_page(conversation, None, limit)?.messages)
+    }
+
+    pub fn transcript_page(
+        &self,
+        conversation: &Id,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<xcb_core::ui::TranscriptPage> {
+        crate::transcript::page(
+            &*self.db()?,
+            xcb_core::ui::TranscriptContext::Conversation(conversation.clone()),
+            before,
+            limit,
+        )
+    }
+
+    pub fn rename_conversation(
+        &self,
+        id: &Id,
+        expected_title: &str,
+        title: &str,
+    ) -> Result<ManagedConversation> {
+        let title = crate::transcript::title(title)?;
+        let mut db = self.write_db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let payload: String = tx
+            .query_row(
+                "SELECT payload FROM conversations WHERE id=?1",
+                [id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(Error::Unavailable("conversation not found"))?;
+        let mut conversation: ManagedConversation = decode(&payload)?;
+        conversation.validate()?;
+        if conversation.id != *id || conversation.title != expected_title {
+            return Err(Error::Conflict("conversation title changed"));
         }
-        let db = self.db()?;
-        let mut query = db.prepare("SELECT payload FROM (SELECT sequence,payload FROM messages WHERE conversation=?1 ORDER BY sequence DESC LIMIT ?2) ORDER BY sequence")?;
-        let rows = query.query_map(params![conversation.as_str(), limit as i64], |row| {
-            row.get::<_, String>(0)
-        })?;
-        let mut messages = Vec::new();
-        let mut bytes = 0usize;
-        for row in rows {
-            let row = row?;
-            bytes = bytes.saturating_add(row.len());
-            if bytes > 8 * 1024 * 1024 {
-                return Err(xcb_core::Error::Limit("managed transcript").into());
-            }
-            let message: Message = decode(&row)?;
-            message.validate()?;
-            messages.push(message);
-        }
-        Ok(messages)
+        // Advance the global view stamp even when another row already has a
+        // later timestamp or several renames occur within the same millisecond.
+        let latest: i64 = tx.query_row(
+            "SELECT COALESCE(max(updated_at),0) FROM conversations",
+            [],
+            |row| row.get(0),
+        )?;
+        conversation.updated_at_ms = now_ms().max(
+            u64::try_from(latest)
+                .map_err(|_| Error::Conflict("conversation timestamp"))?
+                .checked_add(1)
+                .ok_or(Error::Conflict("conversation timestamp overflow"))?,
+        );
+        conversation.title = title;
+        conversation.validate()?;
+        tx.execute(
+            "UPDATE conversations SET payload=?1,updated_at=?2 WHERE id=?3",
+            params![
+                serde_json::to_string(&conversation)?,
+                sql(conversation.updated_at_ms)?,
+                id.as_str()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(conversation)
     }
 
     /// List readers tolerate one corrupt row: it is skipped and remembered so
@@ -1100,8 +1147,8 @@ impl ManagedStore {
         row.map(|(payload, conversation)| {
             let task: ManagedTask = decode(&payload)?;
             task.validate()?;
-            if task.conversation.as_str() != conversation {
-                return Err(Error::Conflict("managed task conversation mismatch"));
+            if task.id != *id || task.conversation.as_str() != conversation {
+                return Err(Error::Conflict("managed task identity mismatch"));
             }
             Ok(task)
         })
@@ -1750,7 +1797,7 @@ impl ManagedStore {
             ],
         )?;
         tx.execute(
-            "UPDATE conversations SET updated_at=?1 WHERE id=?2",
+            "UPDATE conversations SET updated_at=max(updated_at,?1) WHERE id=?2",
             params![sql(message.at_ms)?, conversation.as_str()],
         )?;
         Ok(())
@@ -1888,6 +1935,32 @@ impl ManagedStore {
     async fn transition_program(
         &self,
         expected: &ManagedTask,
+        next: ManagedTask,
+        message: Option<Message>,
+        additional: &[(Id, Message)],
+        mutation: Option<&habitat::WorkerMutation>,
+        admission: Option<&project::ProjectAdmission>,
+        inbox_change: Option<&inbox::Change<'_>>,
+        program_change: Option<&program_state::Change>,
+    ) -> Result<ManagedTask> {
+        self.transition_ui(
+            expected,
+            next,
+            message,
+            additional,
+            mutation,
+            admission,
+            inbox_change,
+            program_change,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn transition_ui(
+        &self,
+        expected: &ManagedTask,
         mut next: ManagedTask,
         message: Option<Message>,
         additional: &[(Id, Message)],
@@ -1895,6 +1968,7 @@ impl ManagedStore {
         admission: Option<&project::ProjectAdmission>,
         inbox_change: Option<&inbox::Change<'_>>,
         program_change: Option<&program_state::Change>,
+        ui_mutation: Option<&habitat::UiMutation>,
     ) -> Result<ManagedTask> {
         next.validate()?;
         if !next.same_identity(expected) || next.revision != expected.revision + 1 {
@@ -1913,6 +1987,11 @@ impl ManagedStore {
             if let Some(saved) = mutation.replay(&tx)? {
                 return Ok(saved);
             }
+        }
+        if let Some(action) = ui_mutation
+            && let Some(saved) = action.replay(&tx)?
+        {
+            return Ok(saved);
         }
         let current =
             task_from(&tx, &expected.id)?.ok_or(Error::Unavailable("managed task not found"))?;
@@ -1942,6 +2021,9 @@ impl ManagedStore {
         }
         if let Some(mutation) = mutation {
             mutation.record(&tx, &next)?;
+        }
+        if let Some(action) = ui_mutation {
+            action.record(&tx, &next)?;
         }
         inbox::transition(&tx, expected, &next, inbox_change)?;
         program_state::transition(&tx, expected, &next, program_change)?;
@@ -2147,6 +2229,11 @@ impl ManagedStore {
                 return Ok(saved);
             }
         }
+        if let Some(action) = options.ui
+            && let Some(saved) = action.replay(&tx)?
+        {
+            return Ok(saved);
+        }
         if let Some(occurrence) = options.occurrence {
             occurrence.check(&tx)?;
             if options.program.is_none()
@@ -2205,6 +2292,9 @@ impl ManagedStore {
         if let Some(occurrence) = options.occurrence {
             occurrence.record(&tx, &task)?;
         }
+        if let Some(action) = options.ui {
+            action.record(&tx, &task)?;
+        }
         tx.commit()?;
         Ok(task)
     }
@@ -2235,6 +2325,20 @@ impl ManagedStore {
         id: Id,
         text: String,
         attachments: Vec<Attachment>,
+    ) -> Result<ManagedTask> {
+        self.reply_inner(task, conversation, id, text, attachments, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn reply_inner(
+        &self,
+        task: &ManagedTask,
+        conversation: &Id,
+        id: Id,
+        text: String,
+        attachments: Vec<Attachment>,
+        ui_mutation: Option<&habitat::UiMutation>,
     ) -> Result<ManagedTask> {
         if task.program.is_some() {
             return Err(Error::Conflict(
@@ -2348,8 +2452,18 @@ impl ManagedStore {
                 ),
             ]
         };
-        self.transition_records(task, next, Some(message), &additional)
-            .await
+        self.transition_ui(
+            task,
+            next,
+            Some(message),
+            &additional,
+            None,
+            None,
+            None,
+            None,
+            ui_mutation,
+        )
+        .await
     }
 
     async fn remember(
@@ -2420,6 +2534,55 @@ impl ManagedStore {
         )?;
         Self::append_message_tx(&tx, &ack, conversation, None)?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Explicit composer submission: create ordinary new work with the original
+    /// text and images. Answers, cancellation, and continuation use exact task
+    /// actions; this path never interprets the prompt as one of those actions.
+    pub async fn submit_new(
+        &self,
+        conversation: &Id,
+        id: Id,
+        text: String,
+        attachments: Vec<Attachment>,
+        workspace: &Path,
+    ) -> Result<()> {
+        bounded_text(&text, xcb_core::MAX_TEXT_BYTES)?;
+        if text.trim().is_empty() && attachments.is_empty() {
+            return Err(xcb_core::Error::Invalid("empty task").into());
+        }
+        if attachments.len() > 8 {
+            return Err(xcb_core::Error::Limit("managed attachments").into());
+        }
+        for attachment in &attachments {
+            attachment.validate()?;
+        }
+        let scope = workspace.to_str().ok_or(Error::PrivateState)?;
+        let task_id = Id::new(format!(
+            "t_{}",
+            digest(format!("xcb-task-v1\0{conversation}\0{id}\0{scope}"))
+        ))?;
+        let action = habitat::UiMutation::new(
+            &id,
+            &task_id,
+            json!({"action":"submit_new","conversation":conversation,"text":text,"attachments":attachments}),
+        )?;
+        if action.replay(&*self.db()?)?.is_some() {
+            return Ok(());
+        }
+        self.create_habitat_task(
+            conversation,
+            id,
+            text,
+            attachments,
+            workspace,
+            habitat::CreateOptions {
+                ui: Some(&action),
+                ..Default::default()
+            },
+        )
+        .await?;
         Ok(())
     }
 
@@ -5275,7 +5438,9 @@ fn managed_view(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    view.messages = managed.messages(conversation, 256)?;
+    let page = managed.transcript_page(conversation, None, 256)?;
+    view.messages = page.messages.clone();
+    view.transcript = Some(page);
     let mut tasks = managed.active_tasks(128)?;
     let active_ids: BTreeSet<_> = tasks.iter().map(|task| task.id.clone()).collect();
     tasks.extend(
@@ -5303,6 +5468,7 @@ fn managed_view(
             };
             TaskRow {
                 id: task.id.clone(),
+                revision: task.revision,
                 title: task.title.clone(),
                 state: task_state(task),
                 status: Some(task.habitat_status().into()),
@@ -5428,20 +5594,103 @@ pub async fn serve_ui(
     let mut last_ensure = Instant::now();
     let mut last_ensure_error: Option<String> = None;
     let mut dispatch_pending = false;
+    // Preserve durable acknowledgements and draft recovery under UI backpressure.
+    let mut pending_updates = std::collections::VecDeque::new();
     while !quit {
         ticker.tick().await;
+        while let Some(update) = pending_updates.pop_front() {
+            match output.try_send(update) {
+                Ok(()) => (),
+                Err(std::sync::mpsc::TrySendError::Full(update)) => {
+                    pending_updates.push_front(update);
+                    break;
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return Ok(()),
+            }
+        }
         let mut handled = false;
         for _ in 0..32 {
+            if pending_updates.len() >= 64 {
+                break;
+            }
             let intent = match input.try_recv() {
                 Ok(intent) => intent,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => Intent::Quit,
             };
             handled = true;
+            let intent = match intent {
+                Intent::HabitatAt {
+                    conversation: expected,
+                    command,
+                } => {
+                    if expected != conversation {
+                        pending_updates.push_back(Update::Notice("Conversation changed. No project settings were changed; return to the original conversation before retrying.".into()));
+                        continue;
+                    }
+                    Intent::Habitat(command)
+                }
+                intent => intent,
+            };
+            let submit_context = match &intent {
+                Intent::SubmitTo { context, .. } => Some(context.clone()),
+                _ => None,
+            };
             match intent {
                 Intent::Habitat(command) => {
+                    use xcb_core::ui::HabitatCommand;
+                    if let HabitatCommand::RecallQueued {
+                        id,
+                        expected_revision,
+                        operation,
+                    } = command
+                    {
+                        match managed
+                            .recall_queued(&id, expected_revision, &operation)
+                            .await
+                        {
+                            Ok(task) => pending_updates.push_back(Update::QueuedDraft {
+                                context: task.conversation,
+                                id,
+                                operation,
+                                text: task.backlog_prompt.unwrap_or(task.goal),
+                            }),
+                            Err(error) => pending_updates.push_back(Update::QueuedRecallRejected {
+                                context: conversation.clone(),
+                                id,
+                                operation,
+                                reason: error.to_string(),
+                            }),
+                        }
+                        continue;
+                    }
+                    let command_context = match &command {
+                        HabitatCommand::EnqueueIn { conversation, .. } => conversation.clone(),
+                        _ => conversation.clone(),
+                    };
+                    let recovery = match &command {
+                        HabitatCommand::Enqueue { id, prompt, .. }
+                        | HabitatCommand::EnqueueIn { id, prompt, .. } => {
+                            Some((None, id.clone(), prompt.clone()))
+                        }
+                        HabitatCommand::Steer { task, event, text } => {
+                            Some((Some(task.clone()), event.clone(), text.clone()))
+                        }
+                        HabitatCommand::Reply {
+                            id, reply, text, ..
+                        } => Some((Some(id.clone()), reply.clone(), text.clone())),
+                        _ => None,
+                    };
                     match managed.habitat_command(&conversation, command).await {
                         Ok(notice) => {
+                            if let Some((task, operation, text)) = recovery {
+                                pending_updates.push_back(Update::HabitatAccepted {
+                                    context: command_context.clone(),
+                                    task,
+                                    operation,
+                                    text,
+                                });
+                            }
                             output.try_send(Update::Notice(notice)).ok();
                             last_ensure = Instant::now();
                             if let Err(error) = ensure_daemon(store.root(), &executable) {
@@ -5453,6 +5702,14 @@ pub async fn serve_ui(
                             }
                         }
                         Err(error) => {
+                            if let Some((task, operation, text)) = recovery {
+                                pending_updates.push_back(Update::HabitatDraft {
+                                    context: command_context.clone(),
+                                    task,
+                                    operation,
+                                    text,
+                                });
+                            }
                             output
                                 .try_send(Update::Notice(format!(
                                     "Habitat action was not accepted: {error}"
@@ -5461,15 +5718,77 @@ pub async fn serve_ui(
                         }
                     }
                 }
+                Intent::Rename {
+                    context,
+                    expected_title,
+                    title,
+                } => {
+                    let result = match context {
+                        xcb_core::ui::TranscriptContext::Conversation(id) => managed
+                            .rename_conversation(&id, &expected_title, &title)
+                            .map(|_| ()),
+                        _ => Err(Error::Unavailable(
+                            "choose a managed conversation to rename",
+                        )),
+                    };
+                    if let Err(error) = result {
+                        output
+                            .try_send(Update::Notice(format!("Rename was not accepted: {error}")))
+                            .ok();
+                    }
+                }
+                Intent::TranscriptPage {
+                    context,
+                    before_sequence,
+                    request,
+                } => {
+                    let result = match &context {
+                        xcb_core::ui::TranscriptContext::Conversation(id)
+                            if *id == conversation =>
+                        {
+                            managed.transcript_page(id, Some(before_sequence), 256)
+                        }
+                        _ => Err(Error::Conflict("transcript context changed")),
+                    };
+                    match result {
+                        Ok(page) => {
+                            pending_updates.push_back(Update::TranscriptPage { request, page })
+                        }
+                        Err(error) => pending_updates.push_back(Update::TranscriptPageRejected {
+                            context,
+                            request,
+                            reason: error.to_string(),
+                        }),
+                    }
+                }
                 Intent::Submit {
                     id,
                     text,
                     attachments,
+                }
+                | Intent::SubmitTo {
+                    id,
+                    text,
+                    attachments,
+                    ..
                 } => {
-                    match managed
-                        .submit(
-                            &conversation,
+                    if let Some(expected) = &submit_context
+                        && expected
+                            != &xcb_core::ui::TranscriptContext::Conversation(conversation.clone())
+                    {
+                        pending_updates.push_back(Update::SubmitRejected {
                             id,
+                            context: submit_context,
+                            text,
+                            attachments,
+                            reason: "conversation changed before submission".into(),
+                        });
+                        continue;
+                    }
+                    match managed
+                        .submit_new(
+                            &conversation,
+                            id.clone(),
                             text.clone(),
                             attachments.clone(),
                             &workspace,
@@ -5477,13 +5796,27 @@ pub async fn serve_ui(
                         .await
                     {
                         Ok(()) => {
+                            pending_updates.push_back(Update::Submitted {
+                                id,
+                                context: xcb_core::ui::TranscriptContext::Conversation(
+                                    conversation.clone(),
+                                ),
+                            });
                             last_ensure = Instant::now();
                             if let Err(error) = ensure_daemon(store.root(), &executable) {
                                 output.try_send(Update::Notice(format!("Task was saved, but the background supervisor could not start: {error}"))).ok();
                             }
                         }
                         Err(error) => {
-                            output.try_send(Update::Draft { text, attachments }).ok();
+                            pending_updates.push_back(Update::SubmitRejected {
+                                id,
+                                context: Some(xcb_core::ui::TranscriptContext::Conversation(
+                                    conversation.clone(),
+                                )),
+                                text,
+                                attachments,
+                                reason: error.to_string(),
+                            });
                             output
                                 .try_send(Update::Notice(format!(
                                     "Message was not accepted: {error}"
@@ -5493,17 +5826,11 @@ pub async fn serve_ui(
                     }
                 }
                 Intent::Cancel => {
-                    let id = new_id("m");
-                    if let Err(error) = managed
-                        .submit(&conversation, id, "cancel".into(), vec![], &workspace)
-                        .await
-                    {
-                        output
-                            .try_send(Update::Notice(format!(
-                                "Cancellation was not accepted: {error}"
-                            )))
-                            .ok();
-                    }
+                    output
+                        .try_send(Update::Notice(
+                            "Select a task to cancel its observed revision.".into(),
+                        ))
+                        .ok();
                 }
                 Intent::Quit => {
                     quit = true;
@@ -5560,7 +5887,8 @@ pub async fn serve_ui(
                             .ok();
                     }
                 },
-                Intent::Account(_)
+                Intent::HabitatAt { .. }
+                | Intent::Account(_)
                 | Intent::Model(_)
                 | Intent::SetDefault
                 | Intent::Resume(_)
