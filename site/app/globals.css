@@ -455,3 +455,8 @@ section[id], h2[id], h3[id] { scroll-margin-top: 6.5rem; }
   .xcb-opening .hraness-marketing-hero__copy { max-width: 46rem; }
   .xcb-opening .hraness-marketing-hero__frame { max-width: 36rem; justify-self: center; }
 }
+
+/* Keep the appearance panel inside the viewport when navigation wraps. */
+@media (max-width: 48rem) {
+  .xcb-header-wrap .hraness-marketing-header__actions { margin-inline-start: auto; }
+}
