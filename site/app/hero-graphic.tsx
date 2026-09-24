@@ -58,21 +58,21 @@ export function HeroGraphic() {
             <ol className="xcb-lanes">
               <li>
                 <strong>claude</strong><span className="xcb-lane-plan">max · sonnet 4.6</span>
+                <span className="xcb-lane-state">quota window</span>
+                <small>resumes at reset</small>
+              </li>
+              <li>
+                <strong>codex</strong><span className="xcb-lane-plan">plus · gpt-5.2-codex</span>
                 <span className="xcb-lane-state xcb-lane-live">working</span>
                 <small>auth refactor</small>
               </li>
               <li>
-                <strong>codex</strong><span className="xcb-lane-plan">plus · gpt-5.2-codex</span>
-                <span className="xcb-lane-state xcb-lane-done">settled</span>
-                <small>test repair</small>
-              </li>
-              <li>
                 <strong>devin</strong><span className="xcb-lane-plan">—</span>
-                <span className="xcb-lane-state">quota window</span>
-                <small>resumes at reset</small>
+                <span className="xcb-lane-state">idle</span>
+                <small>ranked lower</small>
               </li>
             </ol>
-            <div className="xcb-terminal-input"><span aria-hidden="true">›</span> route → claude/max <span>lease held until exit proven</span></div>
+            <div className="xcb-terminal-input"><span aria-hidden="true">›</span> route → codex/plus <span>account held until the process exits</span></div>
           </div>
         </div>
         <Sword />

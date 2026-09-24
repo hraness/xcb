@@ -17,17 +17,17 @@ import { SiteHeader } from "./site-header";
 import { WorkspacePreview } from "./workspace-preview";
 
 const repository = "https://github.com/hraness/xcb";
-const summary = "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. Your agent calls a closed JSON contract, your app embeds the TypeScript SDK, or you drive the terminal — every turn lands on one eligible account, bounded, with custody proven at settlement.";
+const summary = "xcb sends each coding task to one of your Claude, Codex, or Devin accounts that is signed in, idle, and not at a known quota limit, then keeps that account locked until the provider process has exited. Another agent can call it with one JSON request, an app can embed the TypeScript SDK, or you can drive it from the terminal.";
 const questions = [
-  { question: "What is xcb?", answer: "xcb, short for Excalibur, is an open-source subscription router for coding agents. It selects an eligible account/model route across your connected Claude, Codex, and Devin accounts, runs one bounded turn, and proves account custody when the work settles. A terminal workspace and an experimental managed harness are built on the same routing core. The native implementation is available as a source preview." },
-  { question: "Can I use my existing AI subscriptions?", answer: "Yes — that is the point. Connect your own Claude, Codex, and Devin accounts and installed runtimes, and xcb routes work among them. It does not include model access, pool unrelated subscriptions, or remove provider usage limits; provider pricing and terms still apply." },
-  { question: "Can another agent call it?", answer: "Yes. xcb --json route is a closed stdin/stdout contract: one task document in, one settled result out, including the selected route, a resumable session id, and outcome facts. A dryRun flag returns the selected route without reserving an account or launching a provider. Applications can embed the TypeScript SDK's createSubscriptionRouter instead." },
-  { question: "How does it choose a route?", answer: "Candidates must be admitted runtimes on enabled, credentialed, idle accounts with observed fresh model entries, outside any known quota window. xcb then ranks survivors by task class and relative quality, cost, and latency Pareto tiers; an optional judge can only order routes that already passed. It never invents access and never substitutes an API route for a subscription route." },
-  { question: "What happens when an account hits its limit?", answer: "A provider-reported quota window excludes that account's routes until it resets, so work goes to the next eligible subscription instead of failing against a blocked one. When nothing is eligible the call fails closed with a bounded unavailable result — xcb never silently substitutes an API key or an unqualified route." },
-  { question: "What stays on my computer?", answer: "Account state, credentials custody, session history, and configuration stay local. Model requests still go to the provider the route selected. There is no required xcb cloud account, and local usage measurement does not automatically publish your data." },
-  { question: "Is the managed harness ready?", answer: "No — it is experimental. The harness is being rebuilt as a self-evolving ALGAL harness, where routing manifests are proposed and evaluated on labeled cases, but the current build does not execute self-modifying orchestration policies. What it does learn today are reflexes: small replayable programs for model tier and continuation whose parameters are promoted only after winning a trial on labels they were never fitted on, and can be rolled back. Admission, custody, and settlement contracts stay fixed while it evolves." },
-  { question: "Which platforms does it run on?", answer: "Native release binaries are built for macOS ARM64 and Linux x86_64; other hosts build from source. Provider support is narrower than the platform list: Claude and Codex coding workflows have passed on macOS ARM64 with tested accounts, the Codex and Devin candidates currently require macOS, and the isolated command runner is set up on macOS ARM64." },
-  { question: "Can I use it for daily work today?", answer: "The tested Claude and Codex setups passed real coding workflows on macOS ARM64. Native xcb is still a source preview: provider builds are restricted, command execution uses offline Linux, and the tested Devin account reached quota before a coding turn. Read the setup guide to decide whether those boundaries fit your projects." },
+  { question: "What is xcb?", answer: "xcb, short for Excalibur, is an open-source router for coding agents. It picks one of your connected Claude, Codex, or Devin accounts and a model, runs the task, and holds that account until the provider process has exited. A terminal workspace and an experimental managed harness are built on the same router. The native app is a source preview." },
+  { question: "Can I use my existing AI subscriptions?", answer: "Yes. Connect your own Claude, Codex, and Devin accounts and installed CLIs, and xcb routes work among them. It does not include model access, pool unrelated subscriptions, or lift provider usage limits; provider pricing and terms still apply." },
+  { question: "Can another agent call it?", answer: "Yes. xcb --json route reads one task as JSON on stdin and writes one JSON result on stdout: the route it chose, a session id you can resume, and how the run ended. With dryRun set, it returns the chosen route without reserving an account or starting a provider. Applications can embed the TypeScript SDK’s createSubscriptionRouter instead." },
+  { question: "How does it choose a route?", answer: "First it filters. A candidate needs a supported provider build, an enabled, signed-in, idle account outside any known quota window, and a model recently seen in that provider’s catalog. Then it ranks what is left by task type and by relative quality, cost, and latency. An optional judge can inform that ranking but cannot add a route that failed the filter. xcb never invents access and never swaps a subscription route for an API route." },
+  { question: "What happens when an account hits its limit?", answer: "When the provider has reported a quota window for an account, xcb skips that account until the reported reset, so work goes to the next account that qualifies. If none qualify, a route call returns an unavailable result and a managed task waits for the reset. xcb never falls back to an API key or an unsupported route." },
+  { question: "What stays on my computer?", answer: "Account state, credentials, session history, and configuration stay on your computer. Model requests still go to the provider the route selected. If you turn on the optional judge, which is off by default, it sends limited task and response context to TypeSafe’s System One service. You don’t need an xcb cloud account, and local usage measurement never publishes your data automatically." },
+  { question: "Is the managed harness ready?", answer: "No, it is experimental. It is being rebuilt on ALGAL to propose routing rules and test them on labeled examples, and the current build does not execute self-modifying orchestration policies. What it learns today are reflexes: two small programs that pick a model tier for a new task and categorize how a turn ended. They learn from your replies, adopt new parameters only after they beat the current ones on labels they were not fitted on, and can be rolled back. Provider checks, account locking, and run records stay fixed." },
+  { question: "Which platforms does it run on?", answer: "The release pipeline builds binaries for macOS ARM64 and Linux x86_64; other hosts build from source. Provider support is narrower than the platform list: Claude and Codex coding workflows have passed on macOS ARM64 with the tested accounts, Codex and Devin support currently requires macOS, and the isolated command runner is set up on macOS ARM64." },
+  { question: "Can I use it for daily work today?", answer: "The tested Claude and Codex setups passed real coding workflows on macOS ARM64. Native xcb is still a source preview: provider builds are restricted, command execution uses offline Linux, and the tested Devin account reached quota before a coding turn. Read the setup guide to decide whether those limits fit your projects." },
   { question: "What does it cost?", answer: "xcb is MIT licensed and free to build from source. Your provider subscriptions, model usage, and any services you choose are separate. There is no xcb subscription required to route through your own accounts." },
 ] as const;
 
@@ -49,74 +49,76 @@ export default function Home() {
           <div className="hraness-material-wall xcb-opening">
             <HeroField />
             <ProductHero className="xcb-marketing-hero" align="center" name=""
-              heading="All your AI subscriptions. One router." headingId="hero-title" summary={summary}
-              actions={[{ href: "/docs/getting-started", label: "Get started ↗" }, { href: "/docs/route", label: "Route contract" }]}
-              boundary="Open source · uses the subscriptions you already have · source build"
-              notice={<div className="xcb-hero-install"><p>Install from source in three commands. Needs Git and rustup; release binaries are built for macOS ARM64 and Linux x86_64.</p><pre className="install-command" tabIndex={0}><code>{threeCommandInstall}</code></pre><ReleaseSummary release={publishedRelease} /></div>}
+              heading="Run coding tasks on the subscriptions you already pay for." headingId="hero-title" summary={summary}
+              actions={[{ href: "/docs/getting-started", label: "Get started" }, { href: "/docs/route", label: "Route tasks" }]}
+              boundary="Open source · MIT licensed · Source preview"
+              notice={<div className="xcb-hero-install"><p>{publishedRelease === null
+                ? "Build from source. You need Git, rustup, and your platform’s build tools."
+                : <>Build from source with Git, rustup, and your platform’s build tools, or <a href="/download">download a verified release</a>.</>}</p><pre className="install-command" tabIndex={0}><code>{threeCommandInstall}</code></pre><ReleaseSummary release={publishedRelease} /></div>}
               frame={<HeroGraphic />}
             />
           </div>
-          <MarketingSection id="why" heading="Why xcb." headingId="why-title" summary="Most agent tools start from one seat. xcb starts from the subscriptions you already pay for — and from the agents that call it.">
+          <MarketingSection id="why" heading="Why xcb." headingId="why-title" summary="Use the coding subscriptions you already pay for, whether you start a task or another agent does.">
             <div className="xcb-fit-grid">
-              <div><h3>Multiplex your subscriptions</h3><p>One account&apos;s quota window shouldn&apos;t idle your day. Every credentialed account stays in the eligible set, and each turn lands on the best route that is actually free.</p></div>
-              <div><h3>Made for other agents</h3><p>xcb is infrastructure, not just an app. A closed JSON contract lets any agent hand over a task and get a settled result back; the SDK embeds the same router in your application.</p></div>
-              <div><h3>Evolves under fixed contracts</h3><p>Experimental: the managed harness proposes routing manifests, evaluates them on labeled cases, and promotes only strictly-better ones. What it may never change — admission, custody, settlement — stays fixed.</p></div>
+              <div><h3>Keep working when an account hits a known quota limit</h3><p>When an account reaches a known quota limit, xcb skips it until the provider’s reported reset and sends the next task to the best-ranked account and model that is free.</p></div>
+              <div><h3>Made for other agents</h3><p>Another agent can hand xcb a task as one JSON request and get back the result, the route it took, and a session it can resume. Apps can use the TypeScript SDK instead, which holds the account the app names while its task runs.</p></div>
+              <div><h3>Self-tuning, in development</h3><p>The managed harness is being rebuilt to propose routing rules, test them on labeled examples, and keep only rules that score strictly better. The design keeps provider checks, account locking, and run records outside what it can change.</p></div>
             </div>
           </MarketingSection>
-          <MarketingSection id="router" heading="Every turn. One accountable route." headingId="router-title" summary="A call is never just a prompt. The route that takes it is admitted, held, and settled on the record.">
+          <MarketingSection id="router" heading="What happens when xcb routes a task" headingId="router-title" summary="xcb checks which accounts can take the task, holds the one it picks, and records how the run ended.">
             <div className="xcb-fit-grid">
-              <div><h3>Custody that can be proven</h3><p>The selected account is held under an exclusive, generation-fenced lease while its provider runs. Credentials never enter the workspace, and custody stays held until process exit is independently proven.</p></div>
-              <div><h3>Eligibility, not promises</h3><p>Only admitted runtimes, enabled credentialed accounts, and observed model entries are candidates. Known quota windows exclude a route; a public offer never stands in for live access.</p></div>
-              <div><h3>One bounded turn</h3><p>Each call sets an explicit model, deadline, and output bound. Workspace tools are brokered, processes are joined, and an uncertain outcome is reported — never silently retried.</p></div>
+              <div><h3>The account stays locked until the run ends</h3><p>While the provider runs, xcb holds the chosen account so no other task can start on it. Credentials never enter your project folder, and xcb releases the account only after it has independent proof that the provider process exited.</p></div>
+              <div><h3>Only accounts that pass xcb’s checks</h3><p>A candidate needs a supported provider build, an enabled and signed-in account, and a model xcb has recently seen in that provider’s catalog. Accounts inside a known quota window are skipped. A provider’s advertised promotion never counts as proof that your account qualifies for it.</p></div>
+              <div><h3>One turn per route call</h3><p>Each route call runs one provider turn on one model, with an optional deadline and a cap on the returned text. File access goes through xcb’s broker, xcb waits for the provider’s processes to exit, and when the outcome is uncertain it says so instead of retrying.</p></div>
             </div>
-            <a className="xcb-text-link" href="/docs/route">Read the route contract ↗</a>
+            <a className="xcb-text-link" href="/docs/route">How routing works →</a>
           </MarketingSection>
-          <MarketingSection id="interfaces" heading="For agents, a contract. For apps, an SDK." headingId="interfaces-title" layout="split" summary="Another coding agent calls the contract. An application embeds the router.">
+          <MarketingSection id="interfaces" heading="Call it from an agent or embed it in an app." headingId="interfaces-title" layout="split" summary="Coding agents use the JSON command. Applications can embed the TypeScript SDK.">
             <div className="xcb-interface-grid">
-              <div><h3>For agents — <code>xcb --json route</code></h3><p>One closed JSON document on stdin, one bounded JSON result on stdout. The contract takes a task and eligibility constraints — never credentials, tools, hooks, or provider flags.</p><a className="xcb-text-link" href="/docs/route">Request and response schema ↗</a></div>
-              <div><h3>For applications — the SDK</h3><p><code>createSubscriptionRouter</code> bundles the lease store and qualified task adapters into one call. The TypeScript compatibility package is a source build; hosts supply adapters and qualification evidence.</p><a className="xcb-text-link" href="/docs/route#sdk">Router entry point ↗</a></div>
+              <div><h3>For agents: <code>xcb --json route</code></h3><p>An agent writes one JSON request to stdin and reads one JSON result from stdout. The request carries the task and can pin a provider, account, model, or timeout. It cannot carry credentials, tools, hooks, system prompts, or provider flags.</p><a className="xcb-text-link" href="/docs/route">Request and response schema →</a></div>
+              <div><h3>For applications: the SDK</h3><p><code>createSubscriptionRouter</code> wraps your account lease store and task adapters in one object. Your app names the account and model for each task, and the router holds that account while the task runs. Your app supplies each provider adapter, with proof that its exact provider build runs with the expected tools and file access.</p><a className="xcb-text-link" href="/docs/route#sdk">Router entry point →</a></div>
             </div>
             <RoutePreview />
           </MarketingSection>
-          <MarketingSection id="routing" heading="See the route before it runs." headingId="routing-title" layout="split-reverse" summary="No hidden brokerage. Every selection is a filter you can preview and a turn you can verify.">
+          <MarketingSection id="routing" heading="See the route before it runs." headingId="routing-title" layout="split-reverse" summary="You can preview which account and model xcb would choose before it reserves anything, and check a managed task’s record after it runs.">
             <div className="xcb-workflow-proof">
-              <div className="xcb-proof-line"><span>Connected accounts</span><strong>eligible: admitted · credentialed · idle · outside known quota windows</strong></div>
+              <div className="xcb-proof-line"><span>Connected accounts</span><strong>supported build · signed in · idle · outside known quota windows</strong></div>
               <div className="xcb-proof-connector" aria-hidden="true">↓</div>
-              <div className="xcb-proof-line"><span>Observed model catalog</span><strong>Pareto tiers on relative quality · cost · latency</strong></div>
+              <div className="xcb-proof-line"><span>Observed model catalog</span><strong>ranked by relative quality · cost · latency</strong></div>
               <div className="xcb-proof-connector" aria-hidden="true">↓</div>
-              <div className="xcb-proof-line"><span>Optional judge</span><strong>orders already-eligible routes only</strong></div>
+              <div className="xcb-proof-line"><span>Optional judge</span><strong>informs the ranking, never adds a route</strong></div>
               <div className="xcb-proof-connector" aria-hidden="true">↓</div>
-              <div className="xcb-proof-line"><span>One routed turn</span><strong>joined processes · recorded outcome · resumable session</strong></div>
-              <p>Preview selection without reserving an account: <code>xcb models route --task &quot;…&quot;</code> and <code>xcb models tiers --task &quot;…&quot;</code>. Verify managed task receipts with <code>xcb tasks verify</code>.</p>
-              <a className="xcb-text-link" href="/docs/route">How selection works ↗</a>
+              <div className="xcb-proof-line"><span>One routed turn</span><strong>processes exit before release · outcome recorded · session you can resume</strong></div>
+              <p>Preview selection without reserving an account: <code>xcb models route --task &quot;…&quot;</code> and <code>xcb models tiers --task &quot;…&quot;</code>. Check that a managed task’s local record is consistent with <code>xcb tasks verify</code>.</p>
+              <a className="xcb-text-link" href="/docs/route">How selection works →</a>
             </div>
           </MarketingSection>
-          <MarketingSection id="workspace" heading="Prefer to drive? There's a terminal." headingId="workspace-title" layout="split" summary="The xcb terminal puts the same router behind an interface you can drive yourself — conversations, sessions, panes, and usage in one place.">
+          <MarketingSection id="workspace" heading="Prefer to drive? There's a terminal." headingId="workspace-title" layout="split" summary="The xcb terminal puts the same router behind an interface you drive yourself, with conversations, sessions, panes, and usage in one place.">
             <WorkspacePreview />
           </MarketingSection>
-          <MarketingSection id="harness" heading="A harness that improves itself." headingId="harness-title" summary="Experimental: the managed harness is being rebuilt as a self-evolving ALGAL harness. Routing manifests are proposed and evaluated on labeled cases, and a manifest is promoted only when it is strictly better — while admission, custody, and settlement contracts stay fixed and deterministic.">
+          <MarketingSection id="harness" heading="In development: a harness that tunes its own routing" headingId="harness-title" summary="The managed harness is being rebuilt on ALGAL so it can propose routing rules, test them on labeled examples, and keep a rule only when it scores strictly better. Provider checks, account locking, and run records stay fixed and deterministic.">
             <div className="xcb-pane-example">
               <span className="xcb-badge" aria-label="Experimental feature">Experimental</span>
               <div className="xcb-evolve-loop" aria-label="The evolution loop">
-                <div className="xcb-evolve-step"><strong>propose</strong><span>routing manifests</span></div>
+                <div className="xcb-evolve-step"><strong>propose</strong><span>routing rules</span></div>
                 <span className="xcb-evolve-arrow" aria-hidden="true">→</span>
                 <div className="xcb-evolve-step"><strong>evaluate</strong><span>labeled cases</span></div>
                 <span className="xcb-evolve-arrow" aria-hidden="true">→</span>
-                <div className="xcb-evolve-step"><strong>promote</strong><span>strictly better only</span></div>
+                <div className="xcb-evolve-step"><strong>keep</strong><span>strictly better only</span></div>
               </div>
-              <p>Shipping now: <a href="/reflexes">reflexes</a> learn which model tier you want and when a worker stopped short, promoting new parameters only after they win on labels they were never fitted on. Their programs never rewrite themselves, and the current build does not execute self-modifying orchestration policies. The durable record format, exclusive account custody, and provider admission gates underneath it are the same ones the route contract uses — and they are fixed inputs to the evolution, not things it can rewrite.</p>
+              <p>What ships today are <a href="/reflexes">reflexes</a>: they learn which model tier you want and notice when a worker stopped short, and they adopt new parameters only after they beat the current ones on labels they were never fitted on. Their programs never rewrite themselves, and the current build does not execute self-modifying orchestration policies. The harness uses the same run records, account locking, and provider checks as the route command, and it cannot rewrite them.</p>
               <a className="xcb-text-link" href={`${repository}/blob/main/docs/managed-harness.md`}>Managed harness design ↗</a>
             </div>
           </MarketingSection>
-          <MarketingSection id="readiness" heading="Honest about the edges." headingId="readiness-title" summary="Native xcb is a source preview. The current evidence covers specific builds and tested accounts, not every provider or machine.">
+          <MarketingSection id="readiness" heading="What works today" headingId="readiness-title" summary="Native xcb is a source preview. These results come from specific builds and tested accounts, so your machine and accounts may differ.">
             <div className="xcb-readiness">
-              <div><span className="xcb-status-dot" aria-hidden="true" /><h3>Claude &amp; Codex</h3><p>Installed coding workflows passed on macOS ARM64 with tested accounts and the exact supported builds: failing test, repair, passing test, and Git inspection.</p><a href="/docs/providers">Supported builds and setup ↗</a></div>
-              <div><span className="xcb-status-dot xcb-status-caution" aria-hidden="true" /><h3>Devin</h3><p>The exact supported builds pass their sandbox-boundary checks without an account. A real coding session with your account still needs its own evidence; your account’s model list is checked at launch.</p><a href="/docs/providers#devin">Current Devin boundary ↗</a></div>
-              <div><span className="xcb-status-dot xcb-status-neutral" aria-hidden="true" /><h3>Tests &amp; builds</h3><p>Offline Linux ARM64 commands, prepared public dependencies, and read-only Git inspection. No native macOS command execution.</p><a href="/docs/workspace">What the runner supports ↗</a></div>
+              <div><span className="xcb-status-dot" aria-hidden="true" /><h3>Claude &amp; Codex</h3><p>On macOS ARM64, with the tested accounts and the supported builds, each finished a real coding task: run a failing test, fix the code, pass the test, and inspect Git status.</p><a href="/docs/providers">Supported builds and setup →</a></div>
+              <div><span className="xcb-status-dot xcb-status-caution" aria-hidden="true" /><h3>Devin</h3><p>The supported Devin builds pass xcb’s sandbox checks without signing in. A coding session on a signed-in Devin account hasn’t been confirmed yet. xcb checks your account’s model list each time a Devin turn starts.</p><a href="/docs/providers#devin">Current Devin status →</a></div>
+              <div><span className="xcb-status-dot xcb-status-neutral" aria-hidden="true" /><h3>Tests &amp; builds</h3><p>Commands run offline in a Linux ARM64 VM, with public dependencies you prepare in advance. Git access is read-only, and native macOS commands can’t run.</p><a href="/docs/workspace">What the runner supports →</a></div>
             </div>
           </MarketingSection>
           <MarketingInstallPanel heading="Build the router." headingId="install-title" id="install">
-            <p className="install-note">Start with the native source build — one binary serves the route contract, the terminal workspace, and the experimental harness. You’ll need Git, Rust 1.97.1, platform build tools, and a supported provider setup. Release binaries are built for macOS ARM64 and Linux x86_64; other hosts build from source.</p>
+            <p className="install-note">Start with the source build. One binary serves the route command, the terminal workspace, and the experimental harness. You need Git, Rust 1.97.1, your platform’s build tools, and a supported provider setup.</p>
             <pre className="install-command" tabIndex={0}><code>{`git clone https://github.com/hraness/xcb.git
 cd xcb
 rustup toolchain install 1.97.1 --profile minimal
@@ -124,7 +126,7 @@ rustup toolchain install 1.97.1 --profile minimal
 export PATH="$HOME/.local/bin:$PATH"
 xcb --help
 xcb update enable --policy notify   # macOS only: daily release check`}</code></pre>
-            <a className="xcb-text-link" href="/docs/getting-started">Follow the complete setup guide ↗</a>
+            <a className="xcb-text-link" href="/docs/getting-started">Follow the setup guide →</a>
             <details className="xcb-release-details"><summary>Release downloads and package details</summary>
               <NativeDownloads release={publishedRelease} />
               <CompatibilityArchive release={publishedRelease} />
@@ -142,7 +144,7 @@ xcb update enable --policy notify   # macOS only: daily release check`}</code></
                     name: "Gobstopper",
                     href: "https://gobstopper.sh",
                     role: "Automatic context compaction for agent sessions",
-                    relationship: "Gobstopper context management ships inside xcb as a default-on plugin, with bounded continuation and settled-boundary checks.",
+                    relationship: "Gobstopper’s context management ships inside xcb as a plugin that is on by default.",
                   },
                   {
                     name: "Ghostget",
@@ -151,10 +153,10 @@ xcb update enable --policy notify   # macOS only: daily release check`}</code></
                     relationship: "Ghostget is the bounded web capability an xcb-routed agent can call: named, attested operations instead of a driven browser.",
                   },
                   {
-                    name: "Aicharts",
+                    name: "AI Charts",
                     href: "https://aicharts.io",
                     role: "AI model benchmarks and usage inspection",
-                    relationship: "Aicharts benchmarks the models and subscription usage across providers; xcb's local usage measurement stays local and upload is unavailable.",
+                    relationship: "AI Charts benchmarks the models and subscription usage across providers; xcb's local usage measurement stays local and upload is unavailable.",
                   },
                 ],
               },
@@ -194,7 +196,7 @@ xcb update enable --policy notify   # macOS only: daily release check`}</code></
             label="Related"
             summary="Each Hraness product owns one private domain and gives your agent the same kind of access: local, bounded, and inspectable."
           />
-          <MarketingCallToAction heading="Stop leaving subscriptions idle." headingId="cta-title" summary="One contract for your agents, one SDK for your applications — on the accounts you already pay for." actions={[{ href: "/docs/getting-started", label: "Get started ↗" }, { href: repository, label: "Explore the source" }]} footnote="xcb / Excalibur · Built by Hraness · MIT licensed" />
+          <MarketingCallToAction heading="Stop leaving subscriptions idle." headingId="cta-title" summary="Send work to the accounts you already pay for, from your agents with the JSON command or from your apps with the SDK." actions={[{ href: "/docs/getting-started", label: "Get started" }, { href: repository, label: "Explore the source" }]} footnote="xcb / Excalibur · Built by Hraness · MIT licensed" />
         </MarketingPage>
       </main>
       <AskAiAboutThis className="ask-ai" url="https://xcb.sh" />

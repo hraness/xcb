@@ -123,7 +123,7 @@ looping or guessing that retry is safe.
 ## Identity limitation and activation gate
 
 The native qualifier accepts `--expected-generation`; this helper passes the
-pinned value on every challenge. Native XCB reads the existing generation under
+pinned value on every challenge. Native xcb reads the existing generation under
 its exclusive account lease **before the live challenge**, refuses missing or
 mismatched generations without creating a new one, and checks the generation
 again before publishing evidence. This prevents a concurrent explicit sign-in
@@ -146,7 +146,7 @@ is no automatic adoption of upgrades or replacement sign-ins.
 
 A command deadline, failed command, interruption, missing successful receipt,
 or uncertain join leaves `pending.json` in place. Future runs stop before any
-provider operation. Inspect the exact attempt and use XCB's documented custody
+provider operation. Inspect the exact attempt and use xcb's documented custody
 diagnostics; never infer recovery from an expired lease, missing PID, or elapsed
 time. This helper deliberately provides no command to clear uncertainty. A new
 binding is not a native recovery mechanism and cannot bypass a held account.
@@ -192,7 +192,7 @@ The helper does not inherit provider keys, proxy settings, Rust compiler
 overrides, or shell startup commands. The scheduler's public absolute invocation
 and complete child argv are preserved in each private intent; no shell is used.
 
-Run synthetic tests under the host scheduler. They never call native XCB, Cargo,
+Run synthetic tests under the host scheduler. They never call native xcb, Cargo,
 launchctl, or a provider:
 
 ```sh

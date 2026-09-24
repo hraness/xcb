@@ -1,7 +1,7 @@
 {
   "name": "@hraness/xcb",
   "version": "0.6.0",
-  "description": "Excalibur: a metaharness and SDK for AI subscriptions, with a customizable terminal workspace, account custody, and token observability. Native xcb is in development.",
+  "description": "TypeScript SDK and compatibility CLI for Excalibur (xcb), which routes coding tasks across your Claude, Codex, and Devin subscriptions.",
   "type": "module",
   "license": "MIT",
   "packageManager": "bun@1.3.14",

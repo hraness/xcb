@@ -1,6 +1,6 @@
 # Managed harness
 
-Native XCB separates a user's control conversations from provider worker
+Native xcb separates a user's control conversations from provider worker
 sessions. Each terminal has its own transcript and draft. Conversations share
 durable tasks; each task retains its originating conversation, workspace,
 original goal, explicit follow-ups, worker history, and transition receipts.
@@ -24,8 +24,8 @@ that an external effect occurred. This implementation does not execute
 self-modifying orchestration policies. [Reflexes](reflexes.md) learn
 parameters for two bounded decisions (model tier and whether a completed turn
 stopped short) from operator behavior; their programs are effect-free, never
-rewrite themselves, and a learned generation is promoted only on held-out
-evidence.
+rewrite themselves, and a learned generation is promoted only after it wins
+a forward trial on labels it was not fitted on.
 
 ## Task lifecycle
 
