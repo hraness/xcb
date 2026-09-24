@@ -219,23 +219,25 @@ fn head(bias: f64, threshold: f64, weights: &[(&str, f64)]) -> Head {
 pub fn prior(reflex: Reflex) -> Params {
     let heads = match reflex {
         Reflex::Route => BTreeMap::from([
-            // ALGAL examples/model-router.algal.json (306 first prompts,
-            // 8-fold CV AUC 0.739), threshold p ≥ 0.35.
+            // ALGAL examples/model-router.algal.json generation 1: the
+            // September 22 head (306 first prompts, 8-fold CV AUC 0.739)
+            // updated with this same anchored rule on 84 labeled September
+            // 2026 first prompts (CV AUC 0.64), threshold p ≥ 0.35.
             (
                 ROUTE_JUDGED.to_owned(),
                 head(
-                    -1.8027,
+                    -1.7683,
                     0.35,
                     &[
-                        ("words", 0.4530),
-                        ("imperative", 1.5943),
-                        ("resume", 0.6881),
-                        ("verbs", 0.4405),
-                        ("difficulty", -0.0755),
-                        ("scope", 0.8716),
-                        ("ambiguity", -0.1508),
-                        ("stakes", -0.4787),
-                        ("frontier", 0.5851),
+                        ("words", 0.5271),
+                        ("imperative", 1.4028),
+                        ("resume", 0.4491),
+                        ("verbs", 0.4438),
+                        ("difficulty", 0.0045),
+                        ("scope", 0.9353),
+                        ("ambiguity", -0.1459),
+                        ("stakes", -0.5129),
+                        ("frontier", 0.6107),
                     ],
                 ),
             ),

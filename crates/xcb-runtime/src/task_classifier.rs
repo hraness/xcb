@@ -1,7 +1,9 @@
-//! Native port of ALGAL's `examples/model-router.algal.json` fitted classifier.
-//! Source: https://github.com/hraness/algal/blob/7bedd93/examples/model-router.algal.json
-//! Provenance and limitations: ALGAL `docs/model-router.md` (306 first prompts;
-//! preference prediction, not a capability benchmark). Keep the six questions,
+//! Native port of ALGAL's `examples/model-router.algal.json` fitted classifier,
+//! generation 1 (September 24, 2026): the 306-prompt September 22 head updated
+//! with the route reflex's own anchored rule on 84 labeled September 2026 first
+//! prompts. Source: https://github.com/hraness/algal/blob/main/examples/model-router.algal.json
+//! Provenance and limitations: ALGAL `docs/model-router.md` (preference
+//! prediction, not a capability benchmark; CV AUC 0.64 on the September window). Keep the six questions,
 //! literal-space features, coefficients, raw score scale and kind gates aligned.
 //! Large-prompt priority is an explicit xcb policy layered above that model.
 //! Features and the fitted head are shared with the route reflex
@@ -234,11 +236,11 @@ mod tests {
         let task = "migrate the session store to the new envelope format and update every caller";
         let result = score(task, &answers("refactor"), false, false).unwrap();
         assert!(result.frontier);
-        assert_eq!(result.score_milli, Some(533));
+        assert_eq!(result.score_milli, Some(488));
         for kind in ["question", "probe"] {
             let result = score(task, &answers(kind), false, false).unwrap();
             assert!(!result.frontier);
-            assert_eq!(result.score_milli, Some(533));
+            assert_eq!(result.score_milli, Some(488));
         }
         // Preserve the manifest's literal-space and punctuation behavior.
         assert_ne!(

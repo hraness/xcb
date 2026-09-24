@@ -1612,7 +1612,7 @@ mod tests {
         assert_eq!(decision.value, "frontier");
         assert_eq!(decision.head, ROUTE_JUDGED);
         // Same score as the native port of ALGAL's model router.
-        assert_eq!(decision.score_milli, 533);
+        assert_eq!(decision.score_milli, 488);
         assert_eq!(
             params.heads[ROUTE_JUDGED].decide(&features),
             decision.value == "frontier"
