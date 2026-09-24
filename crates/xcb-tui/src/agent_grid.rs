@@ -606,6 +606,11 @@ impl App {
         }
         match key.code {
             KeyCode::Enter => self.agent_grid.filter_editing = false,
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agent_grid.filter_editing = false;
+                self.agent_grid.focused = false;
+                self.notice = "Filter closed; your draft is unchanged.".into();
+            }
             KeyCode::F(6) if key.modifiers.is_empty() => {
                 self.agent_grid.filter_editing = false;
                 self.agent_grid.focused = false;
@@ -1132,6 +1137,24 @@ mod tests {
         assert!(app.agent_grid.query.is_empty());
         app.handle(key(KeyCode::Esc), &tx);
         assert!(!app.agent_grid.focused);
+    }
+
+    #[test]
+    fn filter_ctrl_c_returns_to_chat_before_clearing_the_draft() {
+        let mut app = fixture(2);
+        app.composer.set_text("Keep this draft");
+        let (tx, rx) = sync_channel(4);
+        app.overview_command("filter");
+        app.handle(Event::Paste("Agent".into()), &tx);
+        let cancel = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.handle(cancel.clone(), &tx));
+        assert!(!app.agent_grid.filter_editing);
+        assert!(!app.agent_grid.focused);
+        assert_eq!(app.composer.text(), "Keep this draft");
+        assert!(rx.try_recv().is_err());
+        assert!(app.handle(cancel, &tx));
+        assert!(app.composer.text().is_empty());
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

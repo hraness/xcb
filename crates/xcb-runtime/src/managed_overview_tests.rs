@@ -257,7 +257,9 @@ async fn overview_global_attention_failures_and_running_survive_current_workspac
     for index in 0..135 {
         let mut conversation = f.conversation.clone();
         conversation.id = new_id("c");
-        conversation.updated_at_ms += index + 1;
+        // Conversation creation predates task creation. Start after the task
+        // so another_task's creation-time clamp cannot tie these timestamps.
+        conversation.updated_at_ms = f.task.updated_at_ms + index + 1;
         if index < 3 {
             conversation.workspace = "/another/workspace".into();
         }
