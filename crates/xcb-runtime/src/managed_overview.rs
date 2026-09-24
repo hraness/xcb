@@ -30,8 +30,8 @@ fn activity(task: &ManagedTask, beat: Option<&ProgressBeat>, now: u64) -> String
 
 impl ManagedStore {
     /// One selected task per conversation, chosen by attention, active work,
-    /// then recency. The query ranks identifiers before loading at most 128
-    /// task payloads; no conversation transcript is read for the overview.
+    /// then recency, across all workspaces. The query ranks identifiers before
+    /// loading at most 128 task payloads; no conversation transcript is read.
     pub(super) fn agent_overview(
         &self,
         focused: &Id,
@@ -67,10 +67,9 @@ impl ManagedStore {
             LEFT JOIN ranked r ON r.conversation=c.id AND r.position=1
             LEFT JOIN tasks t ON t.id=r.id
             ORDER BY c.id=?1 DESC,
-                CASE WHEN json_valid(c.payload) THEN json_extract(c.payload,'$.workspace')=(
-                    SELECT CASE WHEN json_valid(payload) THEN json_extract(payload,'$.workspace') END
-                    FROM conversations WHERE id=?1) ELSE 0 END DESC,
-                COALESCE(r.priority,3),
+                CASE WHEN t.state='failed' AND CASE WHEN json_valid(t.payload)
+                    THEN COALESCE(json_extract(t.payload,'$.deferred'),0)=0 ELSE 1 END
+                    THEN 0 ELSE COALESCE(r.priority,3) END,
                 max(c.updated_at,COALESCE(r.updated_at,0)) DESC,c.id LIMIT ?2",
         )?;
         let records = query.query_map(

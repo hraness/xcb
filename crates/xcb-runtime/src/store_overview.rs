@@ -6,7 +6,7 @@ use xcb_core::{
 };
 
 impl Store {
-    /// Read one assistant message per selected direct session in a single query.
+    /// Read one assistant message per selected direct session across workspaces.
     /// Managed worker sessions belong to their durable conversation instead.
     pub(crate) fn agent_overview(&self, focused: Option<&Id>) -> Result<Vec<AgentRow>> {
         // A saved working flag is not evidence that its terminal is still alive.
@@ -34,12 +34,10 @@ impl Store {
                 WHERE CASE WHEN json_valid(payload)
                     THEN json_extract(payload,'$.managed_task') IS NULL ELSE 0 END
                 ORDER BY id=?1 DESC,
-                    json_extract(payload,'$.workspace')=(
-                        SELECT CASE WHEN json_valid(payload) THEN json_extract(payload,'$.workspace') END
-                        FROM sessions WHERE id=?1) DESC,
                     CASE json_extract(payload,'$.state')
                         WHEN 'needs_answer' THEN 0 WHEN 'needs_action' THEN 0
                         WHEN 'needs_approval' THEN 0 WHEN 'uncertain' THEN 0
+                        WHEN 'failed' THEN 0 WHEN 'limited' THEN 0
                         WHEN 'working' THEN 1 ELSE 2 END,
                     last_active DESC,id LIMIT ?2
             )

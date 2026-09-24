@@ -855,7 +855,9 @@ impl App {
             "? / F1  Shortcuts     /resume  Sessions     /agents  Tasks".into(),
             "F2 / Alt-Down  Attention     Alt-Left/Right  Switch conversation (empty draft)".into(),
             "F6  Focus agent grid; arrows/PgUp/PgDn browse, Enter adds a reference".into(),
-            "/overview project|all|hide|show     /mouse  Scroll panels and click references".into(),
+            "In the grid: / or Ctrl-F filters; 1 all, 2 active, 3 needs attention".into(),
+            "/overview all|active|attention|filter <text>|clear|hide|show".into(),
+            "/mouse  Scroll panels and click session references".into(),
             String::new(),
             "Commands".into(),
         ];

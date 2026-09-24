@@ -45,9 +45,9 @@ Paste preserves multiple lines without sending them. Drafts accept up to
 attachment. Mouse capture starts off so terminal selection works; `/mouse`
 enables wheel scrolling.
 
-## Keep an eye on agents
+## Keep an eye on sessions
 
-The overview above chat shows sessions in the current project. Each card shows
+The overview above chat shows your sessions. Each card shows
 the session name, routed model, activity, and a preview of its latest response.
 Labels accompany the colors for questions, approvals, completed work, usage
 limits, and problems. A model is shown after routing; thinking is shown only
@@ -64,10 +64,22 @@ one sends nothing and keeps your current chat and guidance target. Edit the
 draft to describe what you want to do with that context, then send it from the
 main chat. Existing task, project, and approval controls still apply.
 
-Use `/overview all` to see other projects, `/overview project` to return to the
-current project, or `/overview hide` and `/overview show` to control visibility.
-The overview holds up to 128 sessions and 2,048 bytes per response preview.
-Short terminals use a compact strip to leave room for typing.
+Sessions needing attention come first, then active work, then earlier sessions.
+Cards keep their relative order within each group as responses arrive. While you
+focus or scroll the grid, the order stays in place; status updates remain visible.
+Returning to the top and leaving grid focus applies priority changes.
+
+In the grid, press `1` for all sessions, `2` for active work and sessions needing
+attention, or `3` for attention only. Press `/` or Ctrl-F to filter by name,
+model, status, or ID. Enter finishes filtering; Escape clears the filter or
+returns to chat. Filtering keeps your chat draft.
+
+The same controls are available as `/overview all`, `/overview active`,
+`/overview attention`, `/overview filter <text>`, and `/overview clear`.
+Use `/overview hide` and `/overview show` to control visibility. The overview
+holds up to 128 sessions and 2,048 bytes per response preview. Short terminals
+use a compact strip to leave room for typing. `xcb chat` includes managed and
+direct sessions; the direct-session interface shows direct sessions.
 
 ## Guide an agent
 

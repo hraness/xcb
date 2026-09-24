@@ -134,8 +134,8 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/overview",
         alias: "",
-        args: "[project|all|hide|show]",
-        summary: "show the agent grid; F6 selects a reference",
+        args: "[all|active|attention|filter <text>|clear|hide|show]",
+        summary: "filter sessions; F6 browses the grid",
         needs_args: false,
     },
     SlashCommand {

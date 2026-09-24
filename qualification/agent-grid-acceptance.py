@@ -196,12 +196,16 @@ def main():
            "TERM": "xterm-256color", "LANG": "en_US.UTF-8", "XCB_STATE": str(root / "state"),
            "XCB_COORDINATION_ROOT": str(root / "coord"), "HRANESS_SUPPORT_AUDIENCE": "off"}
     events_path = root / "intents.jsonl"
+    control_path = root / "control.json"
+    control_path.write_text('{"revision": 0}\n')
+    control_path.chmod(0o600)
+    update_revision = 0
     checks, snapshots, errors = [], [], []
     screen, capture = Screen(40, 132), bytearray()
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(root / "workspace")
-        os.execve(str(binary), [str(binary), "--events", str(events_path)], env)
+        os.execve(str(binary), [str(binary), "--events", str(events_path), "--control", str(control_path)], env)
     status = None
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 132, 0, 0))
     os.set_blocking(fd, False)
@@ -245,7 +249,25 @@ def main():
 
     def no_intents(name):
         rows = log()
-        check(name, all(row["kind"] == "fixture" for row in rows), events=rows)
+        check(name, all(row["kind"] in ("fixture", "fixture_update") for row in rows), events=rows)
+
+    def visible_agents():
+        return [int(number) for number in re.findall(r"\bAgent (\d\d) (?:Workspace work|Other workspace)", "\n".join(screen.text().splitlines()[:screen.rows // 2]))]
+
+    def fixture_update(action, **details):
+        nonlocal update_revision
+        update_revision += 1
+        next_path = root / "control.next"
+        next_path.write_text(json.dumps({"revision": update_revision, "action": action, **details}))
+        next_path.chmod(0o600)
+        next_path.replace(control_path)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            drain(.1)
+            if any(row.get("kind") == "fixture_update" and row.get("revision") == update_revision for row in log()):
+                drain(.3)
+                return
+        raise AssertionError(f"synthetic update {update_revision} was not acknowledged")
 
     def command(text):
         send(b"\x01\x0b" + text.encode() + b"\r")
@@ -264,82 +286,120 @@ def main():
         while (screen.find("Agent 01") is None or screen.find("›") is None) and time.monotonic() < deadline:
             drain(.1)
         initial = snapshot("01-initial")
-        check("real terminal shows agent grid and composer", "Agent 01" in initial and "›" in initial)
-        check("current-project default excludes other project", "Other project" not in initial)
+        expected = [3, 4, 5, 6, 7, 8, 13, 1, 2, 12, 15, 18]
+        check("real terminal shows session grid and composer", "Agent 01" in initial and "›" in initial)
+        check("default prioritizes attention then active sessions across workspaces", visible_agents() == expected, observed=visible_agents())
+        check("default includes sessions from another workspace", "Agent 18" in initial and "Other workspace" in initial)
         check("names models response previews and activity visible", all(value in initial for value in ("codex/fixture", "claude/fixture", "RESPONSE-01", "thinking", "working")))
-        check("all lifecycle states have readable labels", all(value in initial for value in ("needs answer", "needs approval", "needs action", "usage limit", "failed", "needs recovery", "cancelled", "idle")))
-        colors = {number: screen.foreground(f"RESPONSE-{number:02}") for number in (1, 2, 3, 7, 9, 10)}
-        check("response categories use distinct terminal colors", len({str(value) for value in colors.values()}) == 5, colors=colors)
-        check("response category independent of live working state", colors[2] == colors[10] and colors[2] != colors[1])
-        check("overflow does not swallow main chat", "TRANSCRIPT-80" in initial and "Agent 16" not in initial)
+        check("attention states have readable labels", all(value in initial for value in ("needs answer", "needs approval", "needs action", "usage limit", "failed", "needs recovery")))
+        colors = {number: screen.foreground(f"RESPONSE-{number:02}") for number in (1, 2, 3, 7)}
+        check("response category independent of live working state", colors[2] != colors[1])
+        check("overflow does not swallow main chat", "TRANSCRIPT-80" in initial and "Agent 17" not in initial)
         positions = [index for index, line in enumerate(initial.splitlines()) if re.search(r"Agent \d\d|RESPONSE-\d\d", line)]
         check("overview content stays within half viewport", positions and max(positions) < screen.rows // 2)
+        fixture_update("recency")
+        snapshot("02-recency-update")
+        check("recency and incoming row order changes do not reshuffle cards", visible_agents() == expected, observed=visible_agents())
         send(b"draft survives")
         send(F6 + HOME)
+        fixture_update("attention", agent=18)
+        held = snapshot("03-focused-attention-update")
+        check("new attention updates status without moving focused cards", visible_agents() == expected and "ATTENTION-18" in held, observed=visible_agents())
+        check("live updates preserve main composer draft", "draft survives" in held)
+        send(ESC)
+        promoted = snapshot("04-attention-promoted")
+        check("returning to chat promotes attention while preserving peer order", visible_agents() == [3, 4, 5, 6, 7, 8, 13, 18, 1, 2, 12, 15], observed=visible_agents())
+        fixture_update("restore")
+        send(F6 + HOME)
         send(RIGHT + DOWN + PAGEDOWN)
-        moved = snapshot("02-keyboard-page")
-        check("grid keyboard navigation pages overflow", "Agent 01" not in moved and "draft survives" in moved)
+        moved = snapshot("05-keyboard-page")
+        check("grid keyboard navigation pages overflow", "Agent 03" not in moved and "draft survives" in moved)
         send(PAGEUP + HOME)
         send(b"\r")
         send(b"\x01")
-        reference = snapshot("03-keyboard-reference")
-        check("Enter inserts selected reference into existing draft", "draft survives" in reference and "grid-agent-01" in reference)
+        reference = snapshot("06-keyboard-reference")
+        check("Enter inserts selected reference into existing draft", "draft survives" in reference and "grid-agent-03" in reference)
         no_intents("reference selection neither sends nor navigates")
         send(b"\x01\x0b")
         send(F6 + END)
-        last = snapshot("04-last-project-agent")
-        check("End reaches final project agent", "Agent 16" in last and "Other project" not in last)
-        send(ESC)
+        last = snapshot("07-final-sessions")
+        check("End reaches resting sessions from every workspace", all(f"Agent {number:02}" in last for number in (9, 10, 11, 14, 16, 17)))
+        check("idle and cancelled states retain readable labels", "idle" in last and "cancelled" in last)
+        colors.update({number: screen.foreground(f"RESPONSE-{number:02}") for number in (9, 10)})
+        check("response categories use distinct terminal colors", len({str(value) for value in colors.values()}) == 5, colors=colors)
+        check("completed preview stays green when session works again", colors[2] == colors[10])
+        check("all eighteen sessions reachable with no workspace scope", set(expected) | set(visible_agents()) == set(range(1, 19)))
+        send(HOME + b"2")
+        active = snapshot("08-active-filter")
+        check("active filter retains working and attention sessions", set(visible_agents()) == set(expected), observed=visible_agents())
+        send(b"3")
+        attention = snapshot("09-attention-filter")
+        check("attention filter shows only sessions needing attention", visible_agents() == [3, 4, 5, 6, 7, 8, 13], observed=visible_agents())
+        send(b"1" + ESC)
+        send(b"filter draft survives")
+        send(F6 + b"/Other workspace\r")
+        filtered = snapshot("10-text-filter")
+        check("slash filter matches sessions across workspaces", set(visible_agents()) == {17, 18}, observed=visible_agents())
+        check("session filter preserves main composer", "filter draft survives" in filtered)
+        # Esc clears the retained query, then returns focus to the composer.
+        send(ESC + ESC)
+        command("/overview clear")
+        send(b"keyboard filter draft")
+        send(F6 + b"\x06Agent 17\r")
+        filtered = snapshot("11-control-f-filter")
+        check("Ctrl-F filters without editing main composer", visible_agents() == [17] and "keyboard filter draft" in filtered, observed=visible_agents())
+        send(ESC + ESC)
+        command("/overview clear")
         send(b"back in chat")
-        check("Escape returns typing to main composer", "back in chat" in snapshot("05-return-composer"))
+        check("Escape returns typing to main composer", "back in chat" in snapshot("12-return-composer"))
         command("/overview hide")
-        hidden = snapshot("06-hidden")
+        hidden = snapshot("13-hidden")
         check("overview hide reclaims main chat", not re.search(r"Agent \d\d", hidden) and "TRANSCRIPT-80" in hidden)
         command("/overview all")
-        send(F6 + END)
-        check("all-project scope reveals other sessions", "Other project" in snapshot("07-all-projects"))
-        send(ESC)
-        command("/overview project")
         send(F6 + HOME + ESC)
         command("/mouse")
         check("mouse capture explicitly enabled", b"\x1b[?1006h" in capture)
-        before = snapshot("08-before-grid-wheel")
-        point = screen.find("Agent 01")
+        before = snapshot("14-before-grid-wheel")
+        point = screen.find("Agent 03")
         check("first card has screen coordinates", point is not None)
         mouse(65, *point)
-        after = snapshot("09-grid-wheel")
+        after = snapshot("15-grid-wheel")
         check("wheel inside grid moves grid", before.splitlines()[:20] != after.splitlines()[:20])
         check("grid wheel leaves transcript fixed", re.findall(r"TRANSCRIPT-\d+", before) == re.findall(r"TRANSCRIPT-\d+", after))
-        grid_before = after.splitlines()[:20]
+        browsed_order = visible_agents()
+        fixture_update("attention", agent=17)
+        browsed = snapshot("16-browsed-attention-update")
+        check("new attention does not move cards during scrolled browsing", visible_agents() == browsed_order, observed=visible_agents())
+        grid_before = browsed.splitlines()[:20]
         mouse(64, 50, 28)
-        after_chat = snapshot("10-chat-wheel")
-        check("wheel below grid moves transcript", re.findall(r"TRANSCRIPT-\d+", after) != re.findall(r"TRANSCRIPT-\d+", after_chat))
+        after_chat = snapshot("17-chat-wheel")
+        check("wheel below grid moves transcript", re.findall(r"TRANSCRIPT-\d+", browsed) != re.findall(r"TRANSCRIPT-\d+", after_chat))
         check("chat wheel leaves grid fixed", grid_before == after_chat.splitlines()[:20])
-        point = next((screen.find(f"Agent {number:02}") for number in range(1, 17) if screen.find(f"Agent {number:02}")), None)
+        point = next((screen.find(f"Agent {number:02}") for number in range(1, 19) if screen.find(f"Agent {number:02}")), None)
         check("scrolled card remains clickable", point is not None)
         title_line = screen.text().splitlines()[point[1]][point[0]:]
         selected_number = re.match(r"Agent (\d\d)", title_line).group(1)
         mouse(0, *point)
         send(b"\x01")
-        clicked = snapshot("11-mouse-reference")
+        clicked = snapshot("18-mouse-reference")
         check("click inserts clicked agent reference", f"grid-agent-{selected_number}" in clicked)
         no_intents("mouse and wheel perform no provider or navigation action")
         command("/help")
-        snapshot("12-modal-open")
+        snapshot("19-modal-open")
         mouse(0, *point)
         mouse(65, *point)
         send(F6)
-        modal_after = snapshot("13-modal-shield")
+        modal_after = snapshot("20-modal-shield")
         check("modal remains present over grid interactions", "shortcut" in modal_after.lower() or "help" in modal_after.lower())
         check("modal does not insert reference", "grid-agent-" not in modal_after)
         send(ESC)
         no_intents("modal shields underlying agent actions")
         resize(10, 32)
-        tiny = snapshot("14-tiny-terminal")
+        tiny = snapshot("21-tiny-terminal")
         check("tiny terminal preserves composer", "›" in tiny)
         send(F6 + END + ESC)
         resize(40, 132)
-        large = snapshot("15-resized-back")
+        large = snapshot("22-resized-back")
         check("resize restores agents and composer", bool(re.search(r"Agent \d\d", large)) and "›" in large)
         send(F6 + HOME)
         send(b"\r")
@@ -348,7 +408,7 @@ def main():
         send(b"\r")
         submitted = [row for row in log() if row["kind"] == "submit_to"]
         check("explicit submission uses original main chat", len(submitted) == 1 and submitted[0]["context"] == {"kind": "conversation", "id": "grid-main"}, events=submitted)
-        check("submitted prompt retains reference and guidance", "grid-agent-01" in submitted[0]["text"] and "please summarize" in submitted[0]["text"])
+        check("submitted prompt retains reference and guidance", "grid-agent-03" in submitted[0]["text"] and "please summarize" in submitted[0]["text"])
         check("selection never changes session or sends habitat controls", not any(row["kind"] in ("conversation", "resume", "habitat", "submit", "other") for row in log()))
         command("/quit")
         deadline = time.monotonic() + 5
@@ -380,7 +440,7 @@ def main():
                     _, status = os.waitpid(pid, 0)
         os.close(fd)
         (root / "terminal.raw").write_bytes(capture)
-        receipt = {"schema": "xcb.agent-grid-acceptance.v1", "passed": not errors,
+        receipt = {"schema": "xcb.agent-grid-acceptance.v2", "behavior": "all-sessions-stable-priority-filter", "passed": not errors,
                    "binary": str(binary), "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                    "checks": checks, "errors": errors, "snapshots": snapshots,
                    "capture_bytes": len(capture), "exit": os.waitstatus_to_exitcode(status),

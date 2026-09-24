@@ -2,7 +2,7 @@
 
 ## Outcome
 
-Keep a compact view of project agents above the transcript while the main chat
+Keep a compact view of sessions above the transcript while the main chat
 remains the place to give instructions. Each card shows a persistent conversation
 or direct session, its name, routed model, actual activity, and latest response.
 Response labels and colors distinguish completed work, questions, approvals,
@@ -15,8 +15,16 @@ stay above the overview.
 
 ## Interaction
 
-- Show current-project sessions by default; `/overview all` expands scope.
-  `/overview project`, `/overview hide`, and `/overview show` control the view.
+- Show sessions across workspaces by default. `/overview all|active|attention`
+  filters activity; `/overview filter <text>` and `/overview clear` filter names,
+  models, status, and IDs. Hide/show controls visibility.
+- Initially order attention, active, then earlier sessions. Preserve relative
+  order within groups on updates; freeze existing card order while focused or
+  scrolled away from the top. Returning to the top and chat applies priority
+  changes. Show attention counts while positions are held.
+- In grid focus, 1/2/3 select all/active/attention. Slash or Ctrl-F edits a
+  separate 128-character filter. Enter finishes filtering; Escape clears/exits
+  the filter before leaving the grid. Filtering never edits the chat draft.
 - F6 focuses the grid. Arrows, Home/End, and PageUp/PageDown browse it. Enter
   inserts a reference into the draft and returns to chat; Escape returns without
   changing the draft or cancelling work.
@@ -30,7 +38,7 @@ stay above the overview.
 - Preserve selection by identity across live updates. Never apply a stale hit
   rectangle to a replacement row. Reflow and clamp scrolling after resize.
 
-## Implementation ownership
+## Original implementation ownership
 
 All lanes share `/Users/benguo/Documents/xcb-persistent-routing` and preserve one
 another's edits.
@@ -60,3 +68,14 @@ AI review follows the integrated diff, with fixes and affected checks repeated.
 Run the repository's native, compatibility, and site gates on the converged tree.
 Deliver through protected PR checks and the immutable release pipeline, verify
 the released bytes, install, and publish the verified release record.
+
+## Session-first revision
+
+The user clarified that the grid is a list of sessions, without a project scope.
+`/root/session_grid_ux` owns grid ordering/filter behavior;
+`/root/session_projection` owns global projection priority and managed/direct
+union; `/root/session_grid_acceptance` owns the revised real-terminal acceptance.
+Root integrates dispatch/help/docs, then reruns independent review and final
+checks. Previous project-scope acceptance is historical evidence only. Workspace
+controls inside the runtime continue to protect task access; the overview does
+not create or change them.

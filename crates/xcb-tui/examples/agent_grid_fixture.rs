@@ -2,11 +2,12 @@
 //! No provider, account, application database, or persistent user state is used.
 use serde_json::json;
 use std::{
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     io::{self, Write},
     os::unix::fs::OpenOptionsExt,
     sync::mpsc,
     thread,
+    time::Duration,
 };
 use xcb_core::{
     Id,
@@ -14,7 +15,7 @@ use xcb_core::{
     ui::{AgentRow, ConversationRow, Intent, TranscriptContext, Update, View},
 };
 
-const PROJECT: &str = "/synthetic/agent-grid/project";
+const WORKSPACE: &str = "/synthetic/agent-grid/workspace";
 
 fn id(value: &str) -> Id {
     Id::new(value).expect("synthetic identifier")
@@ -49,7 +50,7 @@ fn fixture() -> View {
     view.conversations.push(ConversationRow {
         id: id("grid-main"),
         title: "Overview acceptance chat".into(),
-        workspace: PROJECT.into(),
+        workspace: WORKSPACE.into(),
         messages: 2,
         updated_at_ms: 1000,
     });
@@ -86,15 +87,15 @@ fn fixture() -> View {
             title: format!(
                 "Agent {number:02} {}",
                 if index >= 16 {
-                    "Other project"
+                    "Other workspace"
                 } else {
-                    "Project work"
+                    "Workspace work"
                 }
             ),
             workspace: if index >= 16 {
                 "/synthetic/agent-grid/other"
             } else {
-                PROJECT
+                WORKSPACE
             }
             .into(),
             model: Some(
@@ -141,12 +142,18 @@ fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
     if args.next().as_deref() != Some("--events") {
         return Err(io::Error::other(
-            "usage: agent_grid_fixture --events NEW_PRIVATE_FILE",
+            "usage: agent_grid_fixture --events NEW_PRIVATE_FILE --control PRIVATE_FILE",
         ));
     }
     let path = args
         .next()
         .ok_or_else(|| io::Error::other("missing event file"))?;
+    if args.next().as_deref() != Some("--control") {
+        return Err(io::Error::other("missing --control PRIVATE_FILE"));
+    }
+    let control = args
+        .next()
+        .ok_or_else(|| io::Error::other("missing control file"))?;
     if args.next().is_some() {
         return Err(io::Error::other("unexpected fixture argument"));
     }
@@ -155,20 +162,67 @@ fn main() -> io::Result<()> {
         .create_new(true)
         .mode(0o600)
         .open(path)?;
-    let view = fixture();
+    let mut view = fixture();
     writeln!(
         events,
         "{}",
-        json!({"kind":"fixture", "agents":view.agents.len(), "project_agents":16, "conversation":"grid-main"})
+        json!({"kind":"fixture", "agents":view.agents.len(), "workspaces":2, "conversation":"grid-main"})
     )?;
     events.flush()?;
     let (updates, input) = mpsc::channel();
     let (output, intents) = mpsc::sync_channel(32);
     updates
-        .send(Update::View(Box::new(view)))
+        .send(Update::View(Box::new(view.clone())))
         .map_err(io::Error::other)?;
     let worker = thread::spawn(move || -> io::Result<()> {
-        for intent in intents {
+        let mut revision = 0;
+        loop {
+            // The PTY driver publishes explicit updates and waits for this
+            // acknowledgment. No timing-dependent changes race user input.
+            let command: serde_json::Value =
+                serde_json::from_slice(&fs::read(&control)?).map_err(io::Error::other)?;
+            let next = command["revision"].as_u64().unwrap_or(0);
+            if next > revision {
+                match command["action"].as_str() {
+                    Some("recency") => {
+                        view.agents.reverse();
+                        for (index, row) in view.agents.iter_mut().enumerate() {
+                            row.updated_at_ms = 100_000 + index as u64;
+                        }
+                    }
+                    Some("attention") => {
+                        let number = command["agent"].as_u64().unwrap_or(18);
+                        let context =
+                            TranscriptContext::Conversation(id(&format!("grid-agent-{number:02}")));
+                        let row = view
+                            .agents
+                            .iter_mut()
+                            .find(|row| row.context == context)
+                            .ok_or_else(|| io::Error::other("unknown synthetic agent"))?;
+                        row.state = State::NeedsAnswer;
+                        row.activity = "needs answer".into();
+                        row.category = Some("question".into());
+                        row.response = format!("ATTENTION-{number:02}: synthetic question");
+                    }
+                    Some("restore") => view = fixture(),
+                    _ => return Err(io::Error::other("unknown synthetic update")),
+                }
+                updates
+                    .send(Update::View(Box::new(view.clone())))
+                    .map_err(io::Error::other)?;
+                revision = next;
+                writeln!(
+                    events,
+                    "{}",
+                    json!({"kind":"fixture_update", "revision":revision, "action":command["action"]})
+                )?;
+                events.flush()?;
+            }
+            let intent = match intents.recv_timeout(Duration::from_millis(20)) {
+                Ok(intent) => intent,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             let mut quit = false;
             let event = match intent {
                 Intent::SubmitTo {

@@ -452,6 +452,9 @@ struct ViewStamp {
     fault: Option<std::time::SystemTime>,
     progress: Option<std::time::SystemTime>,
     progress_time: Option<u64>,
+    direct_database: Option<std::time::SystemTime>,
+    direct_wal: Option<std::time::SystemTime>,
+    direct_time: Option<u64>,
     unreadable: usize,
 }
 
@@ -1102,6 +1105,7 @@ impl ManagedStore {
         drop(db);
         let modified = |path: PathBuf| fs::metadata(path).and_then(|meta| meta.modified()).ok();
         let progress = modified(self.root.join(PROGRESS_FILE));
+        let direct_database = modified(state_root.join("xcb.sqlite"));
         Ok(ViewStamp {
             conversation: conversation.clone(),
             conversations,
@@ -1116,6 +1120,11 @@ impl ManagedStore {
             // Expired heartbeats stop presenting a stale thinking/tool phase
             // even when a supervisor stopped without rewriting the file.
             progress_time: progress.map(|_| now_ms() / 15_000),
+            direct_database,
+            direct_wal: modified(state_root.join("xcb.sqlite-wal")),
+            // Owner liveness can change without a database write. Revisit
+            // direct rows even when the managed supervisor remains idle.
+            direct_time: direct_database.map(|_| now_ms() / 15_000),
             unreadable: self.unreadable_tasks(),
         })
     }
@@ -5456,7 +5465,11 @@ fn managed_view(
     // rides along in the detail column; the settlement detail supersedes it
     // because that transition bumps `updated_at_ms` past the beat.
     let progress = read_progress(managed.root());
-    view.agents = managed.agent_overview(conversation, &progress, now)?;
+    view.agents = crate::agent_overview::combine(
+        managed.agent_overview(conversation, &progress, now)?,
+        store.agent_overview(None)?,
+        &xcb_core::ui::TranscriptContext::Conversation(conversation.clone()),
+    );
     view.tasks = tasks
         .iter()
         .map(|task| {

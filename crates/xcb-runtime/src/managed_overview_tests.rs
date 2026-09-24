@@ -248,16 +248,18 @@ async fn overview_corrupt_task_identity_never_exposes_another_conversation_respo
 }
 
 #[tokio::test]
-async fn overview_current_workspace_survives_other_project_volume() {
+async fn overview_global_attention_failures_and_running_survive_current_workspace_volume() {
     let f = fixture().await;
-    let mut peer = f.conversation.clone();
-    peer.id = new_id("c");
+    let mut closed = f.task.clone();
+    closed.state = TaskState::Completed;
+    put_task(&f, &closed);
+    let mut prioritized = Vec::new();
     for index in 0..135 {
-        let mut conversation = peer.clone();
-        if index > 0 {
-            conversation.id = new_id("c");
-            conversation.workspace = "/another/project".into();
-            conversation.updated_at_ms += index + 1;
+        let mut conversation = f.conversation.clone();
+        conversation.id = new_id("c");
+        conversation.updated_at_ms += index + 1;
+        if index < 3 {
+            conversation.workspace = "/another/workspace".into();
         }
         f.managed
             .db()
@@ -271,13 +273,34 @@ async fn overview_current_workspace_survives_other_project_volume() {
                 ],
             )
             .unwrap();
+        if index < 3 {
+            let state = match index {
+                0 => TaskState::NeedsInput,
+                1 => TaskState::Running,
+                _ => TaskState::Failed,
+            };
+            let mut task = another_task(&f, state, conversation.updated_at_ms);
+            task.conversation = conversation.id.clone();
+            task.workspace = conversation.workspace;
+            if index == 0 {
+                task.attention = Some(State::NeedsAnswer);
+            }
+            put_task(&f, &task);
+            prioritized.push(TranscriptContext::Conversation(conversation.id));
+        }
     }
     let result = rows(&f);
     assert_eq!(result.len(), MAX_AGENTS);
+    assert_eq!(result[0].context, prioritized[2]);
+    assert_eq!(result[0].state, State::Failed);
+    assert_eq!(result[1].context, prioritized[0]);
+    assert_eq!(result[1].state, State::NeedsAnswer);
+    assert_eq!(result[2].context, prioritized[1]);
+    assert_eq!(result[2].state, State::Working);
     assert!(
         result
             .iter()
-            .any(|row| row.context == TranscriptContext::Conversation(peer.id.clone()))
+            .any(|row| row.context == TranscriptContext::Conversation(f.conversation.id.clone()))
     );
 }
 
@@ -305,4 +328,66 @@ async fn overview_running_work_is_visible_over_a_newer_queued_sibling() {
     let row = rows(&f).remove(0);
     assert_eq!(row.task, Some(running.id));
     assert_eq!(row.activity, "running");
+}
+
+#[tokio::test]
+async fn overview_running_work_is_visible_over_a_previous_failure() {
+    let f = fixture().await;
+    let mut failed = f.task.clone();
+    failed.state = TaskState::Failed;
+    put_task(&f, &failed);
+    let running = another_task(&f, TaskState::Running, failed.updated_at_ms + 1);
+    put_task(&f, &running);
+    let row = rows(&f).remove(0);
+    assert_eq!(row.task, Some(running.id));
+    assert_eq!(row.state, State::Working);
+}
+
+#[tokio::test]
+async fn managed_view_combines_direct_and_managed_sessions_without_worker_duplicates() {
+    use xcb_core::models::{Mode, ModelChoice};
+
+    let f = fixture().await;
+    let root = f.managed.root().parent().unwrap();
+    let before = f.managed.view_stamp(root, &f.conversation.id).unwrap();
+    let store = Store::open(root).unwrap();
+    let account = store
+        .add_account(Provider::Codex, "Synthetic", 1, None)
+        .unwrap();
+    let model = ModelChoice {
+        provider: Provider::Codex,
+        id: Id::new("fixture-model").unwrap(),
+        label: "Fixture".into(),
+        mode: Mode::Fixed,
+        resolved: None,
+        effort: None,
+        observed_at_ms: 1,
+    };
+    let workspace = Path::new(&f.conversation.workspace);
+    let session = store
+        .create_session(&account.id, model.clone(), workspace, 2)
+        .unwrap();
+    let worker = store
+        .create_managed_session(&account.id, model, workspace, 3, &f.task.id)
+        .unwrap();
+    let after = f.managed.view_stamp(root, &f.conversation.id).unwrap();
+    assert_ne!(before, after);
+    assert!(after.direct_database.is_some());
+    let view = managed_view(&store, &f.managed, &f.conversation.id, workspace).unwrap();
+    assert_eq!(view.agents.len(), 2);
+    assert!(
+        view.agents.iter().any(|row| {
+            row.context == TranscriptContext::Conversation(f.conversation.id.clone())
+        })
+    );
+    assert!(
+        view.agents
+            .iter()
+            .any(|row| row.context == TranscriptContext::Session(session.id.clone()))
+    );
+    assert!(
+        view.agents
+            .iter()
+            .all(|row| row.context != TranscriptContext::Session(worker.id.clone()))
+    );
 }

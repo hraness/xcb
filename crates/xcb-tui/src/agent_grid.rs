@@ -17,13 +17,25 @@ use xcb_core::{
 
 const CARD_HEIGHT: u16 = 6;
 const MAX_AGENTS: usize = 128;
+const MAX_FILTER_CHARS: usize = 128;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
-enum Scope {
+enum Filter {
     #[default]
-    Project,
     All,
+    Active,
+    Attention,
+}
+
+impl Filter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Active => "active",
+            Self::Attention => "attention",
+        }
+    }
 }
 
 struct PaintedCard {
@@ -33,7 +45,9 @@ struct PaintedCard {
 
 pub(crate) struct AgentGrid {
     visible: bool,
-    scope: Scope,
+    filter: Filter,
+    query: String,
+    filter_editing: bool,
     focused: bool,
     selected: Option<TranscriptContext>,
     offset: usize,
@@ -41,14 +55,18 @@ pub(crate) struct AgentGrid {
     page_rows: usize,
     area: Rect,
     cards: Vec<PaintedCard>,
+    // Keep every session's position, including those hidden by a filter.
     order: Vec<TranscriptContext>,
+    displayed_order: Vec<TranscriptContext>,
 }
 
 impl Default for AgentGrid {
     fn default() -> Self {
         Self {
             visible: true,
-            scope: Scope::Project,
+            filter: Filter::All,
+            query: String::new(),
+            filter_editing: false,
             focused: false,
             selected: None,
             offset: 0,
@@ -57,47 +75,93 @@ impl Default for AgentGrid {
             area: Rect::default(),
             cards: Vec::new(),
             order: Vec::new(),
+            displayed_order: Vec::new(),
         }
     }
 }
 
-fn workspace(app: &App) -> Option<&str> {
-    app.view
-        .session
-        .as_ref()
-        .map(|session| session.workspace.as_str())
-        .or_else(|| {
-            let current = app.view.conversation.as_ref()?;
-            app.view
-                .conversations
-                .iter()
-                .find(|row| &row.id == current)
-                .map(|row| row.workspace.as_str())
-        })
-        .or_else(|| {
-            let context = app
-                .view
-                .conversation
-                .as_ref()
-                .map(|id| TranscriptContext::Conversation(id.clone()))?;
-            app.view
-                .agents
-                .iter()
-                .find(|row| row.context == context)
-                .map(|row| row.workspace.as_str())
-        })
-        .filter(|path| !path.is_empty())
+fn needs_attention(row: &AgentRow) -> bool {
+    matches!(
+        row.state,
+        State::NeedsAnswer
+            | State::NeedsAction
+            | State::NeedsApproval
+            | State::Limited
+            | State::Failed
+            | State::Uncertain
+    )
+}
+
+fn priority(row: &AgentRow) -> u8 {
+    if needs_attention(row) {
+        0
+    } else if row.state == State::Working {
+        1
+    } else {
+        2
+    }
+}
+
+fn all_rows(app: &App) -> Vec<&AgentRow> {
+    let grid = &app.agent_grid;
+    let held = !grid.order.is_empty() && (grid.focused || grid.offset > 0 || grid.filter_editing);
+    let mut items: Vec<_> = app.view.agents.iter().take(MAX_AGENTS).collect();
+    // Provider timestamps and polling order must not make cards jump around.
+    // While browsing, existing positions stay put and new sessions append.
+    items.sort_by_key(|row| {
+        let position = grid
+            .order
+            .iter()
+            .position(|context| context == &row.context);
+        (
+            if held { 0 } else { priority(row) },
+            position.unwrap_or(usize::MAX),
+        )
+    });
+    items
+}
+
+fn matches_filter(row: &AgentRow, grid: &AgentGrid) -> bool {
+    let mode_matches = match grid.filter {
+        Filter::All => true,
+        Filter::Active => needs_attention(row) || row.state == State::Working,
+        Filter::Attention => needs_attention(row),
+    };
+    if !mode_matches {
+        return false;
+    }
+    let query = grid.query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    let identity = match &row.context {
+        TranscriptContext::Conversation(id) | TranscriptContext::Session(id) => id.as_str(),
+    };
+    [
+        row.title.as_str(),
+        row.model.as_deref().unwrap_or_default(),
+        row.state.label(),
+        row.activity.as_str(),
+        row.category.as_deref().unwrap_or_default(),
+        identity,
+        row.task.as_ref().map(|id| id.as_str()).unwrap_or_default(),
+    ]
+    .iter()
+    .any(|field| field.to_lowercase().contains(&query))
 }
 
 fn rows(app: &App) -> Vec<&AgentRow> {
-    let project = workspace(app);
-    app.view
-        .agents
-        .iter()
-        .filter(|row| {
-            app.agent_grid.scope == Scope::All || project.is_some_and(|path| path == row.workspace)
-        })
-        .take(MAX_AGENTS)
+    all_rows(app)
+        .into_iter()
+        .filter(|row| matches_filter(row, &app.agent_grid))
+        .collect()
+}
+
+fn filter_text(text: &str) -> String {
+    // Remove terminal controls before counting Unicode characters.
+    clean_line(text, MAX_FILTER_CHARS * 4)
+        .chars()
+        .take(MAX_FILTER_CHARS)
         .collect()
 }
 
@@ -207,7 +271,14 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
     if area.height == 0 || area.width == 0 || !app.agent_grid.visible {
         return;
     }
-    let items: Vec<_> = rows(app).into_iter().cloned().collect();
+    let all: Vec<_> = all_rows(app).into_iter().cloned().collect();
+    let total = all.len();
+    let attention = all.iter().filter(|row| needs_attention(row)).count();
+    let items: Vec<_> = all
+        .iter()
+        .filter(|row| matches_filter(row, &app.agent_grid))
+        .cloned()
+        .collect();
     let count = items.len();
     let compact = area.height < CARD_HEIGHT + 1;
     let cols = if compact { 1 } else { columns(area.width) };
@@ -215,13 +286,15 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
     let total_rows = count.div_ceil(cols);
     let grid = &mut app.agent_grid;
     let order: Vec<_> = items.iter().map(|row| row.context.clone()).collect();
-    if (order != grid.order || cols != grid.columns)
-        && let Some(anchor) = grid.order.get(grid.offset * grid.columns)
+    if ((order != grid.displayed_order && (grid.offset > 0 || grid.focused))
+        || cols != grid.columns)
+        && let Some(anchor) = grid.displayed_order.get(grid.offset * grid.columns)
         && let Some(index) = order.iter().position(|context| context == anchor)
     {
         grid.offset = index / cols;
     }
-    grid.order = order;
+    grid.order = all.iter().map(|row| row.context.clone()).collect();
+    grid.displayed_order = order;
     grid.area = area;
     grid.columns = cols;
     grid.page_rows = page_rows;
@@ -244,11 +317,6 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
         }
     }
     frame.render_widget(Clear, area);
-    let scope = if grid.scope == Scope::All {
-        "all"
-    } else {
-        "project"
-    };
     let range = if total_rows > page_rows {
         format!(
             " · rows {}–{}/{} ↕",
@@ -259,16 +327,33 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
     } else {
         String::new()
     };
-    let control = if grid.focused {
-        "Enter reference · Esc chat"
+    let control = if grid.filter_editing {
+        "Enter done · Esc clear"
+    } else if grid.focused {
+        "1 all · 2 active · 3 attention · / filter · Enter reference · Esc chat"
     } else {
         "F6 browse"
     };
-    let heading = if count == 0 {
-        format!("Agents · {scope} · no agents · /overview all")
+    let summary = if area.width < 60 && (grid.filter_editing || !grid.query.is_empty()) {
+        format!("Sessions {} {count}/{total}", grid.filter.label())
     } else {
-        format!("Agents · {scope} · {count}{range} · {control}")
+        format!("Sessions · {} · {count}/{total}", grid.filter.label())
     };
+    let filter = if grid.filter_editing || !grid.query.is_empty() {
+        let prefix = if area.width < 60 {
+            " /"
+        } else {
+            " · filter: "
+        };
+        let cursor = if grid.filter_editing { "▏" } else { "" };
+        let query_width = area
+            .width
+            .saturating_sub(summary.cell_width() + prefix.cell_width() + cursor.cell_width());
+        format!("{prefix}{}{cursor}", ellipsis(&grid.query, query_width))
+    } else {
+        String::new()
+    };
+    let heading = format!("{summary}{filter} · {attention} need attention{range} · {control}");
     let header = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(
         Paragraph::new(heading).style(Style::default().add_modifier(if grid.focused {
@@ -278,7 +363,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
         })),
         header,
     );
-    if compact {
+    if compact && !grid.filter_editing {
         let row = if grid.focused {
             items
                 .iter()
@@ -287,10 +372,30 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
             items.get(grid.offset)
         };
         if let Some(row) = row {
-            let prefix = if area.width >= 60 {
-                format!("Agents · {scope} · {}/{count} · ", grid.offset + 1)
+            let prefix = if !grid.query.is_empty() {
+                format!(
+                    "Sessions · {} · {count}/{total} · /{} · ",
+                    grid.filter.label(),
+                    ellipsis(&grid.query, area.width / 4)
+                )
+            } else if area.width >= 60 {
+                format!(
+                    "Sessions · {} · {}/{count} · {attention}! · ",
+                    grid.filter.label(),
+                    grid.offset + 1
+                )
             } else {
-                "Agents · ".into()
+                let mode = if grid.filter == Filter::All {
+                    String::new()
+                } else {
+                    format!("{} · ", grid.filter.label())
+                };
+                let urgency = if attention == 0 {
+                    String::new()
+                } else {
+                    format!("{attention}! · ")
+                };
+                format!("Sessions · {mode}{urgency}")
             };
             let status = ellipsis(
                 &status(row, ticks, app.view.reduced_motion),
@@ -314,6 +419,9 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
                 row: row.clone(),
             });
         }
+        return;
+    }
+    if compact {
         return;
     }
     let cell_width = (area.width.saturating_sub(cols.saturating_sub(1) as u16)) / cols as u16;
@@ -432,29 +540,105 @@ impl App {
             })
     }
 
+    fn reset_overview_viewport(&mut self) {
+        self.agent_grid.offset = 0;
+        self.agent_grid.selected = None;
+        self.agent_grid.displayed_order.clear();
+        clear_geometry(self);
+    }
+
+    fn set_overview_query(&mut self, query: &str) {
+        self.agent_grid.query = filter_text(query);
+        self.reset_overview_viewport();
+    }
+
     pub(crate) fn overview_command(&mut self, argument: &str) {
-        match argument.trim() {
+        let argument = argument.trim();
+        match argument {
             "" | "show" => self.agent_grid.visible = true,
             "hide" => {
                 self.agent_grid.visible = false;
                 self.agent_grid.focused = false;
+                self.agent_grid.filter_editing = false;
                 clear_geometry(self);
             }
-            "project" | "all" => {
-                self.agent_grid.scope = if argument.trim() == "all" {
-                    Scope::All
-                } else {
-                    Scope::Project
+            "all" | "active" | "attention" => {
+                self.agent_grid.filter = match argument {
+                    "active" => Filter::Active,
+                    "attention" => Filter::Attention,
+                    _ => Filter::All,
                 };
                 self.agent_grid.visible = true;
-                self.agent_grid.offset = 0;
-                self.agent_grid.selected = None;
-                self.agent_grid.order.clear();
-                clear_geometry(self);
+                self.reset_overview_viewport();
             }
-            _ => self.notice = "/overview [project|all|hide|show]".into(),
+            "clear" => self.set_overview_query(""),
+            "filter" => {
+                self.agent_grid.visible = true;
+                self.agent_grid.focused = true;
+                self.agent_grid.filter_editing = true;
+            }
+            _ if argument.starts_with("filter ") => {
+                self.set_overview_query(&argument[7..]);
+                self.agent_grid.visible = true;
+            }
+            _ => {
+                self.notice =
+                    "/overview [all|active|attention|hide|show|filter <text>|clear]".into()
+            }
         }
         self.dirty = true;
+    }
+
+    fn edit_overview_filter(&mut self, event: &Event) -> bool {
+        if !self.agent_grid.filter_editing {
+            return false;
+        }
+        if let Event::Paste(text) = event {
+            let query = format!("{}{}", self.agent_grid.query, text);
+            self.set_overview_query(&query);
+            return true;
+        }
+        let Event::Key(key) = event else {
+            return false;
+        };
+        if key.kind == KeyEventKind::Release {
+            return true;
+        }
+        match key.code {
+            KeyCode::Enter => self.agent_grid.filter_editing = false,
+            KeyCode::F(6) if key.modifiers.is_empty() => {
+                self.agent_grid.filter_editing = false;
+                self.agent_grid.focused = false;
+            }
+            KeyCode::Esc => {
+                if self.agent_grid.query.is_empty() {
+                    self.agent_grid.filter_editing = false;
+                } else {
+                    self.set_overview_query("");
+                }
+            }
+            KeyCode::Backspace => {
+                let mut query = self.agent_grid.query.clone();
+                if let Some((index, _)) = query.grapheme_indices(true).next_back() {
+                    query.truncate(index);
+                }
+                self.set_overview_query(&query);
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.set_overview_query("");
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                let query = format!("{}{character}", self.agent_grid.query);
+                self.set_overview_query(&query);
+            }
+            _ => (),
+        }
+        // Filter editing owns text and shortcuts; none may reach the composer.
+        true
     }
 
     fn insert_agent_reference(&mut self, row: AgentRow) {
@@ -464,14 +648,15 @@ impl App {
             .any(|current| current.context == row.context && current.task == row.task)
         {
             self.notice =
-                "That agent changed. The overview will refresh; your draft is unchanged.".into();
+                "That session changed. The overview will refresh; your draft is unchanged.".into();
             return;
         }
         match self.composer.handle(Event::Paste(reference(&row))) {
             ComposerAction::Rejected(reason) => self.notice = reason.into(),
             ComposerAction::None => {
                 self.agent_grid.focused = false;
-                self.notice = "Agent reference added to your draft. Enter sends when ready.".into();
+                self.notice =
+                    "Session reference added to your draft. Enter sends when ready.".into();
             }
             _ => unreachable!("a paste cannot submit input"),
         }
@@ -484,6 +669,13 @@ impl App {
             return false;
         }
         if self.modal.is_some() {
+            return false;
+        }
+        if self.edit_overview_filter(event) {
+            return true;
+        }
+        if matches!(event, Event::Paste(_)) {
+            self.agent_grid.focused = false;
             return false;
         }
         if let Event::Mouse(mouse) = event {
@@ -512,8 +704,12 @@ impl App {
                     // Wheel browsing leaves editing in the composer. A prior
                     // keyboard selection must not snap the viewport back.
                     grid.focused = false;
+                    grid.filter_editing = false;
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
+                    if self.agent_grid.filter_editing {
+                        return true;
+                    }
                     if let Some(row) = self
                         .agent_grid
                         .cards
@@ -536,11 +732,6 @@ impl App {
         }
         if key.code == KeyCode::F(6) && key.modifiers.is_empty() {
             self.agent_grid.visible = true;
-            if rows(self).is_empty() {
-                self.agent_grid.focused = false;
-                self.notice = "No agents in this view. /overview all shows other projects.".into();
-                return true;
-            }
             self.agent_grid.focused = !self.agent_grid.focused;
             if self.agent_grid.focused {
                 let _ = self.slash_menu();
@@ -564,8 +755,31 @@ impl App {
             return false;
         }
         if key.code == KeyCode::Esc {
-            self.agent_grid.focused = false;
+            if self.agent_grid.query.is_empty() {
+                self.agent_grid.focused = false;
+            } else {
+                self.set_overview_query("");
+            }
             return true;
+        }
+        if (key.code == KeyCode::Char('/') && key.modifiers.is_empty())
+            || (key.code == KeyCode::Char('f') && key.modifiers == KeyModifiers::CONTROL)
+        {
+            self.agent_grid.filter_editing = true;
+            return true;
+        }
+        if key.modifiers.is_empty() {
+            let mode = match key.code {
+                KeyCode::Char('1') => Some(Filter::All),
+                KeyCode::Char('2') => Some(Filter::Active),
+                KeyCode::Char('3') => Some(Filter::Attention),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                self.agent_grid.filter = mode;
+                self.reset_overview_viewport();
+                return true;
+            }
         }
         if key
             .modifiers
@@ -716,7 +930,7 @@ mod tests {
         assert_eq!(many.agent_grid.cards.len(), 9);
         let narrow = draw(&mut many, 32, 18);
         assert_eq!(many.agent_grid.area.height, 1);
-        assert!(text(&narrow).contains("Agents"));
+        assert!(text(&narrow).contains("Sessions"));
         assert!(many.viewport_height.get() >= 3);
     }
 
@@ -738,25 +952,251 @@ mod tests {
     }
 
     #[test]
-    fn default_scope_never_widens_when_project_identity_is_missing() {
+    fn all_sessions_are_visible_without_workspace_or_project_identity() {
         let mut app = fixture(3);
         app.view.agents[1].workspace = "/other".into();
-        assert_eq!(rows(&app).len(), 2);
+        app.view.agents[2].context = TranscriptContext::Session(id("direct"));
         app.view.conversations.clear();
-        assert_eq!(
-            rows(&app).len(),
-            2,
-            "focused row identifies an older project"
-        );
-        app.view.agents.remove(0);
-        assert!(rows(&app).is_empty());
-        let screen = draw(&mut app, 80, 24);
-        assert!(text(&screen).contains("no agents"));
-        app.overview_command("all");
-        assert_eq!(rows(&app).len(), 2);
+        app.view.conversation = None;
+        assert_eq!(rows(&app).len(), 3);
+        app.overview_command("project");
+        assert!(app.notice.contains("all|active|attention"));
+        assert_eq!(rows(&app).len(), 3);
         app.overview_command("hide");
         assert_eq!(grid_height(&app, Rect::new(0, 0, 80, 20), 24), 0);
         assert!(!app.overview_animating());
+    }
+
+    fn order(app: &App) -> Vec<String> {
+        rows(app)
+            .iter()
+            .map(|row| match &row.context {
+                TranscriptContext::Conversation(id) | TranscriptContext::Session(id) => {
+                    id.to_string()
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn attention_precedes_working_then_rest_and_recency_never_reorders_peers() {
+        let mut app = fixture(6);
+        app.view.agents[0].state = State::Idle;
+        app.view.agents[2].state = State::NeedsAnswer;
+        app.view.agents[3].state = State::Limited;
+        app.view.agents[4].state = State::Failed;
+        app.view.agents[5].state = State::Cancelled;
+        draw(&mut app, 120, 40);
+        let initial = order(&app);
+        assert_eq!(
+            initial,
+            [
+                "conversation_2",
+                "conversation_3",
+                "conversation_4",
+                "conversation_1",
+                "conversation_0",
+                "conversation_5"
+            ]
+        );
+        app.view.agents.reverse();
+        for (index, row) in app.view.agents.iter_mut().enumerate() {
+            row.updated_at_ms += index as u64 + 100;
+        }
+        draw(&mut app, 120, 40);
+        assert_eq!(order(&app), initial);
+        app.view
+            .agents
+            .iter_mut()
+            .find(|row| row.title == "Agent 5")
+            .unwrap()
+            .state = State::NeedsApproval;
+        draw(&mut app, 120, 40);
+        assert_eq!(
+            order(&app),
+            [
+                "conversation_2",
+                "conversation_3",
+                "conversation_4",
+                "conversation_5",
+                "conversation_1",
+                "conversation_0"
+            ]
+        );
+        assert_eq!(app.agent_grid.offset, 0);
+    }
+
+    #[test]
+    fn browsing_freezes_priority_but_updates_status_and_attention_count() {
+        let mut app = fixture(6);
+        draw(&mut app, 120, 40);
+        app.overview_event(&key(KeyCode::F(6)));
+        app.view.agents[4].state = State::NeedsAnswer;
+        app.view.agents[4].activity = "needs answer".into();
+        let mut new_row = app.view.agents[4].clone();
+        new_row.context = TranscriptContext::Conversation(id("new_attention"));
+        app.view.agents.insert(0, new_row);
+        let screen = draw(&mut app, 120, 40);
+        assert_eq!(
+            order(&app),
+            [
+                "conversation_0",
+                "conversation_1",
+                "conversation_2",
+                "conversation_3",
+                "conversation_4",
+                "conversation_5",
+                "new_attention"
+            ]
+        );
+        assert!(text(&screen).contains("2 need attention"));
+        assert!(text(&screen).contains("needs answer"));
+        app.overview_event(&key(KeyCode::Esc));
+        draw(&mut app, 120, 40);
+        assert_eq!(&order(&app)[..2], ["conversation_4", "new_attention"]);
+    }
+
+    #[test]
+    fn mouse_browsing_holds_order_until_the_view_returns_to_top() {
+        let mut app = fixture(12);
+        app.mouse_capture = true;
+        draw(&mut app, 80, 24);
+        app.overview_event(&mouse(MouseEventKind::ScrollDown, 2, 2));
+        draw(&mut app, 80, 24);
+        let anchor = app.agent_grid.cards[0].row.context.clone();
+        app.view.agents[11].state = State::Failed;
+        app.view.agents.reverse();
+        draw(&mut app, 80, 24);
+        assert_eq!(app.agent_grid.cards[0].row.context, anchor);
+        assert_eq!(order(&app)[0], "conversation_0");
+        app.overview_event(&mouse(MouseEventKind::ScrollUp, 2, 2));
+        draw(&mut app, 80, 24);
+        assert_eq!(app.agent_grid.offset, 0);
+        assert_eq!(order(&app)[0], "conversation_11");
+    }
+
+    #[test]
+    fn state_filters_include_actionable_failures_and_can_be_composed_with_text() {
+        let mut app = fixture(5);
+        app.view.agents[0].state = State::Idle;
+        app.view.agents[1].state = State::Limited;
+        app.view.agents[2].state = State::Failed;
+        app.view.agents[3].state = State::NeedsApproval;
+        app.overview_command("active");
+        assert_eq!(rows(&app).len(), 4);
+        app.overview_command("attention");
+        assert_eq!(rows(&app).len(), 3);
+        app.overview_command("filter Agent 2");
+        assert_eq!(order(&app), ["conversation_2"]);
+        app.overview_command("all");
+        assert_eq!(order(&app), ["conversation_2"]);
+        app.overview_command("clear");
+        assert_eq!(rows(&app).len(), 5);
+    }
+
+    #[test]
+    fn local_filter_matches_unicode_name_model_status_and_identity_without_draft_changes() {
+        let mut app = fixture(3);
+        app.view.agents[0].title = "Équipe 界".into();
+        app.view.agents[1].model = Some("UniqueModel".into());
+        app.view.agents[2].state = State::NeedsAnswer;
+        for (query, wanted) in [
+            ("éQUIPE", "conversation_0"),
+            ("uniquemodel", "conversation_1"),
+            ("needs answer", "conversation_2"),
+            ("task_1", "conversation_1"),
+            ("conversation_0", "conversation_0"),
+        ] {
+            app.overview_command(&format!("filter {query}"));
+            assert_eq!(order(&app), [wanted]);
+        }
+        app.overview_command("clear");
+        app.composer.set_text("Retain my draft");
+        let (tx, rx) = sync_channel(4);
+        draw(&mut app, 120, 40);
+        app.handle(key(KeyCode::F(6)), &tx);
+        app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            &tx,
+        );
+        app.handle(Event::Paste("Équipe".into()), &tx);
+        draw(&mut app, 120, 40);
+        app.handle(key(KeyCode::Enter), &tx);
+        assert!(!app.agent_grid.filter_editing);
+        assert!(app.agent_grid.focused);
+        assert_eq!(app.composer.text(), "Retain my draft");
+        assert_eq!(order(&app), ["conversation_0"]);
+        assert!(rx.try_recv().is_err());
+        app.handle(key(KeyCode::Esc), &tx);
+        assert!(app.agent_grid.focused);
+        assert!(app.agent_grid.query.is_empty());
+        app.handle(key(KeyCode::Esc), &tx);
+        assert!(!app.agent_grid.focused);
+    }
+
+    #[test]
+    fn filter_input_is_bounded_and_grapheme_backspace_never_leaks_to_composer() {
+        let mut app = fixture(1);
+        app.composer.set_text("protected");
+        app.overview_command("filter");
+        app.overview_event(&Event::Paste("界".repeat(200)));
+        assert_eq!(app.agent_grid.query.chars().count(), MAX_FILTER_CHARS);
+        app.overview_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+        )));
+        app.overview_event(&Event::Paste("e\u{301}".into()));
+        app.overview_event(&key(KeyCode::Backspace));
+        assert!(app.agent_grid.query.is_empty());
+        app.overview_event(&Event::Paste("zero matches\u{1b}\u{202e}".into()));
+        assert!(!app.agent_grid.query.contains('\u{1b}'));
+        assert!(!app.agent_grid.query.contains('\u{202e}'));
+        draw(&mut app, 80, 24);
+        assert!(rows(&app).is_empty());
+        app.overview_event(&key(KeyCode::Esc));
+        assert!(app.agent_grid.filter_editing);
+        app.overview_event(&key(KeyCode::Esc));
+        assert!(!app.agent_grid.filter_editing);
+        assert!(app.agent_grid.focused);
+        assert_eq!(app.composer.text(), "protected");
+    }
+
+    #[test]
+    fn compact_filter_shows_query_with_no_matches_and_enter_does_not_insert() {
+        let mut app = fixture(2);
+        app.composer.set_text("Keep this draft");
+        app.overview_command("filter");
+        app.overview_event(&Event::Paste("zzz".into()));
+        let screen = draw(&mut app, 32, 18);
+        assert_eq!(app.agent_grid.area.height, 1);
+        assert!(text(&screen).contains("/zzz"));
+        assert!(text(&screen).contains("0/2"));
+        assert!(app.agent_grid.cards.is_empty());
+        app.overview_event(&key(KeyCode::Enter));
+        assert_eq!(app.composer.text(), "Keep this draft");
+    }
+
+    #[test]
+    fn focused_presets_do_not_type_but_ordinary_typing_and_paste_return_to_chat() {
+        let mut app = fixture(2);
+        let (tx, rx) = sync_channel(4);
+        app.view.agents[1].state = State::NeedsAction;
+        draw(&mut app, 80, 24);
+        app.handle(key(KeyCode::F(6)), &tx);
+        app.handle(key(KeyCode::Char('3')), &tx);
+        assert_eq!(rows(&app).len(), 1);
+        app.handle(key(KeyCode::Char('2')), &tx);
+        assert_eq!(rows(&app).len(), 2);
+        app.handle(key(KeyCode::Char('1')), &tx);
+        assert_eq!(rows(&app).len(), 2);
+        app.handle(key(KeyCode::Char('h')), &tx);
+        assert!(!app.overview_focused());
+        assert_eq!(app.composer.text(), "h");
+        app.handle(key(KeyCode::F(6)), &tx);
+        app.handle(Event::Paste("ello".into()), &tx);
+        assert_eq!(app.composer.text(), "hello");
+        assert!(!app.overview_focused());
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
@@ -819,7 +1259,7 @@ mod tests {
             card.y + 1,
         ));
         assert_eq!(app.composer.text(), "retained");
-        assert!(app.notice.contains("agent changed"));
+        assert!(app.notice.contains("session changed"));
     }
 
     #[test]

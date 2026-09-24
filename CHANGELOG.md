@@ -12,8 +12,10 @@ assets, not this file, are the evidence that a version shipped; see
 - F6 browses the grid from the keyboard. With `/mouse` enabled, the wheel scrolls
   the panel under the pointer and clicking a card adds an agent reference to the
   draft. References preserve the current chat and task target and send nothing.
-- `/overview project|all|hide|show` controls scope and visibility. Questions and
-  approvals keep their existing controls above the overview.
+- Sessions needing attention come first, followed by active work, with stable
+  ordering while responses arrive and while you browse. Keyboard filters show
+  all, active, or attention-needed sessions and match names, models, or status.
+  Questions and approvals keep their existing controls above the overview.
 
 ## 0.7.0
 

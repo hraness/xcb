@@ -236,25 +236,30 @@ fn overview_direct_legacy_store_without_outcome_table_keeps_response() {
 }
 
 #[test]
-fn overview_direct_current_workspace_survives_other_project_volume() {
+fn overview_direct_global_attention_failures_and_limits_survive_current_workspace_volume() {
     let f = fixture();
-    let mut peer = f.session.clone();
-    peer.id = new_id("s");
+    let mut attention = Vec::new();
+    let states = [State::NeedsAnswer, State::Failed, State::Limited];
     for index in 0..135 {
-        let mut session = peer.clone();
-        if index > 0 {
-            session.id = new_id("s");
-            session.workspace = "/another/project".into();
-            session.last_active_at_ms += index + 1;
-            session.state = State::NeedsAnswer;
+        let mut session = f.session.clone();
+        session.id = new_id("s");
+        session.last_active_at_ms += index + 1;
+        if let Some(state) = states.get(index as usize) {
+            session.workspace = "/another/workspace".into();
+            session.state = *state;
+            attention.push(session.id.clone());
         }
         f.store.db().unwrap().execute("INSERT INTO sessions(id,account,last_active,payload,revision) VALUES(?1,?2,?3,?4,0)", params![session.id.as_str(), session.account.as_str(), session.last_active_at_ms as i64, serde_json::to_string(&session).unwrap()]).unwrap();
     }
     let result = f.store.agent_overview(Some(&f.session.id)).unwrap();
     assert_eq!(result.len(), MAX_AGENTS);
+    for (row, (id, state)) in result.iter().zip(attention.iter().zip(states).rev()) {
+        assert_eq!(row.context, TranscriptContext::Session(id.clone()));
+        assert_eq!(row.state, state);
+    }
     assert!(
         result
             .iter()
-            .any(|row| row.context == TranscriptContext::Session(peer.id.clone()))
+            .any(|row| row.context == TranscriptContext::Session(f.session.id.clone()))
     );
 }
