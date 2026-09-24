@@ -472,6 +472,27 @@ impl ManagedStore {
             receipt: parent.program_receipt.clone(),
         }))
     }
+    pub(super) fn program_dependency_sessions(&self) -> Result<BTreeSet<Id>> {
+        let db = self.db()?;
+        let mut query = db.prepare("SELECT DISTINCT c.child FROM program_calls c JOIN tasks parent ON parent.id=c.parent WHERE parent.state NOT IN ('completed','failed','cancelled') LIMIT 1025")?;
+        let children = query
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if children.len() > 1024 {
+            return Err(xcb_core::Error::Limit("program session dependencies").into());
+        }
+        let mut sessions = BTreeSet::new();
+        for id in children {
+            let child = task_from(&db, &Id::new(id)?)?
+                .ok_or(Error::Conflict("program dependency child missing"))?;
+            if let Some(session) = child.session {
+                sessions.insert(session);
+            }
+            sessions.extend(child.worker_sessions);
+        }
+        Ok(sessions)
+    }
+
     pub(super) fn program_slice_input(
         &self,
         task: &ManagedTask,
@@ -612,6 +633,16 @@ impl ManagedStore {
         }
         let slice = match result {
             Ok(slice) => slice,
+            Err(Error::Unavailable(
+                "program cancelled before execution" | "program cancelled; output discarded",
+            )) => {
+                return self
+                    .finish_program(
+                        id,
+                        &Err(Error::Unavailable("program cancelled; output discarded")),
+                    )
+                    .await;
+            }
             Err(_) => {
                 return self
                     .finish_program(id, &Err(Error::Unavailable("managed ALGAL slice failed")))
@@ -623,7 +654,7 @@ impl ManagedStore {
         {
             return Err(Error::Conflict("invalid program slice evidence"));
         }
-        let previous = read_execution(&self.db()?, id)?;
+        let previous = read_execution(&*self.db()?, id)?;
         if previous.as_ref().is_some_and(|e| e.waiting.is_some()) {
             return Err(Error::Conflict("program already waits for a child"));
         }
@@ -860,12 +891,12 @@ impl ManagedStore {
         Ok(())
     }
     async fn tick_program(&self, store: &Store, parent: &ManagedTask, advance: bool) -> Result<()> {
-        let execution = read_execution(&self.db()?, &parent.id)?
+        let execution = read_execution(&*self.db()?, &parent.id)?
             .ok_or(Error::Conflict("program checkpoint missing"))?;
         let index = execution
             .waiting
             .ok_or(Error::Conflict("program waiting call missing"))?;
-        let mut call = read_call(&self.db()?, &parent.id, index)?;
+        let mut call = read_call(&*self.db()?, &parent.id, index)?;
         let child = self
             .task(&call.child)?
             .ok_or(Error::Conflict("program child missing"))?;
@@ -916,7 +947,7 @@ impl ManagedStore {
             return Ok(());
         }
         require_grant(
-            &self.db()?,
+            &*self.db()?,
             &parent.conversation,
             parent.program_generation.as_ref(),
             now_ms(),

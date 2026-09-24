@@ -375,7 +375,7 @@ def main():
         # deterministic runtime tests cover completed-result replay separately.
         pure_file = root / "pure.algal.json"
         pure_file.write_text(json.dumps({
-            "contract": "algal.organism.v1", "key": "organism:acceptance-pure",
+            "contract": "algal.organism.v1", "key": "organism:acceptance-pure", "name": "Pure acceptance",
             "cells": [{"id": "summary", "kind": "const", "outputs": {"out": {"type": "text", "value": "PURE_PROGRAM_COMPLETE"}}}],
             "edges": [], "interface": {"inputs": {}, "outputs": {"summary": {"cell": "summary", "port": "out"}}}
         }))

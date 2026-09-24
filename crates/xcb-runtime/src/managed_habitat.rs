@@ -664,7 +664,7 @@ impl ManagedStore {
     ) -> Result<HabitatSchedule> {
         program.verify()?;
         if program.managed_calls > 0 {
-            program_state::require_grant(&self.db()?, conversation, None, now_ms(), true)?;
+            program_state::require_grant(&*self.db()?, conversation, None, now_ms(), true)?;
         }
         self.create_schedule_inner(
             conversation,

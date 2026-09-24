@@ -1205,7 +1205,8 @@ impl ManagedStore {
             .iter()
             .any(|task| {
                 task.session.as_ref() == Some(session) || task.worker_sessions.contains(session)
-            }))
+            })
+            || self.program_dependency_sessions()?.contains(session))
     }
     /// Session ids referenced by any nonterminal task — current session and
     /// worker history — computed with a single managed task scan so a prune
@@ -1218,6 +1219,7 @@ impl ManagedStore {
             }
             ids.extend(task.worker_sessions.iter().cloned());
         }
+        ids.extend(self.program_dependency_sessions()?);
         Ok(ids)
     }
 
@@ -3506,7 +3508,7 @@ fn task_status(task: &ManagedTask) -> String {
     let mut line = format!(
         "- **{}** · {} · {} · {}",
         task.title,
-        task.state.label(),
+        task.habitat_status(),
         project,
         task.detail
     );

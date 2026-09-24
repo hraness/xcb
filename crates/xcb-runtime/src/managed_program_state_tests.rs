@@ -348,7 +348,7 @@ async fn parent_wait_releases_actual_supervisor_workspace_and_worker_slot() {
     assert!(supervisor.active_accounts.is_empty());
     assert!(supervisor.joins.is_empty());
     assert!(f.managed.has_habitat_work().unwrap());
-    let pure=AdmittedProgram::admit(json!({"contract":"algal.organism.v1","key":"organism:independent","cells":[{"id":"r","kind":"const","outputs":{"value":{"type":"text","value":"Independent pure result"}}}],"edges":[],"interface":{"inputs":{},"outputs":{"summary":{"cell":"r","port":"value"}}}}),json!({})).unwrap();
+    let pure=AdmittedProgram::admit(json!({"contract":"algal.organism.v1","key":"organism:independent","name":"Independent pure work","cells":[{"id":"r","kind":"const","outputs":{"value":{"type":"text","value":"Independent pure result"}}}],"edges":[],"interface":{"inputs":{},"outputs":{"summary":{"cell":"r","port":"value"}}}}),json!({})).unwrap();
     let other = f
         .managed
         .enqueue_program(&f.conversation, new_id("m"), "Other pure work".into(), pure)
@@ -921,4 +921,23 @@ async fn consumed_grant_budget_holds_next_call_without_spinning_or_reusing_autho
         f.managed.backlog(Some(&f.conversation), 64).unwrap().len(),
         2
     );
+}
+
+#[tokio::test]
+async fn live_controller_pins_completed_child_sessions_until_controller_settles() {
+    let f = fixture().await;
+    let (parent, child) = waiting(&f, 1).await;
+    let completed = settle_child(&f, &child, "Pinned exact response").await;
+    let session = completed.session.unwrap();
+    assert!(f.managed.has_active_session(&session).unwrap());
+    assert!(f.managed.active_session_ids().unwrap().contains(&session));
+    f.managed.tick_programs(&f.store, true).await.unwrap();
+    let ready = f.managed.task(&parent.id).unwrap().unwrap();
+    let (running, slice) = run_slice(&f, &ready).await;
+    f.managed
+        .finish_program_slice(&parent.id, running.revision, &Ok(slice))
+        .await
+        .unwrap();
+    assert!(!f.managed.has_active_session(&session).unwrap());
+    assert!(!f.managed.active_session_ids().unwrap().contains(&session));
 }

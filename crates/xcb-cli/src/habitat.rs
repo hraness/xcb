@@ -362,11 +362,7 @@ fn print_task(task: &ManagedTask, json: bool) -> Result<()> {
     println!(
         "{} · {} · P{} · rev {} · {} · {}",
         task.id,
-        if task.deferred {
-            "backlog"
-        } else {
-            task.state.label()
-        },
+        task.habitat_status(),
         task.priority,
         task.revision,
         task.conversation,

@@ -130,7 +130,7 @@ describe("xcb CLI", () => {
     const session = await sessions.create({ provider: "devin", accountId: "local", workspace: ROOT, model: "adaptive", now: Date.now() });
     sessions.close();
     const resumed = await cli(["resume", session.id], "", root);
-    expect(resumed.code).toBe(2);
+    expect(resumed.code, resumed.stderr).toBe(2);
     expect(resumed.stderr).toContain("devin binary not found");
     expect(resumed.stderr).not.toContain("claude binary not found");
     const mismatched = await cli(["resume", session.id, "--provider", "claude"], "", root);
