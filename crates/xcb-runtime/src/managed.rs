@@ -55,6 +55,9 @@ pub use project::{MemoryBinding, ProjectPolicy, ProjectProposal};
 #[path = "managed_inbox.rs"]
 mod inbox;
 pub use inbox::{InboxEvent, InboxWatch};
+#[path = "managed_program_state.rs"]
+mod program_state;
+pub use program_state::{ProgramChild, ProgramStatus};
 
 #[cfg(test)]
 #[path = "managed_mailbox_tests.rs"]
@@ -214,6 +217,10 @@ pub struct ManagedTask {
     pub program_generation: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_receipt: Option<String>,
+    #[serde(default)]
+    pub program_waiting: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_child: Option<ProgramChild>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Id>,
     pub detail: String,
@@ -250,6 +257,7 @@ impl ManagedTask {
             && self.goal == other.goal
             && self.program == other.program
             && self.program_generation == other.program_generation
+            && self.program_child == other.program_child
             && self.schedule == other.schedule
             && self
                 .project_proposal
@@ -311,6 +319,18 @@ impl ManagedTask {
             program.verify()?;
             if self.session.is_some() || !self.worker_sessions.is_empty() {
                 return Err(Error::Conflict("program task cannot own provider sessions"));
+            }
+        }
+        if self.program_waiting && (self.program.is_none() || self.session.is_some()) {
+            return Err(Error::Conflict(
+                "only a program may wait for managed children",
+            ));
+        }
+        if let Some(child) = &self.program_child {
+            child.validate()?;
+            if self.program.is_some() || self.project_proposal.is_some() || self.schedule.is_some()
+            {
+                return Err(Error::Conflict("managed program child identity is invalid"));
             }
         }
         label(&self.title, 160)?;
@@ -560,7 +580,7 @@ impl ManagedStore {
         }
         connection.pragma_update(None, "synchronous", "FULL")?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 4 {
+        if version > 5 {
             return Err(Error::Unavailable(
                 "managed state was written by a newer xcb",
             ));
@@ -568,7 +588,7 @@ impl ManagedStore {
         // A prior supervisor owns the old writer contract until all its work
         // settles. Never advance the schema underneath that admitted writer.
         // The daemon itself opens/migrates before taking its dispatch lock.
-        let _migration_guard = if version < 4 {
+        let _migration_guard = if version < 5 {
             Some(managed_migration_guard(&root)?)
         } else {
             None
@@ -623,6 +643,7 @@ impl ManagedStore {
         habitat::migrate(&mut connection)?;
         project::migrate(&mut connection)?;
         inbox::migrate(&mut connection)?;
+        program_state::migrate(&mut connection)?;
         let mut store = Self {
             root,
             connection: Mutex::new(connection),
@@ -731,7 +752,7 @@ impl ManagedStore {
                 )? as u64;
                 let stale_tasks: Vec<String> = {
                     let mut query = tx.prepare(
-                        "SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled') AND updated_at<?1 AND id NOT IN (SELECT task FROM inbox_batches) AND id NOT IN (SELECT task FROM inbox_events WHERE status='waiting' OR updated_at>=?1) AND id NOT IN (SELECT source FROM inbox_watches w JOIN tasks target ON target.id=w.task WHERE (target.state NOT IN ('completed','failed','cancelled') OR target.updated_at>=?1)) AND id NOT IN (SELECT last_task FROM habitat_schedules WHERE last_task IS NOT NULL) AND id NOT IN (SELECT json_extract(payload,'$.project_proposal.parent') FROM tasks WHERE json_valid(payload) AND json_extract(payload,'$.project_proposal.parent') IS NOT NULL AND state IN ('queued','running','needs_input','uncertain')) LIMIT ?2",
+                        "SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled') AND updated_at<?1 AND id NOT IN (SELECT task FROM inbox_batches) AND id NOT IN (SELECT task FROM inbox_events WHERE status='waiting' OR updated_at>=?1) AND id NOT IN (SELECT source FROM inbox_watches w JOIN tasks target ON target.id=w.task WHERE (target.state NOT IN ('completed','failed','cancelled') OR target.updated_at>=?1)) AND id NOT IN (SELECT child FROM program_calls) AND id NOT IN (SELECT parent FROM program_calls pc JOIN tasks child_task ON child_task.id=pc.child WHERE child_task.state NOT IN ('completed','failed','cancelled')) AND id NOT IN (SELECT last_task FROM habitat_schedules WHERE last_task IS NOT NULL) AND id NOT IN (SELECT json_extract(payload,'$.project_proposal.parent') FROM tasks WHERE json_valid(payload) AND json_extract(payload,'$.project_proposal.parent') IS NOT NULL AND state IN ('queued','running','needs_input','uncertain')) LIMIT ?2",
                     )?;
                     query
                         .query_map(params![sql(cutoff)?, RETENTION_BATCH], |row| row.get(0))?
@@ -739,6 +760,7 @@ impl ManagedStore {
                 };
                 for id in &stale_tasks {
                     inbox::retain_task(&tx, id)?;
+                    program_state::retain_task(&tx, id)?;
                     removed +=
                         tx.execute("DELETE FROM receipts WHERE task=?1", [id.as_str()])? as u64;
                     removed += tx.execute(
@@ -1183,7 +1205,8 @@ impl ManagedStore {
             .iter()
             .any(|task| {
                 task.session.as_ref() == Some(session) || task.worker_sessions.contains(session)
-            }))
+            })
+            || self.program_dependency_sessions()?.contains(session))
     }
     /// Session ids referenced by any nonterminal task — current session and
     /// worker history — computed with a single managed task scan so a prune
@@ -1196,6 +1219,7 @@ impl ManagedStore {
             }
             ids.extend(task.worker_sessions.iter().cloned());
         }
+        ids.extend(self.program_dependency_sessions()?);
         Ok(ids)
     }
 
@@ -1840,12 +1864,37 @@ impl ManagedStore {
     async fn transition_inbox(
         &self,
         expected: &ManagedTask,
+        next: ManagedTask,
+        message: Option<Message>,
+        additional: &[(Id, Message)],
+        mutation: Option<&habitat::WorkerMutation>,
+        admission: Option<&project::ProjectAdmission>,
+        inbox_change: Option<&inbox::Change<'_>>,
+    ) -> Result<ManagedTask> {
+        self.transition_program(
+            expected,
+            next,
+            message,
+            additional,
+            mutation,
+            admission,
+            inbox_change,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn transition_program(
+        &self,
+        expected: &ManagedTask,
         mut next: ManagedTask,
         message: Option<Message>,
         additional: &[(Id, Message)],
         mutation: Option<&habitat::WorkerMutation>,
         admission: Option<&project::ProjectAdmission>,
         inbox_change: Option<&inbox::Change<'_>>,
+        program_change: Option<&program_state::Change>,
     ) -> Result<ManagedTask> {
         next.validate()?;
         if !next.same_identity(expected) || next.revision != expected.revision + 1 {
@@ -1895,6 +1944,7 @@ impl ManagedStore {
             mutation.record(&tx, &next)?;
         }
         inbox::transition(&tx, expected, &next, inbox_change)?;
+        program_state::transition(&tx, expected, &next, program_change)?;
         tx.commit()?;
         Ok(next)
     }
@@ -2032,6 +2082,8 @@ impl ManagedStore {
                 None
             },
             program_receipt: None,
+            program_waiting: false,
+            program_child: None,
             schedule: options.occurrence.map(|o| o.schedule_id().clone()),
             detail: if routing_question {
                 "This scheduled prompt requests a different provider from the project requirement. Reply with a revised task for the required provider, or cancel this occurrence."
@@ -2121,11 +2173,13 @@ impl ManagedStore {
             if saved.goal != task.goal
                 || saved.conversation != task.conversation
                 || saved.source_message != task.source_message
+                || saved.program != task.program
             {
                 return Err(Error::Conflict("backlog submission id was reused"));
             }
             return Ok(saved);
         }
+        program_state::check_creation(&tx, &task)?;
         let count: i64 = tx.query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))?;
         let active: i64 = tx.query_row(
             "SELECT count(*) FROM tasks WHERE state IN ('queued','running','needs_input')",
@@ -2182,6 +2236,11 @@ impl ManagedStore {
         text: String,
         attachments: Vec<Attachment>,
     ) -> Result<ManagedTask> {
+        if task.program.is_some() {
+            return Err(Error::Conflict(
+                "program inputs are immutable; enqueue a new program occurrence",
+            ));
+        }
         let now = now_ms();
         let mut next = task.clone();
         next.state = TaskState::Queued;
@@ -2654,6 +2713,8 @@ impl ManagedStore {
             .max_by_key(|task| (task.created_at_ms, task.id.as_str().to_owned()))
             .filter(|task| {
                 task.state == TaskState::Completed
+                    && task.program.is_none()
+                    && task.program_child.is_none()
                     && now_ms().saturating_sub(task.updated_at_ms) < CONTINUE_WINDOW_MS
             }))
     }
@@ -3447,7 +3508,7 @@ fn task_status(task: &ManagedTask) -> String {
     let mut line = format!(
         "- **{}** · {} · {} · {}",
         task.title,
-        task.state.label(),
+        task.habitat_status(),
         project,
         task.detail
     );
@@ -4114,6 +4175,10 @@ struct Completion {
 enum CompletionResult {
     Provider(Result<Outcome>),
     Program(Result<crate::managed_program::ProgramReport>),
+    ProgramSlice {
+        revision: u64,
+        result: Result<crate::managed_program::ProgramSlice>,
+    },
 }
 
 /// Dispatch backoff for a task the supervisor could not launch. The wait
@@ -4426,6 +4491,11 @@ impl Supervisor {
             CompletionResult::Program(result) => {
                 self.managed.finish_program(&completion.id, result).await
             }
+            CompletionResult::ProgramSlice { revision, result } => {
+                self.managed
+                    .finish_program_slice(&completion.id, *revision, result)
+                    .await
+            }
         };
         match result {
             Ok(finished) => {
@@ -4556,6 +4626,7 @@ impl Supervisor {
                 &format!("{unreadable} task rows could not be decoded and were skipped"),
             );
         }
+        self.managed.tick_programs(&self.store, !draining).await?;
         if !draining {
             self.managed.tick_projects(now_ms()).await?;
             self.managed.tick_schedules(now_ms()).await?;
@@ -4576,7 +4647,9 @@ impl Supervisor {
             }
             if let Some(cancel) = self.active.get(&task.id) {
                 let _ = cancel.send(true);
-            } else if matches!(task.state, TaskState::Queued | TaskState::NeedsInput) {
+            } else if !task.program_waiting
+                && matches!(task.state, TaskState::Queued | TaskState::NeedsInput)
+            {
                 match self.managed.settle_unstarted_cancel(task).await {
                     Ok(_) | Err(Error::Conflict(_)) => (),
                     Err(error) => self.task_fault(task, &error).await,
@@ -4584,7 +4657,11 @@ impl Supervisor {
             }
         }
         for task in tasks.into_iter().filter(|task| {
-            !draining && task.state == TaskState::Queued && !task.deferred && !task.cancel_requested
+            !draining
+                && task.state == TaskState::Queued
+                && !task.deferred
+                && !task.cancel_requested
+                && !task.program_waiting
         }) {
             if self.active.len() >= MAX_ACTIVE {
                 break;
@@ -4668,6 +4745,14 @@ impl Supervisor {
             };
         }
         if let Some(program) = &task.program {
+            if task.program_waiting {
+                return Ok(Dispatch::Deferred("waiting for managed child".into()));
+            }
+            let slice_input = if program.managed_calls > 0 {
+                Some(managed.program_slice_input(task)?)
+            } else {
+                None
+            };
             let mut next = task.clone();
             next.state = TaskState::Running;
             next.detail = "running pinned ALGAL planner".into();
@@ -4687,7 +4772,13 @@ impl Supervisor {
             self.joins.spawn(async move {
                 Completion {
                     id,
-                    result: CompletionResult::Program(program.run(cancelled).await),
+                    result: match slice_input {
+                        Some((checkpoint, response)) => CompletionResult::ProgramSlice {
+                            revision: prepared.revision,
+                            result: program.step(checkpoint, response, cancelled).await,
+                        },
+                        None => CompletionResult::Program(program.run(cancelled).await),
+                    },
                 }
             });
             return Ok(Dispatch::Started);
@@ -5229,6 +5320,19 @@ fn managed_view(
         .iter()
         .map(habitat::backlog_row)
         .collect();
+    view.programs = tasks.iter().filter(|task| task.program.is_some()).filter_map(|task| {
+        match managed.program_status(&task.id) {
+            Ok(Some(status)) => Some(xcb_core::ui::ProgramRow {
+                parent: status.parent, phase: status.phase, calls: status.calls, max_calls: status.max_calls,
+                child: status.child, child_status: status.child_status, receipt: status.receipt,
+            }),
+            Ok(None) => None,
+            Err(_) => {
+                record_supervisor_fault(managed.root(), "a program status could not be decoded; its backlog and attention entry remain available");
+                None
+            }
+        }
+    }).collect();
     view.projects = managed.project_rows()?;
     view.inbox = managed.inbox_rows()?;
     view.schedules = managed
@@ -6147,7 +6251,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         let count: i64 = migrated
             .db()
             .unwrap()
@@ -6872,6 +6976,8 @@ mod tests {
             program: None,
             program_generation: None,
             program_receipt: None,
+            program_waiting: false,
+            program_child: None,
             schedule: None,
             detail: "x".into(),
             settle: None,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Credential-free native inbox CLI/PTY acceptance; retain every evidence file.
+"""Credential-free native inbox/program CLI/PTY acceptance; retain evidence files.
 
 Run with an exact native binary, through the host scheduler where installed.
 --evidence-dir selects an existing parent for a fresh private capture directory.
@@ -124,6 +124,28 @@ def main():
         current = task(row["id"])
         return value("backlog", "complete", row["id"], summary, "--revision", str(current["revision"]))
 
+    def eventually(name, predicate):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if predicate():
+                check(name, True)
+                return
+            time.sleep(.1)
+        check(name, False)
+
+    def start_daemon():
+        nonlocal daemon
+        with (root / "daemon.log").open("ab") as log:
+            daemon = subprocess.Popen(base + ["managed-daemon"], env=env, cwd=paths["workspace"],
+                                      stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+        identity = paths["state"] / "managed" / "supervisor.identity.json"
+        def registered():
+            if not identity.exists() or daemon.poll() is not None:
+                return False
+            record = json.loads(identity.read_text())
+            return record["pid"] == daemon.pid and record["sha256"] == sha and record["executable"] == str(binary)
+        eventually("owned daemon exact identity", registered)
+
     def terminal(name, argv, actions, redraw_at=(), durable_at=None):
         pid, fd = pty.fork()
         if pid == 0:
@@ -238,17 +260,7 @@ def main():
         return screen, segments
 
     try:
-        with (root / "daemon.log").open("wb") as log:
-            daemon = subprocess.Popen(base + ["managed-daemon"], env=env, cwd=paths["workspace"],
-                                      stdin=subprocess.DEVNULL, stdout=log, stderr=log)
-        identity = paths["state"] / "managed" / "supervisor.identity.json"
-        until = time.monotonic() + 12
-        while not identity.exists() and daemon.poll() is None and time.monotonic() < until:
-            time.sleep(.05)
-        check("owned daemon started", identity.exists() and daemon.poll() is None)
-        registered = json.loads(identity.read_text())
-        check("owned daemon exact identity", registered["pid"] == daemon.pid
-              and registered["sha256"] == sha and registered["executable"] == str(binary))
+        start_daemon()
         terminal("create-conversation", ["chat", "--new"], [(b"\x04", .3)])
         conversations = value("conversations")
         check("one isolated conversation", len(conversations) == 1)
@@ -357,6 +369,74 @@ def main():
         check("no provider accounts activated", value("accounts")["accounts"] == [])
         check("no provider sessions created", value("sessions") == [])
         check("no fabricated attention", value("attention") == [])
+
+        # Exercise real controller publication and a durable no-account child.
+        # No fabricated provider output or direct database mutation is involved;
+        # deterministic runtime tests cover completed-result replay separately.
+        pure_file = root / "pure.algal.json"
+        pure_file.write_text(json.dumps({
+            "contract": "algal.organism.v1", "key": "organism:acceptance-pure", "name": "Pure acceptance",
+            "cells": [{"id": "summary", "kind": "const", "outputs": {"out": {"type": "text", "value": "PURE_PROGRAM_COMPLETE"}}}],
+            "edges": [], "interface": {"inputs": {}, "outputs": {"summary": {"cell": "summary", "port": "out"}}}
+        }))
+        pure = value("backlog", "program", conversation, str(pure_file), "--id", "acceptance_pure")
+        eventually("pure planner completed without a grant", lambda: task(pure["id"])["state"] == "completed")
+        check("pure planner retained summary", task(pure["id"])["last_output"] == "PURE_PROGRAM_COMPLETE")
+        command("tasks", "verify", pure["id"])
+        program_file = root / "controller.algal.json"
+        program_file.write_bytes((Path(__file__).resolve().parent.parent / "examples/project-controller.algal.json").read_bytes())
+        check("agent cells require explicit managed admission", command("backlog", "program", conversation,
+              str(program_file), ok=False)[0] != 0)
+        check("managed admission requires project authority", command("backlog", "program", conversation,
+              str(program_file), "--managed-calls", "2", ok=False)[0] != 0)
+        value("projects", "configure", conversation, "Exercise bounded controller admission", "--tasks", "2", "--hours", "1")
+        program_args = ("backlog", "program", conversation, str(program_file), "--managed-calls", "2", "--id", "acceptance_controller")
+        program = value(*program_args)
+        def program_status():
+            return value("backlog", "program-status", program["id"])
+        eventually("controller published one linked child", lambda: program_status().get("child") is not None)
+        suspended = program_status()
+        child_id = suspended["child"]
+        check("controller waiting with receipt", suspended["calls"] == 1 and suspended["maxCalls"] == 2
+              and suspended["phase"] == "waiting for child" and suspended["receipt"].startswith("sha256:"))
+        check("program retry returns exact parent", value(*program_args)["id"] == program["id"])
+        check("retry does not duplicate call", program_status()["child"] == child_id and program_status()["calls"] == 1)
+        check("child resolves parent inspector", value("backlog", "program-status", child_id)["parent"] == program["id"])
+        check("parallel project controller rejected", command("backlog", "program", conversation, str(program_file),
+              "--managed-calls", "2", "--id", "conflicting_controller", ok=False)[0] != 0)
+        check("program inputs reject steering", command("steer", program["id"], "Change pinned program", ok=False)[0] != 0)
+        policies = value("projects")
+        policy = next(row for row in policies if row["conversation"] == conversation)
+        check("exactly one grant task consumed", policy["admitted_tasks"] == 1)
+        # File edits cannot mutate a registered manifest or its suspended call.
+        program_file.write_text("{}")
+        check("changed source retry rejected", command(*program_args, ok=False)[0] != 0)
+        daemon.send_signal(signal.SIGTERM)
+        check("owned daemon joins before restart", daemon.wait(timeout=25) == 0)
+        daemon = None
+        start_daemon()
+        recovered = program_status()
+        check("restart retains exact child and checkpoint", all(recovered[key] == suspended[key]
+              for key in ("parent", "calls", "maxCalls", "child", "receipt")))
+        command("tasks", "verify", program["id"])
+        command("tasks", "verify", child_id)
+        before_program_ui = len(value("backlog", "--conversation", conversation))
+        _, program_segments = terminal("program-tui", ["chat", "--resume", conversation], [
+            ((f"/program {program['id']}\r").encode(), .5), (b"\x1b", .2),
+            (b"/program\r", .5), (b"\x1b", .2),
+            ((f"cancel {program['id']}\r").encode(), .5), (b"\x04", .3),
+        ], redraw_at=(0, 2), durable_at={4: lambda: task(program["id"])["state"] == "cancelled"})
+        inspector = re.sub(r"\s+", "", program_segments[0])
+        check("TUI program inspector shows linked call and attention", all(text in inspector
+              for text in (program["id"], child_id, "1/2", "/attention", suspended["receipt"])))
+        check("TUI program picker rendered", "Recentmanagedprograms" in re.sub(r"\s+", "", program_segments[2]))
+        check("program UI creates no ordinary task", len(value("backlog", "--conversation", conversation)) == before_program_ui)
+        check("parent cancellation settles linked child", task(child_id)["state"] == "cancelled")
+        check("cancelled controller launches no second call", program_status()["calls"] == 1)
+        command("tasks", "verify", program["id"])
+        command("tasks", "verify", child_id)
+        check("program acceptance leaves accounts inactive", value("accounts")["accounts"] == [])
+        check("program acceptance creates no provider session", value("sessions") == [])
         check("candidate binary unchanged", hashlib.sha256(binary.read_bytes()).hexdigest() == sha)
     except Exception as error:
         errors.append(f"{type(error).__name__}: {error}")

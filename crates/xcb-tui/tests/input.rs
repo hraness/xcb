@@ -1102,6 +1102,7 @@ fn global_command_menu_only_shows_conversation_and_task_controls() {
             "/memory",
             "/mouse",
             "/new",
+            "/program",
             "/project",
             "/quit",
             "/reply",

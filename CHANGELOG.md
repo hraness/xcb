@@ -4,6 +4,22 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.6.0 (unreleased)
+
+- Resumable ALGAL controllers can request bounded ordinary worker tasks with
+  `xcb backlog program` or `xcb schedules program --managed-calls`. Each child
+  uses normal routing, project authority, budgets and approval handling.
+- Durable checkpoints and deterministic child identities survive restart.
+  Waiting controllers release their worker slot; only conclusively completed
+  children can supply results. Cancellation and uncertain execution retain the
+  existing settlement safeguards.
+- `xcb backlog program-status` and the TUI's `/program` expose linked child
+  status, call progress and execution receipts. Existing pure planners remain
+  compatible.
+- Settle and confirm reflexes gain local auto-certification from observed user
+  replies, with explicit confidence thresholds, holdouts and rollback. Existing
+  authority gates and risk vetoes still apply.
+
 ## 0.5.0
 
 [Verified native release](https://github.com/hraness/xcb/releases/tag/v0.5.0)
