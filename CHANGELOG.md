@@ -16,6 +16,9 @@ assets, not this file, are the evidence that a version shipped; see
   ordering while responses arrive and while you browse. Keyboard filters show
   all, active, or attention-needed sessions and match names, models, or status.
   Questions and approvals keep their existing controls above the overview.
+- Closing a compatibility CLI session store releases its prepared statements
+  before the database closes, so an immediate resume can reopen it without
+  waiting for garbage collection.
 
 ## 0.7.0
 
