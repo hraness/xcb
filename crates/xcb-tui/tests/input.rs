@@ -1782,7 +1782,7 @@ fn submit_selected_answer(
             assert_eq!(text, answer);
             reply
         }
-        intent => panic!("expected an answer for {task}, got {intent:?}"),
+        _ => panic!("expected an answer for {task}"),
     }
 }
 
