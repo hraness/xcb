@@ -1,6 +1,6 @@
-# Weekly dependency update proposals. Every update still arrives as a reviewed
-# pull request through the protected-main ruleset and the full CI matrix; this
-# file grants no merge or release authority.
+# Weekly dependency update proposals. Every update arrives as a pull request
+# that auto-merges once the Required check passes (workflows/dependabot-auto-merge.yml);
+# this file grants no release authority.
 version: 2
 updates:
   - package-ecosystem: cargo

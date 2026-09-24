@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,9 +14,67 @@ concurrency:
   group: check-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "10"
+  RUST_BACKTRACE: short
+  RUSTFLAGS: -D warnings
+  BUN_VERSION: "1.3.14"
+  NODE_VERSION: "24.19.0"
+
 jobs:
+  changes:
+    # Pull requests skip the jobs whose inputs did not change. Pushes to main
+    # and manual dispatches run everything so the main caches stay warm.
+    name: Detect changed paths
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ github.event_name != 'pull_request' && 'true' || steps.code.outputs.code }}
+      site: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.site }}
+      qualification: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.qualification }}
+    steps:
+      - name: Code changes (everything except the site, docs, and markdown)
+        id: code
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
+        with:
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              - '!site/**'
+              - '!docs/**'
+              - '!**/*.md'
+      - name: Site and qualification changes
+        id: surfaces
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
+        with:
+          filters: |
+            site:
+              - 'site/**'
+              - 'src/**'
+              - 'README.md'
+              - '.github/workflows/ci.yml'
+            qualification:
+              - 'qualification/**'
+              - 'src/os-sandbox.ts'
+              - 'src/egress-bridge.ts'
+              - 'src/egress-client.ts'
+              - 'sandbox/**'
+              - '.github/workflows/ci.yml'
+
   check:
+    # Native Rust checks. Linux runs the generic gates (fmt, clippy, Python
+    # helper regressions); macOS runs only the OS-specific test suite.
     name: Check (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -24,24 +83,34 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
         with:
           toolchain: 1.97.1
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.3.14"
+          bun-version: ${{ env.BUN_VERSION }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.19.0"
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
       - run: cargo fmt --all -- --check
+        if: runner.os == 'Linux'
+      # Native broker tests drive actual Bun and Node lock owners on PATH.
       - run: bun install --frozen-lockfile --ignore-scripts
-      - run: bun run check
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: runner.os == 'Linux'
         with:
           python-version: "3.12"
       - name: Native helper regressions
+        if: runner.os == 'Linux'
         run: |
           python3 -I qualification/application-prerequisites.py --self-test
           python3 -I scripts/application-renewal.test.py
@@ -51,9 +120,60 @@ jobs:
           python3 -I scripts/prepare-command-dependencies.test.py
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        if: runner.os == 'Linux'
+
+  compat:
+    # The complete compatibility-package gate: version contract, typecheck,
+    # tests, dist build, and packed-package install smoke check.
+    name: Compatibility package
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - run: bun run check
+
+  compat-macos:
+    # Only the test suite, which branches on the macOS seatbelt and provider
+    # process paths; the generic typecheck, dist, and package gates run on Linux.
+    name: Compatibility tests (macos-15)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - run: bun run test
 
   native-build:
     name: Native build (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -62,10 +182,12 @@ jobs:
         os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
         with:
           toolchain: 1.97.1
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: ./scripts/build-native.sh
       - name: Isolated inbox operator acceptance
         run: python3 -I qualification/inbox-acceptance.py target/release/xcb --evidence-dir "$RUNNER_TEMP"
@@ -87,17 +209,161 @@ jobs:
 
   site:
     name: Site
+    needs: changes
+    if: needs.changes.outputs.site == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: "1.3.14"
+          bun-version: ${{ env.BUN_VERSION }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.19.0"
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-site-${{ runner.os }}-${{ hashFiles('site/bun.lock') }}
+          restore-keys: bun-site-${{ runner.os }}-
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: site/.next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('site/bun.lock') }}-${{ hashFiles('site/**/*.ts', 'site/**/*.tsx', 'site/**/*.css') }}
+          restore-keys: nextjs-${{ runner.os }}-${{ hashFiles('site/bun.lock') }}-
       - run: bun install --frozen-lockfile --ignore-scripts
         working-directory: site
       - run: bun run check
         working-directory: site
+
+  qualification:
+    # Credential-free kernel-boundary evidence for the Linux bwrap backend.
+    # Runs when the probes, sandbox sources, or this workflow change.
+    name: Linux kernel-boundary probes
+    needs: changes
+    if: needs.changes.outputs.qualification == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install boundary tooling
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap iproute2 util-linux curl openssl
+      - name: Namespace capability facts
+        id: facts
+        run: |
+          mkdir -p evidence
+          {
+            echo "apparmor_restrict=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+            echo "unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo absent)"
+            echo "max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo absent)"
+            echo "bwrap=$(command -v bwrap) $(bwrap --version 2>&1 | head -1)"
+            echo "unshare_probe=$(unshare -Urn true 2>&1 && echo ok || echo denied)"
+            echo "bwrap_minimal=$(bwrap --unshare-all --ro-bind /bin/true /bin/true -- /bin/true 2>&1 && echo ok || echo denied)"
+          } | tee evidence/env-facts.txt
+      - name: Probes under the host default restriction (informational)
+        run: |
+          BWRAP="$(command -v bwrap)"
+          SHA="$(sha256sum "$BWRAP" | cut -d' ' -f1)"
+          status=0
+          for probe in linux-sandbox linux-egress linux-loopback; do
+            if [ -f "qualification/$probe.ts" ]; then
+              bun "qualification/$probe.ts" --bwrap "$BWRAP" --bwrap-sha256 "$SHA" > "evidence/restricted-$probe.json" 2> "evidence/restricted-$probe.stderr" || status=1
+            fi
+          done
+          echo "restricted_status=$status" >> evidence/restricted-status.txt
+          exit 0
+      - name: Lift the AppArmor userns restriction for evidence
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          echo "unshare_probe_after=$(unshare -Urn true 2>&1 && echo ok || echo denied)" | tee -a evidence/env-facts.txt
+      - name: Run probes and collect evidence
+        id: probes
+        run: |
+          BWRAP="$(command -v bwrap)"
+          SHA="$(sha256sum "$BWRAP" | cut -d' ' -f1)"
+          status=0
+          for probe in linux-sandbox linux-egress linux-loopback; do
+            if [ -f "qualification/$probe.ts" ]; then
+              code=0
+              timeout 300 bun "qualification/$probe.ts" --bwrap "$BWRAP" --bwrap-sha256 "$SHA" > "evidence/$probe.json" 2> "evidence/$probe.stderr" || code=$?
+              # The process exit code is each probe's authoritative verdict;
+              # build-receipt.ts reads it to set the receipt's exit_code/passed.
+              echo "$code" > "evidence/$probe.exitcode"
+              if [ "$code" -ne 0 ]; then status=1; fi
+            fi
+          done
+          # build-receipt exits nonzero when any probe's recorded verdict is a
+          # failure, so a red probe can no longer ship a passing receipt.
+          bun qualification/build-receipt.ts "$BWRAP" "$SHA" evidence/linux-qualification.json || status=1
+          if [ ! -f evidence/linux-qualification.json ]; then status=1; fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: linux-kernel-boundary-evidence
+          path: evidence/
+          if-no-files-found: warn
+      - name: Require probe evidence
+        if: steps.probes.outputs.status != '0'
+        run: exit 1
+
+  required:
+    # The one check branch policy requires. A job may be skipped only because
+    # the paths filter proved its inputs did not change; any other non-success
+    # result fails the gate.
+    name: Required
+    if: always()
+    needs:
+      - changes
+      - check
+      - compat
+      - compat-macos
+      - native-build
+      - site
+      - qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Admit only success or a deliberate paths-filter skip
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          CODE_CHANGED: ${{ needs.changes.outputs.code }}
+          SITE_CHANGED: ${{ needs.changes.outputs.site }}
+          QUALIFICATION_CHANGED: ${{ needs.changes.outputs.qualification }}
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS"])
+          changed = {
+              "code": os.environ["CODE_CHANGED"],
+              "site": os.environ["SITE_CHANGED"],
+              "qualification": os.environ["QUALIFICATION_CHANGED"],
+          }
+          filtered = {
+              "check": "code",
+              "compat": "code",
+              "compat-macos": "code",
+              "native-build": "code",
+              "site": "site",
+              "qualification": "qualification",
+          }
+          failed = []
+          for job, info in sorted(needs.items()):
+              result = info.get("result")
+              if result == "success":
+                  continue
+              gate = filtered.get(job)
+              if result == "skipped" and gate and changed[gate] == "false":
+                  print(f"{job}: skipped because {gate} inputs did not change")
+                  continue
+              failed.append(f"{job}: {result}")
+          for line in failed:
+              print(f"::error::{line}")
+          sys.exit(1 if failed else 0)
+          EOF
