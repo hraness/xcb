@@ -6,6 +6,9 @@ assets, not this file, are the evidence that a version shipped; see
 
 ## 0.7.0
 
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.7.0)
+for macOS ARM64 and Linux x86_64; [public verification run](https://github.com/hraness/xcb/actions/runs/35953085415).
+
 - The terminal uses a quieter prompt and transcript, Markdown and diff styling,
   scrollable help, and searchable command menus. Editing keys, prompt history,
   and the external editor follow familiar Codex CLI behavior.
