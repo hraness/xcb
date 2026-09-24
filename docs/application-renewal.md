@@ -64,7 +64,7 @@ normal I/O priority. Background throttling can make repeated executable hash
 verification exceed an otherwise healthy discovery deadline. Capability reads
 have a bounded 90-second deadline; every executable, provider, account and evidence
 pin is still checked. Inspection, help and renewal phase deadlines are unchanged.
-Heavy collection and provider phases still acquire their existing HRA leases.
+Heavy collection and provider phases still acquire their existing host leases.
 Launchd checks hourly while the user is logged in; it does not
 wake a sleeping Mac, renew while logged out, or promise network availability.
 An explicit `run --directory ...` uses exactly the same runner when needed.

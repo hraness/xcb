@@ -157,7 +157,7 @@ def main():
         command = subprocess.Popen(argv, stdin=subprocess.PIPE if data is not None else subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
         # This setup only executes fixed trusted provisioning commands; the
-        # outer HRA wrapper owns the full process tree and the VM is dedicated.
+        # outer host wrapper owns the full process tree and the VM is dedicated.
         try:
             output, _ = command.communicate(data, timeout=timeout)
         except subprocess.TimeoutExpired:
