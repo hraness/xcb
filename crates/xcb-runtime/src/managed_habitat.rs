@@ -300,7 +300,7 @@ impl ManagedStore {
         if !(1..=256).contains(&limit) {
             return Err(xcb_core::Error::Invalid("attention limit").into());
         }
-        self.task_rows("SELECT id,payload,conversation FROM tasks WHERE state IN ('needs_input','uncertain') OR (state='queued' AND (CASE WHEN json_valid(payload) THEN json_extract(payload,'$.detail') ELSE '' END LIKE 'no eligible account:%' OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.detail') ELSE '' END LIKE 'usage limits block a matching admitted route;%' OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.detail') ELSE '' END LIKE 'project authority%') AND COALESCE(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.deferred') ELSE 1 END,0)=0) ORDER BY CASE WHEN state='needs_input' THEN 0 WHEN state='queued' THEN 1 ELSE 2 END,updated_at DESC,id LIMIT ?1",limit,false)
+        self.task_rows("SELECT id,payload,conversation FROM tasks WHERE state IN ('needs_input','uncertain') OR (state='queued' AND (CASE WHEN json_valid(payload) THEN json_extract(payload,'$.detail') ELSE '' END LIKE 'no eligible account:%' OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.detail') ELSE '' END LIKE 'usage limits block a matching admitted route;%' OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.detail') ELSE '' END LIKE 'project authority%' OR CASE WHEN json_valid(payload) THEN json_extract(payload,'$.detail') ELSE '' END LIKE 'program waiting for linked child evidence:%') AND COALESCE(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.deferred') ELSE 1 END,0)=0) ORDER BY CASE WHEN state='needs_input' THEN 0 WHEN state='queued' THEN 1 ELSE 2 END,updated_at DESC,id LIMIT ?1",limit,false)
     }
 
     pub(super) async fn habitat_command(
@@ -454,6 +454,13 @@ impl ManagedStore {
         &self,
         task: &ManagedTask,
     ) -> Result<(Option<Provider>, bool)> {
+        if let Some(provider) = task
+            .program_child
+            .as_ref()
+            .and_then(|link| link.required_provider)
+        {
+            return Ok((Some(provider), true));
+        }
         if task.schedule.is_some() && task.provider_required {
             return Ok((task.provider_preference, true));
         }
@@ -656,6 +663,9 @@ impl ManagedStore {
         first_due_ms: u64,
     ) -> Result<HabitatSchedule> {
         program.verify()?;
+        if program.managed_calls > 0 {
+            program_state::require_grant(&self.db()?, conversation, None, now_ms(), true)?;
+        }
         self.create_schedule_inner(
             conversation,
             prompt,
@@ -886,7 +896,7 @@ impl ManagedStore {
             Ok(m) => m,
             Err(e) => return (Err(e), EffectState::None),
         };
-        if name == "xcb_backlog_add" {
+        if name == "xcb_backlog_add" && source.program_child.is_none() {
             mutation.proposal = match self.project_policy(&source.conversation) {
                 Ok(Some(policy)) if policy.enabled && policy.expires_at_ms > now_ms() => {
                     Some(ProjectProposal {
@@ -1107,7 +1117,10 @@ impl ManagedTask {
         } else if blocked_on_account(self)
             || (self.state == TaskState::Queued
                 && (self.detail == routing::NO_QUOTA_AVAILABLE_ROUTE
-                    || self.detail.starts_with("project authority")))
+                    || self.detail.starts_with("project authority")
+                    || self
+                        .detail
+                        .starts_with("program waiting for linked child evidence:")))
         {
             State::NeedsAction
         } else {
@@ -1117,6 +1130,8 @@ impl ManagedTask {
     pub fn habitat_status(&self) -> &'static str {
         if self.deferred {
             "backlog"
+        } else if self.program_waiting {
+            "waiting for child"
         } else if self.state == TaskState::NeedsInput {
             self.habitat_ui_state().label()
         } else {

@@ -2795,6 +2795,62 @@ mod tests {
     }
 
     #[test]
+    fn managed_program_commands_require_explicit_bounded_call_authority() {
+        use clap::Parser;
+        for calls in ["1", "8"] {
+            assert!(
+                super::Cli::try_parse_from([
+                    "xcb",
+                    "backlog",
+                    "program",
+                    "project_a",
+                    "program.json",
+                    "--managed-calls",
+                    calls,
+                    "--inputs",
+                    "inputs.json",
+                    "--id",
+                    "operation_a"
+                ])
+                .is_ok()
+            );
+            assert!(
+                super::Cli::try_parse_from([
+                    "xcb",
+                    "schedules",
+                    "program",
+                    "project_a",
+                    "program.json",
+                    "--managed-calls",
+                    calls,
+                    "--every",
+                    "3600"
+                ])
+                .is_ok()
+            );
+        }
+        for calls in ["0", "9", "-1", "unlimited"] {
+            assert!(
+                super::Cli::try_parse_from([
+                    "xcb",
+                    "backlog",
+                    "program",
+                    "project_a",
+                    "program.json",
+                    "--managed-calls",
+                    calls
+                ])
+                .is_err()
+            );
+        }
+        assert!(super::Cli::try_parse_from(["xcb", "backlog", "program", "program.json"]).is_err());
+        assert!(
+            super::Cli::try_parse_from(["xcb", "backlog", "program-status", "task_a", "--json"])
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn automatic_route_notice_does_not_echo_route_record_data() {
         assert_eq!(
             automatic_route_notice("Warning: usage limits block private-provider-metadata"),
