@@ -84,7 +84,9 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
     sort_choices(&mut view.models, &config.favorites);
     if let Some(id) = current {
         view.session = store.session(id)?;
-        view.messages = store.messages(id, 128)?;
+        let page = store.transcript_page(id, None, 128)?;
+        view.messages = page.messages.clone();
+        view.transcript = Some(page);
         if let Some(session) = &view.session {
             view.state = session.state;
         }

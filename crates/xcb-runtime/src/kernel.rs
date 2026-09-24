@@ -543,6 +543,7 @@ pub async fn execute(
         },
         cancel,
         observer,
+        None,
     )
     .await
 }
@@ -563,10 +564,37 @@ pub async fn execute_once(
         ExecutionMode::Managed,
         cancel,
         observer,
+        None,
     )
     .await
 }
 
+struct UiSubmission {
+    id: Id,
+    outbox: Arc<Mutex<Outbox>>,
+    accepted: std::sync::atomic::AtomicBool,
+}
+impl UiSubmission {
+    fn accepted(&self) -> bool {
+        self.accepted.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn acknowledge(&self, session: &Id) {
+        if !self
+            .accepted
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            queue(
+                &self.outbox,
+                Update::Submitted {
+                    id: self.id.clone(),
+                    context: xcb_core::ui::TranscriptContext::Session(session.clone()),
+                },
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn execute_mode(
     store: Arc<Store>,
     session_id: Id,
@@ -575,6 +603,7 @@ async fn execute_mode(
     mode: ExecutionMode,
     cancel: watch::Receiver<bool>,
     observer: Observer,
+    submission: Option<&UiSubmission>,
 ) -> Result<Outcome> {
     let pane_generation = mode.pane_generation();
     let config = Config::load(store.root())?.0;
@@ -599,6 +628,7 @@ async fn execute_mode(
         mode,
         cancel,
         observer.clone(),
+        submission,
     )
     .await;
     if let Some(session) = store.session(&session_id)? {
@@ -629,6 +659,7 @@ async fn execute_mode(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_inner(
     store: Arc<Store>,
     session_id: Id,
@@ -637,6 +668,7 @@ async fn execute_inner(
     mode: ExecutionMode,
     mut cancel: watch::Receiver<bool>,
     observer: Observer,
+    submission: Option<&UiSubmission>,
 ) -> Result<Outcome> {
     let pane_generation = mode.pane_generation();
     let supervise = mode.supervise();
@@ -659,7 +691,9 @@ async fn execute_inner(
         ready(&store, &session)?;
         tried.insert(format!("{}/{}", session.account, session.model.key()));
         let message = Message {
-            id: new_id("m"),
+            id: submission
+                .filter(|input| !input.accepted())
+                .map_or_else(|| new_id("m"), |input| input.id.clone()),
             role,
             text,
             attachments,
@@ -670,7 +704,7 @@ async fn execute_inner(
                 run: None,
             }),
         };
-        let current = store.append_message(&session_id, session.revision, &message)?;
+        let current = append_input(&store, &session, &message, submission)?;
         fire_hooks(
             &store,
             &config,
@@ -935,6 +969,21 @@ async fn execute_inner(
     }
 }
 
+fn append_input(
+    store: &Store,
+    session: &Session,
+    message: &Message,
+    submission: Option<&UiSubmission>,
+) -> Result<Session> {
+    let current = store.append_message(&session.id, session.revision, message)?;
+    if let Some(input) = submission
+        && message.id == input.id
+    {
+        input.acknowledge(&session.id);
+    }
+    Ok(current)
+}
+
 async fn cancellation_requested(cancel: &mut watch::Receiver<bool>) {
     // Sender loss also ends supervision, just as it ends an active runner.
     let _ = cancel.wait_for(|cancelled| *cancelled).await;
@@ -1095,9 +1144,11 @@ fn publish(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start(
     store: Arc<Store>,
     id: Id,
+    submission: Option<Id>,
     text: String,
     attachments: Vec<xcb_core::session::Attachment>,
     pane: bool,
@@ -1108,6 +1159,7 @@ fn start(
     let activity = Arc::new(Mutex::new(Activity::default()));
     let activity_copy = activity.clone();
     let session_id = id.clone();
+    let submission_outbox = outbox.clone();
     let observer: Observer = Arc::new(move |event| match event {
         Progress::Text { thinking, text } if !pane => {
             if let Ok(mut outbox) = outbox.lock() {
@@ -1145,17 +1197,42 @@ fn start(
         Progress::Notice(message) => queue(&outbox, Update::Notice(message)),
         _ => (),
     });
+    let submission = submission.map(|id| UiSubmission {
+        id,
+        outbox: submission_outbox,
+        accepted: std::sync::atomic::AtomicBool::new(false),
+    });
     let task = tokio::spawn(async move {
-        let result = execute(
+        let result = execute_mode(
             store,
             id.clone(),
-            text,
-            attachments,
-            pane,
+            text.clone(),
+            attachments.clone(),
+            if pane {
+                ExecutionMode::Pane
+            } else {
+                ExecutionMode::Direct
+            },
             cancelled,
             observer,
+            submission.as_ref(),
         )
         .await;
+        if let Some(submission) = &submission
+            && !submission.accepted()
+            && let Err(error) = &result
+        {
+            queue(
+                &submission.outbox,
+                Update::SubmitRejected {
+                    id: submission.id.clone(),
+                    context: Some(xcb_core::ui::TranscriptContext::Session(id.clone())),
+                    text,
+                    attachments,
+                    reason: error.to_string(),
+                },
+            );
+        }
         let _ = finished.send((id, result)).await;
     });
     Active {
@@ -1227,7 +1304,7 @@ pub async fn serve(
                     _ => (),
                 }
                 if !quit && let Some((generated, prompt)) = pending_pane_at_boundary(&store, &id, &mut pending_pane, &config, &outbox) {
-                    let task = start(store.clone(), generated.clone(), prompt, vec![], true, outbox.clone(), completed.clone());
+                    let task = start(store.clone(), generated.clone(), None, prompt, vec![], true, outbox.clone(), completed.clone());
                     active.insert(generated, task);
                 }
                 publish(&store, current.as_ref(), &config, &active, &outbox)?;
@@ -1236,11 +1313,36 @@ pub async fn serve(
                 for _ in 0..16 {
                     let intent = match input.try_recv() { Ok(intent) => intent, Err(TryRecvError::Empty) => break, Err(TryRecvError::Disconnected) => Intent::Quit };
                     if matches!(intent, Intent::Quit) { quit = true; pending_pane = None; for task in active.values() { let _ = task.cancel.send(true); } break; }
+                    let submit_context = match &intent {
+                        Intent::SubmitTo { context, .. } => Some(context.clone()),
+                        _ => None,
+                    };
                     let handled: Result<()> = (|| {
                         match intent {
+                            Intent::Rename { context, expected_title, title } => {
+                                let xcb_core::ui::TranscriptContext::Session(id) = context else {
+                                    return Err(Error::Unavailable("choose a direct session to rename"));
+                                };
+                                store.rename_session(&id, &expected_title, &title)?;
+                            }
+                            Intent::TranscriptPage { context, before_sequence, request } => {
+                                let result = match &context {
+                                    xcb_core::ui::TranscriptContext::Session(id) if current.as_ref() == Some(id) => store.transcript_page(id, Some(before_sequence), 128),
+                                    _ => Err(Error::Conflict("transcript context changed")),
+                                };
+                                match result {
+                                    Ok(page) => queue(&outbox, Update::TranscriptPage { request, page }),
+                                    Err(error) => queue(&outbox, Update::TranscriptPageRejected { context, request, reason: error.to_string() }),
+                                }
+                            }
                             Intent::Refresh => reload_config(store.root(), &mut config, &mut config_stamp, &outbox),
-                            Intent::Submit { text, attachments, .. } => {
+                            Intent::Submit { id: submission, text, attachments }
+                            | Intent::SubmitTo { id: submission, text, attachments, .. } => {
                                 let prepared: Result<Id> = (|| {
+                                    if let Some(expected) = &submit_context
+                                        && current.as_ref().map(|id| xcb_core::ui::TranscriptContext::Session(id.clone())).as_ref() != Some(expected) {
+                                        return Err(Error::Conflict("session changed before submission"));
+                                    }
                                     if current.is_none() { current = Some(new_session(&store, &workspace, &config, None, None, None)?.id); }
                                     let id = current.clone().expect("selected session");
                                     if active.contains_key(&id) || active.len() >= 16 { return Err(Error::Conflict("a turn is still running; your draft was restored to the composer")); }
@@ -1249,9 +1351,13 @@ pub async fn serve(
                                     Ok(id)
                                 })();
                                 match prepared {
-                                    Ok(id) => { active.insert(id.clone(), start(store.clone(), id, text, attachments, false, outbox.clone(), completed.clone())); }
+                                    Ok(id) => { active.insert(id.clone(), start(store.clone(), id, Some(submission), text, attachments, false, outbox.clone(), completed.clone())); }
                                     Err(error) => {
-                                        queue(&outbox, Update::Draft { text, attachments });
+                                        queue(&outbox, Update::SubmitRejected {
+                                            id: submission,
+                                            context: submit_context.or_else(|| current.clone().map(xcb_core::ui::TranscriptContext::Session)),
+                                            text, attachments, reason: error.to_string(),
+                                        });
                                         return Err(error);
                                     }
                                 }
@@ -1265,7 +1371,7 @@ pub async fn serve(
                                 }
                             }
                             Intent::Conversation(_) => return Err(Error::Unavailable("managed conversations are available from plain xcb chat")),
-                            Intent::Habitat(_) => return Err(Error::Unavailable("persistent backlog and schedules are available from plain xcb chat")),
+                            Intent::Habitat(_) | Intent::HabitatAt { .. } => return Err(Error::Unavailable("persistent backlog and schedules are available from plain xcb chat")),
                             Intent::Resume(id) => { if store.session(&id)?.is_none() { return Err(Error::Unavailable("session not found")); } current = Some(id); }
                             Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None, None)?.id),
                             Intent::Account(account) => {
@@ -1301,7 +1407,7 @@ pub async fn serve(
                                 let session = current.as_ref().and_then(|id| store.session(id).ok().flatten()).ok_or(Error::Unavailable("select an account and session before generating a pane"))?;
                                 if active.values().any(|task| task.pane) || active.len() >= 16 { return Err(Error::Conflict("pane generation is already running")); }
                                 if active.contains_key(&session.id) { pending_pane = Some((session.id, request)); queue(&outbox, Update::Notice("Pane generation queued for the account's next idle boundary. Editing and hot reload remain available.".into())); }
-                                else { let generated = generation_session(&store, &session, &config)?; let task = start(store.clone(), generated.id.clone(), pane_prompt(&request)?, vec![], true, outbox.clone(), completed.clone()); active.insert(generated.id, task); }
+                                else { let generated = generation_session(&store, &session, &config)?; let task = start(store.clone(), generated.id.clone(), None, pane_prompt(&request)?, vec![], true, outbox.clone(), completed.clone()); active.insert(generated.id, task); }
                             }
                             Intent::AttachPath(path) => { let image = attachments::from_path(store.root(), Path::new(&path))?; queue(&outbox, Update::Attachment(image)); }
                             Intent::AttachRgba { width, height, bytes } => { let image = attachments::from_rgba(store.root(), width, height, bytes)?; queue(&outbox, Update::Attachment(image)); }
@@ -1407,6 +1513,180 @@ fn pane_prompt(request: &str) -> Result<String> {
 mod tests {
     use super::*;
     use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn ui_submission_acknowledges_only_the_exact_durable_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let workspace = crate::private::directory(&base.join("work")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let session = store
+            .create_session(&account.id, route_candidate(0).1, &workspace, 1)
+            .unwrap();
+        let previous = Message {
+            id: new_id("m"),
+            role: Role::User,
+            text: "Repeat this prompt".into(),
+            at_ms: 2,
+            attachments: vec![],
+            provenance: None,
+        };
+        let current = store
+            .append_message(&session.id, session.revision, &previous)
+            .unwrap();
+        let outbox = Arc::new(Mutex::new(Outbox::default()));
+        let submission = UiSubmission {
+            id: new_id("m"),
+            outbox: outbox.clone(),
+            accepted: std::sync::atomic::AtomicBool::new(false),
+        };
+        let message = Message {
+            id: submission.id.clone(),
+            at_ms: 3,
+            ..previous.clone()
+        };
+        assert!(append_input(&store, &session, &message, Some(&submission)).is_err());
+        assert!(!submission.accepted());
+        assert!(outbox.lock().unwrap().updates.is_empty());
+        let current = append_input(&store, &current, &message, Some(&submission)).unwrap();
+        assert!(submission.accepted());
+        let update = outbox.lock().unwrap().updates.pop_front().unwrap();
+        assert!(matches!(update, Update::Submitted { id, context }
+            if id == submission.id && context == xcb_core::ui::TranscriptContext::Session(session.id.clone())));
+        let reopened = Store::open(store.root()).unwrap();
+        let persisted = reopened.messages(&session.id, 128).unwrap();
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(persisted[1].id, submission.id);
+        assert_eq!(persisted[0].text, persisted[1].text);
+        let continuation = Message {
+            id: new_id("m"),
+            role: Role::System,
+            text: "Continue".into(),
+            at_ms: 4,
+            attachments: vec![],
+            provenance: None,
+        };
+        append_input(&store, &current, &continuation, Some(&submission)).unwrap();
+        assert!(
+            outbox.lock().unwrap().updates.is_empty(),
+            "continuations cannot acknowledge another input"
+        );
+    }
+
+    #[tokio::test]
+    async fn ui_async_submission_failure_restores_exact_id_and_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let store = Arc::new(Store::open(&base.join("state")).unwrap());
+        let session = new_id("missing_session");
+        let submission = new_id("input");
+        let outbox = Arc::new(Mutex::new(Outbox::default()));
+        let (finished, mut completion) = mpsc::channel(1);
+        let active = start(
+            store,
+            session.clone(),
+            Some(submission.clone()),
+            "Retain async draft".into(),
+            vec![],
+            false,
+            outbox.clone(),
+            finished,
+        );
+        active.task.await.unwrap();
+        assert!(completion.recv().await.unwrap().1.is_err());
+        let mut queue = outbox.lock().unwrap();
+        assert!(
+            matches!(queue.updates.pop_front().unwrap(), Update::SubmitRejected {
+            id, context: Some(xcb_core::ui::TranscriptContext::Session(context)), text, attachments, reason
+        } if id == submission && context == session && text == "Retain async draft" && attachments.is_empty() && reason.contains("session not found"))
+        );
+        assert!(queue.updates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ui_navigation_burst_rejects_stale_direct_submission_before_effects() {
+        use xcb_core::ui::TranscriptContext;
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let store = Arc::new(Store::open(&base.join("state")).unwrap());
+        let workspace = crate::private::directory(&base.join("work")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let first = store
+            .create_session(&account.id, route_candidate(0).1, &workspace, 1)
+            .unwrap();
+        let second = store
+            .create_session(&account.id, route_candidate(0).1, &workspace, 2)
+            .unwrap();
+        let submission = new_id("m");
+        let image = xcb_core::session::Attachment {
+            digest: "a".repeat(64),
+            media_type: "image/png".into(),
+            bytes: 512,
+            width: 16,
+            height: 16,
+        };
+        let (commands, input) = sync_channel(8);
+        let (output, updates) = sync_channel(1);
+        commands.send(Intent::Resume(second.id.clone())).unwrap();
+        commands
+            .send(Intent::SubmitTo {
+                context: TranscriptContext::Session(first.id.clone()),
+                id: submission.clone(),
+                text: "Keep this in the original session".into(),
+                attachments: vec![image.clone()],
+            })
+            .unwrap();
+        let task = tokio::spawn(serve(
+            store.clone(),
+            workspace,
+            Some(first.id.clone()),
+            input,
+            output,
+        ));
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                while let Ok(update) = updates.try_recv() {
+                    if let Update::SubmitRejected {
+                        id,
+                        context,
+                        text,
+                        attachments,
+                        reason,
+                    } = update
+                    {
+                        assert_eq!(id, submission);
+                        assert_eq!(context, Some(TranscriptContext::Session(first.id.clone())));
+                        assert_eq!(text, "Keep this in the original session");
+                        assert_eq!(attachments, vec![image.clone()]);
+                        assert!(reason.contains("session changed"));
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        commands.send(Intent::Quit).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        for session in [first, second] {
+            assert!(store.messages(&session.id, 128).unwrap().is_empty());
+            assert_eq!(
+                store.session(&session.id).unwrap().unwrap().revision,
+                session.revision
+            );
+        }
+        assert!(store.unsettled_runs().unwrap().is_empty());
+    }
 
     #[test]
     fn workspace_lease_excludes_concurrent_and_unsettled_writers_across_accounts() {
@@ -1804,7 +2084,21 @@ mod tests {
                 loop {
                     while let Ok(update) = updates.try_recv() {
                         match update {
-                            Update::Draft { text, attachments } => {
+                            Update::SubmitRejected {
+                                id,
+                                context,
+                                text,
+                                attachments,
+                                reason,
+                            } => {
+                                assert_eq!(id.as_str(), "m_retained");
+                                assert_eq!(
+                                    context,
+                                    Some(xcb_core::ui::TranscriptContext::Session(
+                                        session.id.clone()
+                                    ))
+                                );
+                                assert!(reason.contains("selected account is disabled"));
                                 assert_eq!(text, "retained task");
                                 assert_eq!(attachments, vec![image.clone()]);
                                 draft = true;

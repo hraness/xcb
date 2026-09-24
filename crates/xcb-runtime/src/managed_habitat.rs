@@ -118,6 +118,7 @@ pub(super) struct CreateOptions<'a> {
     pub deferred: bool,
     pub priority: u8,
     pub worker: Option<&'a WorkerMutation>,
+    pub ui: Option<&'a UiMutation>,
     pub occurrence: Option<&'a Occurrence>,
     pub program: Option<&'a crate::managed_program::AdmittedProgram>,
     pub program_parent: Option<&'a ManagedTask>,
@@ -182,6 +183,81 @@ pub(super) struct WorkerMutation {
     session: Id,
     call: Id,
     input: String,
+}
+
+/// Terminal actions have their own receipt namespace in the existing bounded
+/// mutation ledger. A retry is bound to the original task revision and input,
+/// including after that task has moved on to another question.
+pub(super) struct UiMutation {
+    id: Id,
+    task: Id,
+    input: String,
+    recall: bool,
+}
+impl UiMutation {
+    pub(super) fn new(operation: &Id, task: &Id, input: Value) -> Result<Self> {
+        Ok(Self {
+            id: Id::new(format!("ui_{}", digest(operation.as_str())))?,
+            task: task.clone(),
+            input: serde_json::to_string(&input)?,
+            recall: input["action"] == "recall",
+        })
+    }
+    pub(super) fn replay(&self, db: &Connection) -> Result<Option<ManagedTask>> {
+        let row: Option<(String, String, String)> = db
+            .query_row(
+                "SELECT source_task,input,response FROM habitat_calls WHERE id=?1",
+                [self.id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        row.map(|(task, input, response)| {
+            if task != self.task.as_str() || input != self.input {
+                return Err(Error::Conflict(
+                    "terminal action id was reused with different input",
+                ));
+            }
+            let saved: ManagedTask = decode(&response)?;
+            saved.validate()?;
+            if saved.id != self.task {
+                return Err(Error::Conflict("terminal action receipt task mismatch"));
+            }
+            Ok(saved)
+        })
+        .transpose()
+    }
+    pub(super) fn record(&self, tx: &Transaction<'_>, task: &ManagedTask) -> Result<()> {
+        if self.recall {
+            let has_inbox: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM inbox_events WHERE task=?1)",
+                [self.task.as_str()],
+                |row| row.get(0),
+            )?;
+            if has_inbox {
+                return Err(Error::Conflict(
+                    "queued work has guidance that must remain with the task",
+                ));
+            }
+        }
+        let count: i64 = tx.query_row(
+            "SELECT count(*) FROM habitat_calls WHERE source_task=?1",
+            [self.task.as_str()],
+            |row| row.get(0),
+        )?;
+        if count >= 256 {
+            return Err(xcb_core::Error::Limit("task mutations").into());
+        }
+        tx.execute(
+            "INSERT INTO habitat_calls(id,source_task,input,response) VALUES(?1,?2,?3,?4)",
+            params![
+                self.id.as_str(),
+                self.task.as_str(),
+                self.input,
+                serde_json::to_string(task)?
+            ],
+        )?;
+        Ok(())
+    }
 }
 impl WorkerMutation {
     fn new(
@@ -310,6 +386,22 @@ impl ManagedStore {
     ) -> Result<String> {
         use xcb_core::ui::HabitatCommand;
         match command {
+            HabitatCommand::CancelTask {
+                id,
+                expected_revision,
+            } => {
+                self.cancel_task(&id, expected_revision).await?;
+                Ok("Cancellation requested; waiting for confirmed settlement".into())
+            }
+            HabitatCommand::RecallQueued {
+                id,
+                expected_revision,
+                operation,
+            } => {
+                self.recall_queued(&id, expected_revision, &operation)
+                    .await?;
+                Ok("Queued work recalled for editing".into())
+            }
             HabitatCommand::Steer { task, event, text } => {
                 let event = self.steer_task(&task, event, text)?;
                 Ok(format!(
@@ -387,12 +479,28 @@ impl ManagedStore {
                 ))
             }
             HabitatCommand::Enqueue {
+                id,
                 prompt,
                 deferred,
                 priority,
             } => {
                 let task = self
-                    .enqueue_backlog(conversation, new_id("m"), prompt, deferred, priority)
+                    .enqueue_backlog(conversation, id, prompt, deferred, priority)
+                    .await?;
+                Ok(format!("{} · {}", task.id, task.habitat_status()))
+            }
+            HabitatCommand::EnqueueIn {
+                conversation: expected,
+                id,
+                prompt,
+                deferred,
+                priority,
+            } => {
+                if &expected != conversation {
+                    return Err(Error::Conflict("conversation changed before queueing work"));
+                }
+                let task = self
+                    .enqueue_backlog(&expected, id, prompt, deferred, priority)
                     .await?;
                 Ok(format!("{} · {}", task.id, task.habitat_status()))
             }
@@ -414,8 +522,14 @@ impl ManagedStore {
                 let task = self.release_backlog(&id, expected_revision).await?;
                 Ok(format!("Released {} for automatic routing", task.id))
             }
-            HabitatCommand::Reply { id, text } => {
-                self.reply_to_task(&id, text).await?;
+            HabitatCommand::Reply {
+                id,
+                expected_revision,
+                reply,
+                text,
+            } => {
+                self.reply_to_task_checked(&id, expected_revision, reply, text)
+                    .await?;
                 Ok("Reply queued; provider and host permission gates still apply".into())
             }
             HabitatCommand::Schedule {
@@ -509,6 +623,22 @@ impl ManagedStore {
         let current = self
             .conversation(conversation)?
             .ok_or(Error::Unavailable("conversation not found"))?;
+        let task = Id::new(format!(
+            "t_{}",
+            digest(format!(
+                "xcb-task-v1\0{conversation}\0{submission}\0{}",
+                current.workspace
+            ))
+        ))?;
+        let action = UiMutation::new(
+            &submission,
+            &task,
+            json!({"action":"enqueue","conversation":conversation,"prompt":prompt,
+                   "deferred":deferred,"priority":priority}),
+        )?;
+        if let Some(saved) = action.replay(&*self.db()?)? {
+            return Ok(saved);
+        }
         self.create_habitat_task(
             conversation,
             submission,
@@ -518,6 +648,7 @@ impl ManagedStore {
             CreateOptions {
                 deferred,
                 priority,
+                ui: Some(&action),
                 ..CreateOptions::default()
             },
         )
@@ -605,15 +736,136 @@ impl ManagedStore {
     }
 
     pub async fn reply_to_task(&self, id: &Id, text: String) -> Result<ManagedTask> {
-        validate_prompt(&text)?;
         let task = self
             .task(id)?
             .ok_or(Error::Unavailable("managed task not found"))?;
+        self.reply_to_task_checked(id, task.revision, new_id("m"), text)
+            .await
+    }
+
+    pub async fn reply_to_task_checked(
+        &self,
+        id: &Id,
+        expected_revision: u64,
+        reply: Id,
+        text: String,
+    ) -> Result<ManagedTask> {
+        validate_prompt(&text)?;
+        let action = UiMutation::new(
+            &reply,
+            id,
+            json!({"action":"reply","revision":expected_revision,"text":text}),
+        )?;
+        if let Some(saved) = action.replay(&*self.db()?)? {
+            return Ok(saved);
+        }
+        let task = self
+            .task(id)?
+            .ok_or(Error::Unavailable("managed task not found"))?;
+        if task.revision != expected_revision {
+            return Err(Error::Conflict(
+                "task question changed; read the current question before replying",
+            ));
+        }
         if task.state != TaskState::NeedsInput || task.cancel_requested {
             return Err(Error::Conflict("task is not waiting for input"));
         }
-        self.reply(&task, &task.conversation, new_id("m"), text, vec![])
-            .await
+        self.reply_inner(
+            &task,
+            &task.conversation,
+            reply,
+            text,
+            vec![],
+            Some(&action),
+        )
+        .await
+    }
+
+    /// Request cancellation of the exact observed task. Only the supervisor's
+    /// confirmed settlement may turn this request into a cancelled state.
+    pub async fn cancel_task(&self, id: &Id, expected_revision: u64) -> Result<ManagedTask> {
+        let task = self
+            .task(id)?
+            .ok_or(Error::Unavailable("managed task not found"))?;
+        if task.revision != expected_revision || task.state.terminal() {
+            return Err(Error::Conflict("task changed before cancellation"));
+        }
+        if task.cancel_requested {
+            return Ok(task);
+        }
+        let mut next = task.clone();
+        next.cancel_requested = true;
+        next.detail = "cancellation requested; waiting for confirmed settlement".into();
+        next.revision += 1;
+        next.updated_at_ms = now_ms().max(task.updated_at_ms);
+        let saved = self.transition(&task, next, None).await?;
+        self.label_cancelled_continuation(&task);
+        Ok(saved)
+    }
+
+    pub async fn recall_queued(
+        &self,
+        id: &Id,
+        expected_revision: u64,
+        operation: &Id,
+    ) -> Result<ManagedTask> {
+        let action = UiMutation::new(
+            operation,
+            id,
+            json!({"action":"recall","revision":expected_revision}),
+        )?;
+        if let Some(saved) = action.replay(&*self.db()?)? {
+            return Ok(saved);
+        }
+        let task = self
+            .task(id)?
+            .ok_or(Error::Unavailable("managed task not found"))?;
+        if task.revision != expected_revision
+            || task.state != TaskState::Queued
+            || task.cancel_requested
+            || task.session.is_some()
+            || task.attempts != 0
+            || !task.worker_sessions.is_empty()
+            || !task.user_inputs.is_empty()
+            || !task.attachments.is_empty()
+            || task.program.is_some()
+            || task.project_proposal.is_some()
+            || task.schedule.is_some()
+            || task.context_carried
+            || task.message_count_before != 0
+        {
+            return Err(Error::Conflict(
+                "only work that has never started can be recalled",
+            ));
+        }
+        let has_inbox: bool = self.db()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM inbox_events WHERE task=?1)",
+            [id.as_str()],
+            |row| row.get(0),
+        )?;
+        if has_inbox {
+            return Err(Error::Conflict(
+                "queued work has guidance that must remain with the task",
+            ));
+        }
+        let mut next = task.clone();
+        next.state = TaskState::Cancelled;
+        next.deferred = false;
+        next.detail = "recalled for editing before worker dispatch".into();
+        next.revision += 1;
+        next.updated_at_ms = now_ms().max(task.updated_at_ms);
+        self.transition_ui(
+            &task,
+            next,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            Some(&action),
+        )
+        .await
     }
 
     pub fn schedules(&self, conversation: Option<&Id>) -> Result<Vec<HabitatSchedule>> {

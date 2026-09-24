@@ -205,9 +205,12 @@ def main():
 
         try:
             ready_by = time.monotonic() + 12
-            while b"Ctrl-V" not in capture and time.monotonic() < ready_by:
+            def composer_ready():
+                return "›".encode() in capture and b"Ctrl-T history" in capture
+
+            while not composer_ready() and time.monotonic() < ready_by:
                 drain(.1)
-            check(name + " composer ready", b"Ctrl-V" in capture)
+            check(name + " composer ready", composer_ready())
             drain(.5)
             for index, (data, delay) in enumerate(actions):
                 offset = len(capture)
@@ -424,7 +427,7 @@ def main():
         _, program_segments = terminal("program-tui", ["chat", "--resume", conversation], [
             ((f"/program {program['id']}\r").encode(), .5), (b"\x1b", .2),
             (b"/program\r", .5), (b"\x1b", .2),
-            ((f"cancel {program['id']}\r").encode(), .5), (b"\x04", .3),
+            ((f"/cancel {program['id']}\r").encode(), .5), (b"\x04", .3),
         ], redraw_at=(0, 2), durable_at={4: lambda: task(program["id"])["state"] == "cancelled"})
         inspector = re.sub(r"\s+", "", program_segments[0])
         check("TUI program inspector shows linked call and attention", all(text in inspector
