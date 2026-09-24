@@ -1,6 +1,6 @@
 # Known quota limits and route selection
 
-Native XCB keeps known Claude account-wide exhaustion separate from short-lived
+Native xcb keeps known Claude account-wide exhaustion separate from short-lived
 usage percentages. A current-credential observation of 100% use in `five_hour`
 or `seven_day` prevents a new coding turn until the provider-reported reset,
 even after the five-minute percentage freshness period. If both windows are
@@ -15,7 +15,7 @@ ownership, so a second terminal cannot race a newly recorded exhaustion.
 Configured continuation retains its existing cleanup, effect, checkpoint and
 quota-evidence gates; this change only removes blocked candidates.
 
-Managed tasks apply a second bounded selection stage after admission. XCB derives
+Managed tasks apply a second bounded selection stage after admission. xcb derives
 relative quality, cost and latency profiles from observed model identities,
 peels non-dominated models into Pareto layers, then scores them for routine,
 balanced or complex work. Fresh remaining usage, configured favorites and a
@@ -56,14 +56,14 @@ windows, arbitrary Codex quota buckets, or Devin resource-exhaustion errors.
 It does not persist unknown-reset denials or authentication health. Existing
 percentage summaries remain telemetry, not proof of model-specific availability.
 
-Official temporary pricing offers are a separate observation class. XCB checks
+Official temporary pricing offers are a separate observation class. xcb checks
 the bounded public [Devin pricing page](https://devin.ai/pricing) at supervisor
 startup and every six hours,
 retains its source digest, treats it as stale after 24 hours, and enforces the
 advertised end timestamp independently of page freshness. The September 2026
 observation annotates the advertised Devin CLI SWE-2 promotion only for known
 SWE-2 effort variants. The public offer is conditional on an eligible paid plan;
-it does not prove that a connected account qualifies. XCB therefore does not
+it does not prove that a connected account qualifies. xcb therefore does not
 zero a route’s relative cost or grant a free-price bonus from this observation.
 It never qualifies Devin or verifies the user-supplied `--plan` label. Inspect or refresh it with `xcb offers` and
 `xcb offers --refresh`.
@@ -77,7 +77,7 @@ tried by that task. Unsettled or uncertain effects are never failed over.
 
 The separation of account health from active work and selection was informed by
 [Underclass's routing and health design](https://github.com/ghuntley/underclass/tree/a0ed73d732e5230657595ab6803c182aea93d792).
-XCB retains its own custody and provider contracts; no Underclass source code
+xcb retains its own custody and provider contracts; no Underclass source code
 was copied.
 
 ## Automatic capability selection

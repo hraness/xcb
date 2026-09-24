@@ -33,7 +33,14 @@ test("public entry pages keep one optional support footer and no product signup"
 test("the homepage clearly separates source installation from verified releases", () => {
   const html = renderToStaticMarkup(<Home />);
   expect(html.match(/<h1\b/gu)).toHaveLength(1);
-  expect(html).toContain("All your AI subscriptions. One router.");
+  const heroHeadings: string[] = [];
+  new HTMLRewriter().on("h1#hero-title", { text(chunk) { heroHeadings.push(chunk.text); } }).transform(html);
+  expect(heroHeadings.join("").trim()).not.toBe("");
+  // The hero summary names every supported provider.
+  const heroSummary: string[] = [];
+  new HTMLRewriter().on('header[aria-labelledby="hero-title"] .hraness-marketing-hero__summary', { text(chunk) { heroSummary.push(chunk.text); } }).transform(html);
+  expect(heroSummary.join("").trim()).not.toBe("");
+  for (const provider of ["Claude", "Codex", "Devin"]) expect(heroSummary.join("")).toContain(provider);
   expect(html).toContain("./scripts/install-native.sh");
   if (publishedRelease === null) {
     expect(html).toContain("No native release is published yet; install from source");
@@ -109,9 +116,9 @@ test("support boundaries appear before installation without implying offline inf
   const html = renderToStaticMarkup(<Home />);
   expect(html).toContain("source preview");
   expect(html).toContain("macOS ARM64");
-  expect(html).toContain("still needs its own evidence");
-  expect(html).toContain("Offline Linux ARM64");
-  expect(html).toContain("No native macOS command execution");
+  expect(html).toContain("signed-in Devin account hasn’t been confirmed");
+  expect(html).toContain("offline in a Linux ARM64 VM");
+  expect(html).toContain("native macOS commands can’t run");
   expect(html).toContain("Model requests still go to the provider");
   expect(html.indexOf('id="readiness"')).toBeLessThan(html.indexOf('id="install"'));
   expect(html).toContain('href="/compare"');

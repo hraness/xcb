@@ -156,9 +156,9 @@ from native tool inventory, authentication and live-provider qualification.
 `application-prerequisites.py` collects actual native validation output and
 prepares the private input for `xcb --json qualify-application`. It does not
 perform authenticated inference or activate application access. Python 3.9 or
-newer, Git, Cargo, the final release XCB executable, and that executable's current
+newer, Git, Cargo, the final release xcb executable, and that executable's current
 doctor pins and account/model catalog are required. The `--state` directory is
-existing private XCB state; the script inspects it through the read-only CLI and
+existing private xcb state; the script inspects it through the read-only CLI and
 never reads credential files itself.
 
 Freeze the source and build `cargo build --release --locked -p xcb-cli`. Use the
@@ -182,7 +182,7 @@ output directories and targets. The actual
 workspace test log supplies the mandatory application unit and contract cases,
 so those tests are not run twice. Native source files, embedded fixtures, Cargo
 manifests/lockfile, local Cargo configuration, toolchain and compiler environment
-are checked before and after collection. XCB's inspection command supplies the
+are checked before and after collection. xcb's inspection command supplies the
 exact compiled policy/configuration, executable and provider identities.
 
 For Claude, collection runs the current credential-free kernel probe and checks
@@ -191,7 +191,7 @@ process joins. It does not execute Claude. Codex and Devin instead require an
 explicit `--provider-boundary /absolute/current-native-boundary.json` from their
 separate reviewed fixtures; the script checks the supported receipt schema,
 current binary/source bindings and successful observations. Devin's helper must
-match the final XCB binary. Run those fixtures again when their bindings change.
+match the final xcb binary. Run those fixtures again when their bindings change.
 Keep their original observation times; a boundary receipt is never refreshed by
 copying it into a new bundle.
 
@@ -232,4 +232,4 @@ evidence or turn a failed command into a success.
 Run `python3 qualification/application-prerequisites.py --self-test` through the
 host scheduler for the hermetic parser, custody and bundle regressions. These
 checks use only synthetic files and a bounded Python signal-mask child; they do
-not run Cargo, XCB or providers.
+not run Cargo, xcb or providers.

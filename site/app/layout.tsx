@@ -17,9 +17,9 @@ import "./compare/compare.css";
  */
 const initialPalette = getDesignPaletteTheme("tokyo-night", "light");
 
-const title = "xcb — One router for your Claude, Codex & Devin subscriptions";
+const title = "xcb · One router for your Claude, Codex, and Devin subscriptions";
 const description =
-  "Use the AI coding subscriptions you already pay for. xcb routes each task to an eligible Claude, Codex, or Devin account — one bounded turn, proven custody. Agents call a JSON contract; apps embed the TypeScript SDK. Open source.";
+  "Route coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. Agents call xcb with JSON; apps embed the TypeScript SDK. Open source.";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://xcb.sh"),

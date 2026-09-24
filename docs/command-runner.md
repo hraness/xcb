@@ -12,7 +12,7 @@ boundary qualification is separate from live coding acceptance; the dated
 does not establish current quota or model availability. These results do not
 establish an unrestricted replacement for the native CLIs.
 
-The native `workspace_exec` tool runs bounded Linux commands in an XCB-owned
+The native `workspace_exec` tool runs bounded Linux commands in an xcb-owned
 Lima VM on macOS ARM64. The VM has no host workspace mounts, SSH agent forwarding,
 or imported provider credentials. Provider processes keep their existing
 confinement. Commands receive a staged workspace and have no network access.
@@ -25,7 +25,7 @@ disk, 3 GiB memory, and two CPUs. Setup reserves an eight-GiB host free-space fl
 plus its remaining bounded provisioning allocation. It does not reuse other
 Lima VMs or import their configuration.
 
-Run from the XCB checkout, using the installed host scheduler where available:
+Run from the xcb checkout, using the installed host scheduler where available:
 
 ```sh
 "$HOME/.bun/bin/hra-host-run" --mode=shared --lane=mac-native \
@@ -47,12 +47,12 @@ rechecks its admitted environment. Version strings alone do not admit a backend.
 After an intentional backend update, stop active commands, install the matching
 native CLI, and repeat the setup command with `--refresh`. This preserves the
 previous manifest and requires fresh qualification. It does not release an
-unsettled job or authorize deleting its records. Restart open XCB terminals and
+unsettled job or authorize deleting its records. Restart open xcb terminals and
 rerun provider `doctor` after replacing the native CLI.
 
 ## Using the tool
 
-After successful setup and admission, ask XCB to run a project check. The
+After successful setup and admission, ask xcb to run a project check. The
 provider can call this closed schema through the workspace broker:
 
 ```json
@@ -98,8 +98,8 @@ support; a successful plan alone does not activate dependency use.
 This frontend supports Python 3.9 and newer on macOS; it has been checked with
 Apple Python 3.9.6 and Homebrew Python 3.14.6. It observes process exit without
 reaping through macOS kqueue, and TOML parsing stays inside the guest.
-Run from the matching XCB source checkout. Both paths below must be absolute,
-physical paths, and the command root must already belong to XCB.
+Run from the matching xcb source checkout. Both paths below must be absolute,
+physical paths, and the command root must already belong to xcb.
 
 First inspect the no-download plan. `--dry-run` is also the default. Planning
 preserves a private evidence receipt and acknowledges joined guest scratch for
@@ -149,7 +149,7 @@ The workspace must contain `Cargo.toml` with a root `Cargo.lock`, `package.json`
 with a root `bun.lock`, or both pairs. Matching nested manifests are included;
 nested lockfiles are reported but are not covered by the root preparation. A
 site with its own lockfile must be prepared separately with that site directory
-as `--workspace`, then used as XCB's workspace with
+as `--workspace`, then used as xcb's workspace with
 `xcb --cwd /absolute/path/to/project/site`.
 
 Downloads are limited to checksum-bound public crates/npm archives and exact
@@ -188,7 +188,7 @@ or every repository layout.
 Only a command that exits successfully, with a complete captured result, no
 cancellation or supervisor error, and independently proven join may publish.
 Publication checks every changed file against its source snapshot before the
-first host write, then checks again immediately before each replacement. XCB
+first host write, then checks again immediately before each replacement. xcb
 serializes cooperating workspace writers. A rejected revision check preserves
 the concurrent source edit and retains the command's staged result.
 
@@ -198,7 +198,7 @@ run that retains account custody. Directory removal, empty-directory changes,
 and replacing a file with a directory or vice versa are unsupported. Inspect an
 uncertain workspace before deciding how to continue.
 
-After successful publication and durable command/tool settlement, XCB verifies
+After successful publication and durable command/tool settlement, xcb verifies
 and removes only that command's owned input snapshot. It preserves historical
 records and failed, cancelled, or uncertain inputs. Cleanup failure is reported
 without undoing a proven join. The guest can reclaim its acknowledged seed and

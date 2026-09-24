@@ -332,12 +332,12 @@ a { text-underline-offset: 0.2em; }
 .xcb-field-note[data-type="agent"] { --xcb-note-accent: light-dark(#2b5fbf, #7ea4f0); }
 .xcb-field-note[data-type="route"] { --xcb-note-accent: light-dark(#1f6f54, #6fc2a0); }
 .xcb-field-note[data-type="session"] { --xcb-note-accent: light-dark(#386345, #a7c397); }
-.xcb-field-note[data-type="custody"] { --xcb-note-accent: light-dark(#8b631f, #d6b670); }
+.xcb-field-note[data-type="lock"] { --xcb-note-accent: light-dark(#8b631f, #d6b670); }
 .xcb-field-note[data-type="limit"] { --xcb-note-accent: light-dark(#8a4a2c, #d88d64); }
 .xcb-field-note[data-type="terminal"] { --xcb-note-accent: var(--muted); }
-.xcb-field-note[data-type="receipt"] { --xcb-note-accent: light-dark(#386345, #a7c397); }
+.xcb-field-note[data-type="record"] { --xcb-note-accent: light-dark(#386345, #a7c397); }
 .xcb-field-note[data-type="task"] { --xcb-note-accent: light-dark(#6d5a8a, #a793cf); }
-.xcb-field-note[data-type="manifest"] { --xcb-note-accent: light-dark(#4a7a78, #7fb5b2); }
+.xcb-field-note[data-type="rule"] { --xcb-note-accent: light-dark(#4a7a78, #7fb5b2); }
 .xcb-field-note-title { margin: 0 0 .3rem; font: 600 .8125rem/1.25 var(--font-text); letter-spacing: -.005em; }
 .xcb-field-note[data-type="terminal"] .xcb-field-note-title { font-family: var(--font-mono); font-weight: 500; }
 .xcb-field-note-body { margin: 0; color: var(--muted); font-size: .6875rem; line-height: 1.5; }
