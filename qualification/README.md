@@ -5,8 +5,8 @@ checks a default-deny macOS Seatbelt profile using only synthetic files and a
 local endpoint:
 
 ```sh
-oompa-host-run --mode=shared --lane=mac-native --label=xcb-kernel-boundary-probe -- bun qualification/macos-sandbox.ts
-oompa-host-run --mode=shared --lane=mac-native --label=xcb-native-claude-os-scope -- bun qualification/claude-native.ts --os-sandbox
+hra-host-run --mode=shared --lane=mac-native --label=xcb-kernel-boundary-probe -- bun qualification/macos-sandbox.ts
+hra-host-run --mode=shared --lane=mac-native --label=xcb-native-claude-os-scope -- bun qualification/claude-native.ts --os-sandbox
 ```
 
 The second command applies that same experimental profile to the actual native
@@ -41,7 +41,7 @@ native production qualification.
 Run the explicit fixture on macOS ARM64 through the installed host scheduler:
 
 ```sh
-oompa-host-run --mode=shared --lane=mac-native --label=xcb-native-claude-scope -- bun qualification/claude-native.ts
+hra-host-run --mode=shared --lane=mac-native --label=xcb-native-claude-scope -- bun qualification/claude-native.ts
 ```
 
 It runs the actual pinned native Claude Code binary through the real Agent SDK,
