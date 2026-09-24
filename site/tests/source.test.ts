@@ -63,8 +63,8 @@ describe("xcb site source contract", () => {
       read("app/docs/page.tsx"),
       read("app/readme.generated.ts"),
     ]);
-    expect(packageJson).toContain('"@hraness/ui": "github:hraness/ui#c6b824c3ebcb95ba804f98076639946d03759a21"');
-    expect(packageJson).toContain('"@hraness/design-kit": "github:hraness/design-kit#b0326108cf58268827ee69007414188ee27e2963"');
+    expect(packageJson).toContain('"@hraness/ui": "github:hraness/ui#v0.5.18"');
+    expect(packageJson).toContain('"@hraness/design-kit": "github:hraness/design-kit#v0.16.2"');
     expect(home).toContain('import { AskAiAboutThis } from "@hraness/ui"');
     expect(home).toContain('<AskAiAboutThis className="ask-ai" url="https://xcb.sh" />');
     expect(docs).toContain('<AskAiAboutThis className="ask-ai" url="https://xcb.sh/docs" />');

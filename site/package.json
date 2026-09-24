@@ -21,9 +21,9 @@
     "check": "bun run check:theme && bun run sync:readme && bun run build:theme && bun run test && bun run lint && bun run typecheck && bun run build"
   },
   "dependencies": {
-    "@hraness/design-kit": "github:hraness/design-kit#b0326108cf58268827ee69007414188ee27e2963",
+    "@hraness/design-kit": "github:hraness/design-kit#v0.16.2",
     "@hraness/site-footer": "github:hraness/site-footer#v0.15.0",
-    "@hraness/ui": "github:hraness/ui#c6b824c3ebcb95ba804f98076639946d03759a21",
+    "@hraness/ui": "github:hraness/ui#v0.5.18",
     "@hraness/web-discovery": "github:hraness/web-discovery#v0.6.0",
     "next": "16.3.5",
     "react": "19.3.0",
