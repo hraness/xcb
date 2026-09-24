@@ -72,7 +72,7 @@ python3 qualification/inbox-acceptance.py /absolute/path/to/xcb --evidence-dir /
 ```
 
 On a host with the HRA scheduler, run that command through its installed absolute
-`hra-host-run` path and the appropriate compute lane. The script creates a fresh
+`host-run` path and the appropriate compute lane. The script creates a fresh
 private state, home, workspace and coordination root, launches only its owned
 daemon, and retains JSON, terminal captures and diagnostics. A future fixture
 schedule keeps that daemon alive during the checks and is paused before shutdown.

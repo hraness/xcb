@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provision only a separately owned XCB Lima home. Run under hra-host-run."""
+"""Provision only a separately owned XCB Lima home. Run under host-run."""
 import argparse
 import fcntl
 import hashlib

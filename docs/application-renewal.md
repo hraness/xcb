@@ -36,7 +36,7 @@ for binding, the first run, installation, and removal.
   --source /absolute/xcb --state /absolute/private/xcb-state \
   --xcb /absolute/path/to/installed/xcb \
   --provider-executable /absolute/path/to/native/claude \
-  --scheduler /absolute/path/to/hra-host-run \
+  --scheduler /absolute/path/to/host-run \
   --cargo /absolute/path/to/physical/cargo \
   --node /absolute/path/to/physical/node --bun /absolute/path/to/physical/bun \
   --account a_selected --model claude/sonnet/low
@@ -46,7 +46,7 @@ Binding creates a new mode0700 directory and mode0600 files. It performs only
 read-only native inspection/capability commands and Git/toolchain identification;
 it does not refresh an account, run Cargo gates, contact a provider, or schedule
 anything. Existing output directories are refused. Python3.9+, the macOS Rust
-installation under `/opt/homebrew`, and the HRA host scheduler are required by
+installation under `/opt/homebrew`, and the host scheduler are required by
 this initial implementation.
 
 After review and coordination with the native account owner, install explicitly:
@@ -196,6 +196,6 @@ Run synthetic tests under the host scheduler. They never call native xcb, Cargo,
 launchctl, or a provider:
 
 ```sh
-/absolute/path/to/hra-host-run --mode=shared --lane=mac-native --label=xcb-renewal-synthetic-tests -- \
+/absolute/path/to/host-run --mode=shared --lane=mac-native --label=xcb-renewal-synthetic-tests -- \
   /usr/bin/python3 -I /absolute/xcb/scripts/application-renewal.test.py
 ```
