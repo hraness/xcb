@@ -86,21 +86,29 @@ impl Protocol for ClaudeProtocol {
             claude::Event::Delta { thinking, text } => events.push(Event::Delta { thinking, text }),
             claude::Event::Assistant { text } => events.push(Event::Assistant(text)),
             claude::Event::Quota {
-                window,
-                utilization,
-                resets_at_ms,
+                observations,
                 failure,
                 notice,
             } => {
                 if let Some(notice) = notice {
                     events.push(Event::Diagnostic(runner::Diagnostic::notice(notice)));
                 }
-                events.push(Event::Quota {
-                    window,
-                    used_percent: utilization.map(|used| used * 100.0),
-                    resets_at_ms,
-                    failure,
-                });
+                if observations.is_empty() {
+                    events.push(Event::Quota {
+                        window: None,
+                        used_percent: None,
+                        resets_at_ms: None,
+                        failure,
+                    });
+                }
+                for (index, observation) in observations.into_iter().enumerate() {
+                    events.push(Event::Quota {
+                        window: Some(observation.window),
+                        used_percent: Some(observation.utilization * 100.0),
+                        resets_at_ms: observation.resets_at_ms,
+                        failure: if index == 0 { failure } else { None },
+                    });
+                }
             }
             claude::Event::Result {
                 terminal,

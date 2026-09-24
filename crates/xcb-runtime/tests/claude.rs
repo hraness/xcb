@@ -49,15 +49,24 @@ fn malformed_recognized_events_refuse_and_unknown_events_are_inert() {
         parse_event(br#"{"type":"future_notification"}"#).unwrap(),
         Event::Notice
     ));
-    // Telemetry drift is not malformed: an out-of-range meter clamps, and a
-    // rejection still classifies its quota failure.
+    // Telemetry drift is not malformed: a rejection without a recognizable
+    // window still classifies its quota failure (nothing is recordable), and
+    // an out-of-range meter for a known window clamps to exhaustion.
     assert!(matches!(
         parse_event(br#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","utilization":2.0}}"#).unwrap(),
         Event::Quota {
-            utilization: Some(1.0),
+            ref observations,
             failure: Some(Failure::AccountQuota),
             ..
-        }
+        } if observations.is_empty()
+    ));
+    assert!(matches!(
+        parse_event(br#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","rateLimitType":"five_hour","utilization":2.0}}"#).unwrap(),
+        Event::Quota {
+            ref observations,
+            failure: Some(Failure::AccountQuota),
+            ..
+        } if observations.len() == 1 && observations[0].window == "five_hour" && observations[0].utilization == 1.0
     ));
     assert!(parse_event(br#"{"type":"rate_limit_event"}"#).is_err());
 }
