@@ -173,11 +173,12 @@ Plain `xcb` reopens the latest persistent control conversation for the workspace
 managed tasks routed through admitted Codex, Claude, or Devin sessions; closing
 the terminal detaches without cancelling them. Open another terminal for an
 independent conversation over the same task swarm, use `/tasks` to inspect work,
-or `/sessions` to switch control conversations. Ordinary prompts create new work;
-when one task in the conversation asks for input, the next reply answers it.
-Use `new task: …` to explicitly start separate work. Independent workspaces can
-run concurrently; tasks in the same workspace run one at a time. Say
-`cancel <task-id>` to request cancellation and inspect `/tasks` for settlement.
+or `/resume` to switch control conversations. Ordinary prompts create new work.
+In the v0.7 terminal, select a task in `/agents` and press `s` to guide it or `a`
+to answer its current question; the prompt displays the target. `/task` returns
+to new work and Tab queues it. Independent workspaces can run concurrently;
+tasks in the same workspace run one at a time. Use
+`/cancel <task-id>` to request cancellation and inspect `/tasks` for settlement.
 
 Use `/backlog` for this conversation's backlog and `/backlog all` to browse all
 projects. `/attention` collects questions, approvals and actions across agents.
@@ -378,7 +379,9 @@ route, saved session id, and settled outcome facts as bounded JSON. See
 
 `xcb chat --resume` reopens a control conversation; `xcb resume` opens a saved
 direct provider session and its workspace. Neither is a headless continuation
-command. `/help` lists terminal commands. Conversations, tasks, provider
+command. `/help` lists terminal commands. The [terminal guide](docs/terminal.md)
+covers editing keys, transcript search, agent guidance, and draft recovery.
+Conversations, tasks, provider
 sessions, and credentials live in the private native state root
 `~/.local/share/xcb`; `--state /absolute/path` or `XCB_STATE` overrides it.
 The `xcb-compat` compatibility CLI uses `~/.xcb` instead. Do not point both

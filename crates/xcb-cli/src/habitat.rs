@@ -66,6 +66,9 @@ pub enum BacklogCommand {
         /// Queue priority from 0 to 9; larger values run first.
         #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u8).range(0..=9))]
         priority: u8,
+        /// Stable submission identity for retrying the same prompt and options.
+        #[arg(long)]
+        id: Option<Id>,
     },
     /// Edit undispatched work; a revision protects against concurrent edits.
     Edit {
@@ -94,6 +97,23 @@ pub enum BacklogCommand {
         id: Id,
         /// Answer or additional context; does not grant permissions.
         text: String,
+        /// Revision of the question being answered; stale questions are rejected.
+        #[arg(long)]
+        revision: Option<u64>,
+        /// Stable reply identity for retrying the same answer.
+        #[arg(long, requires = "revision")]
+        reply_id: Option<Id>,
+    },
+    /// Cancel never-started ordinary queued work and print its prompt for editing.
+    Recall {
+        /// Queued task id from `xcb backlog`.
+        id: Id,
+        /// Current task revision; stale recall is rejected.
+        #[arg(long)]
+        revision: u64,
+        /// Stable operation identity for retrying this recall.
+        #[arg(long)]
+        operation: Id,
     },
     /// Read recent work summaries for a persistent conversation.
     Memory {
@@ -490,10 +510,17 @@ pub async fn backlog(
             prompt,
             ready,
             priority,
+            id,
         }) => {
             runnable = ready;
             store
-                .enqueue_backlog(&conversation, new_id("input"), prompt, !ready, priority)
+                .enqueue_backlog(
+                    &conversation,
+                    id.unwrap_or_else(|| new_id("input")),
+                    prompt,
+                    !ready,
+                    priority,
+                )
                 .await?
         }
         Some(BacklogCommand::Edit {
@@ -517,9 +544,49 @@ pub async fn backlog(
             runnable = true;
             store.release_backlog(&id, revision).await?
         }
-        Some(BacklogCommand::Reply { id, text }) => {
+        Some(BacklogCommand::Recall {
+            id,
+            revision,
+            operation,
+        }) => {
+            let task = store.recall_queued(&id, revision, &operation).await?;
+            if json {
+                crate::print_json(&task)?;
+            } else {
+                println!(
+                    "{}",
+                    xcb_core::display_text(
+                        task.backlog_prompt.as_deref().unwrap_or(&task.goal),
+                        xcb_core::MAX_TEXT_BYTES
+                    )
+                );
+            }
+            return Ok(0);
+        }
+        Some(BacklogCommand::Reply {
+            id,
+            text,
+            revision,
+            reply_id,
+        }) => {
             runnable = true;
-            store.reply_to_task(&id, text).await?
+            let revision = match revision {
+                Some(revision) => revision,
+                None => {
+                    store
+                        .task(&id)?
+                        .ok_or(Error::Unavailable("managed task not found"))?
+                        .revision
+                }
+            };
+            store
+                .reply_to_task_checked(
+                    &id,
+                    revision,
+                    reply_id.unwrap_or_else(|| new_id("reply")),
+                    text,
+                )
+                .await?
         }
     };
     print_task(&task, json)?;

@@ -148,6 +148,33 @@ enum Commands {
     },
     /// List persistent managed control conversations.
     Conversations,
+    /// Read a page of saved conversation history, oldest message first.
+    History {
+        /// Conversation id, or session id when --direct is set.
+        id: Id,
+        /// Read a direct provider session instead of a managed conversation.
+        #[arg(long)]
+        direct: bool,
+        /// Read messages older than the previous page's first_sequence.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=i64::MAX as u64))]
+        before: Option<u64>,
+        /// Maximum messages in this page, from 1 to 512.
+        #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u16).range(1..=512))]
+        limit: u16,
+    },
+    /// Rename a conversation only if its title still matches the inspected value.
+    Rename {
+        /// Conversation id, or session id when --direct is set.
+        id: Id,
+        /// New display title.
+        title: String,
+        /// Exact current title; a concurrent rename is rejected.
+        #[arg(long)]
+        expected_title: String,
+        /// Rename a direct provider session instead of a managed conversation.
+        #[arg(long)]
+        direct: bool,
+    },
     /// Manage a conversation's durable work queue and completed work.
     Backlog {
         #[command(subcommand)]
@@ -562,6 +589,14 @@ enum TaskCommand {
         /// Only messages after this sequence number (default 0).
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(..=i64::MAX as u64))]
         after: u64,
+    },
+    /// Request cancellation only if the task still matches the inspected revision.
+    Cancel {
+        /// Managed task id from `xcb tasks` or `xcb backlog`.
+        id: Id,
+        /// Current task revision; stale cancellation is rejected.
+        #[arg(long)]
+        revision: u64,
     },
 }
 #[derive(Subcommand)]
@@ -2062,6 +2097,61 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Some(Commands::History {
+            id,
+            direct,
+            before,
+            limit,
+        }) => {
+            let page = if direct {
+                store.transcript_page(&id, before, usize::from(limit))?
+            } else {
+                xcb_runtime::managed::ManagedStore::open(store.root())?.transcript_page(
+                    &id,
+                    before,
+                    usize::from(limit),
+                )?
+            };
+            if cli.json {
+                print_json(page)?;
+            } else {
+                for message in page.messages {
+                    println!(
+                        "{:?}\n{}\n",
+                        message.role,
+                        xcb_core::display_text(&message.text, xcb_core::MAX_TEXT_BYTES)
+                    );
+                }
+                if page.has_older
+                    && let Some(before) = page.first_sequence
+                {
+                    println!(
+                        "Older messages: xcb history {id} --before {before}{}",
+                        if direct { " --direct" } else { "" }
+                    );
+                }
+            }
+            Ok(0)
+        }
+        Some(Commands::Rename {
+            id,
+            title,
+            expected_title,
+            direct,
+        }) => {
+            if direct {
+                print_json(store.rename_session(&id, &expected_title, &title)?)?;
+            } else {
+                print_json(
+                    xcb_runtime::managed::ManagedStore::open(store.root())?.rename_conversation(
+                        &id,
+                        &expected_title,
+                        &title,
+                    )?,
+                )?;
+            }
+            Ok(0)
+        }
         Some(Commands::Conversations) => {
             let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
             let conversations = managed.conversations(256)?;
@@ -2113,6 +2203,11 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let task = xcb_runtime::managed::inspect(&managed, &id)?
                         .ok_or(Error::Unavailable("managed task not found"))?;
                     print_json(task)?;
+                }
+                Some(TaskCommand::Cancel { id, revision }) => {
+                    let task = managed.cancel_task(&id, revision).await?;
+                    print_json(task)?;
+                    xcb_runtime::managed::ensure_daemon(store.root(), &std::env::current_exe()?)?;
                 }
                 Some(TaskCommand::Messages { id, after }) => {
                     managed
@@ -2680,7 +2775,11 @@ async fn managed_chat(
     let executable = std::env::current_exe()?;
     let (updates, display) = sync_channel(256);
     let (commands, input) = sync_channel(32);
-    let ui = tokio::task::spawn_blocking(move || xcb_tui::run(display, commands));
+    let options = xcb_tui::RunOptions {
+        recovery_directory: Some(store.root().join("input-recovery")),
+    };
+    let ui =
+        tokio::task::spawn_blocking(move || xcb_tui::run_with_options(display, commands, options));
     let result =
         xcb_runtime::managed::serve_ui(store, conversation.id, input, updates, executable).await;
     let ui = ui
@@ -2709,7 +2808,11 @@ async fn direct_chat(
     }
     let (updates, display) = sync_channel(256);
     let (commands, input) = sync_channel(32);
-    let ui = tokio::task::spawn_blocking(move || xcb_tui::run(display, commands));
+    let options = xcb_tui::RunOptions {
+        recovery_directory: Some(store.root().join("input-recovery")),
+    };
+    let ui =
+        tokio::task::spawn_blocking(move || xcb_tui::run_with_options(display, commands, options));
     let result = kernel::serve(store, cwd, session, input, updates).await;
     let ui = ui
         .await
@@ -3403,6 +3506,80 @@ mod tests {
             Some(Commands::Models {
                 command: Some(ModelCommand::Route { task, provider: Some(Provider::Codex) })
             }) if task == "fix a race"
+        ));
+    }
+
+    #[test]
+    fn terminal_history_and_task_controls_require_explicit_identity() {
+        assert!(
+            Cli::try_parse_from([
+                "xcb",
+                "backlog",
+                "reply",
+                "t_a",
+                "answer",
+                "--reply-id",
+                "reply_a"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["xcb", "tasks", "cancel", "t_a"]).is_err());
+        let cli =
+            Cli::try_parse_from(["xcb", "tasks", "cancel", "t_a", "--revision", "9"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Tasks {
+                command: Some(TaskCommand::Cancel { revision: 9, .. })
+            })
+        ));
+        assert!(Cli::try_parse_from(["xcb", "rename", "c_a", "New title"]).is_err());
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "rename",
+            "c_a",
+            "New title",
+            "--expected-title",
+            "Old title",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Rename { direct: false, expected_title, .. }) if expected_title == "Old title")
+        );
+        assert!(Cli::try_parse_from(["xcb", "history", "c_a", "--limit", "513"]).is_err());
+        assert!(Cli::try_parse_from(["xcb", "history", "c_a", "--before", "0"]).is_err());
+        let cli =
+            Cli::try_parse_from(["xcb", "history", "s_a", "--direct", "--before", "19"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::History {
+                direct: true,
+                before: Some(19),
+                limit: 128,
+                ..
+            })
+        ));
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "backlog",
+            "reply",
+            "t_a",
+            "answer",
+            "--revision",
+            "7",
+            "--reply-id",
+            "reply_a",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Backlog {
+                command: Some(habitat::BacklogCommand::Reply {
+                    revision: Some(7),
+                    reply_id: Some(_),
+                    ..
+                }),
+                ..
+            })
         ));
     }
 

@@ -1,3 +1,6 @@
+#[path = "markdown.rs"]
+mod markdown;
+
 use crate::{App, EditorKind, Modal, view_context};
 use ratatui::{
     Frame,
@@ -5,13 +8,14 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, StyledGrapheme, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
-use ratatui_textarea::TextArea;
+use ratatui_textarea::{CursorMove, TextArea};
 use std::{
     collections::{HashMap, VecDeque, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
 };
+use unicode_segmentation::UnicodeSegmentation;
 use xcb_core::{
     Id, display_text,
     panes::{Node, Source},
@@ -44,7 +48,7 @@ fn status_symbol(state: State) -> &'static str {
 }
 
 fn muted() -> Style {
-    Style::default().fg(Color::DarkGray)
+    Style::default().add_modifier(Modifier::DIM)
 }
 fn clean(text: &str) -> String {
     display_text(text, 256 * 1024)
@@ -59,16 +63,16 @@ fn expand_tabs_at(line: &str, column: u16) -> String {
         return line.to_owned();
     }
     let mut out = String::with_capacity(line.len() + 8);
-    let mut column = column;
+    let mut column = column as usize;
     for ch in line.chars() {
         if ch == '\t' {
             let pad = 4 - column % 4;
-            out.extend(std::iter::repeat_n(' ', pad as usize));
+            out.extend(std::iter::repeat_n(' ', pad));
             column += pad;
         } else {
             if !ch.is_control() {
                 let mut buf = [0; 4];
-                column = column.saturating_add(ch.encode_utf8(&mut buf).cell_width());
+                column = column.saturating_add(ch.encode_utf8(&mut buf).cell_width() as usize);
             }
             out.push(ch);
         }
@@ -246,7 +250,7 @@ fn message_lines(
         }
         Role::Assistant => {
             push_boundary(&mut lines, message, previous);
-            lines.extend(body_lines(&message.text, Style::default()));
+            lines.extend(markdown::lines(&message.text));
             lines.push(Line::default());
         }
         // A finished tool call is a compact cell in the story.
@@ -279,20 +283,12 @@ fn next_boundary<'a>(
         previous
     }
 }
-/// Key identifying a message's wrapped rows: id, content shape, boundary
-/// context, and the toggles that change its rendered shape. Persisted
-/// messages are append-only, but context elision and retries can rewrite a
-/// body in place — hashing the length alone would miss a same-length edit,
-/// while hashing every byte costs a 512KiB scan per frame on big
-/// transcripts. Sampling the head and tail keeps the key O(1) yet still
-/// catches any realistic rewrite.
+/// Key identifying a message's wrapped rows. Include the whole bounded body:
+/// a same-length replacement in its middle must not leave stale visible text.
 fn message_key(app: &App, message: &Message, previous: Option<&MessageProvenance>) -> u64 {
     let mut hasher = DefaultHasher::new();
     (message.role as u8).hash(&mut hasher);
-    message.text.len().hash(&mut hasher);
-    let bytes = message.text.as_bytes();
-    bytes[..64.min(bytes.len())].hash(&mut hasher);
-    bytes[bytes.len().saturating_sub(64)..].hash(&mut hasher);
+    message.text.hash(&mut hasher);
     message.attachments.len().hash(&mut hasher);
     if matches!(message.role, Role::Thinking | Role::Assistant)
         && let Some(provenance) = message.provenance.as_ref()
@@ -314,7 +310,7 @@ struct MessageRows {
 
 /// Render-side wrap cache for the transcript. Persisted messages are
 /// append-only with immutable text, so their wrapped rows survive unchanged
-/// across frames keyed by (id, text length, boundary context, toggles); only
+/// across frames keyed by (id, text, boundary context, toggles); only
 /// the streaming tail — echoes, `app.thinking`, `app.stream`, live tool cells —
 /// re-wraps, and only when its inputs changed. The textarea scroll mirrors
 /// live here too (see `place_textarea_cursor`).
@@ -326,13 +322,16 @@ pub(crate) struct RenderCache {
     rows: HashMap<Id, MessageRows>,
     tail_key: u64,
     tail_rows: Vec<Line<'static>>,
-    composer_scroll: (u16, u16),
-    editor_scroll: (u16, u16),
+    composer_scroll: (usize, usize),
+    editor_scroll: (usize, usize),
+    composer_cursor: Option<(usize, usize)>,
+    editor_cursor: Option<(usize, usize)>,
     /// True while an editor modal is open; a fresh editor resets its mirror.
     editor_open: bool,
     thinking_key: u64,
     thinking_width: u16,
     thinking_rows: Vec<Line<'static>>,
+    transcript_match: Option<(String, usize, usize)>,
 }
 impl RenderCache {
     /// Drop rows when the wrap width, conversation context, or message list
@@ -384,8 +383,8 @@ impl RenderCache {
     /// input that shapes it changed.
     fn tail_rows(&mut self, app: &App, width: u16) -> &[Line<'static>] {
         let mut hasher = DefaultHasher::new();
-        app.stream.len().hash(&mut hasher);
-        app.thinking.len().hash(&mut hasher);
+        app.stream.hash(&mut hasher);
+        app.thinking.hash(&mut hasher);
         app.show_thinking.hash(&mut hasher);
         app.show_activity.hash(&mut hasher);
         (app.view.state as u8).hash(&mut hasher);
@@ -395,11 +394,10 @@ impl RenderCache {
         if let Some(last) = app.view.activity.last() {
             last.hash(&mut hasher);
         }
-        let mut echo_signature = 0usize;
         for (text, attachments) in app.pending_echoes() {
-            echo_signature += text.len() + attachments;
+            text.hash(&mut hasher);
+            attachments.hash(&mut hasher);
         }
-        echo_signature.hash(&mut hasher);
         let key = hasher.finish();
         if key != self.tail_key {
             self.tail_key = key;
@@ -431,25 +429,48 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         );
         return;
     }
-    let attachment_height = (app.attachments.len() as u16).min(3);
-    let input_height = (app.composer.textarea.lines().len() as u16)
-        .saturating_add(2)
-        .clamp(3, 8)
-        .min(area.height.saturating_sub(4 + attachment_height));
+    let target = app.composer_target_label();
+    let target_identity = target
+        .as_deref()
+        .and_then(|label| label.split(" · ").next());
+    let footer_height = if let Some(identity) = target_identity {
+        1 + u16::try_from(wrap_rows(&[Line::from(clean(identity))], area.width).len())
+            .unwrap_or(u16::MAX)
+            .clamp(1, 2)
+    } else if area.height >= 9 {
+        2
+    } else {
+        1
+    };
     let notice = app.view.pane_error.as_deref().unwrap_or(&app.notice);
-    // Long notices wrap to the viewport instead of truncating, borrowing up
-    // to two rows from the transcript without starving the composer or chrome.
+    let notice_min = u16::from(!notice.is_empty());
+    let attachment_height = u16::try_from(app.attachments.len())
+        .unwrap_or(u16::MAX)
+        .min(3)
+        .min(area.height.saturating_sub(4 + footer_height + notice_min));
+    let input_height = u16::try_from(app.composer.textarea.lines().len())
+        .unwrap_or(u16::MAX)
+        .saturating_add(1)
+        .clamp(2, 7)
+        .min(
+            area.height
+                .saturating_sub(2 + footer_height + attachment_height + notice_min),
+        );
+    // Notices borrow at most three rows without hiding the prompt or footer.
     let notice_budget = area
         .height
-        .saturating_sub(4 + attachment_height + input_height)
-        .max(1);
-    let notice_height = (wrap_rows(
-        &[Line::from(expand_tabs(&clean(notice)))],
-        area.width.max(1),
-    )
-    .len() as u16)
-        .clamp(1, 3)
-        .min(notice_budget);
+        .saturating_sub(2 + footer_height + attachment_height + input_height);
+    let notice_height = if notice.is_empty() {
+        0
+    } else {
+        (wrap_rows(
+            &[Line::from(expand_tabs(&clean(notice)))],
+            area.width.max(1),
+        )
+        .len() as u16)
+            .clamp(1, 3)
+            .min(notice_budget)
+    };
     let parts = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -458,7 +479,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
             Constraint::Length(notice_height),
             Constraint::Length(attachment_height),
             Constraint::Length(input_height),
-            Constraint::Length(1),
+            Constraint::Length(footer_height),
         ])
         .split(area);
     let mut project = app
@@ -505,7 +526,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("xcb", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" · {}", clean(&project)), muted()),
+            Span::styled(
+                format!(" · {}", clean(&project).replace(['\n', '\t'], " ")),
+                muted(),
+            ),
         ])),
         header[0],
     );
@@ -535,15 +559,25 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
             .attachments
             .iter()
             .rev()
-            .take(3)
+            .take(attachment_height as usize)
             .rev()
-            .map(|attachment| {
+            .enumerate()
+            .map(|(index, attachment)| {
                 let kind = attachment
                     .media_type
                     .strip_prefix("image/")
                     .unwrap_or(&attachment.media_type);
+                let hidden = app
+                    .attachments
+                    .len()
+                    .saturating_sub(attachment_height as usize);
+                let extra = if index == 0 && hidden > 0 {
+                    format!(" · +{hidden} more")
+                } else {
+                    String::new()
+                };
                 Line::from(format!(
-                    "[image:{} {}×{} · {} KiB]",
+                    "[image:{} {}×{} · {} KiB]{extra}",
                     display_text(kind, 32),
                     attachment.width,
                     attachment.height,
@@ -555,35 +589,44 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
             parts[3],
         );
     }
-    let attachment_hint = if app.attachments.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " {} attached · Alt-Backspace removes last ",
-            app.attachments.len()
-        )
-    };
-    app.composer.textarea.set_block(
-        Block::default()
-            .borders(Borders::TOP | Borders::BOTTOM)
-            .border_style(Style::default().fg(status_color(app.view.state)))
-            .title(attachment_hint),
+    // A fixed gutter anchors the prompt while the textarea owns scrolling.
+    let composer_padding = u16::from(parts[4].height > 1);
+    let composer_area = Rect::new(
+        parts[4].x.saturating_add(2),
+        parts[4].y.saturating_add(composer_padding),
+        parts[4].width.saturating_sub(2),
+        parts[4].height.saturating_sub(composer_padding),
+    );
+    app.composer.textarea.set_block(Block::default());
+    frame.render_widget(
+        Paragraph::new("›").style(Style::default().add_modifier(Modifier::BOLD)),
+        Rect::new(parts[4].x, composer_area.y, 1, composer_area.height.min(1)),
     );
     app.composer
         .textarea
         .set_cursor_line_style(Style::default());
     app.composer.textarea.set_placeholder_text(
         if app.managed_mode() && app.view.state == State::Working {
-            "Describe new work · /steer <task> <guidance> · /inbox · /attention"
+            "Describe work · /steer selects a task · /attention"
         } else if app.view.remote_active {
             "Running in another terminal · your draft is kept here"
         } else if app.view.state == State::Working {
             "Type a follow-up while the agent works"
         } else {
-            "Message · / for commands · Ctrl-V pastes"
+            "Ask xcb to work on something · / for commands"
         },
     );
-    frame.render_widget(&app.composer.textarea, parts[4]);
+    {
+        let mut cache = app.render_cache.borrow_mut();
+        let cache = &mut *cache;
+        render_textarea(
+            frame,
+            &mut app.composer.textarea,
+            composer_area,
+            &mut cache.composer_scroll,
+            &mut cache.composer_cursor,
+        );
+    }
     if let Some((matches, selected)) = app.slash_menu() {
         render_slash_menu(frame, &matches, selected, parts[4]);
     }
@@ -594,10 +637,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     } else {
         app.view.state
     };
-    let mut color = status_color(badge_state);
-    if badge_state.attention() && !app.view.reduced_motion && (ticks / 16).is_multiple_of(2) {
-        color = Color::LightYellow;
-    }
     let status = if matches!(badge_state, State::Working) {
         let elapsed = app
             .working_since
@@ -617,19 +656,25 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     } else {
         format!(" {} {} ", status_symbol(badge_state), badge_state.label())
     };
+    let status_area = Rect {
+        height: 1,
+        ..parts[5]
+    };
     let footer = Layout::horizontal([
         Constraint::Min(0),
-        Constraint::Length(status.chars().count() as u16),
+        Constraint::Length(status.cell_width().min(status_area.width.saturating_sub(8))),
     ])
-    .split(parts[5]);
+    .split(status_area);
     let model = app
         .view
         .session
         .as_ref()
         .map(|session| {
             format!(
-                "{} · {} · ? help",
-                session.model.provider, session.model.label
+                "{} · {} · {}",
+                session.model.label,
+                session.model.provider,
+                clean(&project)
             )
         })
         .or_else(|| {
@@ -649,9 +694,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     .filter(|task| crate::task_queued(task))
                     .count();
                 let waiting = if app.view.backlog.is_empty() {
-                    app.view.tasks.iter().filter(|task| task.state.attention()).count()
+                    app.view
+                        .tasks
+                        .iter()
+                        .filter(|task| task.state.attention())
+                        .count()
                 } else {
-                    app.view.backlog.iter().filter(|task| task.state.attention()).count()
+                    app.view
+                        .backlog
+                        .iter()
+                        .filter(|task| task.state.attention())
+                        .count()
                 };
                 // The freshest running worker's `model · account` identifies
                 // the route the swarm is actually using.
@@ -689,7 +742,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     .or_else(|| lowest.map(|p| format!(" · quota {}%", p.round() as u32)))
                     .unwrap_or_default();
                 format!(
-                    "{running} running{} · {waiting} needs you (/attention) · {} chats{}{}{} · /b backlog · ? help",
+                    "{running} running{} · {waiting} needs you (/attention) · {} chats{}{}{}",
                     if queued > 0 {
                         format!(" · {queued} queued")
                     } else {
@@ -713,7 +766,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     if app.view.accounts.is_empty() {
                         "no provider accounts — xcb accounts add <provider> · ? help".into()
                     } else {
-                        "global dispatcher · / for commands · ? help".into()
+                        "automatic routing · global dispatcher".into()
                     }
                 })
         })
@@ -721,50 +774,81 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
             app.view
                 .pending_route
                 .as_ref()
-                .map(|route| format!("{} · {} · ? help", route.model, route.account))
+                .map(|route| format!("{} · {} · {}", route.model, route.account, clean(&project)))
         })
         .unwrap_or_else(|| "Choose an account with /accounts · ? help".into());
+    frame.render_widget(Paragraph::new(clean(&model)).style(muted()), footer[0]);
     frame.render_widget(
-        Paragraph::new(clean(&model)).style(Style::default().add_modifier(Modifier::BOLD)),
-        footer[0],
-    );
-    frame.render_widget(
-        Paragraph::new(status).alignment(Alignment::Right).style(
-            Style::default()
-                .bg(color)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Paragraph::new(status)
+            .alignment(Alignment::Right)
+            .style(if badge_state.attention() {
+                Style::default().fg(status_color(badge_state))
+            } else {
+                muted()
+            }),
         footer[1],
     );
-    let managed = app
-        .view
-        .extensions
-        .iter()
-        .any(|(name, _)| name == "algal supervisor");
-    let shift_enter = app.keyboard_enhanced;
+    if footer_height > 1 {
+        let newline = if app.keyboard_enhanced {
+            "Shift-Enter newline"
+        } else {
+            "Alt-Enter newline"
+        };
+        let hints = target_identity
+            .map(|identity| {
+                let with_hint = format!("{identity} · Tab queues new work");
+                if wrap_rows(&[Line::from(with_hint.clone())], area.width).len()
+                    <= (footer_height - 1) as usize
+                {
+                    with_hint
+                } else {
+                    identity.to_owned()
+                }
+            })
+            .unwrap_or_else(|| {
+                if app.attachments.is_empty() {
+                    format!("? help · Ctrl-T history · Ctrl-G editor · {newline}")
+                } else {
+                    format!("? help · /detach removes images · {newline}")
+                }
+            });
+        frame.render_widget(
+            Paragraph::new(clean(&hints))
+                .style(muted())
+                .wrap(Wrap { trim: false }),
+            Rect {
+                y: parts[5].y + 1,
+                height: footer_height - 1,
+                ..parts[5]
+            },
+        );
+    }
+    let shortcuts = if matches!(app.modal, Some(Modal::Help { .. })) {
+        app.shortcut_lines()
+    } else {
+        Vec::new()
+    };
     // The hardware cursor belongs to whatever captures typing: an open modal
     // (its own cursor), otherwise the composer.
     if let Some(modal) = &mut app.modal {
         let mut cache = app.render_cache.borrow_mut();
-        render_modal(frame, modal, area, managed, shift_enter, &mut cache);
+        render_modal(frame, modal, area, &shortcuts, &mut cache);
     } else {
         let mut cache = app.render_cache.borrow_mut();
         cache.editor_open = false;
         place_textarea_cursor(
             frame,
             &app.composer.textarea,
-            parts[4],
+            composer_area,
             &mut cache.composer_scroll,
         );
     }
 }
 
-/// `ratatui-textarea` keeps its scroll offset private inside `Viewport`;
-/// mirror the widget's `next_scroll_top` rule so the computed cursor cell
-/// tracks what was rendered. Two textareas share this rule (composer and the
-/// editor modal), each keeping its previous top in the render cache.
-fn next_scroll_top(prev_top: u16, cursor: u16, len: u16) -> u16 {
+/// Keep the viewport in display cells. The editor library uses character
+/// columns for horizontal scrolling; wide graphemes and tabs require a cell
+/// viewport so the text cursor and terminal hardware cursor agree.
+fn next_scroll_top(prev_top: usize, cursor: usize, len: usize) -> usize {
     if cursor < prev_top {
         cursor
     } else if prev_top.saturating_add(len) <= cursor {
@@ -774,48 +858,192 @@ fn next_scroll_top(prev_top: u16, cursor: u16, len: u16) -> u16 {
     }
 }
 
-/// Display-cell column of `col` characters into `line`, matching the
-/// textarea's own `DisplayTextBuilder` (tabs expand to 4-column stops,
-/// control characters render as nothing).
-fn cursor_cells(line: &str, col: usize) -> u16 {
-    let mut width = 0u16;
-    for ch in line.chars().take(col) {
-        width = if ch == '\t' {
+fn cursor_cells(line: &str, col: usize) -> usize {
+    let mut chars = 0usize;
+    let mut width = 0usize;
+    for grapheme in line.graphemes(true) {
+        if chars >= col {
+            break;
+        }
+        chars += grapheme.chars().count();
+        width = if grapheme == "\t" {
             width.saturating_add(4 - width % 4)
-        } else if ch.is_control() {
-            width
         } else {
-            let mut buf = [0; 4];
-            width.saturating_add(ch.encode_utf8(&mut buf).cell_width())
+            width.saturating_add(clean(grapheme).cell_width() as usize)
         };
     }
     width
 }
 
-/// Place the terminal's hardware cursor on the textarea's cursor cell so IME
-/// candidate windows and the cursor shape land where typing happens.
+/// Paint the textarea's editing state with a cell-aware viewport. Keeping this
+/// renderer small also leaves terminal colors, selections and hardware cursor
+/// placement under the same rules for the composer and modal editor.
+/// TextArea exposes scalar columns, including positions inside a grapheme.
+/// Normalize those before painting so insertion and both cursors agree.
+fn normalize_cursor(textarea: &mut TextArea<'static>, previous: &mut Option<(usize, usize)>) {
+    let (row, cursor) = textarea.cursor();
+    let Some(line) = textarea.lines().get(row) else {
+        return;
+    };
+    let forward = previous.is_some_and(|(old_row, old_col)| old_row == row && cursor > old_col);
+    let mut start = 0usize;
+    let movement = line.graphemes(true).find_map(|grapheme| {
+        let end = start + grapheme.chars().count();
+        if cursor <= start {
+            return Some((CursorMove::Back, 0));
+        }
+        let movement = (cursor < end).then(|| {
+            if forward {
+                (CursorMove::Forward, end - cursor)
+            } else {
+                (CursorMove::Back, cursor - start)
+            }
+        });
+        start = end;
+        movement
+    });
+    if let Some((direction, count)) = movement {
+        for _ in 0..count {
+            textarea.move_cursor(direction);
+        }
+    }
+    *previous = Some(textarea.cursor());
+}
+
+fn render_textarea(
+    frame: &mut Frame<'_>,
+    textarea: &mut TextArea<'static>,
+    area: Rect,
+    scroll: &mut (usize, usize),
+    previous_cursor: &mut Option<(usize, usize)>,
+) {
+    normalize_cursor(textarea, previous_cursor);
+    let inner = textarea.block().map_or(area, |block| block.inner(area));
+    if inner.is_empty() {
+        return;
+    }
+    // Let the widget record geometry for its PageUp/PageDown input actions,
+    // then replace its character-scrolled paint with our cell-scrolled view.
+    frame.render_widget(&*textarea, area);
+    frame.render_widget(Clear, area);
+    if let Some(block) = textarea.block() {
+        frame.render_widget(block, area);
+    }
+    let (cursor_row, cursor_col) = textarea.cursor();
+    let cursor_line = textarea.lines().get(cursor_row).map_or("", String::as_str);
+    scroll.0 = next_scroll_top(scroll.0, cursor_row, inner.height as usize);
+    let cursor_cell = cursor_cells(cursor_line, cursor_col);
+    scroll.1 = next_scroll_top(scroll.1, cursor_cell, inner.width as usize);
+    let mut column = 0usize;
+    let cursor_width = cursor_line
+        .graphemes(true)
+        .find_map(|grapheme| {
+            let start = column;
+            column += grapheme.chars().count();
+            (start == cursor_col).then(|| {
+                if grapheme == "\t" {
+                    4 - cursor_cell % 4
+                } else {
+                    clean(grapheme).cell_width() as usize
+                }
+            })
+        })
+        .unwrap_or(1)
+        .max(1)
+        .min(inner.width as usize);
+    // Keep a wide cursor glyph whole at the right edge of the viewport.
+    scroll.1 = scroll.1.max(
+        cursor_cell
+            .saturating_add(cursor_width)
+            .saturating_sub(inner.width as usize),
+    );
+    if textarea.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" ", textarea.cursor_style()),
+                Span::styled(
+                    clean(textarea.placeholder_text()),
+                    textarea.placeholder_style().unwrap_or_else(muted),
+                ),
+            ])),
+            inner,
+        );
+        return;
+    }
+    let selection = textarea.selection_range();
+    let mut lines = Vec::new();
+    for (row, source) in textarea
+        .lines()
+        .iter()
+        .enumerate()
+        .skip(scroll.0)
+        .take(inner.height as usize)
+    {
+        let mut col = 0usize;
+        let mut cells = 0usize;
+        let mut spans = Vec::new();
+        for grapheme in source.graphemes(true) {
+            let style = if (row, col) == (cursor_row, cursor_col) {
+                textarea.style().patch(textarea.cursor_style())
+            } else if selection.is_some_and(|(start, end)| (row, col) >= start && (row, col) < end)
+            {
+                textarea.style().add_modifier(Modifier::REVERSED)
+            } else {
+                textarea.style()
+            };
+            let symbol = if grapheme == "\t" {
+                " ".repeat(4 - cells % 4)
+            } else {
+                clean(grapheme)
+            };
+            let end = cells.saturating_add(symbol.cell_width() as usize);
+            col += grapheme.chars().count();
+            if cells >= scroll.1.saturating_add(inner.width as usize) {
+                break;
+            }
+            if end > scroll.1 {
+                if cells < scroll.1 {
+                    // A wide grapheme clipped at the left edge leaves cells,
+                    // never half a glyph or an incorrect hardware position.
+                    spans.push(Span::styled(
+                        " ".repeat((end - scroll.1).min(inner.width as usize)),
+                        style,
+                    ));
+                } else if end <= scroll.1.saturating_add(inner.width as usize) {
+                    spans.push(Span::styled(symbol, style));
+                }
+            }
+            cells = end;
+        }
+        if row == cursor_row
+            && cursor_col >= col
+            && cells < scroll.1.saturating_add(inner.width as usize)
+        {
+            spans.push(Span::styled(" ", textarea.cursor_style()));
+        }
+        lines.push(Line::from(spans));
+    }
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
 fn place_textarea_cursor(
     frame: &mut Frame<'_>,
     textarea: &TextArea<'static>,
     area: Rect,
-    scroll: &mut (u16, u16),
+    scroll: &mut (usize, usize),
 ) {
     let inner = textarea.block().map_or(area, |block| block.inner(area));
     if inner.is_empty() {
         return;
     }
     let (row, col) = textarea.cursor();
-    let cursor_row = u16::try_from(row).unwrap_or(u16::MAX);
-    // The widget scrolls horizontally by character column, not cells (our
-    // textareas never enable line numbers, so no width correction applies).
-    let cursor_col = u16::try_from(col).unwrap_or(u16::MAX);
-    let top_row = next_scroll_top(scroll.0, cursor_row, inner.height);
-    let top_col = next_scroll_top(scroll.1, cursor_col, inner.width);
-    *scroll = (top_row, top_col);
     let line = textarea.lines().get(row).map_or("", String::as_str);
-    let cell = cursor_cells(line, col);
-    let x = inner.x.saturating_add(cell.saturating_sub(top_col));
-    let y = inner.y.saturating_add(cursor_row.saturating_sub(top_row));
+    let x = inner.x.saturating_add(
+        u16::try_from(cursor_cells(line, col).saturating_sub(scroll.1)).unwrap_or(u16::MAX),
+    );
+    let y = inner
+        .y
+        .saturating_add(u16::try_from(row.saturating_sub(scroll.0)).unwrap_or(u16::MAX));
     frame.set_cursor_position(Position::new(
         x.min(inner.right().saturating_sub(1)),
         y.min(inner.bottom().saturating_sub(1)),
@@ -823,7 +1051,7 @@ fn place_textarea_cursor(
 }
 
 /// A completed tool call renders as a compact `• name` cell so the transcript
-/// narrates the work; Ctrl-U expands the first lines of its output inline.
+/// narrates the work; F4 expands the first lines of its output inline.
 fn render_tool_turn(lines: &mut Vec<Line<'static>>, text: &str, expanded: bool) {
     let (name, output) = text.split_once(": ").unwrap_or((text, ""));
     lines.push(Line::from(vec![
@@ -841,11 +1069,19 @@ fn render_tool_turn(lines: &mut Vec<Line<'static>>, text: &str, expanded: bool) 
         .take(9)
         .map(|line| display_text(line, 160))
         .collect();
-    for line in output.iter().take(8) {
+    for (index, line) in output.iter().take(8).enumerate() {
         // Expanded cells are indented two cells; tabs keep stopping on the
         // same four-column grid the rest of the transcript uses.
         lines.push(Line::from(Span::styled(
-            format!("  {}", expand_tabs_at(line, 2)),
+            format!(
+                "  {} {}",
+                if index + 1 == output.len() {
+                    "└"
+                } else {
+                    "│"
+                },
+                expand_tabs_at(line, 4)
+            ),
             muted(),
         )));
     }
@@ -855,16 +1091,19 @@ fn render_tool_turn(lines: &mut Vec<Line<'static>>, text: &str, expanded: bool) 
 }
 
 fn render_user_turn(lines: &mut Vec<Line<'static>>, text: &str, attachments: usize) {
-    lines.push(Line::from(Span::styled(
-        "You",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.extend(body_lines(text, Style::default()));
+    let text = clean(text);
+    for (index, line) in text.lines().enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled(if index == 0 { "› " } else { "  " }, muted()),
+            Span::styled(
+                expand_tabs_at(line, 2),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
     if attachments > 0 {
         lines.push(Line::from(Span::styled(
-            format!("{attachments} attached image(s)"),
+            format!("  {attachments} attached image(s)"),
             muted(),
         )));
     }
@@ -940,31 +1179,12 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
     let mut lines = Vec::new();
     match source {
         Source::LastUser => {
-            lines.push(Line::from(Span::styled(
-                "You",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            match app
-                .view
-                .messages
-                .iter()
-                .rev()
-                .find(|message| message.role == Role::User)
+            if let Some(message) = app
+                .transcript_messages()
+                .filter(|message| message.role == Role::User)
+                .last()
             {
-                Some(message) => {
-                    lines.extend(body_lines(&message.text, Style::default()));
-                    if !message.attachments.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            format!("{} attached image(s)", message.attachments.len()),
-                            muted(),
-                        )));
-                    }
-                }
-                None => lines.push(Line::from(
-                    "Bring your accounts. Choose your models. Make the terminal yours.",
-                )),
+                render_user_turn(&mut lines, &message.text, message.attachments.len());
             }
         }
         Source::Subagents => {
@@ -1104,9 +1324,9 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
         Source::Activity => {
             lines.push(Line::from(Span::styled(
                 if app.show_activity {
-                    "Tool activity · Ctrl-U hides"
+                    "Tool activity · F4 hides"
                 } else {
-                    "Tool activity hidden · Ctrl-U reveals"
+                    "Tool activity hidden · F4 reveals"
                 },
                 muted(),
             )));
@@ -1155,11 +1375,11 @@ fn tail_lines(app: &App) -> Vec<Line<'static>> {
         }
     }
     if !app.stream.is_empty() {
-        lines.extend(body_lines(&app.stream, Style::default()));
+        lines.extend(markdown::lines(&app.stream));
     }
     // Tools started but not yet persisted keep narrating the turn at
     // the tail until their result cell lands — but only while a run
-    // is live; stale activity stays hidden behind Ctrl-U's detail.
+    // is live; stale activity stays hidden behind F4's detail.
     // `activity` only lists the current run's calls, so count this
     // turn's settled cells.
     if matches!(app.view.state, State::Working) || app.view.remote_active {
@@ -1314,37 +1534,31 @@ fn render_rows(
 }
 
 fn render_responses(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let heading = if app.show_history {
-        "▾ Transcript · Ctrl-O collapses history"
-    } else {
-        "▸ Transcript · Ctrl-O expands history"
-    };
-    // The paused marker leads so terminal width cannot truncate it.
-    render_heading(
-        frame,
-        Line::from(Span::styled(
-            if app.paused.get() {
-                format!("↑ paused · End follows · {heading}")
-            } else {
-                heading.into()
-            },
-            muted(),
-        )),
-        area,
-    );
+    let heading_height = u16::from(app.paused.get());
+    if app.paused.get() {
+        render_heading(
+            frame,
+            Line::from(Span::styled(
+                "↑ paused · End follows · Ctrl-T history",
+                muted(),
+            )),
+            area,
+        );
+    }
     let body_area = Rect {
-        y: area.y.saturating_add(1),
-        height: area.height.saturating_sub(1),
+        y: area.y.saturating_add(heading_height),
+        height: area.height.saturating_sub(heading_height),
         ..area
     };
     if body_area.height == 0 || body_area.width == 0 {
         return;
     }
+    app.viewport_height.set(body_area.height);
     let width = body_area.width.max(1);
     let mut cache = app.render_cache.borrow_mut();
     cache.prepare(app, width);
 
-    let messages = &app.view.messages;
+    let messages: Vec<_> = app.transcript_messages().collect();
     // Collapsed shows the latest turn: everything since the last user
     // message, or the trailing message when no prompt exists yet.
     let start = if app.show_history {
@@ -1401,9 +1615,9 @@ fn render_responses(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn render_thinking(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let heading = if app.show_thinking {
-        "▾ Thinking · Ctrl-T collapses"
+        "▾ Thinking · /thinking collapses"
     } else {
-        "▸ Thinking · Ctrl-T expands"
+        "▸ Thinking · /thinking expands"
     };
     render_heading(
         frame,
@@ -1426,9 +1640,8 @@ fn render_thinking(frame: &mut Frame<'_>, area: Rect, app: &App) {
         return;
     }
     let width = body_area.width.max(1);
-    // The body is keyed like the transcript tail: live thinking only
-    // appends, so its length is the signature; the persisted fallback
-    // samples the message like `message_key` does.
+    // Content changes, including same-length replacements, invalidate the
+    // thinking viewport just as they invalidate transcript rows.
     let latest = app
         .view
         .messages
@@ -1437,13 +1650,10 @@ fn render_thinking(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .find(|message| message.role == Role::Thinking);
     let mut hasher = DefaultHasher::new();
     app.show_thinking.hash(&mut hasher);
-    app.thinking.len().hash(&mut hasher);
+    app.thinking.hash(&mut hasher);
     if let Some(message) = latest {
         message.id.as_str().hash(&mut hasher);
-        message.text.len().hash(&mut hasher);
-        let bytes = message.text.as_bytes();
-        bytes[..64.min(bytes.len())].hash(&mut hasher);
-        bytes[bytes.len().saturating_sub(64)..].hash(&mut hasher);
+        message.text.hash(&mut hasher);
         provenance_fp(message.provenance.as_ref()).hash(&mut hasher);
     }
     let key = hasher.finish();
@@ -1476,12 +1686,14 @@ fn render_thinking(frame: &mut Frame<'_>, area: Rect, app: &App) {
     render_rows(frame, body_area, &cache.thinking_rows, 0, top);
 }
 
-fn modal_area(area: Rect) -> Rect {
+fn modal_area(area: Rect, desired_height: Option<u16>) -> Rect {
     let width = area.width.saturating_sub(4).min(110);
-    let height = area.height.saturating_sub(2);
+    let height = desired_height
+        .unwrap_or(area.height)
+        .min(area.height.saturating_sub(2));
     Rect::new(
         area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
+        area.bottom().saturating_sub(height + 1),
         width,
         height,
     )
@@ -1495,7 +1707,7 @@ fn render_slash_menu(
     selected: usize,
     composer: Rect,
 ) {
-    let height = (matches.len() as u16 + 2).min(10).min(composer.y);
+    let height = (matches.len().max(1) as u16 + 2).min(10).min(composer.y);
     if height < 3 {
         return;
     }
@@ -1506,7 +1718,7 @@ fn render_slash_menu(
         height,
     );
     frame.render_widget(Clear, area);
-    let items: Vec<_> = matches
+    let mut items: Vec<_> = matches
         .iter()
         .map(|command| {
             let summary = if command.alias.is_empty() {
@@ -1525,106 +1737,137 @@ fn render_slash_menu(
             ]))
         })
         .collect();
-    let mut state = ListState::default().with_selected(Some(selected));
+    if items.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "No matching commands",
+            muted(),
+        ))));
+    }
+    let mut state = ListState::default().with_selected((!matches.is_empty()).then_some(selected));
     frame.render_stateful_widget(
         List::new(items)
             .block(
                 Block::bordered()
-                    .title(" commands ")
+                    .title(format!(" commands · {} matches ", matches.len()))
                     .title_bottom(" ↑↓ choose · Tab completes · Enter runs · Esc hides "),
             )
-            .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("› "),
         area,
         &mut state,
     );
 }
 
+/// A single-line filter keeps the query's tail and hardware cursor together
+/// when a Unicode query grows beyond the panel width.
+fn render_filter(frame: &mut Frame<'_>, area: Rect, query: &str, suffix: &str, cursor: bool) {
+    if area.is_empty() {
+        return;
+    }
+    let query = expand_tabs(&clean(query));
+    let line = Line::raw(query);
+    let width = line.width();
+    let available = area.width.saturating_sub(3) as usize;
+    let left = width.saturating_sub(available);
+    let mut column = 0usize;
+    let mut visible = String::from("› ");
+    for grapheme in line.styled_graphemes(Style::default()) {
+        let end = column.saturating_add(grapheme.symbol.cell_width() as usize);
+        if end > left {
+            if column < left {
+                visible.push_str(&" ".repeat(end - left));
+            } else {
+                visible.push_str(grapheme.symbol);
+            }
+        }
+        column = end;
+    }
+    visible.push_str(suffix);
+    frame.render_widget(
+        Paragraph::new(visible).style(muted()),
+        Rect { height: 1, ..area },
+    );
+    if cursor {
+        frame.set_cursor_position(Position::new(
+            area.x
+                .saturating_add(2)
+                .saturating_add((width - left) as u16)
+                .min(area.right().saturating_sub(1)),
+            area.y,
+        ));
+    }
+}
+
+/// Map the lowercased search result back to original UTF-8 boundaries, even
+/// when one scalar expands during lowercasing (for example Turkish İ).
+fn match_range(text: &str, needle: &str) -> Option<std::ops::Range<usize>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let found = text.to_lowercase().find(needle)?;
+    let target_end = found + needle.len();
+    let mut folded = 0usize;
+    let mut start = None;
+    let mut end = 0usize;
+    for (index, ch) in text.char_indices() {
+        let next = folded + ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+        if start.is_none() && next > found {
+            start = Some(index);
+        }
+        if folded < target_end {
+            end = index + ch.len_utf8();
+        }
+        folded = next;
+        if folded >= target_end {
+            break;
+        }
+    }
+    start.map(|start| start..end)
+}
+
 fn render_modal(
     frame: &mut Frame<'_>,
     modal: &mut Modal,
     area: Rect,
-    managed: bool,
-    shift_enter: bool,
+    shortcuts: &[String],
     cache: &mut RenderCache,
 ) {
-    let area = modal_area(area);
+    let desired_height = match modal {
+        Modal::Picker { items, query, .. } => Some(
+            (u16::try_from(
+                items
+                    .iter()
+                    .filter(|item| crate::interaction::item_matches(item, query))
+                    .count()
+                    .max(1),
+            )
+            .unwrap_or(u16::MAX))
+            .saturating_add(4)
+            .min(14),
+        ),
+        Modal::Help { .. } => Some(24),
+        Modal::HistorySearch { .. } => Some(14),
+        _ => None,
+    };
+    let area = modal_area(area, desired_height);
     frame.render_widget(Clear, area);
     match modal {
-        Modal::Help => {
+        Modal::Help { scroll } => {
             cache.editor_open = false;
-            let cancel = if managed {
-                "Esc requests cancellation for managed work · Esc also closes dialogs and the / menu"
-            } else {
-                "Esc stops the running turn · Esc also closes dialogs and the / menu"
-            };
-            let quit = if managed {
-                "Ctrl-C requests cancellation, clears a draft (Ctrl-R restores), then detaches · Ctrl-D detaches on empty"
-            } else {
-                "Ctrl-C stops a live turn, clears a draft (Ctrl-R restores), quits when idle · Ctrl-D quits on empty"
-            };
-            let newline = if shift_enter {
-                "Enter send · Shift-Enter, Alt-Enter or Ctrl-J newline"
-            } else {
-                "Enter send · Alt-Enter or Ctrl-J newline (Shift-Enter needs the kitty keyboard protocol)"
-            };
-            let mode_keys = if managed {
-                "Ctrl-P managed tasks · Ctrl-R prompt history · Ctrl-G editor"
-            } else {
-                "Ctrl-P models · Ctrl-R prompt history · Ctrl-G editor"
-            };
-            let lifecycle = if managed {
-                "Closing xcb never implies worker settlement; background tasks keep running"
-            } else {
-                "Direct sessions stay bound to this terminal; use plain `xcb` for managed work"
-            };
-            let commands = if managed {
-                [
-                    "/tasks /t · /new /n · /attach <path> · /sessions /s",
-                    "/backlog /b [all|add|edit|run] · /attention · /reply <id> <answer>",
-                    "/steer <task> <guidance> · /watch <target> <source> · /inbox [all|task]",
-                    "/schedule [all|every|pause|resume] · /help /h · /quit /q · /exit /e",
-                ]
-            } else {
-                [
-                    "/tasks /t · /new /n · /model /m · /accounts /a · /sessions /s · /pane /p",
-                    "/pane [edit|generate …] · /attach <path> · /default /d · /help /h",
-                    "/plugin <name> on|off · /reload /r · /quit /q · /exit /e",
-                    "Managed guidance and inbox controls are available in xcb chat",
-                ]
-            };
             let block = Block::bordered()
                 .title(" Keyboard & commands ")
-                .title_bottom(" Esc closes · ? closes and types ? when ? opened it ");
+                .title_bottom(" ↑↓ / PgUp/PgDn scroll · Esc closes ");
             let inner = block.inner(area);
             frame.render_widget(block, area);
-            frame.render_widget(
-                Paragraph::new(
-                    [
-                        newline,
-                        "Ctrl-V paste text/image · Alt-Backspace remove last attachment · pastes over 256 KiB are refused",
-                        "PageUp older · PageDown newer · Shift-End or Ctrl-End follows newest (plain End edits a draft)",
-                        "/mouse turns wheel scrolling on; while on, hold Shift (Option on macOS) to select text",
-                        "Ctrl-T thinking · Ctrl-O history · Ctrl-U tool output · these and Ctrl-G/P/L/R replace readline keys",
-                        "? on an empty line or F1 opens this help · Ctrl-A/E line ends · Ctrl-W/K delete word/line end",
-                        mode_keys,
-                        cancel,
-                        quit,
-                        lifecycle,
-                        "Pickers: ↑↓ or Ctrl-P/N move · PgUp/PgDn page · Home/End ends",
-                        "Ctrl-U clears the filter · Enter selects · Esc closes",
-                        "",
-                        "Type / for the command menu — arrows choose, Tab completes, Enter runs.",
-                        commands[0],
-                        commands[1],
-                        commands[2],
-                        commands[3],
-                    ]
-                    .join("\n"),
-                )
-                .wrap(Wrap { trim: false }),
-                inner,
+            let body: Vec<_> = shortcuts
+                .iter()
+                .flat_map(|line| body_lines(line, Style::default()))
+                .collect();
+            let rows = wrap_rows(&body, inner.width.max(1));
+            *scroll = (*scroll).min(
+                u16::try_from(rows.len().saturating_sub(inner.height as usize)).unwrap_or(u16::MAX),
             );
+            render_rows(frame, inner, &rows, 0, *scroll as usize);
         }
         Modal::Picker {
             title,
@@ -1633,35 +1876,167 @@ fn render_modal(
             selected,
         } => {
             cache.editor_open = false;
-            let title = format!(" {title} · {query} ");
-            let block = Block::bordered()
-                .title(title.clone())
-                .title_bottom(" Type to filter · Enter selects · Esc closes ");
-            let inner = block.inner(area);
-            frame.render_widget(block, area);
-            // The query lives in the title row; the hardware cursor tracks
-            // its end so typed input lands where the user is looking.
-            frame.set_cursor_position(Position::new(
-                area.x
-                    .saturating_add(title.cell_width())
-                    .min(area.right().saturating_sub(2)),
-                area.y,
-            ));
             let visible: Vec<_> = items
                 .iter()
-                .filter(|item| item.label.to_lowercase().contains(&query.to_lowercase()))
+                .filter(|item| crate::interaction::item_matches(item, query))
                 .map(|item| ListItem::new(clean(&item.label)))
                 .collect();
             *selected = (*selected).min(visible.len().saturating_sub(1));
-            let mut state =
-                ListState::default().with_selected((!visible.is_empty()).then_some(*selected));
-            frame.render_stateful_widget(
-                List::new(visible)
-                    .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White))
-                    .highlight_symbol("› "),
-                inner,
-                &mut state,
-            );
+            let count = visible.len();
+            let block = Block::bordered()
+                .title(format!(" {} · {count}/{} ", clean(title), items.len()))
+                .title_bottom(" ↑↓ choose · Enter selects · Esc closes ");
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            render_filter(frame, inner, query, "", true);
+            let list_area = Rect {
+                y: inner.y.saturating_add(1),
+                height: inner.height.saturating_sub(1),
+                ..inner
+            };
+            if count == 0 {
+                frame.render_widget(Paragraph::new("  No matches").style(muted()), list_area);
+            } else {
+                let mut state = ListState::default().with_selected(Some(*selected));
+                frame.render_stateful_widget(
+                    List::new(visible)
+                        .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+                        .highlight_symbol("› "),
+                    list_area,
+                    &mut state,
+                );
+            }
+        }
+        Modal::HistorySearch {
+            query,
+            matches,
+            selected,
+            ..
+        } => {
+            cache.editor_open = false;
+            let block = Block::bordered()
+                .title(format!(" Prompt history · {} matches ", matches.len()))
+                .title_bottom(" Ctrl-R / ↑↓ older/newer · Enter accepts · Esc restores ");
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            render_filter(frame, inner, query, "", true);
+            let body = Rect {
+                y: inner.y.saturating_add(2),
+                height: inner.height.saturating_sub(2),
+                ..inner
+            };
+            let text = matches
+                .get(*selected)
+                .map(String::as_str)
+                .unwrap_or("No matches");
+            let needle = query.to_lowercase();
+            let mut rows = Vec::new();
+            let mut match_row = None;
+            for line in clean(text).lines() {
+                let line = expand_tabs(line);
+                let styled = if let Some(range) = match_range(&line, &needle) {
+                    Line::from(vec![
+                        Span::raw(line[..range.start].to_owned()),
+                        Span::styled(
+                            line[range.clone()].to_owned(),
+                            Style::default().add_modifier(Modifier::UNDERLINED),
+                        ),
+                        Span::raw(line[range.end..].to_owned()),
+                    ])
+                } else {
+                    Line::from(line)
+                };
+                let wrapped = wrap_rows(&[styled], body.width.max(1));
+                if match_row.is_none()
+                    && let Some(index) = wrapped.iter().position(|row| {
+                        row.spans
+                            .iter()
+                            .any(|span| span.style.add_modifier.contains(Modifier::UNDERLINED))
+                    })
+                {
+                    match_row = Some(rows.len() + index);
+                }
+                rows.extend(wrapped);
+            }
+            let top = match_row
+                .unwrap_or(0)
+                .saturating_sub(body.height.saturating_sub(1).min(1) as usize)
+                .min(rows.len().saturating_sub(body.height as usize));
+            render_rows(frame, body, &rows, 0, top);
+        }
+        Modal::Transcript {
+            title,
+            lines,
+            query,
+            scroll,
+            matches,
+            selected,
+            search,
+            has_more,
+        } => {
+            cache.editor_open = false;
+            let footer = if *has_more {
+                " ↑↓ scroll · p older · F3 search · Esc closes "
+            } else {
+                " ↑↓ scroll · Home/End · F3 search · Esc closes "
+            };
+            let block = Block::bordered()
+                .title(format!(
+                    " {}{} ",
+                    clean(title),
+                    if *has_more {
+                        " · older history available"
+                    } else {
+                        ""
+                    }
+                ))
+                .title_bottom(footer);
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            let query_height = u16::from(*search || !query.is_empty());
+            if query_height > 0 {
+                render_filter(
+                    frame,
+                    inner,
+                    query,
+                    &format!(" · {} matches", matches.len()),
+                    *search,
+                );
+            }
+            let body = Rect {
+                y: inner.y.saturating_add(query_height),
+                height: inner.height.saturating_sub(query_height),
+                ..inner
+            };
+            let mut rows = Vec::new();
+            let mut selected_row = None;
+            for (index, text) in lines.iter().enumerate() {
+                if matches.get(*selected) == Some(&index) {
+                    selected_row = Some(rows.len());
+                }
+                let style = if !query.is_empty() && matches.binary_search(&index).is_ok() {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                rows.extend(wrap_rows(&body_lines(text, style), body.width.max(1)));
+            }
+            if !query.is_empty() && matches.is_empty() {
+                rows.insert(
+                    0,
+                    Line::from(Span::styled("No matches in loaded history", muted())),
+                );
+            }
+            let max_scroll = rows.len().saturating_sub(body.height as usize);
+            let match_key = (query.clone(), *selected, lines.len());
+            if cache.transcript_match.as_ref() != Some(&match_key)
+                && let Some(row) = selected_row
+            {
+                *scroll = u32::try_from(row.min(max_scroll)).unwrap_or(u32::MAX);
+            }
+            cache.transcript_match = Some(match_key);
+            *scroll = (*scroll).min(u32::try_from(max_scroll).unwrap_or(u32::MAX));
+            render_rows(frame, body, &rows, 0, *scroll as usize);
         }
         Modal::Inspect {
             title,
@@ -1709,6 +2084,7 @@ fn render_modal(
                 } else {
                     (0, 0)
                 };
+                cache.editor_cursor = None;
                 cache.editor_open = true;
             }
             textarea.set_block(
@@ -1717,7 +2093,13 @@ fn render_modal(
                     .title_bottom(" Ctrl-S saves · Esc cancels · no code is executed "),
             );
             textarea.set_cursor_line_style(Style::default());
-            frame.render_widget(&**textarea, area);
+            render_textarea(
+                frame,
+                textarea,
+                area,
+                &mut cache.editor_scroll,
+                &mut cache.editor_cursor,
+            );
             place_textarea_cursor(frame, textarea, area, &mut cache.editor_scroll);
             if let Some(error) = error {
                 frame.render_widget(

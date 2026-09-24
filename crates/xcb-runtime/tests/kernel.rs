@@ -1,7 +1,7 @@
 use std::{
     fs,
     sync::{Arc, mpsc::sync_channel},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use xcb_core::{
     Id, Provider,
@@ -55,44 +55,57 @@ async fn a_rejected_submission_returns_the_full_draft() {
         updates,
     ));
 
+    let submission_id = Id::new("m_task").unwrap();
+    let prompt = format!(
+        "{}\nPreserve the final line: λ 🇵🇷",
+        "do the whole thing\n".repeat(512)
+    );
     commands
         .send(Intent::Submit {
-            id: Id::new("m_task").unwrap(),
-            text: "do the thing".into(),
+            id: submission_id.clone(),
+            text: prompt.clone(),
             attachments: vec![image()],
         })
         .unwrap();
     let collected = tokio::task::spawn_blocking(move || {
-        let mut draft = None;
-        let mut notice = None;
-        for _ in 0..64 {
-            match display.recv_timeout(Duration::from_secs(10)) {
-                Ok(Update::Draft { text, attachments }) => draft = Some((text, attachments)),
-                Ok(Update::Notice(text)) => notice = Some(text),
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| "timed out waiting for the rejection response".to_owned())?;
+            match display.recv_timeout(remaining) {
+                Ok(Update::SubmitRejected {
+                    id,
+                    context,
+                    text,
+                    attachments,
+                    reason,
+                }) => return Ok((id, context, text, attachments, reason)),
+                Ok(Update::Submitted { .. }) => {
+                    return Err("a submission without an account was accepted".to_owned());
+                }
                 Ok(_) => (),
-                Err(error) => panic!("update channel failed: {error}"),
-            }
-            if draft.is_some() && notice.is_some() {
-                break;
+                Err(error) => return Err(format!("update channel failed: {error}")),
             }
         }
-        (draft, notice)
     })
-    .await
-    .unwrap();
+    .await;
     drop(commands);
     serve.await.unwrap().unwrap();
 
-    let (text, attachments) = collected
-        .0
+    let (id, context, text, attachments, reason) = collected
+        .unwrap()
         .expect("a rejected submission returns the draft");
-    assert_eq!(text, "do the thing");
+    assert_eq!(id, submission_id);
+    assert_eq!(
+        context, None,
+        "no session could be created without an account"
+    );
+    assert_eq!(text, prompt);
     assert_eq!(attachments, vec![image()]);
     assert!(
-        collected
-            .1
-            .expect("the rejection is explained")
-            .contains("account")
+        reason.contains("account"),
+        "the rejection is explained: {reason}"
     );
 }
 

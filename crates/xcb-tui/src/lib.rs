@@ -1,4 +1,8 @@
 pub mod composer;
+pub mod external_editor;
+pub mod input_recovery;
+mod interaction;
+mod recovery_ui;
 pub mod render;
 
 use composer::{Composer, ComposerAction};
@@ -24,7 +28,7 @@ use xcb_core::{
     Id,
     panes::Pane,
     session::{Attachment, State},
-    ui::{HabitatCommand, Intent, Update, View},
+    ui::{HabitatCommand, Intent, TranscriptContext, Update, View},
     usage::Estimate,
 };
 
@@ -40,6 +44,111 @@ pub struct SlashCommand {
     pub needs_args: bool,
 }
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
+    SlashCommand {
+        name: "/detach",
+        alias: "",
+        args: "[index|all]",
+        summary: "remove a pending attachment",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/resume",
+        alias: "",
+        args: "",
+        summary: "resume a saved conversation or session",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/rename",
+        alias: "",
+        args: "[name]",
+        summary: "rename this conversation or session",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/status",
+        alias: "",
+        args: "",
+        summary: "inspect current routing and agent state",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/history",
+        alias: "",
+        args: "",
+        summary: "browse saved transcript and older pages",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/copy",
+        alias: "",
+        args: "",
+        summary: "copy the last assistant answer",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/clear",
+        alias: "",
+        args: "",
+        summary: "clear display without deleting history",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/editor",
+        alias: "",
+        args: "",
+        summary: "edit this draft in VISUAL or EDITOR",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/drafts",
+        alias: "",
+        args: "",
+        summary: "recover private drafts from earlier terminals",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/tools",
+        alias: "",
+        args: "",
+        summary: "expand tool output in the transcript",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/thinking",
+        alias: "",
+        args: "",
+        summary: "show or hide reasoning output",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/agents",
+        alias: "",
+        args: "",
+        summary: "inspect live managed agents and tasks",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/task",
+        alias: "",
+        args: "[prompt]",
+        summary: "write a new task instead of guiding a selected task",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/queue",
+        alias: "",
+        args: "[prompt]",
+        summary: "queue ordinary project work",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/cancel",
+        alias: "",
+        args: "[task-id]",
+        summary: "cancel an explicitly observed task",
+        needs_args: false,
+    },
     SlashCommand {
         name: "/steer",
         alias: "",
@@ -210,7 +319,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
 ];
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum PickAction {
     Pane(Id),
     Model(String),
@@ -226,6 +335,8 @@ pub enum PickAction {
     Program(Id),
     Text(String),
     EditPane,
+    CancelTask { id: Id, revision: u64 },
+    Recovery(usize),
 }
 #[derive(Clone)]
 pub struct PickItem {
@@ -257,7 +368,25 @@ pub enum Modal {
         lines: Vec<String>,
         scroll: u16,
     },
-    Help,
+    Help {
+        scroll: u16,
+    },
+    HistorySearch {
+        query: String,
+        original: String,
+        matches: Vec<String>,
+        selected: usize,
+    },
+    Transcript {
+        title: String,
+        lines: Vec<String>,
+        query: String,
+        scroll: u32,
+        matches: Vec<usize>,
+        selected: usize,
+        search: bool,
+        has_more: bool,
+    },
 }
 
 /// Draft text and pending attachments scoped to one session. Kept per session
@@ -266,6 +395,8 @@ pub enum Modal {
 struct SessionDraft {
     text: String,
     attachments: Vec<Attachment>,
+    target: Option<interaction::ComposerTarget>,
+    origin: Option<input_recovery::RecoveryInput>,
 }
 
 /// Bound on remembered per-context drafts; the least recently used is evicted.
@@ -521,14 +652,21 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         model.label.hash(&mut hasher);
     }
     view.messages.len().hash(&mut hasher);
-    if let Some(last) = view.messages.last() {
-        last.id.as_str().hash(&mut hasher);
-        (last.role as u8).hash(&mut hasher);
-        last.text.len().hash(&mut hasher);
-        last.attachments.len().hash(&mut hasher);
+    for message in &view.messages {
+        message.id.as_str().hash(&mut hasher);
+        (message.role as u8).hash(&mut hasher);
+        message.text.hash(&mut hasher);
+        for attachment in &message.attachments {
+            attachment.digest.hash(&mut hasher);
+        }
+    }
+    if let Some(page) = &view.transcript {
+        page.first_sequence.hash(&mut hasher);
+        page.has_older.hash(&mut hasher);
     }
     for task in &view.tasks {
         task.id.as_str().hash(&mut hasher);
+        task.revision.hash(&mut hasher);
         task.title.hash(&mut hasher);
         (task.state as u8).hash(&mut hasher);
         task.status.hash(&mut hasher);
@@ -606,6 +744,7 @@ struct PendingEcho {
     session: Option<Id>,
     text: String,
     attachments: usize,
+    recovery_attachments: Vec<Attachment>,
 }
 
 enum InboxScope {
@@ -713,6 +852,27 @@ pub struct App {
     /// Notice text last observed and when it appeared; drives expiry.
     notice_seen: String,
     notice_since: Option<Instant>,
+    composer_target: Option<interaction::ComposerTarget>,
+    pending_habitat: VecDeque<interaction::PendingHabitat>,
+    live_picker: Option<interaction::LivePicker>,
+    live_inspect: Option<PickAction>,
+    external_editor_requested: bool,
+    initial_view_pending: bool,
+    pub transcript_clear_before: Option<Id>,
+    history_messages: Vec<xcb_core::session::Message>,
+    history_context: Option<TranscriptContext>,
+    history_first: Option<u64>,
+    history_more: bool,
+    history_request: Option<(Id, TranscriptContext)>,
+    pub(crate) viewport_height: Cell<u16>,
+    recovery: Option<input_recovery::RecoveryJournal>,
+    recovery_directory: Option<std::path::PathBuf>,
+    recovery_entries: Vec<input_recovery::RecoveryEntry>,
+    recovery_choices: Vec<recovery_ui::RecoveryChoice>,
+    recovery_extras: VecDeque<recovery_ui::RetainedInput>,
+    recovery_composer_origin: Option<input_recovery::RecoveryInput>,
+    recovery_fingerprint: u64,
+    recovery_saved: Option<Instant>,
 }
 impl App {
     /// The pending `/mouse` change, if any: `Some(true)` enables capture.
@@ -740,7 +900,7 @@ impl App {
         }
     }
     fn open_help(&mut self, via_question: bool) {
-        self.modal = Some(Modal::Help);
+        self.modal = Some(Modal::Help { scroll: 0 });
         self.help_via_question = via_question;
     }
     fn managed_mode(&self) -> bool {
@@ -817,6 +977,21 @@ impl App {
             return Vec::new();
         }
         const MANAGED: &[&str] = &[
+            "/detach",
+            "/resume",
+            "/rename",
+            "/status",
+            "/history",
+            "/copy",
+            "/clear",
+            "/editor",
+            "/drafts",
+            "/tools",
+            "/thinking",
+            "/agents",
+            "/task",
+            "/queue",
+            "/cancel",
             "/steer",
             "/watch",
             "/inbox",
@@ -866,12 +1041,17 @@ impl App {
             self.slash_dismissed.set(false);
         }
         let matches = self.slash_matches();
-        if matches.is_empty() || self.slash_dismissed.get() {
+        if self.slash_dismissed.get()
+            || !self.composer.text().starts_with('/')
+            || self.composer.text().contains(char::is_whitespace)
+        {
             return None;
         }
         Some((
             matches.clone(),
-            self.slash_selected.get().min(matches.len() - 1),
+            self.slash_selected
+                .get()
+                .min(matches.len().saturating_sub(1)),
         ))
     }
     fn save_draft(&mut self, session: Id, draft: SessionDraft) {
@@ -880,7 +1060,15 @@ impl App {
         }
         self.drafts.push_back((session, draft));
         while self.drafts.len() > MAX_DRAFT_SESSIONS {
-            self.drafts.pop_front();
+            if let Some((context, draft)) = self.drafts.pop_front() {
+                self.retain_rejected_with_origin(
+                    context,
+                    draft.text,
+                    draft.attachments,
+                    draft.target,
+                    draft.origin,
+                );
+            }
         }
     }
     fn take_draft(&mut self, session: &Id) -> Option<SessionDraft> {
@@ -923,7 +1111,87 @@ impl App {
     }
     pub fn apply(&mut self, update: Update) -> bool {
         match update {
+            Update::Submitted { id, .. } => {
+                self.pending_echoes.retain(|echo| echo.id != id);
+                self.dirty = true;
+            }
+            Update::SubmitRejected {
+                id,
+                context,
+                text,
+                attachments,
+                reason,
+            } => {
+                if let Some(index) = self.pending_echoes.iter().position(|echo| echo.id == id) {
+                    let pending = self.pending_echoes.remove(index).expect("matched submit");
+                    let context = context
+                        .map(|context| match context {
+                            TranscriptContext::Conversation(id)
+                            | TranscriptContext::Session(id) => id,
+                        })
+                        .or(pending.session);
+                    self.composer.remember(&text);
+                    if context == view_context(&self.view)
+                        && self.composer.text().is_empty()
+                        && self.attachments.is_empty()
+                        && self.composer_target.is_none()
+                        && !self.pending_image
+                    {
+                        self.composer.set_text(&text);
+                        self.attachments = attachments;
+                    } else if let Some(context) = context {
+                        self.retain_rejected(context, text, attachments, None);
+                    } else {
+                        self.restore_draft(text, attachments);
+                    }
+                }
+                self.notice = xcb_core::display_text(&reason, 1024);
+                self.dirty = true;
+            }
+            Update::TranscriptPageRejected {
+                context,
+                request,
+                reason,
+            } => {
+                if self.history_request.as_ref() == Some(&(request, context)) {
+                    self.history_request = None;
+                    self.notice = xcb_core::display_text(&reason, 1024);
+                    self.dirty = true;
+                }
+            }
+            Update::QueuedRecallRejected {
+                context: _,
+                id,
+                operation,
+                reason,
+            } => {
+                self.pending_habitat.retain(|entry| {
+                    entry.task.as_ref() != Some(&id) || entry.operation != operation
+                });
+                self.notice = xcb_core::display_text(&reason, 1024);
+                self.dirty = true;
+            }
+            Update::TranscriptPage { request, page } => self.accept_history_page(request, page),
+            Update::HabitatDraft {
+                context,
+                task,
+                operation,
+                text,
+            } => self.habitat_outcome(false, context, task, operation, text),
+            Update::HabitatAccepted {
+                context,
+                task,
+                operation,
+                text,
+            } => self.habitat_outcome(true, context, task, operation, text),
+            Update::QueuedDraft {
+                context,
+                id,
+                operation,
+                text,
+            } => self.accept_queued_draft(context, id, operation, text),
             Update::View(mut view) => {
+                self.initial_view_pending = false;
                 self.expire_notice();
                 if view.pane_error.is_some() {
                     view.pane = self.view.pane.clone();
@@ -932,6 +1200,13 @@ impl App {
                 let previous = view_context(&self.view);
                 let next = view_context(&view);
                 if previous != next {
+                    let target = self.composer_target.take();
+                    let origin = self.recovery_composer_origin.take();
+                    self.transcript_clear_before = None;
+                    self.history_request = None;
+                    if matches!(self.modal, Some(Modal::Transcript { .. })) {
+                        self.modal = None;
+                    }
                     // Before the first context arrives, input already belongs to
                     // the context being opened. A delayed initial view must not
                     // erase part of a command or an attachment typed meanwhile.
@@ -943,13 +1218,23 @@ impl App {
                         let text = self.composer.text();
                         let attachments = std::mem::take(&mut self.attachments);
                         if !text.is_empty() || !attachments.is_empty() {
-                            self.save_draft(previous, SessionDraft { text, attachments });
+                            self.save_draft(
+                                previous,
+                                SessionDraft {
+                                    text,
+                                    attachments,
+                                    target,
+                                    origin,
+                                },
+                            );
                         }
                     }
                     if !preserve_unbound_input {
                         let draft = next.and_then(|id| self.take_draft(&id)).unwrap_or_default();
                         self.composer.set_text(&draft.text);
                         self.attachments = draft.attachments;
+                        self.composer_target = draft.target;
+                        self.recovery_composer_origin = draft.origin;
                     }
                     self.stream.clear();
                     self.thinking.clear();
@@ -965,6 +1250,7 @@ impl App {
                     self.dirty = true;
                 }
                 self.view = *view;
+                self.refresh_live_surfaces();
                 if let Some(Modal::Picker {
                     title,
                     items,
@@ -1066,33 +1352,10 @@ impl App {
                     self.working_since = None;
                 }
                 if !self.pending_echoes.is_empty() {
-                    let current = view_context(&self.view);
-                    // Unbound echoes adopt the context the kernel bound the
-                    // submit to; echoes for other contexts stay pending.
-                    for echo in &mut self.pending_echoes {
-                        if echo.session.is_none() {
-                            echo.session = current.clone();
-                        }
-                    }
-                    let mut consumed = vec![false; self.view.messages.len()];
                     self.pending_echoes.retain(|echo| {
-                        if echo.session != current {
-                            return true;
-                        }
-                        !self
-                            .view
-                            .messages
-                            .iter()
-                            .enumerate()
-                            .any(|(index, message)| {
-                                !consumed[index]
-                                    && message.role == xcb_core::session::Role::User
-                                    && (message.id == echo.id || message.text == echo.text)
-                                    && {
-                                        consumed[index] = true;
-                                        true
-                                    }
-                            })
+                        !self.view.messages.iter().any(|message| {
+                            message.role == xcb_core::session::Role::User && message.id == echo.id
+                        })
                     });
                     self.dirty = true;
                 }
@@ -1174,6 +1437,8 @@ impl App {
     }
     fn picker(&mut self, title: &str, items: Vec<PickItem>) {
         self.inbox_scope = None;
+        self.live_picker = None;
+        self.live_inspect = None;
         self.modal = Some(Modal::Picker {
             title: title.into(),
             query: String::new(),
@@ -1191,6 +1456,33 @@ impl App {
         });
     }
     fn try_send(&mut self, output: &SyncSender<Intent>, intent: Intent) -> bool {
+        let intent = match intent {
+            Intent::Habitat(
+                command @ (HabitatCommand::ConfigureProject { .. }
+                | HabitatCommand::Schedule { .. }
+                | HabitatCommand::MemorySearch { .. }),
+            ) => {
+                let Some(conversation) = self.view.conversation.clone() else {
+                    self.notice =
+                        "Open a conversation before changing its project settings.".into();
+                    return false;
+                };
+                Intent::HabitatAt {
+                    conversation,
+                    command,
+                }
+            }
+            intent => intent,
+        };
+        if matches!(
+            intent,
+            Intent::NewSession | Intent::Conversation(_) | Intent::Resume(_)
+        ) && !self.recovery_capacity_available()
+        {
+            self.notice =
+                "Recover or discard retained input before opening another conversation.".into();
+            return false;
+        }
         if output.try_send(intent).is_err() {
             self.notice = "The command queue is full or closed. Nothing was submitted.".into();
             false
@@ -1202,6 +1494,10 @@ impl App {
         self.try_send(output, intent);
     }
     fn request_cancel(&mut self, output: &SyncSender<Intent>) {
+        if self.managed_mode() {
+            self.managed_cancel(output);
+            return;
+        }
         if self.try_send(output, Intent::Cancel) {
             self.notice = if self.managed_mode() {
                 "Cancellation requested for this conversation; check the task status for settlement."
@@ -1229,8 +1525,31 @@ impl App {
         command: &str,
         arguments: &str,
     ) {
-        if !self.try_send(output, intent) {
+        let pending = self.habitat_pending(&intent);
+        if pending.is_some()
+            && (self.pending_habitat.len() >= 16 || !self.recovery_capacity_available())
+        {
             self.composer.set_text(&format!("{command} {arguments}"));
+            self.notice = "Waiting for earlier input acknowledgements; command retained.".into();
+            return;
+        }
+        let tracked = pending.is_some();
+        if let Some(pending) = pending {
+            self.pending_habitat.push_back(pending);
+        }
+        if tracked && !self.flush_recovery(true) {
+            self.pending_habitat.pop_back();
+            self.composer.set_text(&format!("{command} {arguments}"));
+            return;
+        }
+        if self.try_send(output, intent) {
+            self.inbox_draft_event = None;
+        } else {
+            if tracked {
+                self.pending_habitat.pop_back();
+            }
+            self.composer.set_text(&format!("{command} {arguments}"));
+            self.flush_recovery(true);
         }
     }
 
@@ -1254,11 +1573,7 @@ impl App {
         command: &str,
         arguments: &str,
     ) {
-        if self.try_send(output, intent) {
-            self.inbox_draft_event = None;
-        } else {
-            self.composer.set_text(&format!("{command} {arguments}"));
-        }
+        self.send_habitat(output, intent, command, arguments);
     }
 
     fn habitat_command(&mut self, command: &str, arguments: &str, output: &SyncSender<Intent>) {
@@ -1275,7 +1590,10 @@ impl App {
                     self.notice = "Use /steer <task-id> <guidance>. Task IDs are shown in /tasks and /backlog.".into();
                 }
             }
-            "/steer" => self.notice = "Use /steer <task-id> <guidance>. Guidance waits for an authorized turn; approvals remain separate.".into(),
+            "/steer" => {
+                if let Ok(id) = Id::new(action) { self.select_task_target(&id, false); }
+                else { self.notice = "Use /steer <task-id> [guidance], or select a task in /agents and press s.".into(); }
+            }
             "/watch" => {
                 if let (Ok(task), Ok(source)) = (Id::new(action), Id::new(tail)) {
                     let event = self.inbox_event_id(command, arguments);
@@ -1368,7 +1686,12 @@ impl App {
                 self.picker(if attention { "Attention · questions / approvals / actions" } else if all { "All agents · backlog and history" } else { "This agent · backlog and history" }, items);
             }
             "/backlog" if action == "add" && !tail.is_empty() => {
-                self.send_habitat(output, Intent::Habitat(HabitatCommand::Enqueue { prompt: tail.into(), deferred: true, priority: 5 }), command, arguments);
+                let Some(conversation) = self.view.conversation.clone() else {
+                    self.composer.set_text(&format!("{command} {arguments}"));
+                    self.notice = "Open a conversation before adding work.".into(); return;
+                };
+                let id = self.inbox_event_id(command, arguments);
+                self.send_habitat(output, Intent::Habitat(HabitatCommand::EnqueueIn { conversation, id, prompt: tail.into(), deferred: true, priority: 5 }), command, arguments);
             }
             "/backlog" if action == "run" => {
                 if let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == tail) {
@@ -1386,8 +1709,9 @@ impl App {
                 } else { self.notice = "Task not in the current backlog view. /backlog all lists task ids.".into(); }
             }
             "/reply" if !tail.is_empty() => {
-                if let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == action) {
-                    self.send_habitat(output, Intent::Habitat(HabitatCommand::Reply { id: task.id.clone(), text: tail.into() }), command, arguments);
+                if let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == action).cloned() {
+                    let reply = self.inbox_event_id(command, &format!("{}:{arguments}", task.revision));
+                    self.send_habitat(output, Intent::Habitat(HabitatCommand::Reply { id: task.id, expected_revision: task.revision, reply, text: tail.into() }), command, arguments);
                 } else { self.notice = "Task not in the current backlog view. /attention lists tasks needing you.".into(); }
             }
             "/program" if arguments.is_empty() => {
@@ -1438,7 +1762,15 @@ impl App {
             .iter()
             .find(|entry| entry.alias == command)
             .map_or(command, |entry| entry.name);
+        let command = match command {
+            "/resume" => "/sessions",
+            "/agents" => "/tasks",
+            other => other,
+        };
         let arguments = arguments.trim();
+        if self.interaction_command(command, arguments, output) {
+            return true;
+        }
         if matches!(
             command,
             "/backlog"
@@ -1454,6 +1786,7 @@ impl App {
         ) {
             if self.managed_mode() {
                 self.habitat_command(command, arguments, output);
+                self.record_live_picker(command, arguments);
             } else {
                 self.notice =
                     "Open xcb chat to manage a persistent conversation's backlog and schedules."
@@ -1477,8 +1810,10 @@ impl App {
                 self.send(output, Intent::Quit);
                 return false;
             }
-            "/new" if self.managed_mode() => self.composer.set_text("new task: "),
-            "/new" => self.send(output, Intent::NewSession),
+            "/new" => {
+                self.composer_target = None;
+                self.send(output, Intent::NewSession);
+            }
             "/default" => self.send(output, Intent::SetDefault),
             "/model" | "/models" if arguments.is_empty() => self.picker(
                 "Models · fixed, Adaptive, and Fusion",
@@ -1652,6 +1987,7 @@ impl App {
                         .into()
             }
         }
+        self.record_live_picker(command, arguments);
         true
     }
     pub fn handle(&mut self, event: Event, output: &SyncSender<Intent>) -> bool {
@@ -1686,117 +2022,97 @@ impl App {
             // An open slash-command menu owns navigation and completion; global
             // toggles and Ctrl-C cancel stay reachable.
             if let Some((matches, selected)) = self.slash_menu() {
-                match key.code {
-                    KeyCode::Up
-                        if !key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                    {
-                        self.slash_selected.set(if selected == 0 {
-                            matches.len() - 1
-                        } else {
-                            selected - 1
-                        });
-                        return true;
-                    }
-                    KeyCode::Down
-                        if !key
-                            .modifiers
-                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                    {
-                        self.slash_selected.set((selected + 1) % matches.len());
-                        return true;
-                    }
-                    KeyCode::Char('p') | KeyCode::Char('n')
-                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                    {
-                        self.slash_selected.set(if key.code == KeyCode::Char('p') {
-                            if selected == 0 {
-                                matches.len() - 1
-                            } else {
-                                selected - 1
-                            }
-                        } else {
-                            (selected + 1) % matches.len()
-                        });
-                        return true;
-                    }
-                    KeyCode::Tab => {
-                        let mut text = matches[selected].name.to_owned();
-                        if matches[selected].needs_args {
-                            text.push(' ');
-                        }
-                        self.composer.set_text(&text);
-                        return true;
-                    }
-                    KeyCode::Enter => {
-                        let command = matches[selected];
-                        if command.needs_args {
-                            self.composer.set_text(&format!("{} ", command.name));
-                            return true;
-                        }
-                        // Route through the composer's own submit path so the
-                        // command lands in prompt history like a typed line.
-                        self.composer.set_text(command.name);
-                        if let ComposerAction::Submit(text) = self.composer.handle(Event::Key(
-                            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-                        )) {
-                            return self.slash(&text, output);
-                        }
-                        return true;
-                    }
-                    KeyCode::Esc => {
+                if matches.is_empty() {
+                    if key.code == KeyCode::Esc {
                         self.slash_dismissed.set(true);
                         return true;
                     }
-                    _ => (),
+                    if matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Tab) {
+                        return true;
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Up
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            self.slash_selected.set(if selected == 0 {
+                                matches.len() - 1
+                            } else {
+                                selected - 1
+                            });
+                            return true;
+                        }
+                        KeyCode::Down
+                            if !key
+                                .modifiers
+                                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                        {
+                            self.slash_selected.set((selected + 1) % matches.len());
+                            return true;
+                        }
+                        KeyCode::Char('p') | KeyCode::Char('n')
+                            if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
+                            self.slash_selected.set(if key.code == KeyCode::Char('p') {
+                                if selected == 0 {
+                                    matches.len() - 1
+                                } else {
+                                    selected - 1
+                                }
+                            } else {
+                                (selected + 1) % matches.len()
+                            });
+                            return true;
+                        }
+                        KeyCode::Tab => {
+                            let mut text = matches[selected].name.to_owned();
+                            text.push(' ');
+                            self.composer.set_text(&text);
+                            return true;
+                        }
+                        KeyCode::Enter => {
+                            let command = matches[selected];
+                            if command.needs_args {
+                                self.composer.set_text(&format!("{} ", command.name));
+                                return true;
+                            }
+                            // Route through the composer's own submit path so the
+                            // command lands in prompt history like a typed line.
+                            self.composer.set_text(command.name);
+                            if let ComposerAction::Submit(text) = self.composer.handle(Event::Key(
+                                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                            )) {
+                                return self.slash(&text, output);
+                            }
+                            return true;
+                        }
+                        KeyCode::Esc => {
+                            self.slash_dismissed.set(true);
+                            return true;
+                        }
+                        _ => (),
+                    }
                 }
             }
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                match key.code {
-                    KeyCode::Char('c') => {
-                        // Standard interrupt ordering: a live turn is cancelled
-                        // first, then a draft clears, then an idle empty
-                        // composer quits.
-                        if self.can_cancel_work() {
-                            self.request_cancel(output);
-                        } else if !self.composer.text().is_empty() {
-                            self.composer.clear_to_history();
-                            self.notice =
-                                "Draft cleared (Ctrl-R restores). Press Ctrl-C again to quit."
-                                    .into();
-                        } else {
-                            self.send(output, Intent::Quit);
-                            return false;
-                        }
-                        return true;
-                    }
-                    KeyCode::Char('t') => {
-                        self.show_thinking = !self.show_thinking;
-                        return true;
-                    }
-                    KeyCode::Char('o') => {
-                        self.show_history = !self.show_history;
-                        return true;
-                    }
-                    KeyCode::Char('u') => {
-                        self.show_activity = !self.show_activity;
-                        return true;
-                    }
-                    KeyCode::Char('p') => {
-                        if self.managed_mode() {
-                            self.slash("/tasks", output);
-                        } else {
-                            self.slash("/model", output);
-                        }
-                        return true;
-                    }
-                    KeyCode::Char('l') => {
-                        self.send(output, Intent::Refresh);
-                        return true;
-                    }
-                    _ => (),
+            if let Some(keep_running) = self.interaction_key(*key, output) {
+                return keep_running;
+            }
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                // Clear a draft before interrupting work; quit only
+                // after the composer is empty and no work can stop.
+                if !self.composer.text().is_empty() {
+                    self.composer.clear_to_history();
+                    self.notice =
+                        "Draft cleared (Ctrl-R restores). Press Ctrl-C again to quit.".into();
+                } else if self.can_cancel_work() {
+                    self.request_cancel(output);
+                } else {
+                    self.send(output, Intent::Quit);
+                    return false;
                 }
+                return true;
             }
             match key.code {
                 KeyCode::Char('?')
@@ -1813,11 +2129,15 @@ impl App {
                     return true;
                 }
                 KeyCode::PageUp => {
-                    self.scroll_transcript(-10);
+                    self.scroll_transcript(-i32::from(
+                        self.viewport_height.get().max(10).saturating_sub(3),
+                    ));
                     return true;
                 }
                 KeyCode::PageDown => {
-                    self.scroll_transcript(10);
+                    self.scroll_transcript(i32::from(
+                        self.viewport_height.get().max(10).saturating_sub(3),
+                    ));
                     return true;
                 }
                 // Plain End edits a draft (cursor to end of line); with a
@@ -1831,10 +2151,6 @@ impl App {
                 {
                     self.paused.set(false);
                     self.scroll.set(0);
-                    return true;
-                }
-                KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
-                    self.attachments.pop();
                     return true;
                 }
                 KeyCode::Tab if self.composer.text().starts_with('/') => {
@@ -1865,7 +2181,21 @@ impl App {
                 if text.starts_with('/') {
                     return self.slash(&text, output);
                 }
+                if self.composer_target.is_some() && self.managed_mode() {
+                    self.targeted_submit(text, false, output);
+                    return true;
+                }
                 if !text.trim().is_empty() || !self.attachments.is_empty() {
+                    if self.initial_view_pending {
+                        self.composer.set_text(&text);
+                        self.notice = "Opening your conversation; draft retained.".into();
+                        return true;
+                    }
+                    if self.pending_echoes.len() >= 8 || !self.recovery_capacity_available() {
+                        self.composer.set_text(&text);
+                        self.notice = "Waiting for earlier submissions; draft retained.".into();
+                        return true;
+                    }
                     let attachments = std::mem::take(&mut self.attachments);
                     let id = Id::new(format!("m_{}", uuid::Uuid::new_v4().simple()))
                         .expect("generated message id");
@@ -1873,22 +2203,56 @@ impl App {
                         id: id.clone(),
                         session: view_context(&self.view),
                         attachments: attachments.len(),
+                        recovery_attachments: attachments.clone(),
                         text: text.clone(),
                     };
-                    match output.try_send(Intent::Submit {
-                        id,
-                        text,
-                        attachments,
-                    }) {
+                    self.pending_echoes.push_back(echo);
+                    if !self.flush_recovery(true) {
+                        self.pending_echoes.pop_back();
+                        self.composer.set_text(&text);
+                        self.attachments = attachments;
+                        return true;
+                    }
+                    let context = self
+                        .view
+                        .conversation
+                        .clone()
+                        .map(TranscriptContext::Conversation)
+                        .or_else(|| {
+                            self.view
+                                .session
+                                .as_ref()
+                                .map(|session| TranscriptContext::Session(session.id.clone()))
+                        });
+                    let intent = match context {
+                        Some(context) => Intent::SubmitTo {
+                            context,
+                            id,
+                            text,
+                            attachments,
+                        },
+                        None => Intent::Submit {
+                            id,
+                            text,
+                            attachments,
+                        },
+                    };
+                    match output.try_send(intent) {
                         Ok(()) => {
-                            self.pending_echoes.push_back(echo);
-                            while self.pending_echoes.len() > 8 {
-                                self.pending_echoes.pop_front();
-                            }
                             self.notice.clear();
                         }
                         Err(
-                            std::sync::mpsc::TrySendError::Full(Intent::Submit {
+                            std::sync::mpsc::TrySendError::Full(Intent::SubmitTo {
+                                text,
+                                attachments,
+                                ..
+                            })
+                            | std::sync::mpsc::TrySendError::Disconnected(Intent::SubmitTo {
+                                text,
+                                attachments,
+                                ..
+                            })
+                            | std::sync::mpsc::TrySendError::Full(Intent::Submit {
                                 text,
                                 attachments,
                                 ..
@@ -1899,8 +2263,10 @@ impl App {
                                 ..
                             }),
                         ) => {
+                            self.pending_echoes.pop_back();
                             self.composer.set_text(&text);
                             self.attachments = attachments;
+                            self.flush_recovery(true);
                             self.notice = "Command queue unavailable; draft retained.".into();
                         }
                         Err(_) => (),
@@ -1909,7 +2275,10 @@ impl App {
             }
             ComposerAction::Cancel => {
                 // Esc interrupts a live turn; idle it is a quiet no-op.
-                if self.can_cancel_work() {
+                if self.paused.get() {
+                    self.paused.set(false);
+                    self.scroll.set(0);
+                } else if self.can_cancel_work() {
                     self.request_cancel(output);
                 }
             }
@@ -1918,24 +2287,8 @@ impl App {
                 return false;
             }
             ComposerAction::Clipboard => self.clipboard(output),
-            ComposerAction::History => self.picker(
-                "Prompt history",
-                self.composer
-                    .history()
-                    .map(|text| PickItem {
-                        label: text.lines().next().unwrap_or("").into(),
-                        action: PickAction::Text(text.clone()),
-                    })
-                    .collect(),
-            ),
-            ComposerAction::Editor => {
-                self.modal = Some(Modal::Editor {
-                    title: "Prompt editor".into(),
-                    textarea: Box::new(self.composer.textarea.clone()),
-                    kind: EditorKind::Prompt,
-                    error: None,
-                })
-            }
+            ComposerAction::History => self.open_history_search(),
+            ComposerAction::Editor => self.external_editor_requested = true,
             ComposerAction::Rejected(reason) => self.notice = reason.into(),
             ComposerAction::None => (),
         }
@@ -1974,6 +2327,15 @@ impl App {
         }
     }
     fn modal_event(&mut self, event: Event, output: &SyncSender<Intent>) -> bool {
+        if self.recovery_event(&event) {
+            return true;
+        }
+        if self.history_search_event(&event) || self.transcript_event(&event, output) {
+            return true;
+        }
+        if self.inspector_action(&event, output) {
+            return true;
+        }
         // Ctrl-C inside a dialog keeps the composer's ordering: cancel a live
         // run first; idle, it closes the dialog and warns, so a second press
         // is what quits. Esc still only closes the dialog.
@@ -1982,10 +2344,7 @@ impl App {
             && key.code == KeyCode::Char('c')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
-            if self.can_cancel_work() {
-                self.request_cancel(output);
-                return true;
-            }
+            // A local dialog consumes Ctrl-C before any worker action.
             // Prompt-editor text is newer than the composer draft it was
             // opened from; it returns to the composer instead of vanishing.
             if let Some(Modal::Editor {
@@ -2007,7 +2366,7 @@ impl App {
             .into();
             return true;
         }
-        if let (Some(Modal::Help), Event::Key(key)) = (&self.modal, &event)
+        if let (Some(Modal::Help { .. }), Event::Key(key)) = (&self.modal, &event)
             && key.kind != KeyEventKind::Release
             && key.code == KeyCode::Char('?')
         {
@@ -2037,9 +2396,17 @@ impl App {
                     selected,
                     ..
                 } => {
+                    if let Event::Paste(text) = &event {
+                        let text = xcb_core::display_text(text, 1024).replace(['\r', '\n'], " ");
+                        if query.len() + text.len() <= 1024 {
+                            query.push_str(&text);
+                            *selected = 0;
+                        }
+                        return true;
+                    }
                     let filtered = items
                         .iter()
-                        .filter(|item| item.label.to_lowercase().contains(&query.to_lowercase()))
+                        .filter(|item| interaction::item_matches(item, query))
                         .count();
                     if let Event::Mouse(mouse) = event {
                         match mouse.kind {
@@ -2096,7 +2463,7 @@ impl App {
                                 if !key
                                     .modifiers
                                     .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
-                                    && query.len() < 128 =>
+                                    && query.len() + ch.len_utf8() <= 1024 =>
                             {
                                 query.push(ch);
                                 *selected = 0;
@@ -2104,9 +2471,7 @@ impl App {
                             KeyCode::Enter => {
                                 chosen = items
                                     .iter()
-                                    .filter(|item| {
-                                        item.label.to_lowercase().contains(&query.to_lowercase())
-                                    })
+                                    .filter(|item| interaction::item_matches(item, query))
                                     .nth(*selected)
                                     .map(|item| item.action.clone())
                             }
@@ -2114,7 +2479,26 @@ impl App {
                         }
                     }
                 }
-                Modal::Help => {}
+                Modal::Help { scroll } => match &event {
+                    Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
+                        KeyCode::Up => *scroll = scroll.saturating_sub(1),
+                        KeyCode::Down => *scroll = scroll.saturating_add(1),
+                        KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                        KeyCode::PageDown | KeyCode::Char(' ') => {
+                            *scroll = scroll.saturating_add(10)
+                        }
+                        KeyCode::Home => *scroll = 0,
+                        KeyCode::End => *scroll = u16::MAX,
+                        _ => (),
+                    },
+                    Event::Mouse(mouse) => match mouse.kind {
+                        MouseEventKind::ScrollUp => *scroll = scroll.saturating_sub(3),
+                        MouseEventKind::ScrollDown => *scroll = scroll.saturating_add(3),
+                        _ => (),
+                    },
+                    _ => (),
+                },
+                Modal::HistorySearch { .. } | Modal::Transcript { .. } => {}
                 Modal::Inspect { scroll, .. } => {
                     // Read-only dialog: navigation moves the viewport; the
                     // offset is clamped to the wrapped body height at render.
@@ -2223,7 +2607,13 @@ impl App {
         }
         if let Some(action) = chosen {
             self.modal = None;
+            self.live_picker = None;
+            self.live_inspect = Some(action.clone());
             match action {
+                PickAction::CancelTask { id, revision } => {
+                    self.cancel_selected(id, revision, output)
+                }
+                PickAction::Recovery(index) => self.recover_entry(index),
                 PickAction::Pane(id) => self.send(output, Intent::Pane(id)),
                 PickAction::Model(id) => self.send(output, Intent::Model(id)),
                 PickAction::Account(id) => self.send(output, Intent::Account(id)),
@@ -2356,6 +2746,7 @@ impl App {
                     self.edit_pane(&self.view.pane.clone(), self.view.pane_revision.clone())
                 }
             }
+            self.refresh_live_surfaces();
         }
         true
     }
@@ -2381,6 +2772,20 @@ impl Drop for Restore {
 }
 
 pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()> {
+    run_with_options(input, output, RunOptions::default())
+}
+
+#[derive(Default)]
+pub struct RunOptions {
+    /// Trusted application-state directory for private, per-terminal input journals.
+    pub recovery_directory: Option<std::path::PathBuf>,
+}
+
+pub fn run_with_options(
+    input: Receiver<Update>,
+    output: SyncSender<Intent>,
+    options: RunOptions,
+) -> io::Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(io::Error::other(
             "xcb chat needs a terminal; use xcb run for headless work",
@@ -2404,8 +2809,12 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut app = App {
         keyboard_enhanced,
+        initial_view_pending: true,
         ..App::default()
     };
+    if let Some(directory) = options.recovery_directory {
+        app.configure_recovery(directory);
+    }
     let mut ticks = 0u64;
     let mut needs_draw = true;
     let mut blink = 0u64;
@@ -2414,13 +2823,18 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
             match input.try_recv() {
                 Ok(update) => {
                     if !app.apply(update) {
+                        app.flush_recovery(true);
                         return Ok(());
                     }
                 }
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => return Ok(()),
+                Err(TryRecvError::Disconnected) => {
+                    app.flush_recovery(true);
+                    return Ok(());
+                }
             }
         }
+        app.flush_recovery(false);
         needs_draw |= app.take_dirty();
         // The attention blink and the working spinner/elapsed badge are the
         // only states that change with time alone.
@@ -2448,6 +2862,46 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
                 break;
             }
         }
+        if std::mem::take(&mut app.external_editor_requested) {
+            app.flush_recovery(true);
+            let original = app.composer.text();
+            // Leave the terminal usable for the editor, then restore every mode
+            // before surfacing either edited text or a failure.
+            if keyboard_enhanced {
+                execute!(io::stdout(), PopKeyboardEnhancementFlags)?;
+            }
+            execute!(
+                io::stdout(),
+                DisableBracketedPaste,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            )?;
+            disable_raw_mode()?;
+            let edited = external_editor::edit(&original);
+            enable_raw_mode()?;
+            execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+            if keyboard_enhanced {
+                execute!(
+                    io::stdout(),
+                    PushKeyboardEnhancementFlags(
+                        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    )
+                )?;
+            }
+            if app.mouse_capture {
+                execute!(io::stdout(), EnableMouseCapture)?;
+            }
+            match edited {
+                Ok(text) => {
+                    app.composer.set_text(&text);
+                    app.notice = "Editor draft loaded. Enter sends when ready.".into();
+                }
+                Err(error) => app.notice = error.to_string(),
+            }
+            terminal.clear()?;
+            needs_draw = true;
+            app.flush_recovery(true);
+        }
         match app.take_mouse_toggle() {
             Some(true) => execute!(io::stdout(), EnableMouseCapture)?,
             Some(false) => execute!(io::stdout(), DisableMouseCapture)?,
@@ -2457,8 +2911,9 @@ pub fn run(input: Receiver<Update>, output: SyncSender<Intent>) -> io::Result<()
         // Publishing is kernel-driven: serve() pushes a full view on its own
         // cadence and picks up config.json writes itself, so no TUI-side
         // refresh timer duplicates publishes. Ctrl-L and /reload still send
-        // an explicit Intent::Refresh.
+        // an explicit Intent::Refresh via /reload.
     }
+    app.flush_recovery(true);
     Ok(())
 }
 
@@ -2467,6 +2922,68 @@ mod habitat_surface_tests {
     use super::*;
     use std::sync::mpsc::sync_channel;
     use xcb_core::ui::BacklogRow;
+
+    #[test]
+    fn pending_input_is_journaled_before_dispatch_and_failed_journaling_blocks_send() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("xcb-ui-before-send-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (tx, rx) = sync_channel(4);
+        let mut app = app();
+        app.configure_recovery(root.join("input"));
+        app.composer.set_text("Keep this input until acknowledged");
+        app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &tx,
+        );
+        let Intent::SubmitTo { id, .. } = rx.try_recv().unwrap() else {
+            panic!("bound new work")
+        };
+        let snapshot: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(app.recovery.as_ref().unwrap().path()).unwrap())
+                .unwrap();
+        assert_eq!(snapshot["text"], "");
+        assert_eq!(snapshot["other_inputs"][0]["operation"], id.as_str());
+        assert_eq!(snapshot["other_inputs"][0]["uncertain_pending"], true);
+        // Lose access to the task-owned journal directory. The next request must
+        // remain local because its pending identity cannot be saved first.
+        std::fs::rename(root.join("input"), root.join("moved")).unwrap();
+        app.composer.set_text("Must not dispatch");
+        app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &tx,
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(app.composer.text(), "Must not dispatch");
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn first_view_must_arrive_before_live_terminal_submission() {
+        let (tx, rx) = sync_channel(4);
+        let mut app = App {
+            initial_view_pending: true,
+            ..App::default()
+        };
+        app.open_recovery();
+        assert!(app.modal.is_none());
+        app.composer.set_text("early input");
+        app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &tx,
+        );
+        assert!(rx.try_recv().is_err());
+        assert_eq!(app.composer.text(), "early input");
+        app.apply(Update::View(Box::default()));
+        app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &tx,
+        );
+        assert!(matches!(rx.try_recv(), Ok(Intent::Submit { .. })));
+    }
 
     fn app() -> App {
         let conversation = Id::new("project_a").unwrap();
@@ -2729,7 +3246,7 @@ mod habitat_surface_tests {
         app.slash("/backlog add investigate later", &tx);
         assert!(matches!(
             rx.try_recv(),
-            Ok(Intent::Habitat(HabitatCommand::Enqueue {
+            Ok(Intent::Habitat(HabitatCommand::EnqueueIn {
                 deferred: true,
                 ..
             }))
@@ -2751,7 +3268,7 @@ mod habitat_surface_tests {
         }
         app.slash("/schedule every 3600 follow project", &tx);
         assert!(
-            matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::Schedule { interval_ms: 3_600_000, prompt })) if prompt == "follow project")
+            matches!(rx.try_recv(), Ok(Intent::HabitatAt { command: HabitatCommand::Schedule { interval_ms: 3_600_000, prompt }, .. }) if prompt == "follow project")
         );
     }
 
@@ -2797,9 +3314,9 @@ mod habitat_surface_tests {
         }
         app.slash("/project grant 5 24 Maintain the parser", &tx);
         assert!(
-            matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::ConfigureProject {
+            matches!(rx.try_recv(), Ok(Intent::HabitatAt { command: HabitatCommand::ConfigureProject {
             expected_revision: Some(17), max_tasks: 5, required_provider: Some(xcb_core::Provider::Codex), goal, ..
-        })) if goal == "Maintain the parser")
+        }, .. }) if goal == "Maintain the parser")
         );
         app.slash("/project pause", &tx);
         assert!(matches!(
@@ -2822,7 +3339,7 @@ mod habitat_surface_tests {
         );
         app.slash("/memory search parser decisions", &tx);
         assert!(
-            matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::MemorySearch { query })) if query == "parser decisions")
+            matches!(rx.try_recv(), Ok(Intent::HabitatAt { conversation, command: HabitatCommand::MemorySearch { query } }) if query == "parser decisions" && conversation.as_str() == "project_a")
         );
     }
 }

@@ -1004,27 +1004,37 @@ impl Store {
             && crate::digest(&message.text) == expected)
     }
     pub fn messages(&self, id: &Id, limit: usize) -> Result<Vec<Message>> {
-        if !(1..=512).contains(&limit) {
-            return Err(xcb_core::Error::Invalid("message page limit").into());
+        Ok(self.transcript_page(id, None, limit)?.messages)
+    }
+
+    pub fn transcript_page(
+        &self,
+        id: &Id,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<xcb_core::ui::TranscriptPage> {
+        crate::transcript::page(
+            &*self.db()?,
+            xcb_core::ui::TranscriptContext::Session(id.clone()),
+            before,
+            limit,
+        )
+    }
+
+    /// Compare the observed title, then change metadata without advancing the
+    /// transcript revision or invalidating an active worker's custody.
+    pub fn rename_session(&self, id: &Id, expected_title: &str, title: &str) -> Result<Session> {
+        let title = crate::transcript::title(title)?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = session_from(&tx, id)?.ok_or(Error::Unavailable("session not found"))?;
+        if session.id != *id || session.title != expected_title {
+            return Err(Error::Conflict("session title changed"));
         }
-        let db = self.db()?;
-        let mut query = db.prepare("SELECT payload FROM (SELECT sequence,payload FROM messages WHERE session=?1 ORDER BY sequence DESC LIMIT ?2) ORDER BY sequence")?;
-        let rows = query.query_map(params![id.as_str(), limit as i64], |row| {
-            row.get::<_, String>(0)
-        })?;
-        let mut messages = Vec::new();
-        let mut bytes = 0usize;
-        for row in rows {
-            let row = row?;
-            bytes += row.len();
-            if bytes > 8 * 1024 * 1024 {
-                return Err(xcb_core::Error::Limit("transcript page").into());
-            }
-            let message: Message = decode(&row)?;
-            message.validate()?;
-            messages.push(message);
-        }
-        Ok(messages)
+        session.title = title;
+        update_session(&tx, &session, session.revision)?;
+        tx.commit()?;
+        Ok(session)
     }
     pub fn authentication_required(&self, account: &Id) -> Result<bool> {
         let db = self.db()?;

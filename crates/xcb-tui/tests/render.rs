@@ -196,7 +196,8 @@ fn a_paused_viewport_is_pinned_while_output_streams() {
     assert!(contents.contains("line-041"));
     assert!(contents.contains("paused · End follows"));
 
-    // PageUp bases its step on the last rendered top line, then End follows.
+    // PageUp bases its step on the last rendered top line and viewport.
+    let previous_top = app.scroll_top();
     app.handle(
         crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::PageUp,
@@ -204,11 +205,12 @@ fn a_paused_viewport_is_pinned_while_output_streams() {
         )),
         &std::sync::mpsc::sync_channel(1).0,
     );
-    assert_eq!(app.scroll.get(), 30);
+    assert!(app.scroll.get() < previous_top);
+    let page_top = app.scroll.get();
     terminal
         .draw(|frame| render::draw(frame, &mut app, 0))
         .unwrap();
-    assert_eq!(app.scroll_top(), 30);
+    assert_eq!(app.scroll_top(), page_top);
     app.handle(
         crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::End,
@@ -460,12 +462,12 @@ fn a_submitted_prompt_echoes_in_the_transcript_immediately() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(contents.contains("You"));
+    assert!(contents.contains("› ship the fix"));
     assert!(contents.contains("ship the fix"));
 }
 
 #[test]
-fn tool_calls_render_as_compact_cells_and_expand_on_ctrl_u() {
+fn tool_calls_render_as_compact_cells_and_expand_on_f4() {
     let mut app = app();
     app.view.pane = Pane::focus();
     app.view.messages = vec![
@@ -608,6 +610,7 @@ fn global_conversation_shows_managed_tasks_instead_of_provider_chrome() {
         .insert(0, ("algal supervisor".into(), "on".into()));
     app.view.tasks = vec![xcb_core::ui::TaskRow {
         id: Id::new("t_login").unwrap(),
+        revision: 1,
         title: "Fix login redirect".into(),
         state: State::NeedsAnswer,
         status: Some("needs input".into()),
@@ -645,6 +648,7 @@ fn managed_task(
 ) -> xcb_core::ui::TaskRow {
     xcb_core::ui::TaskRow {
         id: Id::new(id).unwrap(),
+        revision: 1,
         title: title.into(),
         state: State::Working,
         status: Some(status.into()),
@@ -655,6 +659,37 @@ fn managed_task(
         workspace: "/project".into(),
         updated_at_ms,
     }
+}
+
+#[test]
+fn managed_header_keeps_current_conversation_visible_while_routes_are_busy() {
+    let mut app = app();
+    app.view.session = None;
+    app.view.conversation = Some(Id::new("active_conversation").unwrap());
+    app.view.conversations = vec![xcb_core::ui::ConversationRow {
+        id: Id::new("active_conversation").unwrap(),
+        title: "Active \u{202e}workspace\u{1b}".into(),
+        workspace: "/project".into(),
+        messages: 1,
+        updated_at_ms: 1,
+    }];
+    app.view.state = State::Working;
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    app.view.tasks = vec![managed_task(
+        "busy_task",
+        "Busy task",
+        "running",
+        Some("devin/swe-2-high · account_one"),
+        1,
+    )];
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let rows = screen_rows(&terminal);
+    assert!(rows[0].starts_with("xcb · Active workspace"));
+    assert!(!rows[0].contains(['\u{202e}', '\u{1b}']));
+    assert!(buffer_text(&terminal).contains("1 running"));
 }
 
 #[test]
@@ -856,7 +891,7 @@ fn empty_global_conversation_has_quiet_dispatcher_chrome() {
         .collect();
     assert!(contents.contains("global dispatcher"));
     assert!(contents.contains("Describe work or ask about the running task swarm"));
-    assert!(contents.contains("Message · / for commands"));
+    assert!(contents.contains("Ask xcb to work on something"));
     assert!(!contents.contains("usage: unmeasured"));
 }
 
@@ -899,9 +934,9 @@ fn managed_work_does_not_advertise_direct_session_followups() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(contents.contains("Describe new work"));
-    assert!(contents.contains("/steer <task> <guidance>"));
-    assert!(contents.contains("/inbox"));
+    assert!(contents.contains("Describe work"));
+    assert!(contents.contains("/steer"));
+    assert!(contents.contains("/attention"));
     assert!(!contents.contains("Type a follow-up"));
 }
 
@@ -1042,7 +1077,7 @@ fn tabs_expand_to_the_next_four_column_stop() {
         "tabs must expand: {contents}"
     );
     assert!(
-        contents.contains("out   put"),
+        contents.contains("out put"),
         "tool cells expand tabs too: {contents}"
     );
 }
@@ -1056,20 +1091,19 @@ fn hardware_cursor_tracks_the_composer_cell() {
     terminal
         .draw(|frame| render::draw(frame, &mut app, 0))
         .unwrap();
-    // The composer occupies rows 20..23; its TOP|BOTTOM borders leave the text
-    // row at y=21 and the cursor five cells in.
+    // The composer has a two-cell prompt gutter and remains above its footer.
     assert_eq!(
         terminal.get_cursor_position().unwrap(),
-        Position::new(5, 21)
+        Position::new(7, 21)
     );
-    // Two lines grow the composer to rows 19..23; the cursor sits on line 2.
+    // Additional lines grow upward; the last line remains anchored.
     app.composer.set_text("ab\ncd");
     terminal
         .draw(|frame| render::draw(frame, &mut app, 0))
         .unwrap();
     assert_eq!(
         terminal.get_cursor_position().unwrap(),
-        Position::new(2, 21)
+        Position::new(4, 21)
     );
 }
 
@@ -1107,11 +1141,10 @@ fn hardware_cursor_tracks_modal_editor_and_picker_cells() {
     terminal
         .draw(|frame| render::draw(frame, &mut app, 0))
         .unwrap();
-    // The title " Accounts · select an account · en " measures 35 cells; the
-    // cursor tracks its end on the border row.
+    // The filter gets its own row above the choices in a bottom-anchored panel.
     assert_eq!(
         terminal.get_cursor_position().unwrap(),
-        Position::new(37, 1)
+        Position::new(7, 19)
     );
 }
 
@@ -1151,8 +1184,8 @@ fn transcript_rows_match_ratatui_word_wrap() {
             terminal
                 .draw(|frame| render::draw(frame, &mut app, 0))
                 .unwrap();
-            // Transcript body rows start one row under the widget's heading.
-            let got: Vec<String> = (2..200)
+            // Quiet transcript begins directly below the xcb header.
+            let got: Vec<String> = (1..199)
                 .map(|y| {
                     (0..width)
                         .map(|x| {
@@ -1269,4 +1302,356 @@ fn transcript_frame_benchmark() {
         streaming,
         streaming / 200
     );
+}
+
+fn screen_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn quiet_chrome_uses_terminal_defaults_and_anchors_the_prompt() {
+    use ratatui::style::{Color, Modifier};
+    for width in [24, 40, 80, 120] {
+        let mut app = app();
+        app.composer.set_text("draft");
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal
+            .draw(|frame| render::draw(frame, &mut app, 0))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 21)].symbol(), "›");
+        assert_eq!(buffer[(2, 21)].symbol(), "d");
+        assert_eq!(buffer[(0, 22)].fg, Color::Reset);
+        assert_eq!(buffer[(0, 22)].bg, Color::Reset);
+        assert!(buffer[(0, 22)].modifier.contains(Modifier::DIM));
+        assert!(buffer.content.iter().all(|cell| cell.bg == Color::Reset));
+        assert_eq!(terminal.get_cursor_position().unwrap().x, 7);
+        assert!(
+            !screen_rows(&terminal)
+                .iter()
+                .any(|row| row.starts_with('─'))
+        );
+    }
+}
+
+#[test]
+fn markdown_styles_are_visible_in_actual_transcript_cells() {
+    use ratatui::style::{Color, Modifier};
+    let mut app = app();
+    app.stream = "# Result\n- **bold** and `inline`\n[docs](https://example.test)\n```diff\n-old\n+new\n@@ hunk\n```\n> quote\n1. first".into();
+    let mut terminal = Terminal::new(TestBackend::new(90, 26)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let rows = screen_rows(&terminal);
+    let cell_at = |needle: &str| {
+        let (y, row) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.contains(needle))
+            .unwrap();
+        let x = row[..row.find(needle).unwrap()].chars().count();
+        terminal.backend().buffer()[(x as u16, y as u16)].clone()
+    };
+    assert!(cell_at("Result").modifier.contains(Modifier::BOLD));
+    assert!(cell_at("bold").modifier.contains(Modifier::BOLD));
+    assert_eq!(cell_at("inline").fg, Color::Cyan);
+    assert!(cell_at("docs").modifier.contains(Modifier::UNDERLINED));
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("docs (https://example.test)"))
+    );
+    assert_eq!(cell_at("-old").fg, Color::Red);
+    assert_eq!(cell_at("+new").fg, Color::Green);
+    assert_eq!(cell_at("@@ hunk").fg, Color::Cyan);
+    assert!(rows.iter().any(|row| row.contains("│ quote")));
+    assert!(rows.iter().any(|row| row.contains("1. first")));
+}
+
+#[test]
+fn wide_and_long_composer_text_keeps_hardware_cursor_on_the_painted_cursor() {
+    use ratatui::style::Modifier;
+    for text in [
+        "あ🙂e\u{301}".to_string(),
+        "あ🙂".repeat(50),
+        "\tend".repeat(50),
+        "x".repeat(70_000),
+        format!("{}end", "x\n".repeat(70_000)),
+    ] {
+        let mut app = app();
+        app.composer.set_text(&text);
+        let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
+        terminal
+            .draw(|frame| render::draw(frame, &mut app, 0))
+            .unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert!(cursor.x >= 2 && cursor.x < 40);
+        assert!(cursor.y < 12);
+        let cell = &terminal.backend().buffer()[cursor];
+        assert_eq!(
+            cell.symbol(),
+            " ",
+            "end-of-text cursor must follow visible content: {cursor:?}"
+        );
+        assert!(cell.modifier.contains(Modifier::REVERSED));
+    }
+}
+
+#[test]
+fn picker_has_bottom_anchor_query_cursor_count_and_no_match_row() {
+    use xcb_tui::{PickAction, PickItem};
+    for height in [7, 12, 24] {
+        let mut app = app();
+        app.modal = Some(Modal::Picker {
+            title: "Accounts".into(),
+            query: "missing".into(),
+            selected: 99,
+            items: vec![PickItem {
+                label: "personal".into(),
+                action: PickAction::Account(Id::new("personal").unwrap()),
+            }],
+        });
+        let mut terminal = Terminal::new(TestBackend::new(40, height)).unwrap();
+        terminal
+            .draw(|frame| render::draw(frame, &mut app, 0))
+            .unwrap();
+        let contents = buffer_text(&terminal);
+        assert!(contents.contains("0/1"));
+        assert!(contents.contains("No matches"));
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(cursor.y, height - 5);
+        assert_eq!(cursor.x, 12);
+    }
+}
+
+#[test]
+fn help_scrolls_in_short_terminals_and_uses_the_current_shortcuts() {
+    let mut app = app();
+    app.modal = Some(Modal::Help { scroll: 0 });
+    let mut terminal = Terminal::new(TestBackend::new(70, 9)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    assert!(buffer_text(&terminal).contains("Ctrl-A/E"));
+    if let Some(Modal::Help { scroll }) = &mut app.modal {
+        *scroll = u16::MAX;
+    }
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    assert!(!buffer_text(&terminal).contains("Ctrl-A/E"));
+    assert!(matches!(app.modal, Some(Modal::Help { scroll }) if scroll > 0 && scroll < u16::MAX));
+}
+
+#[test]
+fn transcript_search_jumps_to_wrapped_match_and_reports_loaded_history_limit() {
+    let mut app = app();
+    app.modal = Some(Modal::Transcript {
+        title: "Transcript".into(),
+        lines: vec![
+            "prefix ".repeat(60),
+            "the needle is here".into(),
+            "tail".into(),
+        ],
+        query: "needle".into(),
+        scroll: 0,
+        matches: vec![1],
+        selected: 0,
+        search: true,
+        has_more: true,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(42, 12)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    assert!(contents.contains("needle is here"));
+    assert!(contents.contains("1 matches"));
+    assert!(contents.contains("older history"));
+    assert!(matches!(app.modal, Some(Modal::Transcript { scroll, .. }) if scroll > 1));
+}
+
+#[test]
+fn short_terminal_preserves_the_prompt_with_attachments_and_notice() {
+    for height in [7, 8, 9] {
+        let mut app = app();
+        app.notice = "The draft is retained while the task changes.".into();
+        app.composer.set_text("ok");
+        app.attachments = vec![
+            Attachment {
+                digest: "a".repeat(64),
+                media_type: "image/png".into(),
+                bytes: 1024,
+                width: 1,
+                height: 1,
+            };
+            3
+        ];
+        let mut terminal = Terminal::new(TestBackend::new(24, height)).unwrap();
+        terminal
+            .draw(|frame| render::draw(frame, &mut app, 0))
+            .unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(cursor.x, 4);
+        assert!(cursor.y < height - 1);
+        assert_eq!(terminal.backend().buffer()[(2, cursor.y)].symbol(), "o");
+        assert_eq!(terminal.backend().buffer()[(0, cursor.y)].symbol(), "›");
+    }
+}
+
+#[test]
+fn same_length_replacements_never_leave_stale_cached_transcript_text() {
+    let mut app = app();
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    app.stream = "first tail".into();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    app.stream = "other tail".into();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    assert!(buffer_text(&terminal).contains("other tail"));
+    assert!(!buffer_text(&terminal).contains("first tail"));
+    app.stream.clear();
+    app.view.messages = vec![Message {
+        id: Id::new("mutable").unwrap(),
+        role: Role::Assistant,
+        text: format!("{}\nBEFORE\n{}", "a".repeat(80), "z".repeat(80)),
+        at_ms: 1,
+        attachments: Vec::new(),
+        provenance: None,
+    }];
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    app.view.messages[0].text = app.view.messages[0].text.replace("BEFORE", "AFTER!");
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    assert!(buffer_text(&terminal).contains("AFTER!"));
+    assert!(!buffer_text(&terminal).contains("BEFORE"));
+}
+
+#[test]
+fn cursor_inside_a_grapheme_is_normalized_before_paint_and_insertion() {
+    use ratatui::style::Modifier;
+    use ratatui_textarea::CursorMove;
+    for text in ["e\u{301}x", "👩‍💻x"] {
+        let mut app = app();
+        app.composer.set_text(text);
+        app.composer.textarea.move_cursor(CursorMove::Jump(0, 1));
+        let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
+        terminal
+            .draw(|frame| render::draw(frame, &mut app, 0))
+            .unwrap();
+        assert_eq!(app.composer.textarea.cursor(), (0, 0));
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(cursor.x, 2);
+        assert!(
+            terminal.backend().buffer()[cursor]
+                .modifier
+                .contains(Modifier::REVERSED)
+        );
+        app.composer.textarea.insert_str("z");
+        assert_eq!(app.composer.text(), format!("z{text}"));
+    }
+}
+
+#[test]
+fn wide_cursor_glyph_scrolls_whole_into_view_at_the_right_edge() {
+    use ratatui::{layout::Position, style::Modifier};
+    use ratatui_textarea::CursorMove;
+    let mut app = app();
+    app.composer.set_text(&format!("{}界z", "x".repeat(21)));
+    app.composer.textarea.move_cursor(CursorMove::Jump(0, 21));
+    let mut terminal = Terminal::new(TestBackend::new(24, 14)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let cursor = terminal.get_cursor_position().unwrap();
+    assert_eq!(cursor, Position::new(22, 11));
+    let cell = &terminal.backend().buffer()[cursor];
+    assert_eq!(cell.symbol(), "界");
+    assert!(cell.modifier.contains(Modifier::REVERSED));
+}
+
+#[test]
+fn history_search_preview_reveals_a_match_below_the_first_screen() {
+    for text in [
+        format!("{}\nlate NEEDLE result\nafter", "earlier line\n".repeat(80)),
+        format!("{}NEEDLE result", "prefix ".repeat(100)),
+        format!("{}NEEDLE result", "İ ".repeat(100)),
+    ] {
+        let mut app = app();
+        app.modal = Some(Modal::HistorySearch {
+            query: "needle".into(),
+            original: "draft".into(),
+            selected: 0,
+            matches: vec![text],
+        });
+        let mut terminal = Terminal::new(TestBackend::new(45, 12)).unwrap();
+        terminal
+            .draw(|frame| render::draw(frame, &mut app, 0))
+            .unwrap();
+        assert!(buffer_text(&terminal).contains("NEEDLE"));
+        assert_eq!(app.composer.text(), "");
+    }
+}
+
+#[test]
+fn modal_arrow_keys_cross_combining_graphemes_in_both_directions() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui_textarea::{CursorMove, TextArea};
+    let mut app = app();
+    let mut textarea = TextArea::from(vec!["e\u{301}x".to_owned()]);
+    textarea.move_cursor(CursorMove::Head);
+    app.modal = Some(Modal::Editor {
+        title: "Edit".into(),
+        textarea: Box::new(textarea),
+        kind: xcb_tui::EditorKind::Prompt,
+        error: None,
+    });
+    let (tx, _) = std::sync::mpsc::sync_channel(4);
+    let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    for (key, expected) in [
+        (KeyCode::Right, 2),
+        (KeyCode::Right, 3),
+        (KeyCode::Left, 2),
+        (KeyCode::Left, 0),
+    ] {
+        app.handle(Event::Key(KeyEvent::new(key, KeyModifiers::NONE)), &tx);
+        terminal
+            .draw(|frame| render::draw(frame, &mut app, 0))
+            .unwrap();
+        assert!(
+            matches!(&app.modal, Some(Modal::Editor { textarea, .. }) if textarea.cursor() == (0, expected))
+        );
+    }
+}
+
+#[test]
+fn one_row_history_preview_shows_the_match_instead_of_preceding_context() {
+    let mut app = app();
+    app.modal = Some(Modal::HistorySearch {
+        query: "needle".into(),
+        original: String::new(),
+        selected: 0,
+        matches: vec!["before\nNEEDLE\nafter".into()],
+    });
+    let mut terminal = Terminal::new(TestBackend::new(40, 7)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    assert!(buffer_text(&terminal).contains("NEEDLE"));
 }
