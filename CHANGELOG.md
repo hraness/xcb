@@ -6,6 +6,9 @@ assets, not this file, are the evidence that a version shipped; see
 
 ## 0.8.2
 
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.2)
+for macOS ARM64 and Linux x86_64; [public verification run](https://github.com/hraness/xcb/actions/runs/36068310101).
+
 - The conversation you have open comes first in the session grid, ahead of
   other sessions needing attention, so the work you just started is never
   pushed off screen. Attention, active, and earlier sessions follow as before,
