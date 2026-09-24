@@ -10,12 +10,12 @@ import "./docs/docs.css";
 import "./compare/compare.css";
 
 /**
- * Paper is the site's own palette; the initial class supplies its compiled
+ * Tokyo Night is the site's own palette; the initial class supplies its compiled
  * values and the blocking bootstrap adds a concrete `data-theme` before
- * paint. With JavaScript disabled no `data-theme` is rendered, so Paper's
+ * paint. With JavaScript disabled no `data-theme` is rendered, so the palette's
  * light-dark() colors keep following the operating system.
  */
-const initialPalette = getDesignPaletteTheme("paper", "light");
+const initialPalette = getDesignPaletteTheme("tokyo-night", "light");
 
 const title = "xcb · One router for your Claude, Codex, and Devin subscriptions";
 const description =
@@ -45,8 +45,8 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: [
-    { color: "#f8f7f4", media: "(prefers-color-scheme: light)" },
-    { color: "#12100f", media: "(prefers-color-scheme: dark)" },
+    { color: "#e1e2e7", media: "(prefers-color-scheme: light)" },
+    { color: "#1a1b26", media: "(prefers-color-scheme: dark)" },
   ],
 };
 
@@ -58,7 +58,8 @@ export default function RootLayout({
       lang="en"
       data-hraness-theme="paper"
       data-hraness-material="lantern"
-      data-palette="paper"
+      data-palette="tokyo-night"
+      data-hraness-pattern="mesh"
       className={initialPalette.className}
       suppressHydrationWarning
     >

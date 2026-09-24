@@ -1,5 +1,5 @@
 /** The pre-paint bootstrap and React provider must adopt the same controller. */
 export const siteDefaultPalette = Object.freeze({
-  palette: "paper",
+  palette: "tokyo-night",
   mode: "system",
 } as const);

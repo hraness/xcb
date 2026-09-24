@@ -10,13 +10,13 @@ import { CompatibilityArchive, NativeDownloads } from "../app/release-state";
 import RootLayout from "../app/layout";
 import { siteDefaultPalette } from "../palette";
 
-test("the appearance menu agrees with the bootstrap Paper/system preference", () => {
+test("the appearance menu agrees with the bootstrap Tokyo Night/system preference", () => {
   const html = renderToStaticMarkup(<RootLayout><Home /></RootLayout>);
   const selected: string[] = [];
   new HTMLRewriter().on('.hraness-design-palette-menu input[type="radio"][checked]', {
     element(element) { selected.push(element.getAttribute("value") ?? ""); },
   }).transform(html);
-  expect(siteDefaultPalette).toEqual({ palette: "paper", mode: "system" });
+  expect(siteDefaultPalette).toEqual({ palette: "tokyo-night", mode: "system" });
   expect(selected).toEqual([siteDefaultPalette.palette, siteDefaultPalette.mode]);
 });
 

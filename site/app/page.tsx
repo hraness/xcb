@@ -47,8 +47,7 @@ export default function Home() {
       <main id="main" tabIndex={-1}>
         <MarketingPage>
           <div className="hraness-material-wall xcb-opening">
-            <HeroField />
-            <ProductHero className="xcb-marketing-hero" align="center" name=""
+            <ProductHero backdrop={<HeroField />} className="xcb-marketing-hero" align="start" name=""
               heading="Run coding tasks on the subscriptions you already pay for." headingId="hero-title" summary={summary}
               actions={[{ href: "/docs/getting-started", label: "Get started" }, { href: "/docs/route", label: "Route tasks" }]}
               boundary="Open source · MIT licensed · Source preview"
