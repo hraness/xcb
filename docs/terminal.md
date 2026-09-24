@@ -50,7 +50,8 @@ enables wheel scrolling.
 The overview above chat shows your sessions. Each card shows
 the session name, routed model, activity, and a preview of its latest response.
 Labels accompany the colors for questions, approvals, completed work, usage
-limits, and problems. A model is shown after routing; thinking is shown only
+limits, and problems. A session that failed without a response shows its
+failure reason in place of the response. A model is shown after routing; thinking is shown only
 when the provider reports it.
 
 The grid uses at most half the terminal height and scrolls when more sessions
@@ -64,8 +65,9 @@ one sends nothing and keeps your current chat and guidance target. Edit the
 draft to describe what you want to do with that context, then send it from the
 main chat. Existing task, project, and approval controls still apply.
 
-Sessions needing attention come first, then active work, then earlier sessions.
-Cards keep their relative order within each group as responses arrive. While you
+The conversation you have open comes first, then sessions needing attention,
+then active work, then earlier sessions. Cards keep their relative order within
+each group as responses arrive. While you
 focus or scroll the grid, the order stays in place; status updates remain visible.
 Returning to the top and leaving grid focus applies priority changes.
 

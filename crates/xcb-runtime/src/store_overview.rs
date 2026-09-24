@@ -26,7 +26,7 @@ impl Store {
         let outcomes = if outcomes_available {
             "run_outcomes"
         } else {
-            "(SELECT NULL AS session,NULL AS run,NULL AS payload WHERE 0)"
+            "(SELECT NULL AS session,NULL AS run,NULL AS input_sequence,NULL AS payload WHERE 0)"
         };
         let mut query = db.prepare(&format!(
             "WITH selected AS (
@@ -41,7 +41,7 @@ impl Store {
                         WHEN 'working' THEN 1 ELSE 2 END,
                     last_active DESC,id LIMIT ?2
             )
-            SELECT s.id,s.payload,m.id,m.payload,o.payload,r.payload
+            SELECT s.id,s.payload,m.id,m.payload,o.payload,r.payload,f.payload,fr.payload
             FROM selected selected_session JOIN sessions s ON s.id=selected_session.id
             LEFT JOIN messages m ON m.session=s.id AND m.sequence=(
                 SELECT sequence FROM messages WHERE session=s.id
@@ -50,7 +50,10 @@ impl Store {
             )
             LEFT JOIN {outcomes} o ON o.session=s.id AND o.run=(
                 CASE WHEN json_valid(m.payload) THEN json_extract(m.payload,'$.provenance.run') END)
-            LEFT JOIN runs r ON r.id=o.run AND r.phase='settled'",
+            LEFT JOIN runs r ON r.id=o.run AND r.phase='settled'
+            LEFT JOIN {outcomes} f ON f.session=s.id AND f.input_sequence=(
+                SELECT MAX(input_sequence) FROM {outcomes} WHERE session=s.id)
+            LEFT JOIN runs fr ON fr.id=f.run AND fr.phase='settled'",
         ))?;
         let records =
             query.query_map(params![focused.map(Id::as_str), MAX_AGENTS as i64], |row| {
@@ -61,11 +64,22 @@ impl Store {
                     row.get::<_, Option<String>>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })?;
         let mut rows = Vec::new();
         for record in records {
-            let (id, payload, message_id, message_payload, outcome_payload, run_payload) = record?;
+            let (
+                id,
+                payload,
+                message_id,
+                message_payload,
+                outcome_payload,
+                run_payload,
+                latest_outcome,
+                latest_run,
+            ) = record?;
             let Ok(session) = decode::<Session>(&payload) else {
                 continue;
             };
@@ -104,10 +118,22 @@ impl Store {
             } else {
                 session.state
             };
-            let response = message
+            let mut response = message
                 .as_ref()
                 .map(|message| xcb_core::display_text(&message.text, MAX_RESPONSE_BYTES))
                 .unwrap_or_default();
+            let mut category = category;
+            // A session that ended without a response shows why: the latest
+            // settled outcome's bounded diagnostic, identity-checked like a
+            // response category. Never a live or unsettled run.
+            if response.is_empty()
+                && matches!(state, State::Failed | State::Limited | State::Uncertain)
+                && let Some((text, label)) =
+                    failure_preview(&session, latest_outcome.as_deref(), latest_run.as_deref())
+            {
+                response = text;
+                category = Some(label);
+            }
             rows.push(AgentRow {
                 context: TranscriptContext::Session(session.id),
                 task: None,
@@ -124,6 +150,30 @@ impl Store {
         crate::agent_overview::sort(&mut rows);
         Ok(rows)
     }
+}
+
+/// The latest settled outcome's diagnostic for a session that ended without a
+/// response, with the same identity checks as a response category.
+fn failure_preview(
+    session: &Session,
+    outcome_payload: Option<&str>,
+    run_payload: Option<&str>,
+) -> Option<(String, String)> {
+    let record = decode::<SettledOutcome>(outcome_payload?).ok()?;
+    let run = decode::<RunRecord>(run_payload?).ok()?;
+    (record.version == 1
+        && run.validate().is_ok()
+        && validate_outcome(&record.outcome).is_ok()
+        && record.run == run.id
+        && record.session == session.id
+        && run.session.as_ref() == Some(&session.id)
+        && run.phase == "settled")
+        .then_some(())?;
+    let diagnostic = record.outcome.diagnostic.as_ref()?.as_str();
+    Some((
+        xcb_core::display_text(diagnostic, MAX_RESPONSE_BYTES),
+        record.outcome.state.label().into(),
+    ))
 }
 
 #[cfg(test)]
