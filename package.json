@@ -57,6 +57,6 @@
     "@types/bun": "1.4.2",
     "@types/node": "26.6.2",
     "sigstore": "4.1.1",
-    "typescript": "6.0.3"
+    "typescript": "7.0.2"
   }
 }
