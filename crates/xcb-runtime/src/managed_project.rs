@@ -77,7 +77,7 @@ pub(super) fn policy_from(db: &Connection, conversation: &Id) -> Result<Option<P
     })
     .transpose()
 }
-fn write_policy(tx: &Transaction<'_>, policy: &ProjectPolicy) -> Result<()> {
+pub(super) fn write_policy(tx: &Transaction<'_>, policy: &ProjectPolicy) -> Result<()> {
     policy.validate()?;
     tx.execute("INSERT INTO project_policies(conversation,revision,payload) VALUES(?1,?2,?3) ON CONFLICT(conversation) DO UPDATE SET revision=excluded.revision,payload=excluded.payload", params![policy.conversation.as_str(),sql(policy.revision)?,serde_json::to_string(policy)?])?;
     Ok(())
@@ -100,6 +100,7 @@ fn no_outstanding(db: &Connection, conversation: &Id, excluded: Option<&Id>) -> 
     Ok(true)
 }
 pub(super) fn check_dispatch(db: &Connection, task: &ManagedTask, now: u64) -> Result<()> {
+    program_state::check_dispatch(db, task, now)?;
     if task.schedule.is_some() && policy_from(db, &task.conversation)?.is_some_and(|p| !p.enabled) {
         return Err(Error::Conflict(
             "project authority is paused; scheduled work waits",
@@ -702,9 +703,11 @@ impl ManagedStore {
             )
         {
             next.state = TaskState::Cancelled;
-            next.detail =
+            next.detail = if task.program.as_ref().is_some_and(|program| program.managed_calls > 0) {
+                "managed ALGAL program cancelled after interpreter joined; completed child reports retained"
+            } else {
                 "ALGAL planner cancelled after bounded interpreter joined; no external effects"
-                    .into();
+            }.into();
         } else {
             match result {
                 Ok(report) => {

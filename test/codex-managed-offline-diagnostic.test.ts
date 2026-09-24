@@ -98,7 +98,7 @@ test("fixed diagnostic joins two real lease generations and emits no account, mo
   const f = await fixture(), result = await f.run(); stopped(result); expect(result.passed).toBe(true); expect(result.failures).toEqual([]);
   expect(f.spawns).toHaveLength(2); expect(f.frames[0]).toEqual([]);
   expect(f.frames[1]).toEqual([
-    { id: 1, method: "initialize", params: { clientInfo: { name: "xcb-offline-diagnostic", version: "0.5.0" }, capabilities: { experimentalApi: false, requestAttestation: false } } },
+    { id: 1, method: "initialize", params: { clientInfo: { name: "xcb-offline-diagnostic", version: "0.6.0" }, capabilities: { experimentalApi: false, requestAttestation: false } } },
     { method: "initialized" }, { id: 2, method: "config/read", params: { cwd: f.spawns[1]!.cwd, includeLayers: false } },
   ]);
   expect(result.protocol).toEqual({ methods: ["initialize", "initialized", "config/read"], configurationObserved: true, disabledNotices: 1, frameCount: 3, failure: null, joined: true });

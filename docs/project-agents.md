@@ -158,17 +158,54 @@ The program must expose a text `summary` and may expose a text `prompt`. Its
 summary and receipt digest become ordinary task history; a prompt becomes a
 deferred proposal and needs the same project grant as worker proposals.
 
-This release admits deterministic `input`, `const`, `fn` and `expr` cells with
+Pure planners admit deterministic `input`, `const`, `fn` and `expr` cells with
 bounded graph size, steps, work, context and output. Useful pure functions include
 ALGAL memory queries and context compaction over explicitly supplied input data.
 There are no imports, host effects, transports, or persistent VM store. Cancellation
 joins bounded execution before settlement. Restart can replay pure work safely;
 proposal publication retains stable occurrence identity.
 
-Effectful programs need a resumable xcb host adapter before admission. The pinned
-VM's generic subprocess backend cannot carry managed parent identity, private
-state-root, tool custody and approvals, so it is rejected. Providers and tools
-continue through normal xcb tasks produced by the planner.
+Current source builds also support managed controllers that request ordinary
+worker tasks and resume from their completed reports. This profile is not in
+the published v0.5.0 binaries. Explicitly enable it with `--managed-calls`, bounded
+from 1 to 8 calls per run:
+
+```sh
+xcb backlog program <conversation-id> examples/project-controller.algal.json --managed-calls 2 --title "Inspect and advance the project"
+xcb backlog program-status <parent-or-child-id> --json
+xcb schedules program <conversation-id> examples/project-controller.algal.json --managed-calls 2 --every 3600
+```
+
+The example inspects the project, then supplies that report to a second worker.
+Managed manifests expose a text `summary` and admit top-level text-output `agent`
+cells alongside pure cells. Provider routes, retries, imports, nested programs,
+arbitrary host tools and subprocess backends are excluded. Inputs and manifest
+bytes remain pinned. Each child uses normal model routing and project tools.
+
+A current project grant is required. Immediate admission requires other released
+project work to have settled; deferred backlog items may remain. Every child consumes
+one grant task atomically when it is published and inherits the exact grant
+generation and provider constraint. Pause, expiry, replacement grants, exhausted
+budgets and unresolved attention hold further calls. Program children can record
+deferred follow-ups, but cannot extend the controller's automatic work budget.
+
+The controller releases its worker slot while waiting. Its checkpoint, receipt,
+linked child and call identity survive restart, so resuming a recorded call does
+not launch it again. Only the exact completed child's intact report can resume
+evaluation. Failure or cancellation stops the controller; questions, approvals
+and uncertain execution stay in the normal attention flow. The controller cannot
+answer an approval. Reports and call prompts are bounded to 8 KiB; checkpoints
+are bounded to 512 KiB. Oversized output is rejected rather than silently clipped.
+
+Use `/program` in the TUI to browse recent controllers, or `/program <task-id>` to
+inspect the parent, call count, linked child status and latest receipt. Open
+`/attention` to resolve a child's question or approval. CLI inspection accepts
+either a parent or child ID and includes retained history outside the bounded TUI
+view. Cancel the parent through the ordinary task controls to cancel its active
+child; xcb waits for settlement before reporting cancellation as complete.
+
+No controller, schedule or provider is activated by an upgrade. These controls
+extend the existing supervisor; they do not require another daemon.
 
 ## Working memory and Wordcell
 

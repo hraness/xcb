@@ -69,6 +69,13 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         needs_args: false,
     },
     SlashCommand {
+        name: "/program",
+        alias: "",
+        args: "[task-id]",
+        summary: "inspect resumable programs and their worker tasks",
+        needs_args: false,
+    },
+    SlashCommand {
         name: "/memory",
         alias: "",
         args: "search <query>",
@@ -216,6 +223,7 @@ pub enum PickAction {
     Inbox(Id),
     Schedule(Id),
     Project(Id),
+    Program(Id),
     Text(String),
     EditPane,
 }
@@ -391,6 +399,60 @@ fn inspect_inbox(event: &xcb_core::ui::InboxRow) -> Modal {
     }
 }
 
+fn program_items(view: &View) -> Vec<PickItem> {
+    view.programs
+        .iter()
+        .map(|program| PickItem {
+            label: format!(
+                "{} · {} · {}/{} calls · {}",
+                program.parent,
+                xcb_core::display_text(&program.phase, 80),
+                program.calls,
+                program.max_calls,
+                xcb_core::display_text(
+                    program.child_status.as_deref().unwrap_or("no active child"),
+                    80
+                ),
+            ),
+            action: PickAction::Program(program.parent.clone()),
+        })
+        .collect()
+}
+
+fn inspect_program(program: &xcb_core::ui::ProgramRow) -> Modal {
+    let mut lines = vec![
+        format!("program  {}", program.parent),
+        format!("phase    {}", xcb_core::display_text(&program.phase, 160)),
+        format!("calls    {}/{}", program.calls, program.max_calls),
+    ];
+    if let Some(child) = &program.child {
+        lines.extend([
+            format!("child    {child}"),
+            format!(
+                "status   {}",
+                xcb_core::display_text(program.child_status.as_deref().unwrap_or("unknown"), 512)
+            ),
+            String::new(),
+            format!("/backlog all · inspect worker {child}"),
+            "/attention · resolve the worker's question or approval".into(),
+            "A waiting program does not answer approvals or hold the workspace.".into(),
+        ]);
+    }
+    lines.extend([
+        String::new(),
+        format!(
+            "receipt  {}",
+            program.receipt.as_deref().unwrap_or("no checkpoint yet")
+        ),
+        format!("xcb backlog program-status {} --json", program.parent),
+    ]);
+    Modal::Inspect {
+        title: format!("Program {}", program.parent),
+        lines,
+        scroll: 0,
+    }
+}
+
 /// Fingerprint of the rendered parts of a `View`. Used to skip repaints when a
 /// refresh publishes a snapshot identical to what is already on screen. Only
 /// fields the renderer reads participate; messages are append-only in the
@@ -490,6 +552,15 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         project.conversation.as_str().hash(&mut hasher);
         project.revision.hash(&mut hasher);
         project.status.hash(&mut hasher);
+    }
+    for program in &view.programs {
+        program.parent.hash(&mut hasher);
+        program.phase.hash(&mut hasher);
+        program.calls.hash(&mut hasher);
+        program.max_calls.hash(&mut hasher);
+        program.child.hash(&mut hasher);
+        program.child_status.hash(&mut hasher);
+        program.receipt.hash(&mut hasher);
     }
     for event in &view.inbox {
         event.id.as_str().hash(&mut hasher);
@@ -614,6 +685,7 @@ pub struct App {
     inbox_draft_event: Option<(String, Id)>,
     /// Refresh an open receipt inspector when durable delivery changes.
     inbox_inspect: Option<Id>,
+    program_inspect: Option<Id>,
     inbox_scope: Option<InboxScope>,
     /// Highlighted row of the slash-command typeahead menu.
     slash_selected: Cell<usize>,
@@ -749,6 +821,7 @@ impl App {
             "/watch",
             "/inbox",
             "/project",
+            "/program",
             "/memory",
             "/attention",
             "/backlog",
@@ -892,6 +965,58 @@ impl App {
                     self.dirty = true;
                 }
                 self.view = *view;
+                if let Some(Modal::Picker {
+                    title,
+                    items,
+                    query,
+                    selected,
+                }) = &mut self.modal
+                    && title == "Recent managed programs"
+                {
+                    let query_lower = query.to_lowercase();
+                    let previous = items
+                        .iter()
+                        .filter(|item| item.label.to_lowercase().contains(&query_lower))
+                        .nth(*selected)
+                        .and_then(|item| match &item.action {
+                            PickAction::Program(id) => Some(id.clone()),
+                            _ => None,
+                        });
+                    *items = program_items(&self.view);
+                    let filtered: Vec<_> = items
+                        .iter()
+                        .filter(|item| item.label.to_lowercase().contains(&query_lower))
+                        .collect();
+                    *selected = previous.and_then(|id| filtered.iter().position(|item| matches!(&item.action, PickAction::Program(parent) if parent == &id)))
+                        .unwrap_or_else(|| (*selected).min(filtered.len().saturating_sub(1)));
+                }
+                if let Some(id) = &self.program_inspect {
+                    let expected = format!("Program {id}");
+                    if let Some(Modal::Inspect { title, scroll, .. }) = &self.modal
+                        && *title == expected
+                    {
+                        let old_scroll = *scroll;
+                        if let Some(program) =
+                            self.view.programs.iter().find(|row| &row.parent == id)
+                        {
+                            let mut modal = inspect_program(program);
+                            if let Modal::Inspect { scroll, .. } = &mut modal {
+                                *scroll = old_scroll;
+                            }
+                            self.modal = Some(modal);
+                        } else {
+                            self.modal = Some(Modal::Inspect {
+                                title: expected,
+                                lines: vec![format!(
+                                    "Outside the current bounded view. Use xcb backlog program-status {id} --json for current state."
+                                )],
+                                scroll: 0,
+                            });
+                        }
+                    } else {
+                        self.program_inspect = None;
+                    }
+                }
                 if let Some(scope) = &self.inbox_scope {
                     if let Some(Modal::Picker { title, items, .. }) = &mut self.modal
                         && title.as_str() == scope.title()
@@ -1265,6 +1390,17 @@ impl App {
                     self.send_habitat(output, Intent::Habitat(HabitatCommand::Reply { id: task.id.clone(), text: tail.into() }), command, arguments);
                 } else { self.notice = "Task not in the current backlog view. /attention lists tasks needing you.".into(); }
             }
+            "/program" if arguments.is_empty() => {
+                self.picker("Recent managed programs", program_items(&self.view));
+            }
+            "/program" => {
+                if let Some(program) = self.view.programs.iter().find(|row| row.parent.as_str() == arguments) {
+                    self.modal = Some(inspect_program(program));
+                    self.program_inspect = Some(program.parent.clone());
+                } else {
+                    self.notice = "Program is outside the current view. Use xcb backlog program-status <id> --json. Create a pinned program with xcb backlog program or xcb schedules program.".into();
+                }
+            }
             "/schedule" if arguments.is_empty() || arguments == "all" => {
                 let all = arguments == "all";
                 self.picker(if all { "All agents · schedules" } else { "This agent · schedules" },
@@ -1310,6 +1446,7 @@ impl App {
                 | "/schedule"
                 | "/reply"
                 | "/project"
+                | "/program"
                 | "/memory"
                 | "/steer"
                 | "/watch"
@@ -2158,6 +2295,12 @@ impl App {
                         });
                     }
                 }
+                PickAction::Program(id) => {
+                    if let Some(program) = self.view.programs.iter().find(|row| row.parent == id) {
+                        self.modal = Some(inspect_program(program));
+                        self.program_inspect = Some(id);
+                    }
+                }
                 PickAction::Project(id) => {
                     if let Some(project) = self.view.projects.iter().find(|p| p.conversation == id)
                     {
@@ -2376,6 +2519,46 @@ mod habitat_surface_tests {
             updated_at_ms: 2,
             receipt: None,
         }
+    }
+
+    #[test]
+    fn program_inspector_tracks_child_attention_without_answering_it() {
+        let (tx, rx) = sync_channel(8);
+        let mut app = app();
+        app.view.programs.push(xcb_core::ui::ProgramRow {
+            parent: Id::new("program_a").unwrap(),
+            phase: "waiting".into(),
+            calls: 1,
+            max_calls: 2,
+            child: Some(Id::new("child_a").unwrap()),
+            child_status: Some("needs approval".into()),
+            receipt: Some("sha256:checkpoint".into()),
+        });
+        app.slash("/program", &tx);
+        assert!(
+            matches!(&app.modal, Some(Modal::Picker { items, .. }) if items.len() == 1 && items[0].label.contains("needs approval"))
+        );
+        app.slash("/program program_a", &tx);
+        assert!(
+            matches!(&app.modal, Some(Modal::Inspect { lines, .. }) if lines.iter().any(|line| line.contains("child_a")) && lines.iter().any(|line| line.contains("/attention")))
+        );
+        assert!(rx.try_recv().is_err());
+        let before = fingerprint_at(&app.view, 0);
+        let mut next = app.view.clone();
+        next.programs[0].child_status = Some("completed".into());
+        next.programs[0].phase = "resuming".into();
+        assert_ne!(before, fingerprint_at(&next, 0));
+        app.apply(Update::View(Box::new(next)));
+        assert!(
+            matches!(&app.modal, Some(Modal::Inspect { lines, .. }) if lines.iter().any(|line| line.contains("resuming")) && !lines.iter().any(|line| line.contains("needs approval")))
+        );
+        let mut next = app.view.clone();
+        next.programs.clear();
+        app.apply(Update::View(Box::new(next)));
+        assert!(
+            matches!(&app.modal, Some(Modal::Inspect { lines, .. }) if lines[0].contains("Outside the current bounded view"))
+        );
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

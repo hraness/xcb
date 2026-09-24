@@ -1,0 +1,27 @@
+{
+  "contract": "algal.organism.v1",
+  "key": "organism:project-controller",
+  "name": "Inspect then act within the project grant",
+  "cells": [
+    {
+      "id": "inspect",
+      "kind": "agent",
+      "prompt": "Inspect the current project and backlog. Report one concrete next action supported by the project goal and current evidence.",
+      "output": { "kind": "text" }
+    },
+    {
+      "id": "act",
+      "kind": "agent",
+      "prompt": "Carry out the next action justified by the prior inspection, within the existing project grant. Stop for required approval or missing input; report a concise result.",
+      "inputs": { "inspection": "text" },
+      "output": { "kind": "text" }
+    }
+  ],
+  "edges": [
+    { "from": { "cell": "inspect", "port": "out" }, "to": { "cell": "act", "port": "inspection" } }
+  ],
+  "interface": {
+    "inputs": {},
+    "outputs": { "summary": { "cell": "act", "port": "out" } }
+  }
+}
