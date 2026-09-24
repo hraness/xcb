@@ -4,6 +4,15 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.8.1
+
+- Claude Code 2.1.281 lists its builtin `agents-md` plugin at session start, which
+  failed xcb's runtime boundary check and stopped every Claude route on that
+  build. xcb now disables that plugin when it launches Claude, so the effective
+  plugin set stays empty, and AGENTS.md files are not loaded as instructions
+  behind xcb's back. The boundary diagnostic now names the property that
+  changed, such as `plugins` or `permissionMode`, instead of a bare mismatch.
+
 ## 0.8.0
 
 [Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.0)

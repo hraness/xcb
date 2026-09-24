@@ -82,6 +82,16 @@ why discovery metadata and execution authority are different.
 
 ## Live Claude subscription smoke
 
+`2026-09-24-live-claude-subscription.json` records the runtime boundary holding
+on Claude Code **2.1.282** (and 2.1.281 earlier the same session) after 2.1.281
+began listing its builtin `agents-md` plugin at session start. Without the
+launch setting that disables that plugin, the per-run boundary assertion failed
+closed on every native Claude route; with it, an automatically routed coding
+turn from a disposable scratch repository completed with settled effects, the
+provider joined before the completion was persisted, and the requested file was
+written. The receipt names the runtime, the boundary assertions, the prior
+failure, and what it does not establish.
+
 `2026-09-22-live-claude-subscription.json` supplements the 2026-09-17 receipt
 below rather than replacing it. It answers one question the earlier one cannot:
 whether the admitted-version floor holds live on a runtime newer than the one
