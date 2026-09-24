@@ -4,8 +4,21 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
-## Unreleased
+## 0.8.0
 
+- A session grid above chat shows agent names, routed models, activity, and
+  response previews with category labels and colors. It grows up to half the
+  terminal height, with independent scrolling and a compact view on short screens.
+- F6 browses the grid from the keyboard. With `/mouse` enabled, the wheel scrolls
+  the panel under the pointer and clicking a card adds an agent reference to the
+  draft. References preserve the current chat and task target and send nothing.
+- Sessions needing attention come first, followed by active work, with stable
+  ordering while responses arrive and while you browse. Keyboard filters show
+  all, active, or attention-needed sessions and match names, models, or status.
+  Questions and approvals keep their existing controls above the overview.
+- Closing a compatibility CLI session store releases its prepared statements
+  before the database closes, so an immediate resume can reopen it without
+  waiting for garbage collection.
 - The route reflex's `judged` head and the task classifier port carry ALGAL's
   generation-1 model-router coefficients: the September 22 fit updated with the
   reflex's anchored learning rule on 84 labeled September 2026 first prompts

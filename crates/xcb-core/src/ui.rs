@@ -256,7 +256,28 @@ pub enum HabitatCommand {
 }
 
 #[derive(Debug, Clone)]
+pub struct AgentRow {
+    /// Stable conversation or direct-session identity, never a worker route.
+    pub context: TranscriptContext,
+    /// The exact managed task represented by the status and response, if any.
+    pub task: Option<Id>,
+    pub title: String,
+    pub workspace: String,
+    /// An observed model/route; an unstarted routing preference is not a model.
+    pub model: Option<String>,
+    pub state: State,
+    /// Host-selected phase, separate from the retained assistant response.
+    pub activity: String,
+    /// Latest retained response for this task/session, at most 2048 UTF-8 bytes.
+    pub response: String,
+    pub category: Option<String>,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct View {
+    /// Up to 128 conversation/direct-session summaries; no worker transcripts.
+    pub agents: Vec<AgentRow>,
     pub conversation: Option<Id>,
     pub conversations: Vec<ConversationRow>,
     pub session: Option<Session>,
@@ -296,6 +317,7 @@ pub struct View {
 impl Default for View {
     fn default() -> Self {
         Self {
+            agents: vec![],
             conversation: None,
             conversations: vec![],
             session: None,

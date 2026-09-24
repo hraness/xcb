@@ -422,6 +422,7 @@ fn elapsed_label(seconds: u64) -> String {
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     let area = frame.area();
+    crate::agent_grid::clear_geometry(app);
     if area.width < 24 || area.height < 7 {
         frame.render_widget(
             Paragraph::new("xcb · enlarge the terminal\nCtrl-C cancels · Ctrl-D exits"),
@@ -547,7 +548,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     );
     app.scroll_top.set(0);
     app.scroll_tail.set(0);
-    render_node(frame, &app.view.pane.root, parts[1], app);
+    let grid_height = crate::agent_grid::grid_height(app, parts[1], area.height);
+    let grid_area = Rect::new(parts[1].x, parts[1].y, parts[1].width, grid_height);
+    let chat_area = Rect::new(
+        parts[1].x,
+        parts[1].y + grid_height,
+        parts[1].width,
+        parts[1].height.saturating_sub(grid_height),
+    );
+    render_node(frame, &app.view.pane.root, chat_area, app);
     frame.render_widget(
         Paragraph::new(expand_tabs(&clean(notice)))
             .style(Style::default().fg(Color::Yellow))
@@ -626,9 +635,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
             &mut cache.composer_scroll,
             &mut cache.composer_cursor,
         );
-    }
-    if let Some((matches, selected)) = app.slash_menu() {
-        render_slash_menu(frame, &matches, selected, parts[4]);
     }
     // A live run owned by a sibling terminal is normal parallel work, not a
     // session needing recovery.
@@ -823,6 +829,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
             },
         );
     }
+    // The pinned overview sits above the chat; dialogs stay above both.
+    crate::agent_grid::render(frame, app, grid_area, ticks);
+    if let Some((matches, selected)) = app.slash_menu() {
+        render_slash_menu(frame, &matches, selected, parts[4]);
+    }
     let shortcuts = if matches!(app.modal, Some(Modal::Help { .. })) {
         app.shortcut_lines()
     } else {
@@ -833,7 +844,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     if let Some(modal) = &mut app.modal {
         let mut cache = app.render_cache.borrow_mut();
         render_modal(frame, modal, area, &shortcuts, &mut cache);
-    } else {
+    } else if !app.overview_focused() {
         let mut cache = app.render_cache.borrow_mut();
         cache.editor_open = false;
         place_textarea_cursor(
@@ -1115,8 +1126,8 @@ fn preferred_height(node: &Node, app: &App) -> Constraint {
         // List widgets collapse entirely when they have nothing to show.
         Node::Widget { source, .. }
             if matches!(source, Source::Subagents)
-                && app.view.subagents.is_empty()
-                && app.view.tasks.is_empty()
+                && ((app.view.subagents.is_empty() && app.view.tasks.is_empty())
+                    || (crate::agent_grid::is_visible(app) && app.view.subagents.is_empty()))
                 || matches!(source, Source::Extensions) && app.view.extensions.is_empty() =>
         {
             Constraint::Length(0)
@@ -1196,7 +1207,12 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
                 },
                 muted(),
             )));
-            for task in &app.view.tasks {
+            for task in app
+                .view
+                .tasks
+                .iter()
+                .filter(|_| !crate::agent_grid::is_visible(app))
+            {
                 let project = std::path::Path::new(&task.workspace)
                     .file_name()
                     .and_then(|name| name.to_str())

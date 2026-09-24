@@ -1,7 +1,6 @@
-// SQLite port shared by Bun and Node runtimes. bun:sqlite and node:sqlite differ only in
-// statement lookup and empty-result conventions, so the port lazily resolves the runtime's
-// native module and normalizes both to one closed surface. The module load itself stays
-// runtime-neutral: importing this file under Node never touches bun:sqlite and vice versa.
+// SQLite port shared by Bun and Node runtimes. The port normalizes statement lookup,
+// empty results, bindings, and close lifecycle, and lazily resolves the runtime's native
+// module. Importing this file under Node never touches bun:sqlite and vice versa.
 
 export type SqliteBinding = string | number | bigint | boolean | null | Uint8Array;
 export interface SqliteStatement<Row, _Params extends SqliteBinding[] = SqliteBinding[]> {
@@ -19,6 +18,7 @@ type NativeStatement = {
   get(...params: never[]): unknown;
   all(...params: never[]): unknown[];
   run(...params: never[]): { changes: number | bigint };
+  finalize?(): void;
 };
 type NativeDatabase = {
   exec(sql: string): unknown;
@@ -34,24 +34,46 @@ export function wrapSqliteDatabase(database: NativeDatabase, journal: "WAL" | "D
   if (journal === "WAL") database.exec("PRAGMA journal_mode=WAL");
   else {
     database.exec("PRAGMA busy_timeout=0");
-    const mode = database.prepare("PRAGMA journal_mode").get() as { journal_mode?: unknown } | undefined;
-    if (mode?.journal_mode !== "delete") throw new Error("SQLITE_JOURNAL_MISMATCH");
+    const statement = database.prepare("PRAGMA journal_mode");
+    try {
+      const mode = statement.get() as { journal_mode?: unknown } | undefined;
+      if (mode?.journal_mode !== "delete") throw new Error("SQLITE_JOURNAL_MISMATCH");
+    } finally { statement.finalize?.(); }
   }
   database.exec("PRAGMA foreign_keys=OFF");
   let closed = false;
+  // Bun defers closing a database while uncached prepared statements survive. Finalize
+  // them explicitly so close releases transactions and file locks before it returns.
+  // Weak tracking also lets temporary statements be collected in long-running sessions.
+  const statements = new Set<WeakRef<NativeStatement>>();
+  const collected = new FinalizationRegistry<WeakRef<NativeStatement>>(reference => statements.delete(reference));
+  const assertOpen = () => { if (closed) throw new Error("SQLITE_DATABASE_CLOSED"); };
   // node:sqlite rejects boolean bindings where bun:sqlite coerces them to 0/1; normalize.
   const bind = (params: readonly unknown[]) => params.map(value => typeof value === "boolean" ? Number(value) : value);
   return {
-    exec(sql) { database.exec(sql); },
+    exec(sql) { assertOpen(); database.exec(sql); },
     query(sql) {
+      assertOpen();
       const statement = database.prepare(sql);
+      const reference = new WeakRef(statement);
+      statements.add(reference);
+      collected.register(statement, reference, reference);
       return {
-        get: (...params: unknown[]) => ((statement.get as (...args: unknown[]) => unknown)(...bind(params)) ?? null) as never,
-        all: (...params: unknown[]) => ((statement.all as (...args: unknown[]) => unknown[])(...bind(params))) as never,
-        run: (...params: unknown[]) => ({ changes: Number((statement.run as (...args: unknown[]) => { changes: number | bigint })(...bind(params)).changes) }),
+        get: (...params: unknown[]) => { assertOpen(); return ((statement.get as (...args: unknown[]) => unknown)(...bind(params)) ?? null) as never; },
+        all: (...params: unknown[]) => { assertOpen(); return ((statement.all as (...args: unknown[]) => unknown[])(...bind(params))) as never; },
+        run: (...params: unknown[]) => { assertOpen(); return { changes: Number((statement.run as (...args: unknown[]) => { changes: number | bigint })(...bind(params)).changes) }; },
       };
     },
-    close() { if (!closed) { closed = true; database.close(); } },
+    close() {
+      if (closed) return;
+      for (const reference of statements) {
+        reference.deref()?.finalize?.();
+        statements.delete(reference);
+        collected.unregister(reference);
+      }
+      database.close();
+      closed = true;
+    },
   };
 }
 
