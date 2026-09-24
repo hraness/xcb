@@ -6,6 +6,9 @@ assets, not this file, are the evidence that a version shipped; see
 
 ## 0.8.3
 
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.3)
+for macOS ARM64 and Linux x86_64; [public verification run](https://github.com/hraness/xcb/actions/runs/36073107332).
+
 - Claude Code 2.1.282 reports usage meters for every window in one
   `unifiedWindows` object and no longer sets the single top-level meter xcb
   read, so no usage observation was recorded and an account that had hit its
