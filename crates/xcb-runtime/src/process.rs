@@ -60,17 +60,30 @@ fn executable_file(path: &Path) -> Result<File> {
         )
         .open(path)?;
     let meta = file.metadata()?;
-    if !meta.is_file()
-        || ![0, rustix::process::getuid().as_raw()].contains(&meta.uid())
-        || meta.mode() & 0o7000 != 0
-        || meta.mode() & 0o022 != 0
-        || meta.mode() & 0o111 == 0
-        || meta.len() == 0
-        || meta.len() > 512 * 1024 * 1024
-    {
+    // Each rule fails on its own so the operator learns what to fix.
+    if !meta.is_file() {
+        return Err(Error::Unavailable("executable is not a regular file"));
+    }
+    if ![0, rustix::process::getuid().as_raw()].contains(&meta.uid()) {
         return Err(Error::Unavailable(
-            "executable ownership, permissions, or size is invalid",
+            "executable is not owned by this user or root",
         ));
+    }
+    if meta.mode() & 0o7000 != 0 {
+        return Err(Error::Unavailable(
+            "executable has setuid, setgid, or sticky bits",
+        ));
+    }
+    if meta.mode() & 0o022 != 0 {
+        return Err(Error::Unavailable(
+            "executable is group- or world-writable; run xcb doctor to repair its mode",
+        ));
+    }
+    if meta.mode() & 0o111 == 0 {
+        return Err(Error::Unavailable("executable is not executable"));
+    }
+    if meta.len() == 0 || meta.len() > 512 * 1024 * 1024 {
+        return Err(Error::Unavailable("executable size is invalid"));
     }
     Ok(file)
 }
@@ -419,6 +432,13 @@ pub struct Pin {
 impl Pin {
     pub fn verify(&self) -> Result<()> {
         host_executable()?.verify_pin(&self.host_sha256)?;
+        // Package managers reinstall the same bytes with group- and
+        // world-writable modes (bun's global install does). Tighten the mode
+        // of an executable we own before judging it, exactly as discovery
+        // does; the digest below still binds the bytes to the pin.
+        if executable_file(&self.executable).is_err() {
+            repair_executable_mode(&self.executable)?;
+        }
         if self.executable.canonicalize()? != self.executable
             || executable_digest(&self.executable)? != self.sha256
         {
@@ -1190,6 +1210,50 @@ mod tests {
         let file = executable_file(&path).unwrap();
         let flags = fcntl_getfd(&file).unwrap();
         assert!(flags.contains(FdFlags::CLOEXEC));
+    }
+
+    #[test]
+    fn executable_checks_name_the_failed_rule() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_executable(directory.path(), 0o777);
+        match executable_file(&path) {
+            Err(Error::Unavailable(message)) => {
+                assert!(message.contains("world-writable"), "{message}")
+            }
+            other => panic!("expected a permissions error, got {other:?}"),
+        }
+        let path = write_executable(directory.path(), 0o600);
+        match executable_file(&path) {
+            Err(Error::Unavailable(message)) => assert_eq!(message, "executable is not executable"),
+            other => panic!("expected a mode error, got {other:?}"),
+        }
+    }
+
+    /// Package managers reinstall the same bytes with writable modes. A pin
+    /// whose bytes still match tightens the mode instead of failing until the
+    /// operator reruns doctor; bytes that changed still fail.
+    #[test]
+    fn pin_verify_repairs_an_owned_world_writable_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = write_executable(directory.path(), 0o777)
+            .canonicalize()
+            .unwrap();
+        let sha256 = digest_file(fs::File::open(&path).unwrap(), 1 << 20).unwrap();
+        let (_, host_sha256) = host_identity().unwrap();
+        let pin = Pin {
+            provider: Provider::Claude,
+            executable: path.clone(),
+            sha256,
+            version: "2.1.282".into(),
+            host_sha256,
+            observed_at_ms: 0,
+        };
+        pin.verify().unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o755);
+        // Changed bytes are not adopted, writable or not.
+        fs::write(&path, b"#!/bin/sh\necho changed\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(pin.verify().is_err());
     }
 
     #[test]

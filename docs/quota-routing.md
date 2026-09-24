@@ -44,8 +44,9 @@ observations recorded while holding that account's exact run or metadata-probe
 ownership can adopt the generation-bound quota pool. Credential replacement
 makes the old pool inapplicable; ordinary refresh with unchanged credentials
 retains its binding. Legacy observations remain preserved but cannot impose
-this block. Refreshing metadata can supply newer evidence without starting a
-coding turn:
+this block. Refreshing metadata can supply newer evidence without starting a coding turn
+on Claude Code builds that report usage at session start; 2.1.282 reports usage
+only on requests, so the next routed turn records the meters instead:
 
 ```sh
 xcb accounts refresh ACCOUNT
