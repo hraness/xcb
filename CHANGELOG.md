@@ -6,6 +6,9 @@ assets, not this file, are the evidence that a version shipped; see
 
 ## 0.8.0
 
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.0)
+for macOS ARM64 and Linux x86_64; [public verification run](https://github.com/hraness/xcb/actions/runs/36032036107).
+
 - A session grid above chat shows agent names, routed models, activity, and
   response previews with category labels and colors. It grows up to half the
   terminal height, with independent scrolling and a compact view on short screens.
