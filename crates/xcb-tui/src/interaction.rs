@@ -572,6 +572,24 @@ impl App {
             .position(|entry| entry.operation == operation && entry.task == task)
             .and_then(|index| self.pending_habitat.remove(index));
         if accepted {
+            self.dirty = true;
+            // Once this exact answer is saved, an unchanged empty composer
+            // continues guiding the same task. Never reinterpret newer input
+            // or replace a target selected while the acknowledgement travelled.
+            if let Some(pending) = &pending
+                && pending
+                    .target
+                    .as_ref()
+                    .is_some_and(|target| target.answer_revision.is_some())
+                && view_context(&self.view).as_ref() == Some(&pending.context)
+                && self.composer_target == pending.target
+                && self.composer.text().is_empty()
+                && self.attachments.is_empty()
+                && !self.pending_image
+                && let Some(target) = &mut self.composer_target
+            {
+                target.answer_revision = None;
+            }
             self.notice = if task.is_some() {
                 "Input saved. /inbox shows when it enters an authorized turn."
             } else {
@@ -584,6 +602,7 @@ impl App {
         if pending.is_none() {
             return;
         }
+        self.dirty = true;
         let context = pending.as_ref().expect("matched operation").context.clone();
         self.composer.remember(&text);
         if view_context(&self.view).as_ref() == Some(&context)

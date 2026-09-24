@@ -1597,17 +1597,193 @@ fn answer_target_retains_the_observed_question_revision_and_rejected_draft() {
         }
         _ => panic!("reply must carry the selected question revision"),
     };
+    app.take_dirty();
     app.apply(Update::HabitatDraft {
         context: xcb_core::Id::new("conversation_one").unwrap(),
         task: Some(xcb_core::Id::new("task_one").unwrap()),
         operation,
         text: "Answer to the original question".into(),
     });
+    assert!(
+        app.take_dirty(),
+        "rejected answer must repaint the restored draft"
+    );
     assert_eq!(app.composer.text(), "Answer to the original question");
     assert!(
         app.composer_target_label()
             .is_some_and(|label| label.contains("task_one"))
     );
+}
+
+#[test]
+fn accepted_answer_returns_to_guidance_and_the_next_input_steers_the_same_task() {
+    use xcb_core::ui::{HabitatCommand, Intent, Update};
+    let (tx, rx) = sync_channel(8);
+    let mut app = managed_fixture(xcb_core::session::State::NeedsAnswer);
+    select_answer_target(&mut app, &tx, "task_one");
+    let operation = submit_selected_answer(&mut app, &tx, &rx, "task_one", 7, "Use option A");
+    assert!(app.composer.text().is_empty());
+
+    for (ack_operation, ack_task) in [
+        (
+            xcb_core::Id::new("unmatched_operation").unwrap(),
+            "task_one",
+        ),
+        (operation.clone(), "different_task"),
+    ] {
+        app.apply(Update::HabitatAccepted {
+            context: xcb_core::Id::new("conversation_one").unwrap(),
+            task: Some(xcb_core::Id::new(ack_task).unwrap()),
+            operation: ack_operation,
+            text: "Use option A".into(),
+        });
+        assert!(
+            app.composer_target_label()
+                .is_some_and(|label| label.starts_with("Answer task_one")),
+            "an unmatched acknowledgement must not change the answer target"
+        );
+    }
+
+    app.take_dirty();
+    app.apply(Update::HabitatAccepted {
+        context: xcb_core::Id::new("conversation_one").unwrap(),
+        task: Some(xcb_core::Id::new("task_one").unwrap()),
+        operation,
+        text: "Use option A".into(),
+    });
+    assert!(
+        app.take_dirty(),
+        "accepted answer must repaint its new target"
+    );
+    assert!(app.composer.text().is_empty());
+    assert!(
+        app.composer_target_label()
+            .is_some_and(|label| label.starts_with("Guide task_one"))
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "acknowledgement must not send input"
+    );
+    app.composer.set_text("Also check the regression");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(
+        matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::Steer { task, text, .. })) if task.as_str() == "task_one" && text == "Also check the regression")
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn accepted_answer_preserves_a_newer_draft_and_its_answer_revision() {
+    use xcb_core::ui::Update;
+    let (tx, rx) = sync_channel(8);
+    let mut app = managed_fixture(xcb_core::session::State::NeedsAnswer);
+    select_answer_target(&mut app, &tx, "task_one");
+    let operation = submit_selected_answer(&mut app, &tx, &rx, "task_one", 7, "First answer");
+    app.handle(Event::Paste("Newer answer draft".into()), &tx);
+    app.take_dirty();
+    app.apply(Update::HabitatAccepted {
+        context: xcb_core::Id::new("conversation_one").unwrap(),
+        task: Some(xcb_core::Id::new("task_one").unwrap()),
+        operation,
+        text: "First answer".into(),
+    });
+    assert!(app.take_dirty(), "accepted answer notice must repaint");
+    assert_eq!(app.composer.text(), "Newer answer draft");
+    assert!(
+        app.composer_target_label()
+            .is_some_and(|label| label.starts_with("Answer task_one"))
+    );
+    assert!(rx.try_recv().is_err());
+    submit_selected_answer(&mut app, &tx, &rx, "task_one", 7, "Newer answer draft");
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn accepted_answer_preserves_a_newer_answer_selection_or_displayed_context() {
+    use xcb_core::{Id, ui::Update};
+    for scenario in ["new_question", "new_task", "other_conversation"] {
+        let (tx, rx) = sync_channel(8);
+        let mut app = managed_fixture(xcb_core::session::State::NeedsAnswer);
+        add_second_task(&mut app);
+        select_answer_target(&mut app, &tx, "task_one");
+        let operation = submit_selected_answer(&mut app, &tx, &rx, "task_one", 7, "First answer");
+        let (next_task, next_revision) = match scenario {
+            "new_question" => {
+                app.view.backlog[0].revision = 8;
+                app.view.backlog[0].summary = "New question".into();
+                ("task_one", 8)
+            }
+            "new_task" => ("task_two", 11),
+            _ => {
+                let mut next_view = app.view.clone();
+                next_view.conversation = Some(Id::new("conversation_two").unwrap());
+                app.apply(Update::View(Box::new(next_view)));
+                ("task_one", 7)
+            }
+        };
+        select_answer_target(&mut app, &tx, next_task);
+        assert!(app.composer.text().is_empty());
+        app.take_dirty();
+        app.apply(Update::HabitatAccepted {
+            context: Id::new("conversation_one").unwrap(),
+            task: Some(Id::new("task_one").unwrap()),
+            operation,
+            text: "First answer".into(),
+        });
+        assert!(app.take_dirty(), "accepted answer notice must repaint");
+        assert!(
+            app.composer_target_label()
+                .is_some_and(|label| label.starts_with(&format!("Answer {next_task}"))),
+            "accepted old answer must preserve {scenario} selection"
+        );
+        assert!(app.composer.text().is_empty());
+        assert!(rx.try_recv().is_err());
+        submit_selected_answer(&mut app, &tx, &rx, next_task, next_revision, "Next answer");
+        assert!(rx.try_recv().is_err());
+    }
+}
+
+fn select_answer_target(
+    app: &mut App,
+    tx: &std::sync::mpsc::SyncSender<xcb_core::ui::Intent>,
+    task: &str,
+) {
+    app.composer.set_text("/attention");
+    picker_key(app, tx, KeyCode::Enter);
+    app.handle(Event::Paste(task.into()), tx);
+    picker_key(app, tx, KeyCode::Enter);
+    picker_key(app, tx, KeyCode::Char('a'));
+    assert!(
+        app.composer_target_label()
+            .is_some_and(|label| label.starts_with(&format!("Answer {task}")))
+    );
+}
+
+fn submit_selected_answer(
+    app: &mut App,
+    tx: &std::sync::mpsc::SyncSender<xcb_core::ui::Intent>,
+    rx: &std::sync::mpsc::Receiver<xcb_core::ui::Intent>,
+    task: &str,
+    revision: u64,
+    answer: &str,
+) -> xcb_core::Id {
+    use xcb_core::ui::{HabitatCommand, Intent};
+    app.composer.set_text(answer);
+    picker_key(app, tx, KeyCode::Enter);
+    match rx.try_recv().unwrap() {
+        Intent::Habitat(HabitatCommand::Reply {
+            id,
+            expected_revision,
+            reply,
+            text,
+        }) => {
+            assert_eq!(id.as_str(), task);
+            assert_eq!(expected_revision, revision);
+            assert_eq!(text, answer);
+            reply
+        }
+        intent => panic!("expected an answer for {task}, got {intent:?}"),
+    }
 }
 
 #[test]
