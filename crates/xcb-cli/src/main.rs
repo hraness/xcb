@@ -30,7 +30,7 @@ use xcb_runtime::{
 #[command(
     name = "xcb",
     version,
-    about = "Excalibur — a local, composable terminal workspace for coding agents",
+    about = "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for",
     after_help = "Plain `xcb` opens a persistent managed conversation in the terminal UI.\n\nFirst run:\n  xcb accounts add <provider> --plan <label>\n  xcb doctor --provider <provider>\n  xcb accounts login <account-id>\n  xcb accounts refresh <account-id>\n  xcb"
 )]
 struct Cli {

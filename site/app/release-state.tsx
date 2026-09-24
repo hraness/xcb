@@ -2,8 +2,8 @@ import { nativePlatforms, type PublishedRelease } from "./publication";
 
 const releasesUrl = "https://github.com/hraness/xcb/releases";
 
-/** The platforms native release binaries are built for, as running text. */
-export const nativePlatformSentence = "Native release binaries are built for macOS ARM64 (darwin-aarch64) and Linux x86_64 (linux-x86_64); other hosts build from source, and the updater fails closed anywhere else.";
+/** The platforms the release pipeline builds native archives for, as running text. */
+export const nativePlatformSentence = "The release pipeline builds native archives for macOS ARM64 (darwin-aarch64) and Linux x86_64 (linux-x86_64). Other hosts build from source, and the updater installs nothing on them.";
 
 /**
  * One truthful sentence about the latest verified release. Every public page
@@ -56,5 +56,5 @@ export function CompatibilityArchive({ release }: Readonly<{ release: PublishedR
   if (release === null || release.archiveUrl === null) {
     return <p>No <code>@hraness/xcb</code> npm package is published{release === null ? "" : " for this release"}. Releases tagged v0.3.0 and earlier are AgentMixer package archives, not xcb.</p>;
   }
-  return <p><a href={release.archiveUrl}>TypeScript compatibility archive</a> for v{release.version}. This is a separate surface from the native app; see the <a href="https://github.com/hraness/xcb/blob/main/docs/compatibility.md">compatibility reference</a>.</p>;
+  return <p><a href={release.archiveUrl}>TypeScript compatibility archive</a> for v{release.version}. This package is separate from the native app; see the <a href="https://github.com/hraness/xcb/blob/main/docs/compatibility.md">compatibility reference</a>.</p>;
 }

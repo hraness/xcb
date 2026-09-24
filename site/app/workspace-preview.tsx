@@ -26,7 +26,7 @@ export function WorkspacePreview() {
             <div className="xcb-terminal-input"><span aria-hidden="true">›</span> /sessions <span>pick up where you left off</span></div>
           </>}
           {view === "Accounts" && <>
-            <p className="xcb-terminal-prompt">Your accounts. An explicit choice.</p>
+            <p className="xcb-terminal-prompt">Pick the account and model yourself.</p>
             <div className="xcb-example-accounts">
               <div><strong>Claude</strong><span>Named accounts</span><code>/accounts</code></div>
               <div><strong>Codex</strong><span>Observed model catalog</span><code>/model</code></div>
@@ -42,12 +42,12 @@ export function WorkspacePreview() {
               <div><dt>Known Claude quota limit</dt><dd>Wait until the reported reset</dd></div>
               <div><dt>Missing or stale usage</dt><dd>Shown as unknown</dd></div>
             </dl>
-            <p className="xcb-preview-note">No invented balances. Local measurement stays separate from optional publishing.</p>
+            <p className="xcb-preview-note">Usage measurement stays on your machine.</p>
             <div className="xcb-terminal-input"><span aria-hidden="true">›</span> /accounts <span>see known quota windows</span></div>
           </>}
         </div>
       </div>
-      <figcaption>Illustrative workspace · no live provider calls. <a href="/docs/providers">Current provider support ↗</a></figcaption>
+      <figcaption>Illustrative workspace · no live provider calls. <a href="/docs/providers">Current provider support →</a></figcaption>
     </figure>
   );
 }

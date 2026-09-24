@@ -2,17 +2,18 @@ import type { Metadata } from "next";
 import { MarketingPage, MarketingSection, ProductHero } from "@hraness/design-kit/react/server";
 import { AskAiAboutThis } from "@hraness/ui";
 import { SiteHeader } from "../site-header";
+import { socialImages } from "../social";
 
 const title = "Routing that learns how you work · xcb";
-const description = "xcb learns which model tier you want and notices when a worker stopped before the job was done or is waiting for your go-ahead. Every decision is a replayable program, and learned changes are promoted only after they win on labels they were never fitted on.";
+const description = "xcb learns which model tier you want and when a worker stopped early or needs your go-ahead, and adopts a change only after it wins on new labels.";
 const reference = "https://github.com/hraness/xcb/blob/main/docs/reflexes.md";
 
 export const metadata: Metadata = {
   title,
   description,
   alternates: { canonical: "/reflexes" },
-  openGraph: { title, description, siteName: "xcb", type: "website", url: "/reflexes" },
-  twitter: { card: "summary_large_image", title, description },
+  openGraph: { title, description, siteName: "xcb", type: "website", url: "/reflexes", images: socialImages },
+  twitter: { card: "summary_large_image", title, description, images: socialImages },
 };
 
 export default function Reflexes() {
