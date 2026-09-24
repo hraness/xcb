@@ -63,8 +63,8 @@ describe("xcb site source contract", () => {
       read("app/docs/page.tsx"),
       read("app/readme.generated.ts"),
     ]);
-    expect(packageJson).toContain('"@hraness/ui": "github:hraness/ui#v0.5.16"');
-    expect(packageJson).toContain('"@hraness/design-kit": "github:hraness/design-kit#v0.15.0"');
+    expect(packageJson).toContain('"@hraness/ui": "github:hraness/ui#v0.5.18"');
+    expect(packageJson).toContain('"@hraness/design-kit": "github:hraness/design-kit#v0.16.3"');
     expect(home).toContain('import { AskAiAboutThis } from "@hraness/ui"');
     expect(home).toContain('<AskAiAboutThis className="ask-ai" url="https://xcb.sh" />');
     expect(docs).toContain('<AskAiAboutThis className="ask-ai" url="https://xcb.sh/docs" />');
@@ -191,7 +191,7 @@ test("registers the footer layer after UI layers in one stylesheet", async () =>
   expect(layout).not.toContain('import "@hraness/site-footer/styles.css"');
 });
 
-test("adopts the shared palette contract with Paper as the default appearance", async () => {
+test("adopts the shared palette contract with Tokyo Night as the default appearance", async () => {
   const [layout, header, bootstrap, css, packageJson] = await Promise.all([
     read("app/layout.tsx"),
     read("app/site-header.tsx"),
@@ -199,8 +199,8 @@ test("adopts the shared palette contract with Paper as the default appearance", 
     read("app/globals.css"),
     read("package.json"),
   ]);
-  expect(layout).toContain('data-palette="paper"');
-  expect(layout).toContain('getDesignPaletteTheme("paper", "light")');
+  expect(layout).toContain('data-palette="tokyo-night"');
+  expect(layout).toContain('getDesignPaletteTheme("tokyo-night", "light")');
   expect(layout).toContain('src="/theme-bootstrap.js"');
   expect(layout).toContain("DesignPaletteProvider");
   expect(layout).toContain("suppressHydrationWarning");
