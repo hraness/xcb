@@ -181,6 +181,12 @@ run concurrently; tasks in the same workspace run one at a time. Say
 
 Use `/backlog` for this conversation's backlog and `/backlog all` to browse all
 projects. `/attention` collects questions, approvals and actions across agents.
+Use `/steer <task-id> <guidance>` to queue guidance for a task's next safe turn,
+and `/inbox` to inspect acceptance and delivery. `/watch <target-id> <source-id>`
+requests a completion report in the target's inbox. Available reports and messages
+share a bounded batch; they do not renew budgets or reopen closed work. The CLI
+offers the same `steer`, `watch` and `inbox` controls, including stable IDs for
+retries and paginated JSON inspection.
 Deferred work can be edited, released, or completed with a summary. `/project
 grant <tasks> <hours> <goal>` delegates a bounded follow-up budget; `/project
 pause` holds future automatic work. `/schedule` manages recurring prompts, and

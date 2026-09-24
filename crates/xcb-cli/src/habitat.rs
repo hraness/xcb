@@ -456,6 +456,88 @@ pub async fn backlog(
     Ok(0)
 }
 
+pub fn steer(root: &Path, task: &Id, id: Option<Id>, text: String, json: bool) -> Result<i32> {
+    let store = ManagedStore::open(root)?;
+    let event = store.steer_task(task, id.unwrap_or_else(|| new_id("inbox")), text)?;
+    print_inbox_event(&event, json)?;
+    wake_saved_inbox(root, &event.id);
+    Ok(0)
+}
+
+pub fn watch(root: &Path, target: &Id, source: &Id, id: Option<Id>, json: bool) -> Result<i32> {
+    let store = ManagedStore::open(root)?;
+    let id = id.unwrap_or_else(|| new_id("watch"));
+    let subscription = store.watch_task(target, source, id.clone())?;
+    if json {
+        crate::print_json(subscription)?;
+    } else {
+        println!(
+            "Watch {id} saved: task {source} → inbox for {target}.\nReports wait for an authorized turn; closed work stays closed."
+        );
+    }
+    wake_saved_inbox(root, &id);
+    Ok(0)
+}
+
+fn wake_saved_inbox(root: &Path, id: &Id) {
+    if let Err(error) = wake(root) {
+        eprintln!(
+            "warning: saved as {id}, but the supervisor could not start: {error}. The record is retained; an authorized turn is still required for delivery."
+        );
+    }
+}
+
+pub fn inbox(
+    root: &Path,
+    task: Option<&Id>,
+    conversation: Option<&Id>,
+    before: Option<u64>,
+    limit: usize,
+    json: bool,
+) -> Result<i32> {
+    let store = ManagedStore::open(root)?;
+    let events = store.inbox(task, conversation, before, limit)?;
+    if json {
+        crate::print_json(events)?;
+    } else if events.is_empty() {
+        println!("No inbox events on this page.");
+    } else {
+        for event in &events {
+            print_inbox_event(event, false)?;
+        }
+        if events.len() == limit {
+            println!(
+                "Older events: repeat with --before {}",
+                events.last().expect("nonempty inbox page").sequence
+            );
+        }
+    }
+    Ok(0)
+}
+
+fn print_inbox_event(event: &managed::InboxEvent, json: bool) -> Result<()> {
+    if json {
+        crate::print_json(event)?;
+    } else {
+        println!(
+            "{} · task {} · {} · {} · sequence {}\n  {}",
+            event.id,
+            event.task,
+            xcb_core::display_text(&event.kind, 80),
+            xcb_core::display_text(&event.status, 512),
+            event.sequence,
+            xcb_core::display_text(&event.text, 16_384),
+        );
+        if let Some(reason) = &event.reason {
+            println!("  {}", xcb_core::display_text(reason, 512));
+        }
+        if let Some(receipt) = &event.receipt {
+            println!("  receipt: {}", xcb_core::display_text(receipt, 256));
+        }
+    }
+    Ok(())
+}
+
 pub async fn schedules(
     root: &Path,
     command: Option<ScheduleCommand>,

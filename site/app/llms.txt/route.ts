@@ -30,7 +30,7 @@ ${releaseDetails === "" ? "" : `## Verified release\n\n${releaseDetails}\n\n`}##
 - [Accounts & models](https://xcb.sh/docs/providers): supported builds, authentication, model selection, quota windows.
 - [Tests, builds & recovery](https://xcb.sh/docs/workspace): isolated runner, public dependencies, Git limits, cancellation, recovery.
 - [Make it yours](https://xcb.sh/docs/customization): panes, continuation, context management, and optional extensions.
-- [Learned routing & continuation](https://xcb.sh/docs/reflexes): reflexes that learn the model tier you want and when a worker stopped short, with promotion only after a trial on new labels, and rollback.
+- [Learned routing & continuation](https://xcb.sh/docs/reflexes): reflexes that learn the model tier you want and when a worker stopped short, with promotion only after a trial on new labels, and rollback. Current main source builds add auto-certification; published v0.5.0 downloads instead default settle and confirm to observe, require explicit active settings for them to act, and do not accept auto.
 - [Routing that learns you](https://xcb.sh/reflexes): the use case: learned routing and continuation built from ALGAL programs and local evidence.
 - [Application API](https://xcb.sh/docs/application-api): one model response per call for your app, with no tools or saved history, once your exact build, account, and model pass xcb's application checks; separate from coding sessions.
 - [Reference](https://xcb.sh/docs/reference): full project README and compatibility source reference.
