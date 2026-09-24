@@ -852,14 +852,17 @@ mod tests {
         app.composer.set_text("/");
         let screen = draw(&mut app, 80, 20);
         let content = text(&screen);
-        assert!(content.contains("commands ·"));
+        let popup_title = format!(" commands · {} matches ", app.slash_matches().len());
+        assert!(content.contains(&popup_title));
         assert!(content.contains(app.slash_matches()[0].name));
         assert!(app.overview_event(&mouse(MouseEventKind::Down(MouseButton::Left), 3, 6)));
         assert_eq!(app.composer.text(), "/");
         assert!(app.overview_event(&key(KeyCode::F(6))));
         assert!(app.slash_menu().is_none());
         let screen = draw(&mut app, 80, 20);
-        assert!(!text(&screen).contains("commands ·"));
+        // The empty transcript also says "/help for commands · /pane".
+        // Check the command popup itself, not that unrelated chat hint.
+        assert!(!text(&screen).contains(&popup_title));
         app.overview_event(&key(KeyCode::Esc));
         app.composer.handle(key(KeyCode::Char('o')));
         assert!(app.slash_menu().is_some());
