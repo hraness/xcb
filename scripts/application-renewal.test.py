@@ -131,7 +131,7 @@ class RenewalTests(unittest.TestCase):
                                   "EnvironmentVariables", "StartInterval", "RunAtLoad", "ExitTimeOut"})
 
     def test_environment_omits_ambient_credentials_and_rust_overrides(self):
-        env = r.environment(str(self.root), "/synthetic/scheduler/hra-host-run", "/synthetic/node-bin/node", "/synthetic/bun-bin/bun")
+        env = r.environment(str(self.root), "/synthetic/scheduler/host-run", "/synthetic/node-bin/node", "/synthetic/bun-bin/bun")
         self.assertEqual(set(env), {"HOME", "PATH", "LANG", "LC_ALL", "BUN_CONFIG_NO_ENV_FILE", "CARGO_HOME", "CARGO_INCREMENTAL"})
         self.assertEqual(env["CARGO_INCREMENTAL"], "0")
         self.assertTrue(env["PATH"].startswith("/synthetic/bun-bin:/synthetic/node-bin:/synthetic/scheduler:"))

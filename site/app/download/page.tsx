@@ -79,15 +79,6 @@ rustup toolchain install 1.97.1 --profile minimal
             </div>
           </MarketingSection>
 
-          <MarketingSection
-            id="lineage"
-            heading="Coming from HRA or Oompa?"
-            headingId="lineage-title"
-            summary="xcb is the current name of the Hraness coding-agent workspace, previously released as HRA and then Oompa."
-          >
-            <p>xcb keeps the same idea as HRA and Oompa: accounts, local sessions, model choice, and usage in one terminal. It is a fresh Rust codebase, so it does not upgrade an existing install in place. Existing HRA or Oompa installs keep working as installed; new work starts from the xcb repository.</p>
-          </MarketingSection>
-
           <MarketingCallToAction
             heading="Start with the guide."
             headingId="cta-title"

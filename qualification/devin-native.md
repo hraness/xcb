@@ -7,7 +7,7 @@ with one loopback-only fake control plane. It never reads existing Devin account
 state, resumes a session, opens authentication, or sends traffic to a provider.
 
 Build the helper and the ignored runtime test using the repository's configured
-Rust toolchain (through `hra-host-run` when installed):
+Rust toolchain (through `host-run` when installed):
 
 ```sh
 cargo build -p xcb-cli --locked
