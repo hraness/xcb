@@ -454,8 +454,39 @@ struct ViewStamp {
     progress_time: Option<u64>,
     direct_database: Option<std::time::SystemTime>,
     direct_wal: Option<std::time::SystemTime>,
-    direct_time: Option<u64>,
     unreadable: usize,
+}
+
+#[derive(Default)]
+struct SessionLiveness {
+    checked_at: Option<Instant>,
+    live: BTreeSet<Id>,
+}
+
+impl SessionLiveness {
+    fn changed(&mut self, store: &Store, now: Instant, force: bool) -> Result<bool> {
+        if !force
+            && self
+                .checked_at
+                .is_some_and(|checked| now.duration_since(checked) < Duration::from_secs(15))
+        {
+            return Ok(false);
+        }
+        let live = store
+            .unsettled_runs()?
+            .into_iter()
+            .filter(|run| {
+                run.owner
+                    .as_ref()
+                    .is_some_and(crate::store::RunOwner::alive)
+            })
+            .filter_map(|run| run.session)
+            .collect();
+        let changed = self.checked_at.is_some() && self.live != live;
+        self.live = live;
+        self.checked_at = Some(now);
+        Ok(changed)
+    }
 }
 
 fn sql(value: u64) -> Result<i64> {
@@ -1071,6 +1102,10 @@ impl ManagedStore {
     /// counts and revisions, plus config and fault file stamps. Equal stamps
     /// mean the rebuilt view would be identical, so the client skips it.
     fn view_stamp(&self, state_root: &Path, conversation: &Id) -> Result<ViewStamp> {
+        self.view_stamp_at(state_root, conversation, now_ms())
+    }
+
+    fn view_stamp_at(&self, state_root: &Path, conversation: &Id, now: u64) -> Result<ViewStamp> {
         let db = self.db()?;
         let conversations: (i64, i64) = db.query_row(
             "SELECT COALESCE(max(updated_at),0),count(*) FROM conversations",
@@ -1094,7 +1129,7 @@ impl ManagedStore {
         )?;
         let projects = db.query_row(
             "SELECT count(*),COALESCE(sum(revision),0),COALESCE(sum(CASE WHEN json_valid(payload) THEN json_extract(payload,'$.expires_at_ms')<=?1 ELSE 0 END),0) FROM project_policies",
-            [sql(now_ms())?],
+            [sql(now)?],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         let inbox = db.query_row(
@@ -1119,12 +1154,9 @@ impl ManagedStore {
             progress,
             // Expired heartbeats stop presenting a stale thinking/tool phase
             // even when a supervisor stopped without rewriting the file.
-            progress_time: progress.map(|_| now_ms() / 15_000),
+            progress_time: progress.map(|_| now / 15_000),
             direct_database,
             direct_wal: modified(state_root.join("xcb.sqlite-wal")),
-            // Owner liveness can change without a database write. Revisit
-            // direct rows even when the managed supervisor remains idle.
-            direct_time: direct_database.map(|_| now_ms() / 15_000),
             unreadable: self.unreadable_tasks(),
         })
     }
@@ -5603,6 +5635,7 @@ pub async fn serve_ui(
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     let mut quit = false;
     let mut last_stamp: Option<ViewStamp> = None;
+    let mut session_liveness = SessionLiveness::default();
     let mut stamp_fault_noted = false;
     let mut last_ensure = Instant::now();
     let mut last_ensure_error: Option<String> = None;
@@ -5933,7 +5966,12 @@ pub async fn serve_ui(
         if stamp.is_some() {
             stamp_fault_noted = false;
         }
-        if handled || stamp.is_none() || stamp != last_stamp {
+        let refresh = handled || stamp.is_none() || stamp != last_stamp;
+        // Owner exit does not write the database. Probe it periodically, but
+        // only rebuild when liveness actually changes, never just because an
+        // otherwise idle terminal crossed a wall-clock time bucket.
+        let liveness_changed = session_liveness.changed(&store, Instant::now(), refresh)?;
+        if refresh || liveness_changed {
             let view = managed_view(&store, &managed, &conversation, &workspace)?;
             dispatch_pending = view
                 .tasks

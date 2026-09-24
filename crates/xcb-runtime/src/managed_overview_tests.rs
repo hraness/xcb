@@ -224,6 +224,119 @@ async fn overview_progress_updates_invalidate_the_view_stamp() {
 }
 
 #[tokio::test]
+async fn overview_idle_direct_database_does_not_invalidate_on_time_boundaries() {
+    let f = fixture().await;
+    let root = f.managed.root().parent().unwrap();
+    let store = Store::open(root).unwrap();
+    let before = f
+        .managed
+        .view_stamp_at(root, &f.conversation.id, 14_999)
+        .unwrap();
+    let after = f
+        .managed
+        .view_stamp_at(root, &f.conversation.id, 30_000)
+        .unwrap();
+    assert_eq!(before, after);
+    let mut liveness = SessionLiveness::default();
+    let now = Instant::now();
+    assert!(!liveness.changed(&store, now, false).unwrap());
+    assert!(
+        !liveness
+            .changed(&store, now + Duration::from_secs(15), false)
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn overview_owner_exit_invalidates_once_without_a_database_write() {
+    use xcb_core::models::{Mode, ModelChoice};
+
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let f = fixture().await;
+    let root = f.managed.root().parent().unwrap();
+    let store = Store::open(root).unwrap();
+    let account = store
+        .add_account(Provider::Codex, "Synthetic", 1, None)
+        .unwrap();
+    let model = ModelChoice {
+        provider: Provider::Codex,
+        id: Id::new("fixture-model").unwrap(),
+        label: "Fixture".into(),
+        mode: Mode::Fixed,
+        resolved: None,
+        effort: None,
+        observed_at_ms: 1,
+    };
+    let session = store
+        .create_session(&account.id, model, Path::new(&f.conversation.workspace), 2)
+        .unwrap();
+    let mut run = store.prepare_run(&session.id, session.revision, 3).unwrap();
+    let mut child = ChildGuard(
+        Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    run.owner.as_mut().unwrap().pid = child.0.id();
+    let db = Connection::open(root.join("xcb.sqlite")).unwrap();
+    db.execute(
+        "UPDATE runs SET payload=?1 WHERE id=?2",
+        params![serde_json::to_string(&run).unwrap(), run.id.as_str()],
+    )
+    .unwrap();
+    let before = f
+        .managed
+        .view_stamp_at(root, &f.conversation.id, 1)
+        .unwrap();
+    let mut liveness = SessionLiveness::default();
+    let now = Instant::now();
+    assert!(!liveness.changed(&store, now, false).unwrap());
+    assert!(liveness.live.contains(&session.id));
+    assert!(
+        !liveness
+            .changed(&store, now + Duration::from_secs(15), false)
+            .unwrap()
+    );
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    assert!(
+        liveness
+            .changed(&store, now + Duration::from_secs(30), false)
+            .unwrap()
+    );
+    assert!(
+        !liveness
+            .changed(&store, now + Duration::from_secs(45), false)
+            .unwrap()
+    );
+    assert_eq!(
+        before,
+        f.managed
+            .view_stamp_at(root, &f.conversation.id, 1)
+            .unwrap()
+    );
+    assert_eq!(
+        store.agent_overview(None).unwrap()[0].state,
+        State::Uncertain
+    );
+    assert_eq!(
+        store.session(&session.id).unwrap().unwrap().state,
+        State::Working
+    );
+    assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn overview_corrupt_task_identity_never_exposes_another_conversation_response() {
     let f = fixture().await;
     let mut corrupted = f.task.clone();
