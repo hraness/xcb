@@ -4,6 +4,15 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## Unreleased
+
+- The route reflex's `judged` head and the task classifier port carry ALGAL's
+  generation-1 model-router coefficients: the September 22 fit updated with the
+  reflex's anchored learning rule on 84 labeled September 2026 first prompts
+  (cross-validated AUC 0.64 on that window against 0.63 for the previous head).
+  Routing behavior changes only at the margin; the threshold and kind gates
+  are unchanged.
+
 ## 0.7.0
 
 [Verified native release](https://github.com/hraness/xcb/releases/tag/v0.7.0)

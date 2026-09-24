@@ -49,8 +49,11 @@ decision = program(features, params, evidence)
 
 Generation 0 of each reflex reproduces the behavior xcb had before reflexes:
 
-- `route.judged` holds the coefficients of ALGAL's fitted model-router (306
-  first prompts, cross-validated AUC 0.74). The program keeps its
+- `route.judged` holds the coefficients of ALGAL's fitted model-router,
+  generation 1: the September 22 head (306 first prompts, cross-validated AUC
+  0.74) updated with this reflex's own anchored rule on 84 labeled September
+  2026 first prompts (cross-validated AUC 0.64 on that window, where the
+  parent scores 0.63). The program keeps its
   question/probe kind gate and xcb's substantial-prompt policy (400 words or
   8 KiB always requests the highest quality tier).
 - `route.plain` reproduces the keyword fallback: a complexity cue
