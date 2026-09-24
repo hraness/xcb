@@ -12,6 +12,30 @@ use xcb_runtime::{
 
 #[derive(Subcommand)]
 pub enum BacklogCommand {
+    /// Run a pinned ALGAL program now in an existing project conversation.
+    Program {
+        /// Persistent project conversation from `xcb conversations`.
+        conversation: Id,
+        /// Bounded ALGAL manifest to validate and pin for this run.
+        manifest: PathBuf,
+        /// JSON object of typed inputs; defaults to an empty object.
+        #[arg(long)]
+        inputs: Option<PathBuf>,
+        /// Admit managed agent calls under the current project grant.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=8))]
+        managed_calls: Option<u8>,
+        /// Human-readable title retained in the project's work history.
+        #[arg(long, default_value = "ALGAL project program")]
+        title: String,
+        /// Stable operation identity for an idempotent submission retry.
+        #[arg(long)]
+        id: Option<Id>,
+    },
+    /// Inspect a managed program's checkpoint and linked worker status.
+    ProgramStatus {
+        /// Managed controller or linked child task id from `xcb backlog`.
+        id: Id,
+    },
     /// Record that an unstarted deferred item is already done.
     Complete {
         /// Deferred item from `xcb backlog`.
@@ -183,7 +207,7 @@ pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Res
 
 #[derive(Subcommand)]
 pub enum ScheduleCommand {
-    /// Schedule a pinned, deterministic ALGAL planning program.
+    /// Schedule a pinned ALGAL planner or bounded managed-agent program.
     Program {
         /// Persistent project conversation from `xcb conversations`.
         conversation: Id,
@@ -192,6 +216,9 @@ pub enum ScheduleCommand {
         /// JSON object satisfying the manifest's input interface.
         #[arg(long)]
         inputs: Option<PathBuf>,
+        /// Admit up to this many agent calls per occurrence under a project grant.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=8))]
+        managed_calls: Option<u8>,
         /// Human-readable schedule and backlog label.
         #[arg(long, default_value = "Scheduled ALGAL planner")]
         title: String,
@@ -342,11 +369,7 @@ fn print_task(task: &ManagedTask, json: bool) -> Result<()> {
     println!(
         "{} · {} · P{} · rev {} · {} · {}",
         task.id,
-        if task.deferred {
-            "backlog"
-        } else {
-            task.state.label()
-        },
+        task.habitat_status(),
         task.priority,
         task.revision,
         task.conversation,
@@ -369,6 +392,56 @@ pub async fn backlog(
     let store = ManagedStore::open(root)?;
     let mut runnable = false;
     let task = match command {
+        Some(BacklogCommand::Program {
+            conversation,
+            manifest,
+            inputs,
+            managed_calls,
+            title,
+            id,
+        }) => {
+            let program = load_program(&manifest, inputs.as_deref(), managed_calls)?;
+            let task = store
+                .enqueue_program(
+                    &conversation,
+                    id.unwrap_or_else(|| new_id("input")),
+                    title,
+                    program,
+                )
+                .await?;
+            runnable = true;
+            task
+        }
+        Some(BacklogCommand::ProgramStatus { id }) => {
+            let status = store
+                .program_status(&id)?
+                .ok_or(Error::Unavailable("managed program not found"))?;
+            if json {
+                crate::print_json(status)?;
+            } else {
+                println!(
+                    "{} · {} · {}/{} calls",
+                    status.parent,
+                    xcb_core::display_text(&status.phase, 160),
+                    status.calls,
+                    status.max_calls,
+                );
+                if let Some(child) = status.child {
+                    println!(
+                        "  child: {child} · {}",
+                        xcb_core::display_text(
+                            status.child_status.as_deref().unwrap_or("unknown"),
+                            512
+                        ),
+                    );
+                    println!("  xcb attention · resolve questions and approvals on the child");
+                }
+                if let Some(receipt) = status.receipt {
+                    println!("  receipt: {}", xcb_core::display_text(&receipt, 160));
+                }
+            }
+            return Ok(0);
+        }
         Some(BacklogCommand::Complete {
             id,
             summary,
@@ -538,6 +611,23 @@ fn print_inbox_event(event: &managed::InboxEvent, json: bool) -> Result<()> {
     Ok(())
 }
 
+fn load_program(
+    manifest: &Path,
+    inputs: Option<&Path>,
+    managed_calls: Option<u8>,
+) -> Result<xcb_runtime::managed_program::AdmittedProgram> {
+    use xcb_runtime::managed_program::{AdmittedProgram, MAX_INPUT_BYTES, MAX_MANIFEST_BYTES};
+    let manifest = serde_json::from_slice(&read_bounded(manifest, MAX_MANIFEST_BYTES)?)?;
+    let inputs = match inputs {
+        Some(path) => serde_json::from_slice(&read_bounded(path, MAX_INPUT_BYTES)?)?,
+        None => serde_json::json!({}),
+    };
+    match managed_calls {
+        Some(calls) => AdmittedProgram::admit_managed(manifest, inputs, calls),
+        None => AdmittedProgram::admit(manifest, inputs),
+    }
+}
+
 pub async fn schedules(
     root: &Path,
     command: Option<ScheduleCommand>,
@@ -550,21 +640,11 @@ pub async fn schedules(
             conversation,
             manifest,
             inputs,
+            managed_calls,
             title,
             every,
         }) => {
-            let manifest = serde_json::from_slice(&read_bounded(
-                &manifest,
-                xcb_runtime::managed_program::MAX_MANIFEST_BYTES,
-            )?)?;
-            let inputs = match inputs {
-                Some(path) => serde_json::from_slice(&read_bounded(
-                    &path,
-                    xcb_runtime::managed_program::MAX_INPUT_BYTES,
-                )?)?,
-                None => serde_json::json!({}),
-            };
-            let program = xcb_runtime::managed_program::AdmittedProgram::admit(manifest, inputs)?;
+            let program = load_program(&manifest, inputs.as_deref(), managed_calls)?;
             let interval = every * 1000;
             let first = now_ms()
                 .checked_add(interval)

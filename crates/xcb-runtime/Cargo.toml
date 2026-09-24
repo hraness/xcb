@@ -10,7 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-algal = { git = "https://github.com/hraness/algal", rev = "2fff6e8a1370e3141836067e87b584752dc61a9d", version = "0.2.0" }
+algal = { git = "https://github.com/hraness/algal", rev = "2c7f86a257761dc1a2adaf064adc18dfcdf35925", version = "0.2.0" }
 aicharts-core = { git = "https://github.com/hraness/aicharts", rev = "091433796f7253386c3e3186c67c275fb273b704", version = "0.1.0" }
 base64 = "=0.23.1"
 gobstopper-core = { git = "https://github.com/hraness/gobstopper", rev = "d856594fb6cf9e23e4cef2d28eb6dc0cdf4b7030", version = "0.2.1" }
@@ -31,5 +31,5 @@ tokio = { version = "=1.47.1", features = ["rt-multi-thread", "macros", "process
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["ring", "tls12"] }
 uuid = { version = "=1.26.1", features = ["v4", "serde"] }
 webpki-roots = "=1.0.9"
-xcb-core = { version = "0.5.0", path = "../xcb-core" }
+xcb-core = { version = "0.6.0", path = "../xcb-core" }
 zeroize = "=1.9.0"

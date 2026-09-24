@@ -124,6 +124,19 @@ pub struct ProjectRow {
     pub status: String,
 }
 
+/// A bounded view of durable program progress. Worker approvals belong to the
+/// linked child; inspecting this row grants no authority or acknowledgement.
+#[derive(Debug, Clone)]
+pub struct ProgramRow {
+    pub parent: Id,
+    pub phase: String,
+    pub calls: u8,
+    pub max_calls: u8,
+    pub child: Option<Id>,
+    pub child_status: Option<String>,
+    pub receipt: Option<String>,
+}
+
 /// A durable host event and its honest delivery evidence, not model obedience.
 #[derive(Debug, Clone)]
 pub struct InboxRow {
@@ -217,6 +230,7 @@ pub struct View {
     pub backlog: Vec<BacklogRow>,
     pub schedules: Vec<ScheduleRow>,
     pub projects: Vec<ProjectRow>,
+    pub programs: Vec<ProgramRow>,
     pub inbox: Vec<InboxRow>,
     pub subagents: Vec<Subagent>,
     pub activity: Vec<String>,
@@ -254,6 +268,7 @@ impl Default for View {
             backlog: vec![],
             schedules: vec![],
             projects: vec![],
+            programs: vec![],
             inbox: vec![],
             subagents: vec![],
             activity: vec![],
