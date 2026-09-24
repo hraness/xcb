@@ -28,7 +28,7 @@ Lima VMs or import their configuration.
 Run from the xcb checkout, using the installed host scheduler where available:
 
 ```sh
-"$HOME/.bun/bin/hra-host-run" --mode=shared --lane=mac-native \
+"$HOME/.bun/bin/host-run" --mode=shared --lane=mac-native \
   --label=xcb-command-setup -- /usr/bin/python3 scripts/setup-command-runner.py \
   --root "$HOME/.local/share/xcb-command" --source "$PWD"
 ```
@@ -106,7 +106,7 @@ preserves a private evidence receipt and acknowledges joined guest scratch for
 cleanup; it does not publish a cache or change the workspace:
 
 ```sh
-"$HOME/.bun/bin/hra-host-run" --mode=shared --lane=mac-native \
+"$HOME/.bun/bin/host-run" --mode=shared --lane=mac-native \
   --label=xcb-dependency-plan -- /usr/bin/python3 -I \
   scripts/prepare-command-dependencies.py \
   --root "$HOME/.local/share/xcb-command" \
@@ -117,7 +117,7 @@ After setup admits the matching backend, explicitly prepare the reviewed
 public inputs with the same workspace:
 
 ```sh
-"$HOME/.bun/bin/hra-host-run" --mode=shared --lane=mac-native \
+"$HOME/.bun/bin/host-run" --mode=shared --lane=mac-native \
   --label=xcb-dependency-prepare -- /usr/bin/python3 -I \
   scripts/prepare-command-dependencies.py \
   --root "$HOME/.local/share/xcb-command" \
@@ -129,7 +129,7 @@ interruption, changed input, or incomplete receipt retains that intent and
 blocks another preparation. Inspect it using the cache key printed by the plan:
 
 ```sh
-"$HOME/.bun/bin/hra-host-run" --mode=shared --lane=mac-native \
+"$HOME/.bun/bin/host-run" --mode=shared --lane=mac-native \
   --label=xcb-dependency-status -- /usr/bin/python3 -I \
   scripts/prepare-command-dependencies.py \
   --root "$HOME/.local/share/xcb-command" \

@@ -5,8 +5,8 @@ checks a default-deny macOS Seatbelt profile using only synthetic files and a
 local endpoint:
 
 ```sh
-hra-host-run --mode=shared --lane=mac-native --label=xcb-kernel-boundary-probe -- bun qualification/macos-sandbox.ts
-hra-host-run --mode=shared --lane=mac-native --label=xcb-native-claude-os-scope -- bun qualification/claude-native.ts --os-sandbox
+host-run --mode=shared --lane=mac-native --label=xcb-kernel-boundary-probe -- bun qualification/macos-sandbox.ts
+host-run --mode=shared --lane=mac-native --label=xcb-native-claude-os-scope -- bun qualification/claude-native.ts --os-sandbox
 ```
 
 The second command applies that same experimental profile to the actual native
@@ -41,7 +41,7 @@ native production qualification.
 Run the explicit fixture on macOS ARM64 through the installed host scheduler:
 
 ```sh
-hra-host-run --mode=shared --lane=mac-native --label=xcb-native-claude-scope -- bun qualification/claude-native.ts
+host-run --mode=shared --lane=mac-native --label=xcb-native-claude-scope -- bun qualification/claude-native.ts
 ```
 
 It runs the actual pinned native Claude Code binary through the real Agent SDK,
@@ -177,7 +177,7 @@ application. Run the following through the installed host scheduler, with one
 integration owner. Replace every example path and the account/model selection:
 
 ```sh
-/absolute/path/to/hra-host-run --mode=exclusive --lane=mac-native --label=xcb-application-prerequisites -- \
+/absolute/path/to/host-run --mode=exclusive --lane=mac-native --label=xcb-application-prerequisites -- \
   /usr/bin/python3 /absolute/xcb/qualification/application-prerequisites.py collect \
   --xcb /absolute/xcb/target/release/xcb --state /absolute/private/xcb-state \
   --source /absolute/xcb --provider claude --account a_selected --model claude/sonnet/low \
@@ -218,7 +218,7 @@ After collection, use the same final executable for the separate fixed live
 challenge, also through the scheduler:
 
 ```sh
-/absolute/path/to/hra-host-run --mode=shared --lane=mac-native --label=xcb-application-live-qualification -- \
+/absolute/path/to/host-run --mode=shared --lane=mac-native --label=xcb-application-live-qualification -- \
   /absolute/xcb/target/release/xcb --json --state /absolute/private/xcb-state \
   qualify-application --account a_selected --model claude/sonnet/low \
   --evidence /absolute/private/new-application-evidence
