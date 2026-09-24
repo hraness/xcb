@@ -1,4 +1,4 @@
-import { addHeadingIds, assertFragmentsResolve, assertSafeTarget } from "./readme-html.ts";
+import { addHeadingIds, assertFragmentsResolve, assertSafeTarget, headingText } from "./readme-html.ts";
 
 export const RELEASE_PLACEHOLDER = "{{release.version}}";
 
@@ -6,17 +6,6 @@ export type RenderedBlogBody = Readonly<{
   html: string;
   toc: readonly Readonly<{ href: `#${string}`; label: string }>[];
 }>;
-
-function decodeText(value: string): string {
-  return value
-    .replace(/<[^>]*>/gu, "")
-    .replaceAll("&quot;", '"')
-    .replaceAll("&#39;", "'")
-    .replaceAll("&apos;", "'")
-    .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">")
-    .replaceAll("&amp;", "&");
-}
 
 /**
  * Render one post body. The release placeholder becomes the published release
@@ -40,7 +29,7 @@ export function renderBlogBody(markdown: string, releaseLabel: string): Rendered
   assertFragmentsResolve(rendered);
   const toc = Array.from(rendered.matchAll(/<h2 id="([^"]+)">([\s\S]*?)<\/h2>/gu), ([, id, body]) => ({
     href: `#${id!}` as const,
-    label: decodeText(body!),
+    label: headingText(body!),
   }));
   return { html: rendered, toc };
 }
