@@ -11,7 +11,7 @@ describe("claude code version admission", () => {
   test("the floor is a bounded major line, not an exact pin", () => {
     expect(CLAUDE_CODE_MIN_VERSION).toBe("2.1.268");
     expect(CLAUDE_CODE_MAX_MAJOR).toBe(2);
-    expect(CLAUDE_SDK_CODE_VERSION).toBe("2.1.268");
+    expect(CLAUDE_SDK_CODE_VERSION).toBe("2.1.278");
     for (const admitted of ["2.1.268", "2.1.269", "2.1.300", "2.2.0", "2.99.0"]) {
       expect(claudeCodeVersionAdmitted(admitted), admitted).toBe(true);
     }

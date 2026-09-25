@@ -462,8 +462,8 @@ qualification for the exact native executable and SDK digest. No production
 qualification receipt is bundled. The default provider adapters continue to refuse
 execution. `createProviderLaunchPlan()` is descriptive configuration, not a sandbox.
 
-The installed versions are Claude Agent SDK **0.3.268**, bundled native Claude Code
-**2.1.268**, Anthropic SDK **0.125.0**, MCP SDK **1.30.0**, and Zod **4.6.2**.
+The installed versions are Claude Agent SDK **0.3.278**, bundled native Claude Code
+**2.1.278**, Anthropic SDK **0.127.0**, MCP SDK **1.30.0**, and Zod **4.6.5**.
 `inspectClaudeSdkRuntime()` checks the installed SDK version, the admitted CLI
 version the host inspected (`>= 2.1.268` within major 2), native binary owner,
 mode, link count and SHA-256, and returns the composite qualification identity
