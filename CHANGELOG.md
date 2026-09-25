@@ -4,6 +4,18 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.8.4
+
+- A question, approval, usage limit, or failure that has not changed for a day
+  no longer outranks running work. The session grid lists it after active
+  sessions, its card shows how long it has waited, and the heading counts it
+  separately, as in `2 need attention (5 older)`. Press `2` for active work and
+  attention from the last day; `3` still lists all attention, older attention
+  last.
+- With more than 128 sessions, old attention can no longer push running
+  sessions out of the overview: the 128 sessions it shows are chosen by the
+  same order.
+
 ## 0.8.3
 
 [Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.3)

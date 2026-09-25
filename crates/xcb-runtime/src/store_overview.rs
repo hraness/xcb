@@ -8,7 +8,9 @@ use xcb_core::{
 impl Store {
     /// Read one assistant message per selected direct session across workspaces.
     /// Managed worker sessions belong to their durable conversation instead.
-    pub(crate) fn agent_overview(&self, focused: Option<&Id>) -> Result<Vec<AgentRow>> {
+    /// Selection ranks like the overview: stale attention never displaces
+    /// running work from the bounded result.
+    pub(crate) fn agent_overview(&self, focused: Option<&Id>, now: u64) -> Result<Vec<AgentRow>> {
         // A saved working flag is not evidence that its terminal is still alive.
         // This read never changes custody or recovers an account.
         let live: std::collections::BTreeSet<_> = self
@@ -28,17 +30,20 @@ impl Store {
         } else {
             "(SELECT NULL AS session,NULL AS run,NULL AS input_sequence,NULL AS payload WHERE 0)"
         };
+        // The ranking reads the saved state. A saved `working` session with no
+        // live owner displays as uncertain but ranks as running here; both
+        // tiers precede stale attention, so only the rows the cap trims differ.
         let mut query = db.prepare(&format!(
             "WITH selected AS (
                 SELECT id,last_active FROM sessions
                 WHERE CASE WHEN json_valid(payload)
                     THEN json_extract(payload,'$.managed_task') IS NULL ELSE 0 END
                 ORDER BY id=?1 DESC,
-                    CASE json_extract(payload,'$.state')
-                        WHEN 'needs_answer' THEN 0 WHEN 'needs_action' THEN 0
-                        WHEN 'needs_approval' THEN 0 WHEN 'uncertain' THEN 0
-                        WHEN 'failed' THEN 0 WHEN 'limited' THEN 0
-                        WHEN 'working' THEN 1 ELSE 2 END,
+                    CASE
+                        WHEN json_extract(payload,'$.state') IN ('needs_answer','needs_action',
+                            'needs_approval','uncertain','failed','limited')
+                        THEN CASE WHEN last_active>?3 THEN 0 ELSE 2 END
+                        WHEN json_extract(payload,'$.state')='working' THEN 1 ELSE 3 END,
                     last_active DESC,id LIMIT ?2
             )
             SELECT s.id,s.payload,m.id,m.payload,o.payload,r.payload,f.payload,fr.payload
@@ -55,8 +60,10 @@ impl Store {
                 SELECT MAX(input_sequence) FROM {outcomes} WHERE session=s.id)
             LEFT JOIN runs fr ON fr.id=f.run AND fr.phase='settled'",
         ))?;
-        let records =
-            query.query_map(params![focused.map(Id::as_str), MAX_AGENTS as i64], |row| {
+        let recent = crate::agent_overview::recent_attention_since(now);
+        let records = query.query_map(
+            params![focused.map(Id::as_str), MAX_AGENTS as i64, recent],
+            |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -67,7 +74,8 @@ impl Store {
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                 ))
-            })?;
+            },
+        )?;
         let mut rows = Vec::new();
         for record in records {
             let (
@@ -147,7 +155,7 @@ impl Store {
                 updated_at_ms: session.last_active_at_ms,
             });
         }
-        crate::agent_overview::sort(&mut rows);
+        crate::agent_overview::sort(&mut rows, now);
         Ok(rows)
     }
 }

@@ -80,26 +80,10 @@ impl Default for AgentGrid {
     }
 }
 
-fn needs_attention(row: &AgentRow) -> bool {
-    matches!(
-        row.state,
-        State::NeedsAnswer
-            | State::NeedsAction
-            | State::NeedsApproval
-            | State::Limited
-            | State::Failed
-            | State::Uncertain
-    )
-}
-
-fn priority(row: &AgentRow) -> u8 {
-    if needs_attention(row) {
-        0
-    } else if row.state == State::Working {
-        1
-    } else {
-        2
-    }
+/// Attention that still outranks running work; older attention is listed
+/// after it and counted separately.
+fn recent_attention(row: &AgentRow, now: u64) -> bool {
+    row.needs_attention() && !row.stale_attention(now)
 }
 
 /// The conversation or direct session the terminal has open. Its card is
@@ -115,7 +99,7 @@ fn is_open(app: &App, row: &AgentRow) -> bool {
     }
 }
 
-fn all_rows(app: &App) -> Vec<&AgentRow> {
+fn all_rows_at(app: &App, now: u64) -> Vec<&AgentRow> {
     let grid = &app.agent_grid;
     let held = !grid.order.is_empty() && (grid.focused || grid.offset > 0 || grid.filter_editing);
     let mut items: Vec<_> = app.view.agents.iter().take(MAX_AGENTS).collect();
@@ -129,18 +113,18 @@ fn all_rows(app: &App) -> Vec<&AgentRow> {
         let group = if held || is_open(app, row) {
             0
         } else {
-            priority(row) + 1
+            row.overview_priority(now) + 1
         };
         (group, position.unwrap_or(usize::MAX))
     });
     items
 }
 
-fn matches_filter(row: &AgentRow, grid: &AgentGrid) -> bool {
+fn matches_filter(row: &AgentRow, grid: &AgentGrid, now: u64) -> bool {
     let mode_matches = match grid.filter {
         Filter::All => true,
-        Filter::Active => needs_attention(row) || row.state == State::Working,
-        Filter::Attention => needs_attention(row),
+        Filter::Active => recent_attention(row, now) || row.state == State::Working,
+        Filter::Attention => row.needs_attention(),
     };
     if !mode_matches {
         return false;
@@ -166,10 +150,18 @@ fn matches_filter(row: &AgentRow, grid: &AgentGrid) -> bool {
 }
 
 fn rows(app: &App) -> Vec<&AgentRow> {
-    all_rows(app)
+    let now = crate::display_now_ms();
+    all_rows_at(app, now)
         .into_iter()
-        .filter(|row| matches_filter(row, &app.agent_grid))
+        .filter(|row| matches_filter(row, &app.agent_grid, now))
         .collect()
+}
+
+/// A stale attention card's age in milliseconds. The card shows it, which
+/// also explains why the card follows running work.
+pub(crate) fn stale_attention_age(row: &AgentRow, now: u64) -> Option<u64> {
+    row.stale_attention(now)
+        .then(|| now.saturating_sub(row.updated_at_ms))
 }
 
 fn filter_text(text: &str) -> String {
@@ -286,12 +278,14 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
     if area.height == 0 || area.width == 0 || !app.agent_grid.visible {
         return;
     }
-    let all: Vec<_> = all_rows(app).into_iter().cloned().collect();
+    let now = crate::display_now_ms();
+    let all: Vec<_> = all_rows_at(app, now).into_iter().cloned().collect();
     let total = all.len();
-    let attention = all.iter().filter(|row| needs_attention(row)).count();
+    let attention = all.iter().filter(|row| recent_attention(row, now)).count();
+    let older = all.iter().filter(|row| row.stale_attention(now)).count();
     let items: Vec<_> = all
         .iter()
-        .filter(|row| matches_filter(row, &app.agent_grid))
+        .filter(|row| matches_filter(row, &app.agent_grid, now))
         .cloned()
         .collect();
     let count = items.len();
@@ -369,7 +363,13 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
         String::new()
     };
     let need = if attention == 1 { "needs" } else { "need" };
-    let heading = format!("{summary}{filter} · {attention} {need} attention{range} · {control}");
+    let older = if older == 0 {
+        String::new()
+    } else {
+        format!(" ({older} older)")
+    };
+    let heading =
+        format!("{summary}{filter} · {attention} {need} attention{older}{range} · {control}");
     let header = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(
         Paragraph::new(heading).style(Style::default().add_modifier(if grid.focused {
@@ -472,12 +472,15 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
             )));
         let inner = block.inner(card);
         frame.render_widget(block, card);
+        let mut detail = clean_line(row.model.as_deref().unwrap_or("not routed yet"), 160);
+        // Stale attention says how long it has waited, which is also why it
+        // follows running work.
+        if let Some(age) = stale_attention_age(row, now) {
+            detail.push_str(" · ");
+            detail.push_str(&crate::age_label(age));
+        }
         frame.render_widget(
-            Paragraph::new(clean_line(
-                row.model.as_deref().unwrap_or("not routed yet"),
-                160,
-            ))
-            .style(Style::default().add_modifier(Modifier::DIM)),
+            Paragraph::new(detail).style(Style::default().add_modifier(Modifier::DIM)),
             Rect::new(inner.x, inner.y, inner.width, 1),
         );
         let mut state = status(row, ticks, app.view.reduced_motion);
@@ -848,6 +851,12 @@ impl App {
         self.agent_grid.selected = items
             .get(next.min(items.len().saturating_sub(1)))
             .map(|row| row.context.clone());
+        if key.code == KeyCode::Home {
+            // Scroll now rather than on the next focused repaint, so Home
+            // then Escape before a frame still returns to the top and lets
+            // priority changes apply.
+            self.agent_grid.offset = 0;
+        }
         true
     }
 }
@@ -887,6 +896,8 @@ mod tests {
                 lines: None,
             },
         };
+        // Sessions updated just now; ageing tests move rows back explicitly.
+        let now = crate::display_now_ms();
         app.view.agents = (0..count)
             .map(|index| AgentRow {
                 context: TranscriptContext::Conversation(id(&format!("conversation_{index}"))),
@@ -898,7 +909,7 @@ mod tests {
                 activity: "thinking".into(),
                 response: format!("Response {index}"),
                 category: Some("done".into()),
-                updated_at_ms: 1,
+                updated_at_ms: now,
             })
             .collect();
         app
@@ -1105,6 +1116,64 @@ mod tests {
             ]
         );
         assert_eq!(app.agent_grid.offset, 0);
+    }
+
+    #[test]
+    fn stale_attention_follows_running_work_counts_apart_and_shows_its_age() {
+        let mut app = fixture(6);
+        let day = xcb_core::ui::STALE_ATTENTION_MS;
+        let now = crate::display_now_ms();
+        app.view.agents[0].state = State::Idle;
+        app.view.agents[1].state = State::Failed;
+        app.view.agents[1].activity = "failed".into();
+        app.view.agents[1].category = Some("failed".into());
+        // A minute past each label boundary, so render-time clock reads agree.
+        app.view.agents[1].updated_at_ms = now - 3 * day - 2 * 3_600_000 - 60_000;
+        app.view.agents[2].state = State::NeedsAnswer;
+        app.view.agents[3].state = State::Idle;
+        app.view.agents[4].state = State::Limited;
+        app.view.agents[4].activity = "usage limit".into();
+        app.view.agents[4].category = Some("usage limit".into());
+        app.view.agents[4].updated_at_ms = now - day - 60_000;
+        let screen = draw(&mut app, 120, 40);
+        // Open conversation, recent attention, running work, stale attention, rest.
+        assert_eq!(
+            order(&app),
+            [
+                "conversation_0",
+                "conversation_2",
+                "conversation_5",
+                "conversation_1",
+                "conversation_4",
+                "conversation_3"
+            ]
+        );
+        let content = text(&screen);
+        assert!(content.contains("1 needs attention (2 older)"));
+        assert!(content.contains("Astra · 3d 2h ago"));
+        assert!(content.contains("Astra · 1d 0h ago"));
+        assert!(content.contains("failed") && content.contains("usage limit"));
+        // Active work leaves stale attention out; the attention filter keeps it last.
+        app.overview_command("active");
+        assert_eq!(order(&app), ["conversation_2", "conversation_5"]);
+        app.overview_command("attention");
+        assert_eq!(
+            order(&app),
+            ["conversation_2", "conversation_1", "conversation_4"]
+        );
+    }
+
+    #[test]
+    fn ageing_repaints_when_attention_turns_stale_and_hourly_after() {
+        let mut app = fixture(1);
+        app.view.agents[0].state = State::Failed;
+        let updated = app.view.agents[0].updated_at_ms;
+        let day = xcb_core::ui::STALE_ATTENTION_MS;
+        let at = |now| crate::fingerprint_at(&app.view, now);
+        assert_eq!(at(updated), at(updated + day - 1));
+        assert_ne!(at(updated + day - 1), at(updated + day));
+        assert_eq!(at(updated + day), at(updated + day + 1_000));
+        assert_ne!(at(updated + day), at(updated + day + 3_600_000));
     }
 
     #[test]
@@ -1631,5 +1700,14 @@ mod tests {
         app.overview_event(&key(KeyCode::Home));
         draw(&mut app, 160, 40);
         assert_eq!(app.agent_grid.offset, 0);
+        // Home and Escape inside one frame still leave the grid at the top.
+        app.overview_event(&key(KeyCode::End));
+        draw(&mut app, 160, 40);
+        assert!(app.agent_grid.offset > 0);
+        app.overview_event(&key(KeyCode::Home));
+        app.overview_event(&key(KeyCode::Esc));
+        draw(&mut app, 160, 40);
+        assert_eq!(app.agent_grid.offset, 0);
+        assert!(!app.agent_grid.focused);
     }
 }

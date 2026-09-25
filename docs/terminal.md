@@ -66,13 +66,16 @@ draft to describe what you want to do with that context, then send it from the
 main chat. Existing task, project, and approval controls still apply.
 
 The conversation you have open comes first, then sessions needing attention,
-then active work, then earlier sessions. Cards keep their relative order within
-each group as responses arrive. While you
+then active work, then earlier sessions. A question, approval, usage limit, or
+failure that has not changed for a day moves behind active work. Its card shows
+how long it has waited, and the heading counts it separately, as in
+`2 need attention (5 older)`. Cards keep their relative order within each group
+as responses arrive. While you
 focus or scroll the grid, the order stays in place; status updates remain visible.
 Returning to the top and leaving grid focus applies priority changes.
 
-In the grid, press `1` for all sessions, `2` for active work and sessions needing
-attention, or `3` for attention only. Press `/` or Ctrl-F to filter by name,
+In the grid, press `1` for all sessions, `2` for active work and attention from
+the last day, or `3` for all attention, older attention last. Press `/` or Ctrl-F to filter by name,
 model, status, or ID. Enter finishes filtering; Escape clears the filter or
 returns to chat. Filtering keeps your chat draft.
 

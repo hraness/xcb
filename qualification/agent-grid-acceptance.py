@@ -401,6 +401,18 @@ def main():
         resize(40, 132)
         large = snapshot("22-resized-back")
         check("resize restores agents and composer", bool(re.search(r"Agent \d\d", large)) and "›" in large)
+        # Attention untouched for two days follows running work.
+        send(F6 + HOME + ESC)
+        fixture_update("stale", agents=[6, 7])
+        aged = snapshot("23-stale-attention")
+        order = visible_agents()
+        fresh, working = {3, 4, 5, 8, 13, 17}, {1, 2, 12, 15, 18}
+        check("stale attention follows running work and is counted apart", "6 need attention (2 older)" in aged and fresh | working <= set(order) and not {6, 7} & set(order[:11]), observed=order)
+        command("/overview attention")
+        aged_filter = snapshot("24-stale-attention-filter")
+        order = visible_agents()
+        check("attention filter lists stale attention last with its age", set(order) == fresh | {6, 7} and set(order[-2:]) == {6, 7} and "2d 0h ago" in aged_filter, observed=order)
+        command("/overview all")
         send(F6 + HOME)
         send(b"\r")
         send(b"please summarize")
