@@ -8,6 +8,7 @@ import { FoilController } from "./foil-controller";
 import "./globals.css";
 import "./docs/docs.css";
 import "./compare/compare.css";
+import "./blog/blog.css";
 
 /**
  * Tokyo Night is the site's own palette; the initial class supplies its compiled
