@@ -11,7 +11,11 @@ updates:
     groups:
       cargo-minor-and-patch:
         update-types: [minor, patch]
-  - package-ecosystem: npm
+  # Both JavaScript directories are Bun-managed: bun.lock is the lockfile and
+  # the npm ecosystem cannot update it (Dependabot fails its housekeeping run
+  # and proposes manifests without lockfile regeneration). The bun ecosystem
+  # updates package.json and bun.lock together.
+  - package-ecosystem: bun
     directory: /
     schedule:
       interval: weekly
@@ -19,7 +23,7 @@ updates:
     groups:
       npm-minor-and-patch:
         update-types: [minor, patch]
-  - package-ecosystem: npm
+  - package-ecosystem: bun
     directory: /site
     schedule:
       interval: weekly
