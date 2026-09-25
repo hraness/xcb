@@ -43,14 +43,10 @@ fn write(state_root: &Path, file: &str, value: &Value) -> Result<()> {
     let bytes = serde_json::to_vec(value).map_err(Error::Json)?;
     let target = path(state_root, file)?;
     if target.exists() {
-        // Revision-pinned replace is stronger than blind overwrite; custody
+        // Digest-pinned replace is stronger than blind overwrite; custody
         // records are small enough that the read is negligible.
         let current = private::read(&target, MAX_FILE_BYTES)?;
-        let revision = serde_json::from_slice::<Value>(&current)
-            .ok()
-            .and_then(|v| v.get("revision").and_then(Value::as_u64))
-            .unwrap_or(0);
-        private::replace(&target, &bytes, &revision.to_string())
+        private::replace(&target, &bytes, &crate::digest(&current))
     } else {
         private::create(&target, &bytes)
     }
@@ -164,11 +160,62 @@ pub fn load_account_key(state_root: &Path) -> Result<Option<(AccountKey, u64)>> 
 // Auth session ---------------------------------------------------------------------------
 
 /// The Convex Auth token pair the device presents on authenticated calls.
+/// `token_expiry_ms` is decoded from the JWT payload at issue time; when
+/// the claim is unreadable a conservative assumed lifetime applies.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudSession {
     pub token: String,
     pub refresh_token: String,
+    #[serde(default)]
+    pub token_expiry_ms: Option<u64>,
+}
+
+/// Refresh leads expiry by this much — a token inside the window is
+/// already spent as far as the lane is concerned.
+pub const REFRESH_LEAD_MS: u64 = 120_000;
+/// Assumed token lifetime when the JWT carries no readable `exp`.
+const ASSUMED_TOKEN_TTL_MS: u64 = 30 * 60 * 1000;
+
+/// Decode the JWT `exp` claim (seconds) from `token` without verifying —
+/// this schedules refresh, it does not authenticate anything. An
+/// undecodable token gets `now + ASSUMED_TOKEN_TTL_MS` so refresh still
+/// happens on a bounded horizon.
+pub fn session_expiry_ms(token: &str, now_ms: u64) -> u64 {
+    let Some(payload) = token.split('.').nth(1) else {
+        return now_ms + ASSUMED_TOKEN_TTL_MS;
+    };
+    let Ok(raw) = super::crypto::decode_base64url(payload, 8 * 1024) else {
+        return now_ms + ASSUMED_TOKEN_TTL_MS;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&raw) else {
+        return now_ms + ASSUMED_TOKEN_TTL_MS;
+    };
+    value
+        .get("exp")
+        .and_then(super::wire::json_u64)
+        .map(|seconds| seconds.saturating_mul(1000))
+        .unwrap_or(now_ms + ASSUMED_TOKEN_TTL_MS)
+}
+
+impl CloudSession {
+    /// Build a session from an issued token pair, decoding expiry.
+    pub fn issue(token: String, refresh_token: String, now_ms: u64) -> Self {
+        Self {
+            token_expiry_ms: Some(session_expiry_ms(&token, now_ms)),
+            token,
+            refresh_token,
+        }
+    }
+
+    /// True when the token expires inside the refresh lead (or already
+    /// did, or its expiry was never decodable).
+    pub fn due_for_refresh(&self, now_ms: u64) -> bool {
+        match self.token_expiry_ms {
+            Some(expiry) => expiry <= now_ms + REFRESH_LEAD_MS,
+            None => true,
+        }
+    }
 }
 
 pub fn store_session(state_root: &Path, session: &CloudSession) -> Result<()> {
@@ -178,6 +225,7 @@ pub fn store_session(state_root: &Path, session: &CloudSession) -> Result<()> {
         &json!({
             "token": session.token,
             "refreshToken": session.refresh_token,
+            "tokenExpiryMs": session.token_expiry_ms,
             "revision": 0u64,
         }),
     )

@@ -38,6 +38,26 @@ mod de {
     }
 }
 
+/// Read an integer from a wire `Value`: Convex `v.number()` arrives as
+/// `Float64`, so both representations are accepted but only integral
+/// floats. Returns `None` for anything else.
+pub fn json_u64(value: &Value) -> Option<u64> {
+    if let Some(int) = value.as_u64() {
+        return Some(int);
+    }
+    match value.as_f64() {
+        Some(float)
+            if float.is_finite()
+                && float.fract() == 0.0
+                && float >= 0.0
+                && float <= u64::MAX as f64 =>
+        {
+            Some(float as u64)
+        }
+        _ => None,
+    }
+}
+
 pub const NAMESPACE: &str = "xcb.relay.v1";
 /// The bind-challenge contract a device signs to finish enrollment.
 pub const DEVICE_BIND_CONTRACT: &str = "xcb.relay.v1:device-bind";
@@ -80,6 +100,40 @@ pub fn is_opaque_identifier(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
+/// `^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`
+/// — the version/variant bits are part of the wire shape.
+pub fn is_uuid_v7(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (index, byte) in bytes.iter().enumerate() {
+        match index {
+            8 | 13 | 18 | 23 => {
+                if *byte != b'-' {
+                    return false;
+                }
+            }
+            14 => {
+                if *byte != b'7' {
+                    return false;
+                }
+            }
+            19 => {
+                if !matches!(byte, b'8' | b'9' | b'a' | b'b') {
+                    return false;
+                }
+            }
+            _ => {
+                if !is_lower_hex(*byte) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 pub fn is_command_kind(value: &str) -> bool {
     COMMAND_KINDS.contains(&value)
 }
@@ -113,13 +167,19 @@ impl AuthorityTuple {
         }
     }
 
-    /// Strictly-ordered comparison: generation, then boot id, then fence.
-    /// Mirrors `compareDeviceAuthority` in `wire/authority.ts`.
-    pub fn compare(&self, other: &Self) -> std::cmp::Ordering {
-        self.boot_generation
-            .cmp(&other.boot_generation)
-            .then_with(|| self.boot_id.cmp(&other.boot_id))
-            .then_with(|| self.fence.cmp(&other.fence))
+    /// Mirrors `compareDeviceAuthority` in `wire/authority.ts`: generation
+    /// first, then fence — distinct boot ids at one generation are
+    /// incomparable in wall-clock terms, so an equal fence under a
+    /// different boot id is treated as later, letting a restarted daemon
+    /// make progress rather than deadlocking on its own predecessor.
+    pub fn strictly_after(&self, other: &Self) -> bool {
+        if self.boot_generation != other.boot_generation {
+            return self.boot_generation > other.boot_generation;
+        }
+        if self.boot_id != other.boot_id {
+            return self.fence >= other.fence;
+        }
+        self.fence > other.fence
     }
 }
 
@@ -266,26 +326,24 @@ pub struct ProjectionRow {
 // The `convex` crate's own `TryFrom<JsonValue>`/`From<Value>` impls are the
 // Convex *wire* encoding: every number becomes `Float64` inbound, and
 // `Int64`/`Bytes` outbound become `{"$integer": ...}` / `{"$bytes": ...}`
-// marker objects. Our contract speaks plain JSON against `v.int64()` /
-// `v.float64()` validators, so the bridge lives here instead.
+// marker objects. The relay schema declares every numeric field
+// `v.number()`, which validates `Float64` only, so the bridge lives here
+// and sends every number as `Float64` — the contract's values (ms
+// timestamps, versions, fences) are all far below 2^53.
 
-/// Plain JSON → `convex::Value`. Integers become `Int64`, other finite
-/// numbers `Float64`; non-finite numbers never arrive because serde_json
-/// cannot represent them.
+/// Plain JSON → `convex::Value`. Every finite number becomes `Float64`;
+/// non-finite numbers never arrive because serde_json cannot represent
+/// them.
 pub fn to_convex(value: &Value) -> Result<convex::Value> {
     Ok(match value {
         Value::Null => convex::Value::Null,
         Value::Bool(flag) => convex::Value::Boolean(*flag),
         Value::Number(number) => {
-            if let Some(int) = number.as_i64() {
-                convex::Value::Int64(int)
-            } else if let Some(int) = number.as_u64() {
-                convex::Value::Int64(
-                    i64::try_from(int).map_err(|_| invalid("integer argument overflows int64"))?,
-                )
-            } else {
-                convex::Value::Float64(number.as_f64().ok_or(invalid("non-finite argument"))?)
+            let float = number.as_f64().ok_or(invalid("non-finite argument"))?;
+            if !float.is_finite() || float.abs() > 9_007_199_254_740_992.0 {
+                return Err(invalid("argument exceeds float64 integer range"));
             }
+            convex::Value::Float64(float)
         }
         Value::String(text) => convex::Value::String(text.clone()),
         Value::Array(items) => {
@@ -306,9 +364,21 @@ pub fn to_json(value: &convex::Value) -> Result<Value> {
         convex::Value::Null => Value::Null,
         convex::Value::Boolean(flag) => Value::Bool(*flag),
         convex::Value::Int64(int) => Value::Number((*int).into()),
-        convex::Value::Float64(float) => Value::Number(
-            serde_json::Number::from_f64(*float).ok_or(invalid("non-finite value from relay"))?,
-        ),
+        // The contract's numbers are all integers but the wire carries
+        // `Float64`. Re-canonicalising a signed envelope must reproduce the
+        // exact bytes the sender signed, so integral floats collapse back
+        // to integers — `1.0` from the wire is `1` in canonical JSON.
+        convex::Value::Float64(float) => {
+            let int = *float as i64;
+            if float.is_finite() && float.fract() == 0.0 && int as f64 == *float {
+                Value::Number(int.into())
+            } else {
+                Value::Number(
+                    serde_json::Number::from_f64(*float)
+                        .ok_or(invalid("non-finite value from relay"))?,
+                )
+            }
+        }
         convex::Value::String(text) => Value::String(text.clone()),
         convex::Value::Bytes(_) => return Err(invalid("convex bytes value")),
         convex::Value::Array(items) => {
@@ -349,7 +419,24 @@ mod tests {
             boot_id: "b".repeat(32),
             fence: 0,
         };
-        assert_eq!(a.compare(&b), std::cmp::Ordering::Less);
-        assert_eq!(b.compare(&a), std::cmp::Ordering::Greater);
+        assert!(b.strictly_after(&a));
+        assert!(!a.strictly_after(&b));
+        assert!(!a.strictly_after(&a));
+        // Same generation, different boot: fence alone orders — an equal
+        // fence counts as later so a restarted daemon never deadlocks on
+        // its own predecessor (mirrors compareDeviceAuthority).
+        let c = AuthorityTuple {
+            boot_generation: 2,
+            boot_id: "c".repeat(32),
+            fence: 0,
+        };
+        assert!(b.strictly_after(&c));
+        assert!(c.strictly_after(&b));
+        let c2 = AuthorityTuple {
+            fence: 1,
+            ..c.clone()
+        };
+        assert!(c2.strictly_after(&b));
+        assert!(!b.strictly_after(&c2));
     }
 }

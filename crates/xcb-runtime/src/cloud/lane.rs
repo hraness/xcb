@@ -9,7 +9,7 @@
 //! lane stays a pure protocol state machine.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
@@ -45,6 +45,8 @@ pub struct LaneKeys {
     pub session: CloudSession,
     pub deployment_url: String,
     pub boot_generation: u64,
+    /// Where refreshed sessions and the bumped boot generation persist.
+    pub state_root: PathBuf,
 }
 
 /// Load custody and bump the boot generation — the persisted counter is
@@ -73,6 +75,7 @@ pub fn load_lane_keys(state_root: &Path) -> Result<Option<LaneKeys>> {
         session,
         deployment_url: link.deployment_url,
         boot_generation,
+        state_root: state_root.to_path_buf(),
     }))
 }
 
@@ -99,12 +102,24 @@ pub enum CommandOutcome {
     },
 }
 
+/// What `claim` reports for one command.
+pub enum ClaimOutcome {
+    /// The command is bound to the returned authority — proceed to
+    /// `mark_effect_started` with this exact tuple.
+    Claimed(AuthorityTuple),
+    /// The command closed before we could bind it (expired, cancelled,
+    /// or already terminal) — nothing to execute.
+    Closed,
+}
+
 pub struct RelayLane {
     client: RelayClient,
     device: DeviceIdentity,
     account_key: AccountKey,
     key_version: u64,
     authority: AuthorityTuple,
+    session: CloudSession,
+    state_root: std::path::PathBuf,
     /// deviceId → public keys, refreshed per poll so enrollments land.
     peers: BTreeMap<String, PeerDevice>,
     /// Presence connection this boot owns.
@@ -118,13 +133,15 @@ impl RelayLane {
         let mut client = RelayClient::connect(&keys.deployment_url).await?;
         client.authenticate(&keys.session.token).await;
         let connection_id = uuid::Uuid::now_v7().to_string();
-        let fingerprint = format!("boot:{}", keys.boot_generation);
+        let fingerprint = format!("xcb-boot-{}", keys.boot_generation);
         let mut lane = Self {
             client,
             device: keys.device,
             account_key: keys.account_key,
             key_version: keys.key_version,
             authority: AuthorityTuple::boot(keys.boot_generation),
+            session: keys.session,
+            state_root: keys.state_root,
             peers: BTreeMap::new(),
             connection_id,
             presence_until: 0,
@@ -156,8 +173,10 @@ impl RelayLane {
         self.authority.clone()
     }
 
-    /// Refresh peer keys and heartbeat if presence is close to expiry.
+    /// Refresh the auth session when inside its expiry lead, heartbeat if
+    /// presence is close to expiry, and refresh peer keys.
     pub async fn keepalive(&mut self, now_ms: u64) -> Result<()> {
+        link::refresh_if_due(&mut self.client, &self.state_root, &mut self.session).await?;
         if self.presence_until <= now_ms + 30_000 {
             let response = self
                 .client
@@ -221,25 +240,44 @@ impl RelayLane {
         })
     }
 
-    /// Claim a pending command, binding a fresh-fence authority. The
-    /// returned tuple must be presented verbatim to `mark_effect_started`
-    /// and `settle`.
-    pub async fn claim(&mut self, command: &CommandRow) -> Result<AuthorityTuple> {
-        let authority = self.next_authority();
-        self.client
+    /// Claim a pending or prepared command, binding a fresh-fence
+    /// authority. A `prepared` row bound to a stale earlier authority
+    /// rebinds to ours. Returns `Closed` when the command expired or
+    /// otherwise terminated before the bind landed; `Claimed` carries the
+    /// authority tuple the relay recorded — present it verbatim to
+    /// `mark_effect_started` and `settle`.
+    pub async fn claim(&mut self, command: &CommandRow) -> Result<ClaimOutcome> {
+        let requested = self.next_authority();
+        let response = self
+            .client
             .mutation(
                 "relayCommands:claim",
                 vec![
                     (
                         "authority",
-                        serde_json::to_value(&authority).map_err(Error::Json)?,
+                        serde_json::to_value(&requested).map_err(Error::Json)?,
                     ),
                     ("deviceId", json!(self.device.device)),
                     ("publicId", json!(command.public_id)),
                 ],
             )
             .await?;
-        Ok(authority)
+        match response.get("outcome").and_then(Value::as_str) {
+            Some("applied" | "rebound" | "replay") => {
+                // The recorded tuple is the source of truth — for a replay
+                // it is the previously bound tuple, which may differ from
+                // `requested` (e.g. a fence we already spent).
+                let bound = response
+                    .get("command")
+                    .and_then(|command| command.get("boundAuthority"))
+                    .cloned()
+                    .ok_or(protocol("claim missing boundAuthority"))?;
+                let authority: AuthorityTuple =
+                    serde_json::from_value(bound).map_err(Error::Json)?;
+                Ok(ClaimOutcome::Claimed(authority))
+            }
+            _ => Ok(ClaimOutcome::Closed),
+        }
     }
 
     /// Mark a claimed command effect_started — the point of no return for
@@ -298,7 +336,9 @@ impl RelayLane {
             &plaintext,
             Some(&requester.device),
         )?;
-        let result_digest = super::canonical::canonical_digest(&result)?;
+        // The digest commits to the plaintext, not the sealed envelope —
+        // a retried settle reseals under a fresh IV and must still replay.
+        let result_digest = super::canonical::bytes_digest(&plaintext);
         self.client
             .mutation(
                 "relayCommands:settle",
@@ -319,10 +359,57 @@ impl RelayLane {
         Ok(())
     }
 
-    /// Run one pass over the command queue: claim each pending row, mark
-    /// effect_started, hand the plaintext to `handler`, and settle. A
-    /// handler error settles the command `failed` rather than poisoning the
-    /// lane.
+    /// Recover a command whose bound authority is stale or which we
+    /// cannot finish: from `prepared` the honest close is `failed` (the
+    /// effect never began); from `effect_started` the only honest close
+    /// is `ambiguous` — the reducer rejects `applied` here, which is
+    /// correct: this authority never observed the effect.
+    pub async fn recover(&mut self, command: &CommandRow) -> Result<()> {
+        let (state, result_code) = match command.state {
+            CommandState::Prepared => ("failed", "effect-never-started"),
+            CommandState::EffectStarted => ("ambiguous", "effect-uncertain"),
+            _ => return Err(invalid("recover needs prepared or effect_started")),
+        };
+        let authority = self.next_authority();
+        self.client
+            .mutation(
+                "relayCommands:recover",
+                vec![
+                    (
+                        "authority",
+                        serde_json::to_value(&authority).map_err(Error::Json)?,
+                    ),
+                    ("deviceId", json!(self.device.device)),
+                    ("publicId", json!(command.public_id)),
+                    ("resultCode", json!(result_code)),
+                    ("state", json!(state)),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Drop this boot's presence connection.
+    pub async fn disconnect(&mut self) -> Result<()> {
+        self.client
+            .mutation(
+                "relayDevices:disconnect",
+                vec![
+                    ("connectionId", json!(self.connection_id)),
+                    ("deviceId", json!(self.device.device)),
+                ],
+            )
+            .await?;
+        self.presence_until = 0;
+        Ok(())
+    }
+
+    /// Run one pass over the command queue. `pending`/`prepared` rows are
+    /// claimed (stale `prepared` rebinds to this later authority), marked
+    /// effect_started, handed to `handler`, and settled. `effect_started`
+    /// rows are unobserved effects — the previous claimant died mid-effect
+    /// — so they close `ambiguous` through recovery rather than settle.
+    /// A handler error settles `failed` rather than poisoning the lane.
     pub async fn pump<H>(&mut self, handler: &mut H) -> Result<usize>
     where
         H: FnMut(&OpenedCommand) -> Result<CommandOutcome>,
@@ -330,13 +417,16 @@ impl RelayLane {
         self.keepalive(now_ms()).await?;
         let mut settled = 0;
         for command in self.poll(None).await? {
-            // `prepared` rows either belong to a dead earlier authority (this
-            // later one rebinds them) or replay under our own bound tuple —
-            // both land back in `prepared` and proceed.
+            if command.state == CommandState::EffectStarted {
+                self.recover(&command).await?;
+                continue;
+            }
             if command.state != CommandState::Pending && command.state != CommandState::Prepared {
                 continue;
             }
-            let authority = self.claim(&command).await?;
+            let ClaimOutcome::Claimed(authority) = self.claim(&command).await? else {
+                continue;
+            };
             self.mark_effect_started(&command, &authority).await?;
             let (opened, outcome) = match self.open_payload(&command) {
                 Ok(opened) => match handler(&opened) {

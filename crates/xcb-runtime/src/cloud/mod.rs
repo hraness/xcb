@@ -8,6 +8,7 @@
 
 pub mod canonical;
 pub mod client;
+pub mod commands;
 pub mod controller;
 pub mod crypto;
 pub mod custody;

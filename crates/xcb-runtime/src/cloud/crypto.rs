@@ -347,7 +347,7 @@ pub fn open_envelope(
     }
     let key_version = object
         .get("keyVersion")
-        .and_then(Value::as_u64)
+        .and_then(super::wire::json_u64)
         .ok_or("malformed-envelope")?;
     let declared_recipient = get_str("recipient")?;
     let declared_sender = get_str("sender")?;
@@ -445,7 +445,7 @@ pub fn open_key_wrap(
     }
     let key_version = object
         .get("keyVersion")
-        .and_then(Value::as_u64)
+        .and_then(super::wire::json_u64)
         .ok_or("malformed-envelope")?;
     let declared_recipient = get_str("recipient")?;
     let declared_sender = get_str("sender")?;

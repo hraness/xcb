@@ -1,5 +1,6 @@
 mod application;
 mod habitat;
+mod remote;
 mod route;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -136,6 +137,56 @@ enum Commands {
         #[arg(long)]
         refresh: bool,
     },
+    /// Link this machine into the xcb relay fleet via email one-time code.
+    Link {
+        /// Email the sign-in code goes to; prompted when omitted.
+        #[arg(long)]
+        email: Option<String>,
+        /// The 8-digit code emailed after a previous `xcb link`; prompted
+        /// when omitted on a terminal.
+        #[arg(long)]
+        code: Option<String>,
+        /// Bootstrap or invite token when the deployment gates enrollment.
+        #[arg(long)]
+        invite: Option<String>,
+        /// Relay deployment URL; defaults to $XCB_RELAY_URL or the local
+        /// backend, and persists into custody at enrollment.
+        #[arg(long)]
+        relay: Option<String>,
+        /// Enroll as a dispatch-only controller instead of a workspace
+        /// daemon. Workspace machines use the default.
+        #[arg(long)]
+        controller: bool,
+        /// Device label shown in `xcb fleet`; defaults to the hostname.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// List the enrolled device fleet and its published projections.
+    Fleet,
+    /// Enqueue a managed task on a remote workspace device.
+    Dispatch {
+        /// Target daemon device id from `xcb fleet`.
+        device: String,
+        /// Workspace name on the target.
+        workspace: String,
+        /// Task text; piped stdin is used when omitted.
+        #[arg(short = 'p', long)]
+        prompt: Option<String>,
+    },
+    /// Post text to a remote ALGAL daemon's inbox.
+    Send {
+        /// Target daemon device id from `xcb fleet`.
+        device: String,
+        /// Daemon name on the target.
+        daemon: String,
+        /// Message text.
+        text: String,
+    },
+    /// Manage remote linkage: admit a newly enrolled device or revoke one.
+    Remote {
+        #[command(subcommand)]
+        command: remote::RemoteCommand,
+    },
     /// List direct provider sessions (use conversations for managed chat).
     Sessions {
         #[command(subcommand)]
@@ -232,7 +283,11 @@ enum Commands {
         command: Option<habitat::DaemonCommand>,
     },
     /// Show questions, approvals and actions requiring attention across conversations.
-    Attention,
+    Attention {
+        /// Read the encrypted fleet projections instead of local tasks.
+        #[arg(long)]
+        remote: bool,
+    },
     /// Configure bounded project autonomy and inspect remaining grants.
     Projects {
         #[command(subcommand)]
@@ -1093,6 +1148,62 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         )
         .await;
     }
+    // Remote-fleet commands live entirely in cloud custody and the relay;
+    // they never open the managed store.
+    match &cli.command {
+        Some(Commands::Link {
+            email,
+            code,
+            invite,
+            relay,
+            controller,
+            label,
+        }) => {
+            return remote::link(
+                &root,
+                remote::LinkOptions {
+                    code: code.as_deref(),
+                    controller: *controller,
+                    email: email.as_deref(),
+                    invite: invite.as_deref(),
+                    json_out: cli.json,
+                    label: label.as_deref(),
+                    relay: relay.as_deref(),
+                },
+            )
+            .await;
+        }
+        Some(Commands::Fleet) => return remote::fleet(&root, cli.json).await,
+        Some(Commands::Dispatch {
+            device,
+            workspace,
+            prompt,
+        }) => {
+            let prompt = match prompt {
+                Some(prompt) => prompt.clone(),
+                None if !io::stdin().is_terminal() => {
+                    String::from_utf8(stdin(xcb_core::MAX_TEXT_BYTES)?)
+                        .map_err(|_| xcb_core::Error::Invalid("UTF-8 prompt"))?
+                }
+                None => {
+                    return Err(Error::Unavailable(
+                        "use xcb dispatch <device> <workspace> -p <task> or pipe a task on stdin",
+                    ));
+                }
+            };
+            xcb_core::bounded_text(&prompt, xcb_core::MAX_TEXT_BYTES)?;
+            return remote::dispatch(&root, device, workspace, &prompt, cli.json).await;
+        }
+        Some(Commands::Send {
+            device,
+            daemon,
+            text,
+        }) => return remote::send(&root, device, daemon, text, cli.json).await,
+        Some(Commands::Remote { command }) => {
+            return remote::remote(&root, command, cli.json).await;
+        }
+        _ => {}
+    }
     let store = Arc::new(Store::open(&root)?);
     let (mut config, _) = Config::load(store.root())?;
     match cli.command {
@@ -1101,6 +1212,11 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             | Commands::ApplicationDiagnostic { .. }
             | Commands::QualifyApplication { .. }
             | Commands::ManagedDaemon
+            | Commands::Link { .. }
+            | Commands::Fleet
+            | Commands::Dispatch { .. }
+            | Commands::Send { .. }
+            | Commands::Remote { .. }
             | Commands::Route,
         ) => {
             unreachable!("early dispatch returns above")
@@ -2049,7 +2165,13 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         Some(Commands::Daemons { command }) => {
             habitat::daemons(store.root(), command, cli.json).await
         }
-        Some(Commands::Attention) => habitat::attention(store.root(), cli.json),
+        Some(Commands::Attention { remote }) => {
+            if remote {
+                remote::attention_remote(store.root(), cli.json).await
+            } else {
+                habitat::attention(store.root(), cli.json)
+            }
+        }
         Some(Commands::Projects { command }) => habitat::projects(store.root(), command, cli.json),
         Some(Commands::Memory { command }) => {
             habitat::memory(store.root(), command, cli.json).await

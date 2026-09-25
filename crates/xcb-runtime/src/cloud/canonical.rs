@@ -99,6 +99,15 @@ pub fn canonical_digest(value: &Value) -> Result<String> {
     Ok(format!("sha256:{}", hex::encode(digest)))
 }
 
+/// `sha256:<64 lowercase hex>` over raw bytes — the request/result digest
+/// contract. Committing to the *plaintext* keeps the digest stable across
+/// an idempotent replay, where a resealed envelope would draw a fresh IV
+/// and hash differently every time.
+pub fn bytes_digest(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    format!("sha256:{}", hex::encode(sha2::Sha256::digest(bytes)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

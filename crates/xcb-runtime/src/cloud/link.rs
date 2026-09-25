@@ -23,6 +23,13 @@ fn protocol(what: &'static str) -> Error {
     Error::Protocol(what)
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 const AUTH_PROVIDER: &str = "xcb-otp-v1";
 
 /// Phase 1: request an OTP code for `email`. `invite` is the bootstrap or
@@ -43,7 +50,7 @@ pub async fn request_code(
     }
     let result = client
         .action(
-            "relayAuth:signIn",
+            "auth:signIn",
             vec![
                 ("provider", Value::String(AUTH_PROVIDER.to_string())),
                 ("params", params),
@@ -63,7 +70,7 @@ pub async fn verify_code(
 ) -> Result<CloudSession> {
     let result = client
         .action(
-            "relayAuth:signIn",
+            "auth:signIn",
             vec![
                 ("provider", Value::String(AUTH_PROVIDER.to_string())),
                 (
@@ -89,10 +96,11 @@ pub async fn verify_code(
         .get("refreshToken")
         .and_then(Value::as_str)
         .ok_or(protocol("auth:signIn missing refreshToken"))?;
-    Ok(CloudSession {
-        token: token.to_string(),
-        refresh_token: refresh_token.to_string(),
-    })
+    Ok(CloudSession::issue(
+        token.to_string(),
+        refresh_token.to_string(),
+        now_ms(),
+    ))
 }
 
 /// Refresh an expired session token via the auth:signIn refresh lane.
@@ -102,7 +110,7 @@ pub async fn refresh_session(
 ) -> Result<CloudSession> {
     let result = client
         .action(
-            "relayAuth:signIn",
+            "auth:signIn",
             vec![("refreshToken", Value::String(session.refresh_token.clone()))],
         )
         .await?;
@@ -119,20 +127,38 @@ pub async fn refresh_session(
         .and_then(Value::as_str)
         .unwrap_or(&session.refresh_token)
         .to_string();
-    Ok(CloudSession {
-        token: token.to_string(),
+    Ok(CloudSession::issue(
+        token.to_string(),
         refresh_token,
-    })
+        now_ms(),
+    ))
 }
 
-/// Register + bind a fresh device identity on the authenticated session.
-/// The device id (derived from the signing key) is the public id.
-pub async fn enroll_device(
+/// Refresh `session` when it is inside the expiry lead, persisting and
+/// re-authenticating the client in place. A no-op for a fresh token.
+pub async fn refresh_if_due(
+    client: &mut RelayClient,
+    state_root: &Path,
+    session: &mut CloudSession,
+) -> Result<()> {
+    if !session.due_for_refresh(now_ms()) {
+        return Ok(());
+    }
+    let fresh = refresh_session(client, session).await?;
+    custody::store_session(state_root, &fresh)?;
+    client.authenticate(&fresh.token).await;
+    *session = fresh;
+    Ok(())
+}
+
+/// Register a device identity on the authenticated session. Idempotent for
+/// a pending row with matching keys; a row in another state rejects.
+async fn register_device(
     client: &mut RelayClient,
     device: &DeviceIdentity,
     device_class: &str,
     label: &str,
-) -> Result<String> {
+) -> Result<()> {
     let registered = client
         .mutation(
             "relayDevices:register",
@@ -154,7 +180,12 @@ pub async fn enroll_device(
     if registered.get("deviceId").and_then(Value::as_str) != Some(device.device.as_str()) {
         return Err(protocol("register returned the wrong deviceId"));
     }
+    Ok(())
+}
 
+/// Bind a pending device to this auth session: sign the server's bind
+/// challenge with the device signing key.
+async fn bind_device(client: &mut RelayClient, device: &DeviceIdentity) -> Result<()> {
     let begin = client
         .mutation(
             "relayDevices:beginBind",
@@ -187,18 +218,40 @@ pub async fn enroll_device(
             ],
         )
         .await?;
+    Ok(())
+}
+
+/// Register + bind a fresh device identity on the authenticated session.
+/// The device id (derived from the signing key) is the public id.
+pub async fn enroll_device(
+    client: &mut RelayClient,
+    device: &DeviceIdentity,
+    device_class: &str,
+    label: &str,
+) -> Result<String> {
+    register_device(client, device, device_class, label).await?;
+    bind_device(client, device).await?;
     Ok(device.device.clone())
+}
+
+/// Fetch this account's device rows — active and pending — as the typed
+/// wire shape.
+pub async fn device_rows(client: &mut RelayClient) -> Result<Vec<wire::DeviceRow>> {
+    let rows = client.query("relayDevices:list", vec![]).await?;
+    let list = rows.as_array().ok_or(protocol("devices list shape"))?;
+    let mut out = Vec::with_capacity(list.len());
+    for row in list {
+        out.push(serde_json::from_value(row.clone()).map_err(Error::Json)?);
+    }
+    Ok(out)
 }
 
 /// Fetch this account's enrolled devices as `deviceId → PeerDevice` — the
 /// public keys needed to verify envelopes and open key wraps. Every row
 /// parses through the typed wire shape before its keys are imported.
 pub async fn peers(client: &mut RelayClient) -> Result<BTreeMap<String, PeerDevice>> {
-    let rows = client.query("relayDevices:list", vec![]).await?;
-    let list = rows.as_array().ok_or(protocol("devices list shape"))?;
     let mut out = BTreeMap::new();
-    for row in list {
-        let device: wire::DeviceRow = serde_json::from_value(row.clone()).map_err(Error::Json)?;
+    for device in device_rows(client).await? {
         out.insert(
             device.device_id.clone(),
             PeerDevice {
@@ -261,7 +314,7 @@ pub async fn collect_key_wrap(
         if let Ok(key) = open_key_wrap(envelope, device, sender) {
             let version = envelope
                 .get("keyVersion")
-                .and_then(Value::as_u64)
+                .and_then(wire::json_u64)
                 .unwrap_or(1);
             return Ok(Some((key, version)));
         }
@@ -287,9 +340,40 @@ pub struct LinkOutcome {
     pub public_id: String,
 }
 
+/// Is this auth session already bound to a device? `myKeyEnvelopes` is the
+/// cheapest `requireDevice` query — anything except the relay's
+/// `unauthenticated` code still propagates.
+async fn session_bound(client: &mut RelayClient) -> Result<bool> {
+    match client.query("relayEnvelopes:myKeyEnvelopes", vec![]).await {
+        Ok(_) => Ok(true),
+        Err(Error::Protocol("relay unauthenticated")) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Retire a device row: the subject-level revoke mutation.
+async fn revoke_device(client: &mut RelayClient, device_id: &str) -> Result<()> {
+    client
+        .mutation("relayDevices:revoke", vec![("deviceId", json!(device_id))])
+        .await?;
+    Ok(())
+}
+
+fn bound_elsewhere() -> Error {
+    Error::Conflict(
+        "this sign-in is bound to a device missing from local custody — \
+         clear the stored session and link again",
+    )
+}
+
 /// The full link tail: after `verify_code`, enroll the device and settle
 /// key custody — mint an account key when this is the first executor,
 /// otherwise require an existing wrap addressed to this device.
+///
+/// Resumable: the device identity is persisted before enrollment, and
+/// server state drives the retry branch — an auth session binds exactly
+/// one device, so a retry that generated fresh keys would leave the
+/// session with two bindings, which `requireDevice` rejects.
 pub async fn finish_link(
     client: &mut RelayClient,
     state_root: &Path,
@@ -297,8 +381,52 @@ pub async fn finish_link(
     device_class: &str,
     label: &str,
 ) -> Result<LinkOutcome> {
-    let device = DeviceIdentity::generate()?;
-    let public_id = enroll_device(client, &device, device_class, label).await?;
+    let mut device = match custody::load_device(state_root)? {
+        Some(device) => device,
+        None => {
+            if session_bound(client).await? {
+                return Err(bound_elsewhere());
+            }
+            let device = DeviceIdentity::generate()?;
+            custody::store_device(state_root, &device, device_class, label, &device.device)?;
+            device
+        }
+    };
+
+    let status = device_rows(client)
+        .await?
+        .into_iter()
+        .find(|row| row.device_id == device.device)
+        .map(|row| row.status);
+    match status.as_deref() {
+        Some("active") => {
+            if !session_bound(client).await? {
+                // The device is bound to a session custody lost — its id
+                // never rebinds, so retire it and enroll a fresh identity.
+                revoke_device(client, &device.device).await?;
+                if session_bound(client).await? {
+                    return Err(bound_elsewhere());
+                }
+                device = DeviceIdentity::generate()?;
+                custody::store_device(state_root, &device, device_class, label, &device.device)?;
+                enroll_device(client, &device, device_class, label).await?;
+            }
+        }
+        Some("pending") => {
+            if session_bound(client).await? {
+                return Err(bound_elsewhere());
+            }
+            bind_device(client, &device).await?;
+        }
+        Some(_) => return Err(protocol("unexpected device status")),
+        None => {
+            if session_bound(client).await? {
+                return Err(bound_elsewhere());
+            }
+            enroll_device(client, &device, device_class, label).await?;
+        }
+    }
+    let public_id = device.device.clone();
 
     let key_outcome = match collect_key_wrap(client, &device).await? {
         Some((key, version)) => {
@@ -308,14 +436,20 @@ pub async fn finish_link(
             }
         }
         None => {
-            if device_class == wire::EXECUTOR_CLASS {
+            // Mint only on a genuinely empty account — the peer list
+            // already includes this device (it just registered), so
+            // "alone" means it is the only entry. A second executor that
+            // minted its own key would split the fleet's encryption
+            // domain — any device that isn't alone waits for a wrap.
+            let alone = peers(client).await?.keys().all(|id| id == &device.device);
+            if alone && device_class == wire::EXECUTOR_CLASS {
                 let key = AccountKey::generate();
                 custody::store_account_key(state_root, &key, 1)?;
                 KeyOutcome::Minted
             } else {
-                // A controller without a wrap cannot decrypt fleet
-                // projections; leave custody unset so the caller can prompt
-                // for admission by an enrolled device.
+                // A device without a wrap cannot decrypt fleet content;
+                // leave custody unset so the caller can prompt for
+                // admission by an enrolled device (`xcb remote admit`).
                 KeyOutcome::AwaitingWrap
             }
         }
