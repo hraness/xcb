@@ -10,9 +10,15 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-algal = { git = "https://github.com/hraness/algal", rev = "2c7f86a257761dc1a2adaf064adc18dfcdf35925", version = "0.2.0" }
+aes-gcm = "=0.11.1"
 aicharts-core = { git = "https://github.com/hraness/aicharts", rev = "091433796f7253386c3e3186c67c275fb273b704", version = "0.1.0" }
+algal = { git = "https://github.com/hraness/algal", rev = "2c7f86a257761dc1a2adaf064adc18dfcdf35925", version = "0.2.0" }
 base64 = "=0.23.1"
+convex = "=0.10.4"
+getrandom = "=0.4.3"
+hkdf = "=0.13.0"
+hmac = "=0.13.0"
+p256 = { version = "=0.14.0", features = ["ecdh", "ecdsa", "sha256"] }
 gobstopper-core = { git = "https://github.com/hraness/gobstopper", rev = "d856594fb6cf9e23e4cef2d28eb6dc0cdf4b7030", version = "0.2.1" }
 hex = "=0.4.3"
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
@@ -29,7 +35,7 @@ thiserror = "=2.0.20"
 time = { version = "=0.3.55", features = ["parsing"] }
 tokio = { version = "=1.47.1", features = ["rt-multi-thread", "macros", "process", "io-util", "net", "sync", "time", "signal"] }
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["ring", "tls12"] }
-uuid = { version = "=1.26.1", features = ["v4", "serde"] }
+uuid = { version = "=1.26.1", features = ["v4", "v7", "serde"] }
 webpki-roots = "=1.0.9"
 xcb-core = { version = "0.8.9", path = "../xcb-core" }
 zeroize = "=1.9.0"

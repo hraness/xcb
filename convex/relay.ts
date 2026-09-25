@@ -4,16 +4,18 @@
  *
  * The bootstrap token lives in `XCB_RELAY_BOOTSTRAP` on the deployment and
  * admits the first owner exactly once — it dies the moment a subject
- * verifies. OTP delivery defaults to `log` (the only mode an anonymous
- * local backend supports); setting `XCB_RELAY_EMAIL=resend` switches to
- * Resend using `XCB_RESEND_API_KEY` / `XCB_RESEND_FROM`. */
+ * verifies. OTP delivery defaults to `log`; `XCB_RELAY_EMAIL=resend` uses
+ * Resend via `XCB_RESEND_API_KEY` / `XCB_RESEND_FROM`, and `webhook` POSTs
+ * the code to `XCB_OTP_WEBHOOK_URL` with bearer `XCB_OTP_WEBHOOK_TOKEN`. */
 
 import { defineRelay } from "@hraness/relay/backend";
 import type { EmailTransport } from "@hraness/relay/wire";
 
 const email: EmailTransport = process.env.XCB_RELAY_EMAIL === "resend"
   ? { mode: "resend", keyEnv: "XCB_RESEND_API_KEY", fromEnv: "XCB_RESEND_FROM" }
-  : { mode: "log" };
+  : process.env.XCB_RELAY_EMAIL === "webhook"
+    ? { mode: "webhook", urlEnv: "XCB_OTP_WEBHOOK_URL", tokenEnv: "XCB_OTP_WEBHOOK_TOKEN" }
+    : { mode: "log" };
 
 export const relay = defineRelay({
   namespace: "xcb.relay.v1",

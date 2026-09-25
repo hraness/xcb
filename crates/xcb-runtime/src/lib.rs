@@ -7,6 +7,7 @@ pub mod auth;
 pub mod broker;
 pub mod claude;
 mod claude_protocol;
+pub mod cloud;
 pub mod codex;
 pub mod command;
 pub mod command_tool;
