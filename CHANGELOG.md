@@ -6,6 +6,9 @@ assets, not this file, are the evidence that a version shipped; see
 
 ## 0.8.7
 
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.7)
+for macOS ARM64 and Linux x86_64; [public verification run](https://github.com/hraness/xcb/actions/runs/36092507683).
+
 - `/vim` turns on Vim-style modal editing in the composer. Insert mode keeps
   the familiar Codex CLI keys; Esc enters Normal mode with counts, motions
   (`h j k l`, `w b e`, `0 ^ $`, `gg G`, `{ }`, `f F t T` with `;` and `,`),
