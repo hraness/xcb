@@ -6,6 +6,9 @@ assets, not this file, are the evidence that a version shipped; see
 
 ## 0.8.8
 
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.8)
+for macOS ARM64 and Linux x86_64; [public verification run](https://github.com/hraness/xcb/actions/runs/36111915416).
+
 - Fixed a rare false conflict: a file lock xcb had released could briefly
   still look held, because a process spawned while the lock was held can
   carry it through its first moments of startup. xcb now releases its file
