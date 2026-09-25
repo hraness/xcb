@@ -4,6 +4,16 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.8.7
+
+- `/vim` turns on Vim-style modal editing in the composer. Insert mode keeps
+  the familiar Codex CLI keys; Esc enters Normal mode with counts, motions
+  (`h j k l`, `w b e`, `0 ^ $`, `gg G`, `{ }`, `f F t T` with `;` and `,`),
+  the `d`, `c`, and `y` operators, `x X s S r`, linewise or charwise `p` and
+  `P`, `J`, and `u` and Ctrl-R for undo and redo. Enter still sends from either
+  mode, and the prompt gutter shows `I` or `N`. See the
+  [terminal guide](docs/terminal.md).
+
 ## 0.8.6
 
 - A signed-in Codex account could not finish connecting: 0.156.1 reports the

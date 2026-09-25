@@ -852,7 +852,7 @@ impl App {
             "Ctrl-U/K  Kill to start/end     Ctrl-W / Alt-Backspace  Kill word".into(),
             "Alt-D  Kill next word     Ctrl-Y  Yank     Ctrl-R  Search history".into(),
             "Ctrl-V  Paste image/text     /attach  Add file     /detach  Remove file".into(),
-            "/vim  Vim editing — Esc for Normal mode (hjkl w/b/e f/t d/c/y p u r)".into(),
+            "/vim  Vim editing: Esc enters Normal mode (hjkl w/b/e f/t d/c/y p u r)".into(),
             String::new(),
             "Session and transcript".into(),
             "Esc  Close surface / return to latest / interrupt".into(),
