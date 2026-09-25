@@ -231,6 +231,49 @@ pub(crate) fn lock(file: &File) -> Result<()> {
     }
 }
 
+/// A held exclusive advisory lock that releases its open file description
+/// before the descriptor closes.
+///
+/// Dropping a locked `File` only closes this process's descriptor. A child
+/// another thread spawned while the lock was held can carry an inherited
+/// reference to the same open file description through its pre-exec window,
+/// so a close-only release can leave the lock looking held for a few
+/// milliseconds after this process let go — enough for a follow-up `try_lock`
+/// on the same path to refuse a lock nothing owns. `File::unlock`
+/// (`flock(LOCK_UN)`) releases the description itself, which an inherited
+/// reference cannot keep alive. Measured under concurrent spawning on both
+/// supported platforms: close-only release shows transient refusals, an
+/// explicit unlock shows none.
+pub struct ExclusiveLock(File);
+
+impl ExclusiveLock {
+    /// Guard a descriptor whose exclusive lock was just acquired. Construct
+    /// the guard before any early return that would otherwise drop the raw
+    /// `File`, so every release goes through `unlock`.
+    pub fn held(file: File) -> Self {
+        Self(file)
+    }
+
+    /// The locked descriptor, for custody checks such as `same_file`.
+    pub fn file(&self) -> &File {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for ExclusiveLock {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+
+impl Drop for ExclusiveLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
 pub(crate) fn same_file(path: &Path, file: &File) -> Result<()> {
     let opened = file.metadata()?;
     let named = fs::symlink_metadata(path)?;
@@ -295,4 +338,47 @@ pub fn replace(path: &Path, bytes: &[u8], expected: &str) -> Result<()> {
             .unwrap_or_else(|| map_custody_error(error))
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExclusiveLock;
+    use std::fs::OpenOptions;
+    use std::process::{Command, Stdio};
+
+    /// A child spawned while a lock is held can share its open file
+    /// description through the pre-exec window; here the descriptor is shared
+    /// outright, so under a close-only release the child's copy would keep the
+    /// lock held for its whole life. An explicit `unlock` on drop must free
+    /// the description while the child still runs.
+    #[test]
+    fn a_released_lock_is_not_held_by_a_shared_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("held.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.try_lock().unwrap();
+        let lock = ExclusiveLock::held(file);
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::from(lock.file().try_clone().unwrap()))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(lock);
+        let probe = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let held = probe.try_lock().is_err();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!held, "an inherited descriptor must not outlive the guard");
+    }
 }

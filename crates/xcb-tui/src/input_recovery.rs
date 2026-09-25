@@ -18,6 +18,19 @@ const MAX_DIRECTORY_BYTES: u64 = 128 * 1024 * 1024;
 pub const MAX_OTHER_INPUTS: usize = 128;
 const MAX_DIRECTORY_ENTRIES: usize = 2048;
 
+/// A held flock that releases its open file description before the descriptor
+/// closes. A child spawned while the lock is held can carry an inherited
+/// reference to the description through its pre-exec window, so a close-only
+/// release can leave the lock looking held after this process let go; an
+/// explicit `LOCK_UN` cannot be kept alive by that inherited reference.
+struct HeldLock(File);
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.0, FlockOperation::Unlock);
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RecoverySnapshot {
     pub text: String,
@@ -67,7 +80,7 @@ impl RecoveryEntry {
 pub struct RecoveryJournal {
     directory: Directory,
     id: String,
-    lock: File,
+    lock: HeldLock,
     lock_identity: FileIdentity,
     snapshot_identity: Option<FileIdentity>,
     last_save_complete: bool,
@@ -89,7 +102,8 @@ impl RecoveryJournal {
         let id = uuid::Uuid::new_v4().to_string();
         let lock = directory.create(&format!("{id}.lock"))?;
         rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive)?;
-        let lock_identity = FileIdentity::of(&lock.metadata()?);
+        let lock = HeldLock(lock);
+        let lock_identity = FileIdentity::of(&lock.0.metadata()?);
         Ok(Self {
             directory,
             id,
@@ -220,7 +234,7 @@ impl Drop for RecoveryJournal {
                 rustix::fs::AtFlags::empty(),
             );
         }
-        let _ = rustix::fs::flock(&self.lock, FlockOperation::Unlock);
+        let _ = rustix::fs::flock(&self.lock.0, FlockOperation::Unlock);
     }
 }
 
@@ -376,6 +390,7 @@ pub fn remove(entry: &RecoveryEntry) -> io::Result<()> {
     };
     rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive)
         .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "This terminal is still active"))?;
+    let lock = HeldLock(lock);
     directory.check()?;
     rustix::fs::unlinkat(
         &directory.file,
@@ -387,7 +402,8 @@ pub fn remove(entry: &RecoveryEntry) -> io::Result<()> {
         .open_file(&lock_name, u64::MAX)
         .is_ok_and(|other| {
             other.metadata().is_ok_and(|meta| {
-                lock.metadata()
+                lock.0
+                    .metadata()
                     .is_ok_and(|ours| FileIdentity::of(&meta) == FileIdentity::of(&ours))
             })
         })
@@ -419,7 +435,13 @@ fn lock_is_live(directory: &Directory, id: &str) -> io::Result<bool> {
         Err(error) => return Err(error),
     };
     match rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => Ok(false),
+        Ok(()) => {
+            // A probe's close-only release could stay held by a spawned
+            // child's inherited descriptor; unlock so the next probe reads
+            // the true state.
+            let _ = rustix::fs::flock(&lock, FlockOperation::Unlock);
+            Ok(false)
+        }
         Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
         Err(error) => Err(error.into()),
     }
@@ -588,7 +610,7 @@ struct Directory {
     identity: (u64, u64),
 }
 impl Directory {
-    fn admission(&self) -> io::Result<File> {
+    fn admission(&self) -> io::Result<HeldLock> {
         let lock = match self.create(".admission.lock") {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -597,7 +619,7 @@ impl Directory {
             Err(error) => return Err(error),
         };
         rustix::fs::flock(&lock, FlockOperation::LockExclusive)?;
-        Ok(lock)
+        Ok(HeldLock(lock))
     }
     fn open(path: &Path) -> io::Result<Self> {
         let before = fs::symlink_metadata(path)?;
