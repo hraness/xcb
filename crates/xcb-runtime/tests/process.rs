@@ -16,6 +16,22 @@ async fn finite_output_is_collected_and_oversized_output_is_refused() {
 }
 
 #[tokio::test]
+async fn a_clean_exit_after_stream_close_is_not_reaped_as_a_kill() {
+    // EOF on the pipes only proves the descriptors closed; the leader can
+    // still be finishing its own exit. Sweeping the process group before the
+    // leader's status is known turned that clean exit into a signal kill —
+    // the `provider command failed` CI flake.
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "echo hello; exec 1>&- 2>&-; sleep 0.05"])
+        .env_clear();
+    assert_eq!(
+        capture(command, 128, Duration::from_secs(2)).await.unwrap(),
+        b"hello\n"
+    );
+}
+
+#[tokio::test]
 async fn a_stalled_owned_process_is_terminated_at_its_deadline() {
     let mut command = Command::new("/bin/sleep");
     command.arg("10").env_clear();

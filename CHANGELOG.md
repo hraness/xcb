@@ -4,6 +4,17 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.8.8
+
+- Fixed a rare false conflict: a file lock xcb had released could briefly
+  still look held, because a process spawned while the lock was held can
+  carry it through its first moments of startup. xcb now releases its file
+  locks explicitly instead of relying on the descriptor close.
+- Fixed a rare false `provider command failed`: a provider command that
+  closed its output just before exiting cleanly could have its exit rewritten
+  as a signal by the cleanup sweep. The runner now waits for the command's
+  real exit status before stopping the rest of its process group.
+
 ## 0.8.7
 
 [Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.7)

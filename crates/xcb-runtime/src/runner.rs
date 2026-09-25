@@ -232,7 +232,7 @@ pub(crate) struct LaunchArtifacts {
     identity: (u64, u64),
     retained: bool,
     /// Declared last so the lock stays held through safe disposal.
-    owner: std::fs::File,
+    owner: private::ExclusiveLock,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -301,6 +301,7 @@ impl LaunchArtifacts {
         owner
             .try_lock()
             .map_err(|_| Error::Conflict("launch directory is already owned"))?;
+        let owner = private::ExclusiveLock::held(owner);
         Ok(Self {
             directory,
             identity: (metadata.dev(), metadata.ino()),
@@ -411,17 +412,17 @@ pub fn reclaim_launch_artifacts(root: &Path, remove: bool) -> Result<LaunchArtif
         }
         // Never create a lock during inspection: the launch creator may still
         // be between mkdir and acquiring its own lock.
-        let owner = private::open_file(&path.join(LAUNCH_OWNER_LOCK), 0).ok();
-        if let Some(owner) = &owner {
-            match owner.try_lock() {
-                Ok(()) => (),
+        let owner = match private::open_file(&path.join(LAUNCH_OWNER_LOCK), 0).ok() {
+            Some(owner) => match owner.try_lock() {
+                Ok(()) => Some(private::ExclusiveLock::held(owner)),
                 Err(std::fs::TryLockError::WouldBlock) => {
                     sweep.live += 1;
                     continue;
                 }
                 Err(_) => continue,
-            }
-        }
+            },
+            None => None,
+        };
         let identity = owner
             .as_ref()
             .and_then(|owner| reclaimable_identity(&path, owner).ok());
