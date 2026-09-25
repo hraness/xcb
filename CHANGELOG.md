@@ -6,6 +6,9 @@ assets, not this file, are the evidence that a version shipped; see
 
 ## 0.8.4
 
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.4)
+for macOS ARM64 and Linux x86_64; [public verification run](https://github.com/hraness/xcb/actions/runs/36082334475).
+
 - A question, approval, usage limit, or failure that has not changed for a day
   no longer outranks running work. The session grid lists it after active
   sessions, its card shows how long it has waited, and the heading counts it
