@@ -123,6 +123,14 @@ impl App {
             "/drafts" => self.open_recovery(),
             "/tools" => self.show_activity = !self.show_activity,
             "/thinking" => self.show_thinking = !self.show_thinking,
+            "/vim" => {
+                self.notice = if self.composer.toggle_vim() {
+                    "Vim editing on: Esc enters Normal (hjkl, w/b/e, d/c/y + motion, p, u). Enter still sends."
+                } else {
+                    "Vim editing off."
+                }
+                .into();
+            }
             "/task" => {
                 self.composer_target = None;
                 self.composer.set_text(arguments);
@@ -844,6 +852,7 @@ impl App {
             "Ctrl-U/K  Kill to start/end     Ctrl-W / Alt-Backspace  Kill word".into(),
             "Alt-D  Kill next word     Ctrl-Y  Yank     Ctrl-R  Search history".into(),
             "Ctrl-V  Paste image/text     /attach  Add file     /detach  Remove file".into(),
+            "/vim  Vim editing: Esc enters Normal mode (hjkl w/b/e f/t d/c/y p u r)".into(),
             String::new(),
             "Session and transcript".into(),
             "Esc  Close surface / return to latest / interrupt".into(),

@@ -388,7 +388,8 @@ route, saved session id, and settled outcome facts as bounded JSON. See
 `xcb chat --resume` reopens a control conversation; `xcb resume` opens a saved
 direct provider session and its workspace. Neither is a headless continuation
 command. `/help` lists terminal commands. The [terminal guide](docs/terminal.md)
-covers editing keys, transcript search, agent guidance, and draft recovery.
+covers editing keys, optional Vim editing, transcript search, agent guidance,
+and draft recovery.
 Conversations, tasks, provider
 sessions, and credentials live in the private native state root
 `~/.local/share/xcb`; `--state /absolute/path` or `XCB_STATE` overrides it.

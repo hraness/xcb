@@ -1,7 +1,10 @@
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui_textarea::{CursorMove, DataCursor, TextArea};
 use std::{collections::VecDeque, ops::Range};
 use unicode_segmentation::UnicodeSegmentation;
+
+mod vim;
+pub use vim::Mode as VimMode;
 
 pub const MAX_INPUT: usize = 256 * 1024;
 pub const MAX_HISTORY: usize = 200;
@@ -28,6 +31,11 @@ pub struct Composer {
     history_index: Option<usize>,
     draft: String,
     kill_buffer: String,
+    /// Whether `kill_buffer` holds whole lines, which makes `p`/`P` open a
+    /// line instead of splicing text at the cursor. Vim linewise yanks set it;
+    /// every other kill clears it.
+    kill_linewise: bool,
+    vim: Option<vim::Vim>,
 }
 impl Composer {
     pub fn text(&self) -> String {
@@ -194,6 +202,7 @@ impl Composer {
             if kill {
                 self.kill_buffer =
                     self.text()[self.position_offset(start)..self.position_offset(end)].to_owned();
+                self.kill_linewise = false;
             }
             self.textarea.delete_str(0);
             return;
@@ -204,6 +213,7 @@ impl Composer {
         let text = self.text();
         if kill {
             self.kill_buffer = text[range.clone()].to_owned();
+            self.kill_linewise = false;
         }
         self.move_to(range.start);
         self.textarea.delete_str(text[range].chars().count());
@@ -227,165 +237,189 @@ impl Composer {
             self.textarea.cancel_selection();
         }
     }
+    /// `/vim` toggles modal editing for this composer. Returns the new state.
+    pub fn toggle_vim(&mut self) -> bool {
+        self.vim = if self.vim.is_some() {
+            None
+        } else {
+            Some(vim::Vim::default())
+        };
+        self.vim.is_some()
+    }
+    /// `Some(mode)` while Vim editing is on, for the mode indicator.
+    pub fn vim_mode(&self) -> Option<VimMode> {
+        self.vim.map(|vim| vim.mode)
+    }
+    /// Shared by plain Enter in both keymaps: record, clear, hand the text back.
+    fn submit(&mut self, before: &str) -> ComposerAction {
+        self.remember(before);
+        self.set_text("");
+        // A send always returns Vim editing to insert mode.
+        if let Some(vim) = &mut self.vim {
+            vim.sent();
+        }
+        ComposerAction::Submit(before.to_owned())
+    }
+    /// The default keymap: Emacs-style readline editing. Vim's insert mode
+    /// delegates here so the ordinary keys behave identically.
+    fn emacs_key(&mut self, key: KeyEvent, before: &str, at: usize) -> ComposerAction {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            KeyCode::Char('c') if ctrl => {
+                self.clear_to_history();
+                return ComposerAction::Cancel;
+            }
+            KeyCode::Esc => return ComposerAction::Cancel,
+            KeyCode::Char('d') if ctrl && before.is_empty() => return ComposerAction::Quit,
+            KeyCode::Char('v') if ctrl => return ComposerAction::Clipboard,
+            KeyCode::Char('r') if ctrl => return ComposerAction::History,
+            KeyCode::Char('g') if ctrl => return ComposerAction::Editor,
+            KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => {
+                if !self.insert("\n") {
+                    return ComposerAction::Rejected(INPUT_TOO_LARGE);
+                }
+            }
+            KeyCode::Char('j') if ctrl => {
+                if !self.insert("\n") {
+                    return ComposerAction::Rejected(INPUT_TOO_LARGE);
+                }
+            }
+            KeyCode::Enter => return self.submit(before),
+            KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || ctrl => {
+                if !shift && self.can_navigate_history() && self.previous_history() {
+                    return ComposerAction::None;
+                }
+                self.prepare_selection(shift);
+                self.textarea.move_cursor(CursorMove::Up);
+                self.snap_cursor();
+            }
+            KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || ctrl => {
+                if !shift && self.can_navigate_history() && self.next_history() {
+                    return ComposerAction::None;
+                }
+                self.prepare_selection(shift);
+                self.textarea.move_cursor(CursorMove::Down);
+                self.snap_cursor();
+            }
+            KeyCode::Left | KeyCode::Char('b') if key.code == KeyCode::Left || ctrl || alt => {
+                let next = if alt || (ctrl && key.code == KeyCode::Left) {
+                    previous_word(before, at)
+                } else {
+                    previous_grapheme(before, at)
+                };
+                self.prepare_selection(shift);
+                self.move_to(next);
+            }
+            KeyCode::Right | KeyCode::Char('f') if key.code == KeyCode::Right || ctrl || alt => {
+                let next = if alt || (ctrl && key.code == KeyCode::Right) {
+                    next_word(before, at)
+                } else {
+                    next_grapheme(before, at)
+                };
+                self.prepare_selection(shift);
+                self.move_to(next);
+            }
+            KeyCode::Home | KeyCode::Char('a') if key.code == KeyCode::Home || ctrl => {
+                self.prepare_selection(shift);
+                self.move_to(before[..at].rfind('\n').map_or(0, |i| i + 1));
+            }
+            KeyCode::End | KeyCode::Char('e') if key.code == KeyCode::End || ctrl => {
+                self.prepare_selection(shift);
+                self.move_to(before[at..].find('\n').map_or(before.len(), |i| at + i));
+            }
+            KeyCode::Char('u') if ctrl => {
+                let start = before[..at].rfind('\n').map_or(0, |i| i + 1);
+                self.delete_range(
+                    if start == at {
+                        at.saturating_sub(1)..at
+                    } else {
+                        start..at
+                    },
+                    true,
+                );
+            }
+            KeyCode::Char('k') if ctrl => {
+                let end = before[at..].find('\n').map_or(before.len(), |i| at + i);
+                self.delete_range(
+                    at..if at == end {
+                        (end + 1).min(before.len())
+                    } else {
+                        end
+                    },
+                    true,
+                );
+            }
+            KeyCode::Char('w') if ctrl => self.delete_range(previous_word(before, at)..at, true),
+            KeyCode::Backspace if alt || ctrl => {
+                self.delete_range(previous_word(before, at)..at, true)
+            }
+            KeyCode::Char('h') if ctrl && alt => {
+                self.delete_range(previous_word(before, at)..at, true)
+            }
+            KeyCode::Char('d') if alt => self.delete_range(at..next_word(before, at), true),
+            KeyCode::Delete if ctrl || alt => self.delete_range(at..next_word(before, at), true),
+            KeyCode::Backspace | KeyCode::Char('h') if key.code == KeyCode::Backspace || ctrl => {
+                self.delete_range(previous_grapheme(before, at)..at, false)
+            }
+            KeyCode::Delete | KeyCode::Char('d') if key.code == KeyCode::Delete || ctrl => {
+                self.delete_range(at..next_grapheme(before, at), false)
+            }
+            KeyCode::Char('y') if ctrl => {
+                if !self.insert(&self.kill_buffer.clone()) {
+                    return ComposerAction::Rejected(INPUT_TOO_LARGE);
+                }
+            }
+            KeyCode::Char(ch) if !ctrl && !alt => {
+                if !self.insert(&clean_text(&ch.to_string())) {
+                    return ComposerAction::Rejected(INPUT_TOO_LARGE);
+                }
+            }
+            // TextArea reads Shift-Tab as Tab and would insert one.
+            KeyCode::BackTab => {}
+            _ => {
+                let old = self.textarea.clone();
+                self.textarea.input(key);
+                if self.text().len() > MAX_INPUT {
+                    self.textarea = old;
+                    return ComposerAction::Rejected(INPUT_TOO_LARGE);
+                }
+                self.snap_cursor();
+            }
+        }
+        ComposerAction::None
+    }
     pub fn handle(&mut self, event: Event) -> ComposerAction {
         let before = self.text();
-        match event {
+        let action = match event {
             Event::Paste(text) => {
                 if text.len() > MAX_INPUT || !self.insert(&clean_text(&text)) {
                     return ComposerAction::Rejected(PASTE_TOO_LARGE);
                 }
+                ComposerAction::None
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => {
-                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-                let alt = key.modifiers.contains(KeyModifiers::ALT);
-                let shift = key.modifiers.contains(KeyModifiers::SHIFT);
                 self.snap_cursor();
                 let at = self.cursor_offset();
-                match key.code {
-                    KeyCode::Char('c') if ctrl => {
-                        self.clear_to_history();
-                        return ComposerAction::Cancel;
-                    }
-                    KeyCode::Esc => return ComposerAction::Cancel,
-                    KeyCode::Char('d') if ctrl && before.is_empty() => return ComposerAction::Quit,
-                    KeyCode::Char('v') if ctrl => return ComposerAction::Clipboard,
-                    KeyCode::Char('r') if ctrl => return ComposerAction::History,
-                    KeyCode::Char('g') if ctrl => return ComposerAction::Editor,
-                    KeyCode::Enter if alt || key.modifiers.contains(KeyModifiers::SHIFT) => {
-                        if !self.insert("\n") {
-                            return ComposerAction::Rejected(INPUT_TOO_LARGE);
-                        }
-                    }
-                    KeyCode::Char('j') if ctrl => {
-                        if !self.insert("\n") {
-                            return ComposerAction::Rejected(INPUT_TOO_LARGE);
-                        }
-                    }
-                    KeyCode::Enter => {
-                        self.remember(&before);
-                        self.set_text("");
-                        return ComposerAction::Submit(before);
-                    }
-                    KeyCode::Up | KeyCode::Char('p') if key.code == KeyCode::Up || ctrl => {
-                        if !shift && self.can_navigate_history() && self.previous_history() {
-                            return ComposerAction::None;
-                        }
-                        self.prepare_selection(shift);
-                        self.textarea.move_cursor(CursorMove::Up);
-                        self.snap_cursor();
-                    }
-                    KeyCode::Down | KeyCode::Char('n') if key.code == KeyCode::Down || ctrl => {
-                        if !shift && self.can_navigate_history() && self.next_history() {
-                            return ComposerAction::None;
-                        }
-                        self.prepare_selection(shift);
-                        self.textarea.move_cursor(CursorMove::Down);
-                        self.snap_cursor();
-                    }
-                    KeyCode::Left | KeyCode::Char('b')
-                        if key.code == KeyCode::Left || ctrl || alt =>
-                    {
-                        let next = if alt || (ctrl && key.code == KeyCode::Left) {
-                            previous_word(&before, at)
-                        } else {
-                            previous_grapheme(&before, at)
-                        };
-                        self.prepare_selection(shift);
-                        self.move_to(next);
-                    }
-                    KeyCode::Right | KeyCode::Char('f')
-                        if key.code == KeyCode::Right || ctrl || alt =>
-                    {
-                        let next = if alt || (ctrl && key.code == KeyCode::Right) {
-                            next_word(&before, at)
-                        } else {
-                            next_grapheme(&before, at)
-                        };
-                        self.prepare_selection(shift);
-                        self.move_to(next);
-                    }
-                    KeyCode::Home | KeyCode::Char('a') if key.code == KeyCode::Home || ctrl => {
-                        self.prepare_selection(shift);
-                        self.move_to(before[..at].rfind('\n').map_or(0, |i| i + 1));
-                    }
-                    KeyCode::End | KeyCode::Char('e') if key.code == KeyCode::End || ctrl => {
-                        self.prepare_selection(shift);
-                        self.move_to(before[at..].find('\n').map_or(before.len(), |i| at + i));
-                    }
-                    KeyCode::Char('u') if ctrl => {
-                        let start = before[..at].rfind('\n').map_or(0, |i| i + 1);
-                        self.delete_range(
-                            if start == at {
-                                at.saturating_sub(1)..at
-                            } else {
-                                start..at
-                            },
-                            true,
-                        );
-                    }
-                    KeyCode::Char('k') if ctrl => {
-                        let end = before[at..].find('\n').map_or(before.len(), |i| at + i);
-                        self.delete_range(
-                            at..if at == end {
-                                (end + 1).min(before.len())
-                            } else {
-                                end
-                            },
-                            true,
-                        );
-                    }
-                    KeyCode::Char('w') if ctrl => {
-                        self.delete_range(previous_word(&before, at)..at, true)
-                    }
-                    KeyCode::Backspace if alt || ctrl => {
-                        self.delete_range(previous_word(&before, at)..at, true)
-                    }
-                    KeyCode::Char('h') if ctrl && alt => {
-                        self.delete_range(previous_word(&before, at)..at, true)
-                    }
-                    KeyCode::Char('d') if alt => {
-                        self.delete_range(at..next_word(&before, at), true)
-                    }
-                    KeyCode::Delete if ctrl || alt => {
-                        self.delete_range(at..next_word(&before, at), true)
-                    }
-                    KeyCode::Backspace | KeyCode::Char('h')
-                        if key.code == KeyCode::Backspace || ctrl =>
-                    {
-                        self.delete_range(previous_grapheme(&before, at)..at, false)
-                    }
-                    KeyCode::Delete | KeyCode::Char('d') if key.code == KeyCode::Delete || ctrl => {
-                        self.delete_range(at..next_grapheme(&before, at), false)
-                    }
-                    KeyCode::Char('y') if ctrl => {
-                        if !self.insert(&self.kill_buffer.clone()) {
-                            return ComposerAction::Rejected(INPUT_TOO_LARGE);
-                        }
-                    }
-                    KeyCode::Char(ch) if !ctrl && !alt => {
-                        if !self.insert(&clean_text(&ch.to_string())) {
-                            return ComposerAction::Rejected(INPUT_TOO_LARGE);
-                        }
-                    }
-                    // TextArea reads Shift-Tab as Tab and would insert one.
-                    KeyCode::BackTab => {}
-                    _ => {
-                        let old = self.textarea.clone();
-                        self.textarea.input(key);
-                        if self.text().len() > MAX_INPUT {
-                            self.textarea = old;
-                            return ComposerAction::Rejected(INPUT_TOO_LARGE);
-                        }
-                        self.snap_cursor();
-                    }
+                if self.vim.is_some() {
+                    vim::key(self, key, &before, at)
+                } else {
+                    self.emacs_key(key, &before, at)
                 }
             }
-            _ => (),
-        }
-        if self.text() != before {
+            _ => ComposerAction::None,
+        };
+        // A history recall changes the text too; keep the index it just set.
+        let text = self.text();
+        if text != before
+            && !self
+                .history_index
+                .is_some_and(|index| self.history.get(index) == Some(&text))
+        {
             self.reset_history();
         }
-        ComposerAction::None
+        action
     }
 }
 

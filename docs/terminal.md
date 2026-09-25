@@ -45,6 +45,32 @@ Paste preserves multiple lines without sending them. Drafts accept up to
 attachment. Mouse capture starts off so terminal selection works; `/mouse`
 enables wheel scrolling.
 
+## Edit with Vim keys
+
+`/vim` switches the composer to modal editing; `/vim` again turns it off.
+Insert mode keeps every key above. Esc enters Normal mode,
+and the prompt gutter shows `I` or `N` in place of the `›` marker. Enter still
+sends from either mode, and a send returns the composer to Insert mode. `/`
+in Normal mode reopens the command menu.
+
+| Normal mode | Keys |
+| --- | --- |
+| Move | `h j k l`, `0 ^ $`, `w b e` and `W B E`, `gg G`, `{ }`, arrows, Home, End |
+| Find on the line | `f F t T` with a character; `;` and `,` repeat |
+| Operate on a motion | `d`, `c`, `y`; doubled (`dd cc yy`) for whole lines |
+| Whole-line shortcuts | `D C` to the line end, `Y` for the line, `J` joins lines |
+| Small edits | `x X` delete, `s S` substitute, `r` replaces one character |
+| Paste | `p P`; whole lines when the deletion or yank was linewise |
+| Undo and redo | `u` and Ctrl-R |
+| Return to Insert | `i a I A`, or `o O` on a new line |
+
+Counts work before a motion or an operator (`3w`, `d2j`, `5x`). Esc in Normal
+mode drops a half-typed command; with nothing pending it keeps its usual
+meaning and interrupts running work. Ctrl-C, Ctrl-G, Ctrl-V, and the panel
+keys keep their meanings in both modes, and Ctrl-D still quits only with an
+empty prompt. Vim editing covers the draft only; it does not add `:` commands,
+visual mode, registers, or text objects.
+
 ## Keep an eye on sessions
 
 The overview above chat shows your sessions. Each card shows
@@ -140,5 +166,5 @@ Ctrl-D opens a confirmation to discard a selected inactive journal or retained
 draft. Live terminals cannot be discarded.
 
 xcb implements these interactions itself. Provider-specific Codex commands,
-context rewind, Vim mode, and native terminal scrollback are separate features;
-the current xcb transcript remains inside its terminal workspace.
+context rewind, and native terminal scrollback are separate features; the
+current xcb transcript remains inside its terminal workspace.

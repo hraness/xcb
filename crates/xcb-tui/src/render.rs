@@ -1,7 +1,7 @@
 #[path = "markdown.rs"]
 mod markdown;
 
-use crate::{App, EditorKind, Modal, view_context};
+use crate::{App, EditorKind, Modal, composer::VimMode, view_context};
 use ratatui::{
     Frame,
     buffer::CellWidth,
@@ -607,8 +607,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         parts[4].height.saturating_sub(composer_padding),
     );
     app.composer.textarea.set_block(Block::default());
+    // The gutter doubles as the Vim mode indicator once `/vim` is on.
+    let gutter = match app.composer.vim_mode() {
+        Some(VimMode::Normal) => "N",
+        Some(VimMode::Insert) => "I",
+        None => "›",
+    };
     frame.render_widget(
-        Paragraph::new("›").style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(gutter).style(Style::default().add_modifier(Modifier::BOLD)),
         Rect::new(parts[4].x, composer_area.y, 1, composer_area.height.min(1)),
     );
     app.composer
