@@ -1127,13 +1127,14 @@ mod tests {
         app.view.agents[1].state = State::Failed;
         app.view.agents[1].activity = "failed".into();
         app.view.agents[1].category = Some("failed".into());
-        app.view.agents[1].updated_at_ms = now - 3 * day - 2 * 3_600_000;
+        // A minute past each label boundary, so render-time clock reads agree.
+        app.view.agents[1].updated_at_ms = now - 3 * day - 2 * 3_600_000 - 60_000;
         app.view.agents[2].state = State::NeedsAnswer;
         app.view.agents[3].state = State::Idle;
         app.view.agents[4].state = State::Limited;
         app.view.agents[4].activity = "usage limit".into();
         app.view.agents[4].category = Some("usage limit".into());
-        app.view.agents[4].updated_at_ms = now - day;
+        app.view.agents[4].updated_at_ms = now - day - 60_000;
         let screen = draw(&mut app, 120, 40);
         // Open conversation, recent attention, running work, stale attention, rest.
         assert_eq!(

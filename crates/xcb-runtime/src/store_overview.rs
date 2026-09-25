@@ -30,6 +30,9 @@ impl Store {
         } else {
             "(SELECT NULL AS session,NULL AS run,NULL AS input_sequence,NULL AS payload WHERE 0)"
         };
+        // The ranking reads the saved state. A saved `working` session with no
+        // live owner displays as uncertain but ranks as running here; both
+        // tiers precede stale attention, so only the rows the cap trims differ.
         let mut query = db.prepare(&format!(
             "WITH selected AS (
                 SELECT id,last_active FROM sessions

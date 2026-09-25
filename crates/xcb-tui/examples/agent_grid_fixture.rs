@@ -202,7 +202,8 @@ fn main() -> io::Result<()> {
                         }
                     }
                     Some("stale") => {
-                        let at = now_ms().saturating_sub(2 * STALE_ATTENTION_MS);
+                        // A minute past two days keeps the age label stable.
+                        let at = now_ms().saturating_sub(2 * STALE_ATTENTION_MS + 60_000);
                         for number in command["agents"]
                             .as_array()
                             .into_iter()
