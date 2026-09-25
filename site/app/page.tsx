@@ -6,6 +6,7 @@ import {
   MarketingRelated,
   MarketingSection,
   ProductHero,
+  ProviderMark,
 } from "@hraness/design-kit/react/server";
 import { AskAiAboutThis } from "@hraness/ui";
 import { HeroField } from "./hero-field";
@@ -113,8 +114,8 @@ export default function Home() {
           </MarketingSection>
           <MarketingSection id="readiness" heading="What works today" headingId="readiness-title" summary="Native xcb is a source preview. These results come from specific builds and tested accounts, so your machine and accounts may differ.">
             <div className="xcb-readiness">
-              <div><span className="xcb-status-dot" aria-hidden="true" /><h3>Claude &amp; Codex</h3><p>On macOS ARM64, with the tested accounts and the supported builds, each finished a real coding task: run a failing test, fix the code, pass the test, and inspect Git status.</p><a href="/docs/providers">Supported builds and setup →</a></div>
-              <div><span className="xcb-status-dot xcb-status-caution" aria-hidden="true" /><h3>Devin</h3><p>The supported Devin builds pass xcb’s sandbox checks without signing in. A coding session on a signed-in Devin account hasn’t been confirmed yet. xcb checks your account’s model list each time a Devin turn starts.</p><a href="/docs/providers#devin">Current Devin status →</a></div>
+              <div><span className="xcb-status-dot" aria-hidden="true" /><h3><span className="xcb-provider-marks"><ProviderMark mark="claudecode" label="Claude Code" size={24} /><ProviderMark mark="codex" label="Codex" size={24} /></span>Claude &amp; Codex</h3><p>On macOS ARM64, with the tested accounts and the supported builds, each finished a real coding task: run a failing test, fix the code, pass the test, and inspect Git status.</p><a href="/docs/providers">Supported builds and setup →</a></div>
+              <div><span className="xcb-status-dot xcb-status-caution" aria-hidden="true" /><h3><span className="xcb-provider-marks"><ProviderMark mark="devin" label="Devin" size={24} /></span>Devin</h3><p>The supported Devin builds pass xcb’s sandbox checks without signing in. A coding session on a signed-in Devin account hasn’t been confirmed yet. xcb checks your account’s model list each time a Devin turn starts.</p><a href="/docs/providers#devin">Current Devin status →</a></div>
               <div><span className="xcb-status-dot xcb-status-neutral" aria-hidden="true" /><h3>Tests &amp; builds</h3><p>Commands run offline in a Linux ARM64 VM, with public dependencies you prepare in advance. Git access is read-only, and native macOS commands can’t run.</p><a href="/docs/workspace">What the runner supports →</a></div>
             </div>
           </MarketingSection>
