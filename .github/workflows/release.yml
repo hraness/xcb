@@ -125,7 +125,9 @@ jobs:
           }
 
           for source in \
+            scripts/check-npm-trusted-publisher-oidc.ts \
             scripts/check-npm-trusted-publishing.ts \
+            scripts/npm-publisher-boundary.ts \
             scripts/npm-release-policy.ts \
             scripts/publish-npm-release.ts \
             scripts/release-artifact-checksum.ts \
@@ -149,7 +151,7 @@ jobs:
 
           npm_writer_inventory="$(find "$npm_writer_root" -mindepth 1 -maxdepth 2 -printf '%P\t%y\n' | LC_ALL=C sort)"
           github_writer_inventory="$(find "$github_writer_root" -mindepth 1 -maxdepth 2 -printf '%P\t%y\n' | LC_ALL=C sort)"
-          expected_npm_writer_inventory=$'package.json\tf\nscripts\td\nscripts/check-npm-trusted-publishing.ts\tf\nscripts/npm-release-policy.ts\tf\nscripts/publish-npm-release.ts\tf\nscripts/release-artifact-checksum.ts\tf\nscripts/release-distribution-policy.ts\tf\nscripts/release-process-environment.ts\tf'
+          expected_npm_writer_inventory=$'package.json\tf\nscripts\td\nscripts/check-npm-trusted-publisher-oidc.ts\tf\nscripts/check-npm-trusted-publishing.ts\tf\nscripts/npm-publisher-boundary.ts\tf\nscripts/npm-release-policy.ts\tf\nscripts/publish-npm-release.ts\tf\nscripts/release-artifact-checksum.ts\tf\nscripts/release-distribution-policy.ts\tf\nscripts/release-process-environment.ts\tf'
           expected_github_writer_inventory=$'package.json\tf\nscripts\td\nscripts/publish-github-release.ts\tf\nscripts/release-artifact-checksum.ts\tf\nscripts/release-distribution-policy.ts\tf\nscripts/release-included-response.ts\tf\nscripts/release-process-environment.ts\tf\nscripts/release-ref-authority.ts\tf'
           if [[ "$npm_writer_inventory" != "$expected_npm_writer_inventory" || "$github_writer_inventory" != "$expected_github_writer_inventory" ]]; then
             echo "::error::Release writer closure is not the exact regular-file allowlist"
@@ -487,6 +489,12 @@ jobs:
         run: bun run ./writer/scripts/check-npm-trusted-publishing.ts
       - name: Recheck exact checksum with the reviewed writer
         run: bun run ./writer/scripts/release-artifact-checksum.ts check artifacts/*.tgz artifacts/SHA256SUMS
+      # A first (or repeated-failure) publish attempt proves the OIDC exchange
+      # in a dry run before any bytes are written; a same-run retry only
+      # observes the existing release and never reaches the publisher.
+      - name: Prove the npm OIDC exchange without publishing
+        if: env.PRE_NPM_STATE == 'absent'
+        run: bun run ./writer/scripts/check-npm-trusted-publisher-oidc.ts artifacts/*.tgz
       - name: Publish exact tarball through npm trusted publishing
         id: npm_publish
         run: bun run ./writer/scripts/publish-npm-release.ts artifacts/*.tgz

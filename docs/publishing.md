@@ -53,8 +53,13 @@ An immutable annotated `v<version>` tag at a commit in current `main` history
 7. **Publish npm.** Runs only when the repository variable
    `XCB_PUBLISH_NPM` is `true`. Downloads the exact bytes and the reviewed
    dependency-free npm writer, rechecks the checksum, and publishes through
-   npm OIDC trusted publishing with provenance. No npm token exists anywhere
-   in the pipeline.
+   npm OIDC trusted publishing with provenance. Before any publication the
+   writer runs `check-npm-trusted-publisher-oidc.ts`: a `--dry-run` npm
+   publish that must prove the OIDC token exchange for this exact tag,
+   commit, workflow, job, and run attempt — while writing nothing. A
+   same-run retry observing the existing release skips the publisher
+   entirely. No npm token exists anywhere in the pipeline; there is no
+   credential fallback when the OIDC exchange cannot be proven.
 8. **Admission.** Runs in both modes. Always verifies the exact annotated
    tag, reviewed-main ancestry, immutable Latest GitHub Release, exact
    tarball/`SHA256SUMS` bytes, and every native pair's digest, size, and
@@ -79,6 +84,32 @@ job is not a failure, so the run stays green. Set the variable to `true`
 only after the `@hraness/xcb` trusted publisher is configured on npm; before
 that the OIDC publish would hard-fail after the immutable GitHub Release is
 already public.
+
+#### One-time npm package bootstrap
+
+npm only lets a trusted publisher be configured for a package that already
+exists, so the first `@hraness/xcb` version cannot be published by OIDC.
+The owner performs this bootstrap once, from the exact verified release
+bytes:
+
+1. Download the release artifact `hraness-xcb-<version>.tgz` and
+   `SHA256SUMS` from the immutable GitHub Release for `v<version>` and
+   verify the checksum.
+2. From an owner npm session, run
+   `npm publish hraness-xcb-<version>.tgz --access public --tag latest`.
+   This manual publish is the only non-OIDC publication the package ever
+   receives; it carries no provenance record and exists solely to create
+   the package.
+3. In npm's package settings, add the GitHub Actions trusted publisher:
+   repository `hraness/xcb`, workflow `release.yml`, no environment. npm
+   then accepts only OIDC tokens minted for that workflow's tag pushes.
+4. Set the repository variable `XCB_PUBLISH_NPM=true`.
+
+Every later `v*` tag is then unattended: the preflight proves the OIDC
+exchange in a dry run, the writer publishes the exact reviewed tarball
+with provenance, and admission verifies the registry bytes, npm `latest`,
+the trusted-publisher identity, and the Sigstore certificate bound to this
+repository, workflow, tag, and run.
 
 ## Repository protections
 
