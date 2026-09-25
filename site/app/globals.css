@@ -407,6 +407,8 @@ a { text-underline-offset: 0.2em; }
 .xcb-readiness { font-size: .91rem; }
 .xcb-readiness a { display: inline-block; margin-top: 1rem; text-decoration: underline; font-size: .85rem; }
 .xcb-status-dot { display: block; width: .45rem; height: .45rem; border-radius: 50%; background: light-dark(#386345, #a7c397); margin: 0 0 1rem; }
+.xcb-provider-marks { display: inline-flex; gap: .3rem; vertical-align: -.18em; margin-inline-end: .45rem; }
+.xcb-provider-heading { display: flex; align-items: center; gap: .55rem; }
 .xcb-status-caution { background: light-dark(#8b631f, #d6b670); }
 .xcb-status-neutral { background: var(--muted); }
 .xcb-release-details { width: 100%; max-width: 44rem; text-align: left; border-top: 1px solid var(--line); margin: 1.25rem auto 0; padding-top: 1rem; color: var(--muted); font-size: .85rem; }

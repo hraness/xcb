@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ProviderMark } from "@hraness/design-kit/react/server";
 import { publishedRelease } from "../publication";
 import { readmeHtml } from "../readme.generated";
 import type { DocsSlug } from "./topics";
@@ -98,14 +99,14 @@ function Providers() {
         </tbody>
       </table></div>
       <p>Codex and Devin admission checks both executable bytes and version. A visible model or <code>metadata pin only</code> from <code>doctor</code> does not prove successful coding on your host. The separate TypeScript CLI keeps Codex and Devin task execution disabled pending qualification.</p>
-      <h2 id="claude">Claude</h2>
+      <h2 id="claude" className="xcb-provider-heading"><ProviderMark mark="claudecode" label="Claude Code" size={24} />Claude</h2>
       <Code>{`xcb accounts add claude --plan Max
 xcb doctor --provider claude
 xcb accounts login <account-id>
 xcb accounts refresh <account-id>
 xcb models`}</Code>
       <p>Complete the browser sign-in. Refresh obtains supported model and usage metadata. The plan name is only a label.</p>
-      <h2 id="codex">Codex</h2>
+      <h2 id="codex" className="xcb-provider-heading"><ProviderMark mark="codex" label="Codex" size={24} />Codex</h2>
       <p>xcb supervises the official CLI’s ChatGPT device sign-in in a private profile.</p>
       <Code>{`xcb doctor --provider codex
 xcb accounts add codex --plan ChatGPT
@@ -116,7 +117,7 @@ xcb models`}</Code>
       <Code>{`xcb accounts import-codex --source /absolute/path/to/auth.json
 xcb accounts refresh <account-id>`}</Code>
       <p>The source file stays in place. xcb does not copy provider configuration, plugins, sessions, or transcripts. This route does not accept API-key credentials.</p>
-      <h2 id="devin">Devin</h2>
+      <h2 id="devin" className="xcb-provider-heading"><ProviderMark mark="devin" label="Devin" size={24} />Devin</h2>
       <p>Sign in through Devin’s CLI first, then select its credential file explicitly.</p>
       <Code>{`devin auth login
 xcb doctor --provider devin
