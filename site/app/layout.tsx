@@ -18,9 +18,9 @@ import "./blog/blog.css";
  */
 const initialPalette = getDesignPaletteTheme("tokyo-night", "light");
 
-const title = "xcb · One router for your Claude, Codex, and Devin subscriptions";
+const title = "xcb · Keep coding when one subscription hits its limit.";
 const description =
-  "Route coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. Agents call xcb with JSON; apps embed the TypeScript SDK. Open source.";
+  "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://xcb.sh"),

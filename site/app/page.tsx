@@ -17,7 +17,8 @@ import { SiteHeader } from "./site-header";
 import { WorkspacePreview } from "./workspace-preview";
 
 const repository = "https://github.com/hraness/xcb";
-const summary = "xcb sends each coding task to one of your Claude, Codex, or Devin accounts that is signed in, idle, and not at a known quota limit, then keeps that account locked until the provider process has exited. Another agent can call it with one JSON request, an app can embed the TypeScript SDK, or you can drive it from the terminal.";
+const summary = "One terminal for your Claude, Codex, and Devin accounts. Each task runs on an account that is signed in, idle, and not at a known limit.";
+const metaDescription = "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
 const questions = [
   { question: "What is xcb?", answer: "xcb, short for Excalibur, is an open-source router for coding agents. It picks one of your connected Claude, Codex, or Devin accounts and a model, runs the task, and holds that account until the provider process has exited. A terminal workspace and an experimental managed harness are built on the same router. The native app is a source preview." },
   { question: "Can I use my existing AI subscriptions?", answer: "Yes. Connect your own Claude, Codex, and Devin accounts and installed CLIs, and xcb routes work among them. It does not include model access, pool unrelated subscriptions, or lift provider usage limits; provider pricing and terms still apply." },
@@ -28,7 +29,7 @@ const questions = [
   { question: "Is the managed harness ready?", answer: "No, it is experimental. It is being rebuilt on ALGAL to propose routing rules and test them on labeled examples, and the current build does not execute self-modifying orchestration policies. What it learns today are reflexes: two small programs that pick a model tier for a new task and categorize how a turn ended. They learn from your replies, adopt new parameters only after they beat the current ones on labels they were not fitted on, and can be rolled back. Provider checks, account locking, and run records stay fixed." },
   { question: "Which platforms does it run on?", answer: "The release pipeline builds binaries for macOS ARM64 and Linux x86_64; other hosts build from source. Provider support is narrower than the platform list: Claude and Codex coding workflows have passed on macOS ARM64 with the tested accounts, Codex and Devin support currently requires macOS, and the isolated command runner is set up on macOS ARM64." },
   { question: "Can I use it for daily work today?", answer: "The tested Claude and Codex setups passed real coding workflows on macOS ARM64. Native xcb is still a source preview: provider builds are restricted, command execution uses offline Linux, and the tested Devin account reached quota before a coding turn. Read the setup guide to decide whether those limits fit your projects." },
-  { question: "What does it cost?", answer: "xcb is MIT licensed and free to build from source. Your provider subscriptions, model usage, and any services you choose are separate. There is no xcb subscription required to route through your own accounts." },
+  { question: "What does it cost?", answer: "xcb is MIT licensed. Your provider subscriptions, model usage, and any services you choose are separate. There is no xcb subscription required to route through your own accounts." },
 ] as const;
 
 const threeCommandInstall = `git clone https://github.com/hraness/xcb.git && cd xcb
@@ -37,7 +38,7 @@ rustup toolchain install 1.97.1 --profile minimal
 
 export default function Home() {
   const structuredData = [
-    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: "xcb", description: summary, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.sh" },
+    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: "xcb", description: metaDescription, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.sh" },
     { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: questions.map(({ question, answer }) => ({ "@type": "Question", name: question, acceptedAnswer: { "@type": "Answer", text: answer } })) },
   ];
   return (
@@ -47,10 +48,11 @@ export default function Home() {
       <main id="main" tabIndex={-1}>
         <MarketingPage>
           <div className="hraness-material-wall xcb-opening">
-            <ProductHero backdrop={<HeroField />} className="xcb-marketing-hero" align="start" name=""
-              heading="Run coding tasks on the subscriptions you already pay for." headingId="hero-title" summary={summary}
-              actions={[{ href: "/docs/getting-started", label: "Get started" }, { href: "/docs/route", label: "Route tasks" }]}
-              boundary="Open source · MIT licensed · Source preview"
+            <ProductHero backdrop={<HeroField />} className="xcb-marketing-hero" align="start" name="xcb"
+              eyebrow="Agent subscription router"
+              heading="Keep coding when one subscription hits its limit." headingId="hero-title" summary={summary}
+              actions={[{ href: "/docs/getting-started", label: "Install xcb" }, { href: repository, label: "View the source ↗" }]}
+              boundary="Source preview · MIT licensed · macOS ARM64 and Linux x86_64"
               notice={<div className="xcb-hero-install"><p>{publishedRelease === null
                 ? "Build from source. You need Git, rustup, and your platform’s build tools."
                 : <>Build from source with Git, rustup, and your platform’s build tools, or <a href="/download">download a verified release</a>.</>}</p><pre className="install-command" tabIndex={0}><code>{threeCommandInstall}</code></pre><ReleaseSummary release={publishedRelease} /></div>}
@@ -193,9 +195,9 @@ xcb update enable --policy notify   # macOS only: daily release check`}</code></
             heading="From the same workshop."
             headingId="related-title"
             label="Related"
-            summary="Each Hraness product owns one private domain and gives your agent the same kind of access: local, bounded, and inspectable."
+            summary="Each Hraness product owns one private domain and gives your agent the same kind of access: local, limited to a stated boundary, and inspectable."
           />
-          <MarketingCallToAction heading="Stop leaving subscriptions idle." headingId="cta-title" summary="Send work to the accounts you already pay for, from your agents with the JSON command or from your apps with the SDK." actions={[{ href: "/docs/getting-started", label: "Get started" }, { href: repository, label: "Explore the source" }]} footnote="xcb / Excalibur · Built by Hraness · MIT licensed" />
+          <MarketingCallToAction heading="Stop leaving subscriptions idle." headingId="cta-title" summary="Send work to the accounts you already pay for, from your agents with the JSON command or from your apps with the SDK." actions={[{ href: "/docs/getting-started", label: "Get started" }, { href: repository, label: "Explore the source" }]} footnote="xcb · Built by Hraness · MIT licensed" />
         </MarketingPage>
       </main>
       <AskAiAboutThis className="ask-ai" url="https://xcb.sh" />

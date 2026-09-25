@@ -84,7 +84,7 @@ rustup toolchain install 1.97.1 --profile minimal
             headingId="cta-title"
             summary="Connect a provider account, choose a model, and open your first project."
             actions={[{ href: "/docs/getting-started", label: "Get started" }, { href: "/docs/providers", label: "Provider requirements" }]}
-            footnote="xcb / Excalibur · Built by Hraness · MIT licensed"
+            footnote="xcb · Built by Hraness · MIT licensed"
           />
         </MarketingPage>
       </main>
