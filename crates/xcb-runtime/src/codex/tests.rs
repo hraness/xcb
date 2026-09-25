@@ -1002,3 +1002,44 @@ fn unrecognized_id_less_notifications_are_drift_not_turn_failures() {
         );
     }
 }
+
+#[test]
+fn init_phase_account_notices_are_bounded_and_informational() {
+    // Live 0.156.1 pushes these while an init-phase RPC awaits its response;
+    // the credential-free boundary fixtures never sign in, so the wire trace
+    // cannot pin them. `account/read` and `account/rateLimits/read` results
+    // remain authoritative.
+    let mut c = codec();
+    c.startup_notice(&json!({"method":"account/updated","params":{"authMode":"chatgpt","planType":"prolite"},"emittedAtMs":1}))
+        .unwrap();
+    c.startup_notice(
+        &json!({"method":"account/updated","params":{"authMode":null,"planType":null}}),
+    )
+    .unwrap();
+    c.startup_notice(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":100.0}}}}))
+        .unwrap();
+    c.startup_notice(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":null}}))
+        .unwrap();
+    // Shape drift still fails closed.
+    for frame in [
+        json!({"method":"account/updated","params":{"authMode":"chatgpt","planType":"prolite","extra":1}}),
+        json!({"method":"account/updated","params":{"authMode":42,"planType":"prolite"}}),
+        json!({"method":"account/rateLimits/updated","params":{"rateLimits":"soon"}}),
+        json!({"method":"account/rateLimits/updated","params":{"other":{}}}),
+        json!({"method":"model/reroute","params":{}}),
+        json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":{"type":"idle"}}}),
+    ] {
+        assert!(codec().startup_notice(&frame).is_err(), "{frame}");
+    }
+}
+
+#[test]
+fn account_updated_is_tolerated_mid_session_without_turn_effects() {
+    let (events, outgoing) = started()
+        .accept(json!({"method":"account/updated","params":{"authMode":"chatgpt","planType":"pro"},"emittedAtMs":2}))
+        .unwrap();
+    assert!(events.is_empty() && outgoing.is_empty());
+    assert!(started()
+        .accept(json!({"method":"account/updated","params":{"authMode":"chatgpt","planType":"pro","scopes":[]}}))
+        .is_err());
+}

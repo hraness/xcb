@@ -206,6 +206,22 @@ fn response_id(value: &Value) -> Result<String> {
     crate::wire_helpers::rpc_key(value, "Codex text bound", "Codex identity", "Codex RPC id")
 }
 
+/// The `account/updated` push carries display identity only. `account/read`'s
+/// result stays authoritative for authentication state.
+fn account_identity_notice(p: &Value) -> Result<()> {
+    closed(p, &["authMode", "planType"])?;
+    require(
+        ["authMode", "planType"].iter().all(|key| {
+            let field = &p[key];
+            field.is_null()
+                || field
+                    .as_str()
+                    .is_some_and(|text| text.len() <= 64 && !text.chars().any(char::is_control))
+        }),
+        "Codex account field bound",
+    )
+}
+
 pub fn parse_models(value: &Value, observed_at_ms: u64) -> Result<Vec<ModelChoice>> {
     closed(value, &["data", "nextCursor"])?;
     let rows = value["data"]
@@ -529,6 +545,20 @@ impl CodexProtocol {
                     == value.pointer("/params/thread/id").and_then(Value::as_str),
                 "Codex thread start identity",
             ),
+            // Signed-in accounts push these during `account/read` and other
+            // init-phase RPCs. They are informational here: `account/read`'s
+            // result and the explicit `account/rateLimits/read` stay
+            // authoritative. The credential-free boundary fixtures never sign
+            // in, so these shapes are pinned by unit tests instead.
+            Some("account/updated") => account_identity_notice(&value["params"]),
+            Some("account/rateLimits/updated") => {
+                let p = &value["params"];
+                closed(p, &["rateLimits"])?;
+                require(
+                    p["rateLimits"].is_null() || p["rateLimits"].is_object(),
+                    "Codex rate limit shape",
+                )
+            }
             _ => Err(Error::Protocol(
                 "Codex unexpected initialization notification",
             )),
@@ -1029,6 +1059,7 @@ impl CodexProtocol {
                 self.usage = Some(next);
                 events.push(Event::OutputTokens(next.output));
             }
+            "account/updated" => account_identity_notice(p)?,
             "account/rateLimits/updated" => {
                 let limits = &p["rateLimits"];
                 if !limits.is_null() {
