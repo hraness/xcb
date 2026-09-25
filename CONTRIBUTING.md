@@ -40,6 +40,8 @@ checks do not qualify live providers; keep unqualified adapters disabled.
   activation. Keep published release claims distinct from source version numbers.
 - Keep credentials, provider state, and qualification receipts out of workspaces
   and commits. Do not include transcript text or secrets in bug reports.
-- Open a pull request; do not force-push.
+- Open a pull request and enable auto-merge (`gh pr merge --auto --squash
+  <number>`); the `Required` check decides. Do not request a reviewer, and do
+  not force-push.
 
 Use GitHub issues for bugs and [SECURITY.md](SECURITY.md) for vulnerabilities.

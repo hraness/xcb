@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: dependency-audit
+  group: dependency-audit-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -28,11 +28,13 @@ jobs:
           fetch-depth: 1
           fetch-tags: false
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
         with:
           toolchain: 1.97.1
       - name: Install the pinned cargo-audit
-        run: cargo install cargo-audit --locked --version 0.22.2
+        uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-audit@0.22.2
       - name: Audit the native dependency lock
         run: cargo audit
 
