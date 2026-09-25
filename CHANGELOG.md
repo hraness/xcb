@@ -4,7 +4,7 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
-## 0.8.4
+## 0.8.5
 
 - Codex updates itself, and the only build xcb accepted, 0.155.0-alpha.2.6, no
   longer exists on the machines that ran it or in any public download, so no
@@ -19,6 +19,12 @@ assets, not this file, are the evidence that a version shipped; see
   delegation stays turned off under xcb.
 - Signed-in coding sessions were confirmed on the previous build and have not
   been rerun on 0.156.1.
+
+## 0.8.4
+
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.4)
+for macOS ARM64 and Linux x86_64; [public verification run](https://github.com/hraness/xcb/actions/runs/36082334475).
+
 - A question, approval, usage limit, or failure that has not changed for a day
   no longer outranks running work. The session grid lists it after active
   sessions, its card shows how long it has waited, and the heading counts it
