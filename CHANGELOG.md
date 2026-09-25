@@ -4,6 +4,17 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.8.6
+
+- A signed-in Codex account could not finish connecting: 0.156.1 reports the
+  sign-in during the handshake with an `account/updated` notice that xcb read
+  as protocol drift and refused. xcb now accepts that notice and the matching
+  rate-limit push during connection setup, and tolerates a mid-session
+  `account/updated` without failing the turn.
+- The Codex boundary receipt's `sandboxFunctionSha256` check now hashes the
+  same function slice the probes record, so evidence collection can verify a
+  committed Codex receipt instead of always reporting the policy changed.
+
 ## 0.8.5
 
 - Codex updates itself, and the only build xcb accepted, 0.155.0-alpha.2.6, no

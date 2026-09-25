@@ -357,8 +357,11 @@ def validate_boundary(data, context, source):
                 and value["binarySha256"] == context["provider_sha256"], "Codex boundary identity")
         require(value["platform"] == {("macos", "aarch64"): "macos-arm64"}.get((context["os"], context["arch"])), "Codex platform mismatch")
         sandbox = read_file(source / "crates/xcb-runtime/src/sandbox.rs", 256 * 1024).decode()
-        start = sandbox.index("pub fn codex_seatbelt(")
-        function = sandbox[start:sandbox.index("\n}\n", start) + 3]
+        # The receipt's sandboxFunctionSha256 is the probes' canonical slice:
+        # the function body after `pub fn codex_seatbelt(` through the start of
+        # the next doc comment. codex-native.py and codex-kernel.py record the
+        # same extraction, and committed receipts carry it.
+        function = sandbox.split("pub fn codex_seatbelt(", 1)[1].split("\n/// Devin", 1)[0]
         require(value["sandboxFunctionSha256"] == sha(function.encode()), "Codex policy changed")
         require(value["providerProbeSha256"] == file_hash(source / "qualification/codex-native.py")
                 and value["kernelProbeSha256"] == file_hash(source / "qualification/codex-kernel.py"), "Codex probe changed")
