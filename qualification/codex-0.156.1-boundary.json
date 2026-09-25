@@ -382,5 +382,6 @@
   "caEnvironment": "SSL_CERT_FILE",
   "protectedMetadataUnchanged": true,
   "trustedSetup": "Bounded stabilization before launch baseline; full ctime, flags, size, identity, ownership, mode and link checks retained during provider execution.",
-  "networkDependency": "Literal /var symlink metadata is allowed for the macOS resolver; boundary checks rerun after that change. Separate credential-free transport evidence does not establish a live account."
+  "networkDependency": "Literal /var symlink metadata is allowed for the macOS resolver; boundary checks rerun after that change. Separate credential-free transport evidence does not establish a live account.",
+  "configurationFeatures": "account feature pins from config.rs forced false and verified through config/read"
 }

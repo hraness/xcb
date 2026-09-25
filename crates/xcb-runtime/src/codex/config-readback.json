@@ -1,97 +1,546 @@
 {
   "config": {
-    "model_provider": "openai",
-    "forced_login_method": "chatgpt",
-    "cli_auth_credentials_store": "file",
-    "mcp_oauth_credentials_store": "file",
-    "approval_policy": "never",
-    "sandbox_mode": "read-only",
-    "web_search": "disabled",
-    "project_doc_max_bytes": 0,
-    "check_for_update_on_startup": false,
+    "agents": null,
     "allow_login_shell": false,
-    "notify": [],
-    "mcp_servers": {},
-    "plugins": {},
-    "model_providers": {},
-    "model_catalog_json": "/synthetic/catalog.json",
-    "instructions": null,
-    "developer_instructions": null,
-    "compact_prompt": null,
-    "model_instructions_file": null,
-    "experimental_compact_prompt_file": null,
-    "openai_base_url": null,
-    "chatgpt_base_url": "https://chatgpt.com/backend-api/",
-    "shell_environment_policy": {
-      "inherit": "none",
-      "ignore_default_excludes": null,
-      "exclude": null,
-      "set": null,
-      "include_only": null,
-      "filters": null,
-      "experimental_use_profile": null
-    },
+    "allow_symlinked_codex_home": null,
     "analytics": {
       "enabled": false
     },
-    "feedback": {
-      "enabled": false
-    },
-    "history": {
-      "persistence": "none",
-      "max_bytes": null
-    },
-    "skills": {
-      "bundled": {
-        "enabled": false
-      },
-      "include_instructions": false
-    },
-    "orchestrator": {
-      "skills": {
-        "enabled": false
-      },
-      "mcp": null
-    },
+    "approval_policy": "never",
+    "approvals_reviewer": null,
     "apps": {
       "_default": {
-        "enabled": false,
         "approvals_reviewer": null,
+        "default_tools_approval_mode": null,
         "destructive_enabled": false,
-        "open_world_enabled": false,
-        "default_tools_approval_mode": null
+        "enabled": false,
+        "open_world_enabled": false
       }
     },
+    "apps_mcp_product_sku": null,
+    "audio": null,
+    "auto_review": null,
+    "background_terminal_max_timeout": 300000,
+    "browser_use": null,
+    "chatgpt_base_url": "https://chatgpt.com/backend-api/",
+    "check_for_update_on_startup": false,
+    "cli_auth_credentials_store": "file",
+    "compact_prompt": null,
+    "computer_use": null,
+    "default_permissions": null,
+    "desktop": null,
+    "developer_instructions": null,
+    "disable_paste_burst": null,
+    "experimental_compact_prompt_file": null,
+    "experimental_realtime_start_instructions": null,
+    "experimental_realtime_webrtc_call_base_url": null,
+    "experimental_realtime_ws_backend_prompt": null,
+    "experimental_realtime_ws_base_url": null,
+    "experimental_realtime_ws_model": null,
+    "experimental_realtime_ws_startup_context": null,
+    "experimental_thread_store": null,
+    "experimental_thread_store_endpoint": null,
+    "experimental_use_unified_exec_tool": null,
     "features": {
-      "code_mode": false,
-      "multi_agent_v2": false,
-      "network_proxy": null,
+      "api_key_model_discovery": false,
       "apps": false,
       "auth_elicitation": false,
+      "background_paginated_rollout_migration": false,
       "browser_use": false,
+      "code_mode": false,
+      "codex_apps_mcp_2026_07_28": false,
       "computer_use": false,
+      "guardian_reuse_parent_compaction": false,
       "hooks": false,
       "image_generation": false,
       "in_app_browser": false,
+      "mcp_2026_07_28": false,
       "memories": false,
+      "mentions_v2": true,
       "multi_agent": false,
+      "multi_agent_v2": false,
+      "network_proxy": null,
       "plugin_sharing": false,
       "plugins": false,
+      "realtime_conversation": false,
       "remote_control": false,
       "remote_plugin": false,
       "shell_snapshot": false,
       "shell_tool": false,
       "skill_mcp_dependency_install": false,
       "skill_search": false,
-      "unified_exec": false,
-      "workspace_dependencies": false,
-      "api_key_model_discovery": false,
-      "background_paginated_rollout_migration": false,
-      "codex_apps_mcp_2026_07_28": false,
-      "mcp_2026_07_28": false,
-      "mentions_v2": true,
+      "system_proxy_fallback": false,
       "tool_suggest": true,
-      "windows_sandbox_service": false
+      "unified_exec": false,
+      "windows_sandbox_service": false,
+      "workspace_dependencies": false,
+      "worktrees": false
+    },
+    "feedback": {
+      "enabled": false
+    },
+    "file_opener": "vscode",
+    "forced_chatgpt_workspace_id": null,
+    "forced_login_method": "chatgpt",
+    "ghost_snapshot": null,
+    "goals": null,
+    "hide_agent_reasoning": false,
+    "history": {
+      "max_bytes": null,
+      "persistence": "none"
+    },
+    "hooks": null,
+    "include_apps_instructions": true,
+    "include_collaboration_mode_instructions": true,
+    "include_environment_context": true,
+    "include_permissions_instructions": true,
+    "instructions": null,
+    "js_repl_node_module_dirs": null,
+    "js_repl_node_path": null,
+    "log_dir": null,
+    "marketplaces": {},
+    "mcp_enterprise_managed_auth": null,
+    "mcp_oauth_callback_port": null,
+    "mcp_oauth_callback_url": null,
+    "mcp_oauth_credentials_store": "file",
+    "mcp_optional_startup_grace_ms": null,
+    "mcp_servers": {},
+    "memories": null,
+    "model": null,
+    "model_auto_compact_token_limit": null,
+    "model_auto_compact_token_limit_scope": null,
+    "model_catalog_json": "/synthetic/catalog.json",
+    "model_context_window": null,
+    "model_instructions_file": null,
+    "model_post_turn_compact_threshold_percent": null,
+    "model_provider": "openai",
+    "model_providers": {},
+    "model_reasoning_effort": null,
+    "model_reasoning_summary": null,
+    "model_verbosity": null,
+    "notice": null,
+    "notify": [],
+    "openai_base_url": null,
+    "orchestrator": {
+      "mcp": null,
+      "skills": {
+        "enabled": false
+      }
+    },
+    "oss_provider": null,
+    "otel": null,
+    "permissions": null,
+    "personality": null,
+    "plan_mode_reasoning_effort": null,
+    "plugins": {},
+    "profile": null,
+    "profiles": {},
+    "project_doc_fallback_filenames": [],
+    "project_doc_max_bytes": 0,
+    "project_root_markers": [
+      ".git"
+    ],
+    "projects": null,
+    "realtime": null,
+    "responses_api_metadata": null,
+    "review_model": null,
+    "sandbox_mode": "read-only",
+    "sandbox_workspace_write": null,
+    "service_tier": null,
+    "shell_environment_policy": {
+      "exclude": null,
+      "experimental_use_profile": null,
+      "filters": null,
+      "ignore_default_excludes": null,
+      "include_only": null,
+      "inherit": "none",
+      "set": null
+    },
+    "show_raw_agent_reasoning": null,
+    "skills": {
+      "bundled": {
+        "enabled": false
+      },
+      "include_instructions": false
+    },
+    "sqlite_home": null,
+    "suppress_unstable_features_warning": null,
+    "thread_unload_delay_secs": null,
+    "tool_output_token_limit": null,
+    "tool_suggest": null,
+    "tools": null,
+    "tui": null,
+    "web_search": "disabled",
+    "windows": null
+  },
+  "origins": {
+    "allow_login_shell": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "analytics.enabled": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "approval_policy": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "apps._default.destructive_enabled": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "apps._default.enabled": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "apps._default.open_world_enabled": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "check_for_update_on_startup": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "cli_auth_credentials_store": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.apps": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.auth_elicitation": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.browser_use": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.code_mode.enabled": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.computer_use": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.guardian_reuse_parent_compaction": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.hooks": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.image_generation": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.in_app_browser": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.memories": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.multi_agent": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.multi_agent_v2.enabled": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.plugin_sharing": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.plugins": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.realtime_conversation": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.remote_control": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.remote_plugin": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.shell_snapshot": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.shell_tool": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.skill_mcp_dependency_install": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.skill_search": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.system_proxy_fallback": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.unified_exec": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.workspace_dependencies": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "features.worktrees": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "feedback.enabled": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "forced_login_method": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "history.persistence": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "mcp_oauth_credentials_store": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "model_catalog_json": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "model_provider": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "orchestrator.skills.enabled": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "project_doc_max_bytes": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "sandbox_mode": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "shell_environment_policy.inherit": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "skills.bundled.enabled": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "skills.include_instructions": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
+    },
+    "web_search": {
+      "name": {
+        "file": "/private/tmp/claude-501/-Users-benguo-Documents/105d77f6-6857-451f-99ae-beb580ccb890/scratchpad/codex-readback/readback-9057326914894d16aab95e526d50df8d/scratch/profile/config.toml",
+        "profile": null,
+        "type": "user"
+      },
+      "version": "sha256:0541dc785273a50257d6abb61804fd47194423bd8b0d41329f64cae0c8027cbc"
     }
   }
 }

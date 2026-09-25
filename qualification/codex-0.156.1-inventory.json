@@ -60,7 +60,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "2cbf9e65be7f909828e42b904939e4c5d9d59bf0d763ba1401c812cef4f08839"
+      "evidenceSha256": "efec21b64106ebf8bb244dc81682aae46ea5277d1564895064e5156280151126"
     },
     {
       "model": "gpt-6-astra",
@@ -74,7 +74,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "8b19c00feaf773acd9c0e2817dbe72d36b753d5f27005ae07db040b0073b3ef9"
+      "evidenceSha256": "8098d4d79eee88a05d198b8f1915e87e9d159831fcfba6aee1a465668a4c2c15"
     },
     {
       "model": "gpt-6-astra",
@@ -88,7 +88,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "07dfd0dc3d49b519fc59faf88686c018ec63c4dca7980a9e7c3160882a056206"
+      "evidenceSha256": "6eb94984ee3c3528df17080e8bd57281ca212c0fc06afeb5b0852fc88a4595c2"
     },
     {
       "model": "gpt-6-astra",
@@ -102,7 +102,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "3ecc2fec7974f27cc1d8c9398dc733c685e4dea1f2b77ccbdeee113e39e6aa94"
+      "evidenceSha256": "3a7e99644a5dbc4cad7656d5f99e4c238e62dd8de5cde9e6a3106219e6539f0a"
     },
     {
       "model": "gpt-6-astra",
@@ -116,7 +116,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "80b44685a366a372617137edb5f24aa0fe3edbe0ebfcf5d7fac9d2c34fb27537"
+      "evidenceSha256": "8c32901d4617e404fd553cf587068acb553fec64be8a523ead97ecdcec1fc357"
     },
     {
       "model": "gpt-6-astra",
@@ -130,7 +130,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "ab9acd233d903386ca17c118704b7b0869c20cceb4c1f5723ab431a59f2e32d9"
+      "evidenceSha256": "e9c2d2d48d050be36a9f164f48149efe0d7ef0e6309349a75b3fda73c46525b8"
     },
     {
       "model": "gpt-5.6-sol",
@@ -144,7 +144,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "359fd5d8ee2b084dab8f15456a1677d2c188ea4a62bf891ab709c6d370c571d8"
+      "evidenceSha256": "a01753170b453361fb895b74683996722b67c5ba680782287dea2a3f1643f9cf"
     },
     {
       "model": "gpt-5.6-sol",
@@ -158,7 +158,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "00236cb77a3c624d933939e51fa15421b8e05055626da2ed519735f886da93d3"
+      "evidenceSha256": "ce0bb231bfdb80b34b00c07fe5135f5ae866e749fe269e6a87cae904e8270b7c"
     },
     {
       "model": "gpt-5.6-sol",
@@ -172,7 +172,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "1cda9e9eacd4ed3fe47ff66ab8dd8bdb60786f51087f0d1dade2e96f0a5c58f7"
+      "evidenceSha256": "f754b8a6458a8478c831efd14643bc33e86ba735152b76f0e52ea58e29d0121e"
     },
     {
       "model": "gpt-5.6-sol",
@@ -186,7 +186,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "62f3198e9976fc252f79d0e8e86d847b28ee45d37c7bc54e3b195b78d16c6fd8"
+      "evidenceSha256": "6d599301bc30b17203beab6565f4f3781f6c88630e7e617cb19cf15c44cdedd5"
     },
     {
       "model": "gpt-5.6-sol",
@@ -200,7 +200,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "b3dd2d1a61539467d4d8fa161dc632f6d806aebff926fec1f06247e28022ca51"
+      "evidenceSha256": "a8a7241c7b94539a80ece132de5e6302101006d3e120e62572eb85e4d799b78a"
     },
     {
       "model": "gpt-5.6-sol",
@@ -214,7 +214,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "91feda5a0835f58f591d11cb5afe035cef50ce070e83649f2c5cf822389c9ed6"
+      "evidenceSha256": "5b75333eec1a3ef89882f093c5cf77121475daff5ea258525fab3e849ab0e363"
     }
   ],
   "limitations": [

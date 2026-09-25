@@ -47,7 +47,12 @@ app-server executable; the receipt records the observed checks and their results
 outside the provider's disposable home. Direct paths and symlinks are exercised;
 protected configuration/catalog writes, replacements and deletion are denied.
 The run-owned public CA bundle lives outside writable scratch and is selected
-only through the fixed `SSL_CERT_FILE` environment variable. The fixture copies
+only through the fixed `SSL_CERT_FILE` environment variable. The fixture pins
+the rest of the provider's environment as well: `HOME` and `CODEX_HOME` point
+at the disposable profile, `PATH` is the system default, `TMPDIR` is inside the
+scratch home, `LANG` is fixed, and `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and
+`XDG_CACHE_HOME` are redirected into the disposable home so no ambient user
+state is read. The fixture copies
 the OS-owned public `/private/etc/ssl/cert.pem` after ownership, mode, link-count,
 size and stable-read checks; it reads no user trust store. Direct and symlink CA
 reads must succeed with exact bytes, while writes, replacement and deletion must
