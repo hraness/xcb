@@ -43,6 +43,42 @@ pub fn version_admitted(version: &str) -> bool {
     got[1] > min[1] || (got[1] == min[1] && got[2] >= min[2])
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaObservation {
+    pub window: String,
+    pub utilization: f64,
+    pub resets_at_ms: Option<u64>,
+}
+
+const QUOTA_WINDOWS: [&str; 6] = [
+    "five_hour",
+    "seven_day",
+    "seven_day_opus",
+    "seven_day_sonnet",
+    "seven_day_overage_included",
+    "overage",
+];
+
+fn quota_window(value: Option<&str>) -> Option<String> {
+    value
+        .filter(|value| QUOTA_WINDOWS.contains(value))
+        .map(str::to_owned)
+}
+
+fn quota_utilization(value: Option<&Value>) -> Option<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, 1.0))
+}
+
+fn quota_reset(value: Option<&Value>) -> Option<u64> {
+    value
+        .and_then(Value::as_u64)
+        .filter(|value| *value < 100_000_000_000)
+        .and_then(|value| value.checked_mul(1000))
+}
+
 #[derive(Debug)]
 pub enum Event {
     Initialize(Value),
@@ -56,9 +92,9 @@ pub enum Event {
         text: String,
     },
     Quota {
-        window: Option<String>,
-        utilization: Option<f64>,
-        resets_at_ms: Option<u64>,
+        /// One meter per reported window. Claude Code 2.1.282 reports every
+        /// window in `unifiedWindows`; older builds report one at the top.
+        observations: Vec<QuotaObservation>,
         failure: Option<Failure>,
         /// Telemetry drift the host reports without failing the turn.
         notice: Option<&'static str>,
@@ -243,31 +279,52 @@ pub fn parse_value(value: Value) -> Result<Event> {
                     Some("Claude reported an unrecognized rate limit status; treated as allowed"),
                 ),
             };
-            let utilization = info
-                .get("utilization")
-                .and_then(Value::as_f64)
-                .filter(|value| value.is_finite())
-                .map(|value| value.clamp(0.0, 1.0));
-            let resets_at_ms = info
-                .get("resetsAt")
-                .and_then(Value::as_u64)
-                .filter(|value| *value < 100_000_000_000)
-                .and_then(|value| value.checked_mul(1000));
-            let window = info
-                .get("rateLimitType")
-                .and_then(Value::as_str)
-                .filter(|value| {
-                    [
-                        "five_hour",
-                        "seven_day",
-                        "seven_day_opus",
-                        "seven_day_sonnet",
-                        "seven_day_overage_included",
-                        "overage",
-                    ]
-                    .contains(value)
-                })
-                .map(str::to_owned);
+            let utilization = quota_utilization(info.get("utilization"));
+            let resets_at_ms = quota_reset(info.get("resetsAt"));
+            let window = quota_window(info.get("rateLimitType").and_then(Value::as_str));
+            // Claude Code 2.1.282 reports every window's meter under
+            // `unifiedWindows` and no longer sets the top-level utilization;
+            // older builds report the current window at the top. Read both,
+            // bounded, and keep one observation per recognized window.
+            let mut observations: Vec<QuotaObservation> = Vec::new();
+            if let Some(unified) = info.get("unifiedWindows").and_then(Value::as_object) {
+                if unified.len() > 16 {
+                    return Err(Error::Protocol("rate limit window limit"));
+                }
+                for (name, meter) in unified {
+                    if let (Some(window), Some(utilization)) = (
+                        quota_window(Some(name.as_str())),
+                        quota_utilization(meter.get("utilization")),
+                    ) {
+                        observations.push(QuotaObservation {
+                            window,
+                            utilization,
+                            resets_at_ms: quota_reset(meter.get("resetsAt")),
+                        });
+                    }
+                }
+            }
+            if let (Some(window), Some(utilization)) = (window.clone(), utilization)
+                && !observations.iter().any(|seen| seen.window == window)
+            {
+                observations.push(QuotaObservation {
+                    window,
+                    utilization,
+                    resets_at_ms,
+                });
+            }
+            // A rejection is exhaustion of its window even when no meter is
+            // reported for it; the reset, when known, bounds the block.
+            if rejected
+                && let Some(window) = window.clone()
+                && !observations.iter().any(|seen| seen.window == window)
+            {
+                observations.push(QuotaObservation {
+                    window,
+                    utilization: 1.0,
+                    resets_at_ms,
+                });
+            }
             let failure = rejected.then_some(
                 if matches!(
                     window.as_deref(),
@@ -279,9 +336,7 @@ pub fn parse_value(value: Value) -> Result<Event> {
                 },
             );
             Ok(Event::Quota {
-                window,
-                utilization,
-                resets_at_ms,
+                observations,
                 failure,
                 notice,
             })
@@ -352,24 +407,22 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn quota(
-        value: Value,
-    ) -> (
-        Option<String>,
-        Option<f64>,
-        Option<Failure>,
-        Option<&'static str>,
-    ) {
+    fn quota(value: Value) -> (Vec<QuotaObservation>, Option<Failure>, Option<&'static str>) {
         match parse_event(&serde_json::to_vec(&value).unwrap()).unwrap() {
             Event::Quota {
-                window,
-                utilization,
+                observations,
                 failure,
                 notice,
-                ..
-            } => (window, utilization, failure, notice),
+            } => (observations, failure, notice),
             _ => panic!("rate_limit_event must stay a quota observation"),
         }
+    }
+
+    fn meters(observations: &[QuotaObservation]) -> Vec<(&str, f64, Option<u64>)> {
+        observations
+            .iter()
+            .map(|o| (o.window.as_str(), o.utilization, o.resets_at_ms))
+            .collect()
     }
 
     #[test]
@@ -377,37 +430,111 @@ mod tests {
         let frame = |info: Value| json!({"type":"rate_limit_event","rate_limit_info":info});
         // Unknown windows, statuses and out-of-range meters are drift the host
         // reports without failing a turn that may already have run tools.
-        let (window, _, failure, notice) = quota(frame(json!({
+        let (observations, failure, notice) = quota(frame(json!({
             "status":"throttled","rateLimitType":"five_hour","utilization":0.5
         })));
-        assert_eq!((window, failure), (Some("five_hour".into()), None));
+        assert_eq!(meters(&observations), [("five_hour", 0.5, None)]);
+        assert_eq!(failure, None);
         assert!(notice.is_some());
-        let (window, utilization, failure, _) = quota(frame(json!({
+        let (observations, failure, _) = quota(frame(json!({
             "status":"allowed","rateLimitType":"monthly_enterprise","utilization":1.7
         })));
-        assert_eq!((window, utilization, failure), (None, Some(1.0), None));
-        let (_, utilization, _, _) = quota(frame(json!({
+        assert!(observations.is_empty());
+        assert_eq!(failure, None);
+        let (observations, _, _) = quota(frame(json!({
             "status":"allowed_warning","rateLimitType":"seven_day","utilization":-0.25
         })));
-        assert_eq!(utilization, Some(0.0));
-        let (_, utilization, _, _) = quota(frame(json!({
+        assert_eq!(meters(&observations), [("seven_day", 0.0, None)]);
+        let (observations, _, _) = quota(frame(json!({
             "status":"allowed","rateLimitType":"seven_day","utilization":"high"
         })));
-        assert_eq!(utilization, None);
-        // An explicit rejection classifies even when its window is unknown.
-        for (window, expected) in [
-            (json!("quarterly"), Failure::AccountQuota),
-            (Value::Null, Failure::AccountQuota),
-            (json!("seven_day_opus"), Failure::ModelQuota),
-            (json!("five_hour"), Failure::AccountQuota),
+        assert!(observations.is_empty());
+        // An explicit rejection classifies even when its window is unknown,
+        // and a recognized rejected window records its exhaustion.
+        for (window, expected, recorded) in [
+            (json!("quarterly"), Failure::AccountQuota, None),
+            (Value::Null, Failure::AccountQuota, None),
+            (
+                json!("seven_day_opus"),
+                Failure::ModelQuota,
+                Some("seven_day_opus"),
+            ),
+            (json!("five_hour"), Failure::AccountQuota, Some("five_hour")),
         ] {
-            let (_, _, failure, _) = quota(frame(json!({
+            let (observations, failure, _) = quota(frame(json!({
                 "status":"rejected","rateLimitType":window,"utilization":1.0
             })));
             assert_eq!(failure, Some(expected));
+            assert_eq!(
+                meters(&observations),
+                recorded.map(|w| vec![(w, 1.0, None)]).unwrap_or_default()
+            );
         }
         // A missing rate_limit_info object is still malformed, not drift.
         assert!(parse_event(br#"{"type":"rate_limit_event"}"#).is_err());
+    }
+
+    /// Claude Code 2.1.282 reports every window under `unifiedWindows` and no
+    /// top-level meter. Every recognized window is observed, unknown ones are
+    /// ignored, and a rejection without a meter for its window is recorded as
+    /// exhaustion with the frame's reset.
+    #[test]
+    fn unified_windows_report_every_meter_and_a_rejection_records_exhaustion() {
+        let frame = |info: Value| json!({"type":"rate_limit_event","rate_limit_info":info});
+        let (observations, failure, notice) = quota(frame(json!({
+            "status":"allowed","resetsAt":1790308800,"rateLimitType":"five_hour",
+            "overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false,
+            "unifiedWindows":{
+                "five_hour":{"utilization":0.13,"resetsAt":1790308800},
+                "seven_day":{"utilization":0.03,"resetsAt":1790722800},
+                "quarterly":{"utilization":0.9,"resetsAt":1790722800},
+                "seven_day_opus":{"utilization":"n/a"}
+            }
+        })));
+        assert_eq!(
+            meters(&observations),
+            [
+                ("five_hour", 0.13, Some(1_790_308_800_000)),
+                ("seven_day", 0.03, Some(1_790_722_800_000)),
+            ]
+        );
+        assert_eq!((failure, notice), (None, None));
+        // The top-level meter is used only when the window is not unified.
+        let (observations, _, _) = quota(frame(json!({
+            "status":"allowed","rateLimitType":"five_hour","utilization":0.4,"resetsAt":1790308800,
+            "unifiedWindows":{"seven_day":{"utilization":0.5,"resetsAt":1790722800}}
+        })));
+        assert_eq!(
+            meters(&observations),
+            [
+                ("seven_day", 0.5, Some(1_790_722_800_000)),
+                ("five_hour", 0.4, Some(1_790_308_800_000)),
+            ]
+        );
+        // Rejection: the window's meter is missing, so it is recorded as exhausted.
+        let (observations, failure, _) = quota(frame(json!({
+            "status":"rejected","rateLimitType":"five_hour","resetsAt":1790308800,
+            "unifiedWindows":{"seven_day":{"utilization":0.03,"resetsAt":1790722800}}
+        })));
+        assert_eq!(failure, Some(Failure::AccountQuota));
+        assert_eq!(
+            meters(&observations),
+            [
+                ("seven_day", 0.03, Some(1_790_722_800_000)),
+                ("five_hour", 1.0, Some(1_790_308_800_000)),
+            ]
+        );
+        // Too many windows is malformed, not drift.
+        let many: serde_json::Map<String, Value> = (0..17)
+            .map(|i| (format!("w{i}"), json!({"utilization":0.1})))
+            .collect();
+        assert!(
+            parse_event(
+                &serde_json::to_vec(&frame(json!({"status":"allowed","unifiedWindows":many})))
+                    .unwrap()
+            )
+            .is_err()
+        );
     }
 
     #[test]

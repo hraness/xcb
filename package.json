@@ -1,6 +1,6 @@
 {
   "name": "@hraness/xcb",
-  "version": "0.8.1",
+  "version": "0.8.3",
   "description": "TypeScript SDK and compatibility CLI for Excalibur (xcb), which routes coding tasks across your Claude, Codex, and Devin subscriptions.",
   "type": "module",
   "license": "MIT",
@@ -56,7 +56,7 @@
   "devDependencies": {
     "@types/bun": "1.4.2",
     "@types/node": "26.6.2",
-    "sigstore": "4.1.1",
-    "typescript": "6.0.3"
+    "sigstore": "5.0.0",
+    "typescript": "7.0.2"
   }
 }

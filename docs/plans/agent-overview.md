@@ -18,7 +18,8 @@ stay above the overview.
 - Show sessions across workspaces by default. `/overview all|active|attention`
   filters activity; `/overview filter <text>` and `/overview clear` filter names,
   models, status, and IDs. Hide/show controls visibility.
-- Initially order attention, active, then earlier sessions. Preserve relative
+- The open conversation's card comes first. Then order attention, active, and
+  earlier sessions. Preserve relative
   order within groups on updates; freeze existing card order while focused or
   scrolled away from the top. Returning to the top and chat applies priority
   changes. Show attention counts while positions are held.

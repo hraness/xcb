@@ -102,6 +102,19 @@ fn priority(row: &AgentRow) -> u8 {
     }
 }
 
+/// The conversation or direct session the terminal has open. Its card is
+/// the operator's anchor: it stays first so the work just started is never
+/// pushed off screen by other sessions' attention.
+fn is_open(app: &App, row: &AgentRow) -> bool {
+    match &row.context {
+        TranscriptContext::Conversation(id) => app.view.conversation.as_ref() == Some(id),
+        TranscriptContext::Session(id) => {
+            app.view.conversation.is_none()
+                && app.view.session.as_ref().map(|session| &session.id) == Some(id)
+        }
+    }
+}
+
 fn all_rows(app: &App) -> Vec<&AgentRow> {
     let grid = &app.agent_grid;
     let held = !grid.order.is_empty() && (grid.focused || grid.offset > 0 || grid.filter_editing);
@@ -113,10 +126,12 @@ fn all_rows(app: &App) -> Vec<&AgentRow> {
             .order
             .iter()
             .position(|context| context == &row.context);
-        (
-            if held { 0 } else { priority(row) },
-            position.unwrap_or(usize::MAX),
-        )
+        let group = if held || is_open(app, row) {
+            0
+        } else {
+            priority(row) + 1
+        };
+        (group, position.unwrap_or(usize::MAX))
     });
     items
 }
@@ -997,11 +1012,11 @@ mod tests {
         assert_eq!(
             initial,
             [
+                "conversation_0",
                 "conversation_2",
                 "conversation_3",
                 "conversation_4",
                 "conversation_1",
-                "conversation_0",
                 "conversation_5"
             ]
         );
@@ -1021,15 +1036,125 @@ mod tests {
         assert_eq!(
             order(&app),
             [
+                "conversation_0",
                 "conversation_2",
                 "conversation_3",
                 "conversation_4",
                 "conversation_5",
+                "conversation_1"
+            ]
+        );
+        assert_eq!(app.agent_grid.offset, 0);
+    }
+
+    #[test]
+    fn open_conversation_stays_first_then_attention_and_holds_while_browsing() {
+        let mut app = fixture(5);
+        app.view.agents[0].state = State::Idle;
+        app.view.agents[0].activity = "idle".into();
+        app.view.agents[2].state = State::NeedsAnswer;
+        app.view.agents[4].state = State::Failed;
+        draw(&mut app, 120, 40);
+        assert_eq!(
+            order(&app),
+            [
+                "conversation_0",
+                "conversation_2",
+                "conversation_4",
+                "conversation_1",
+                "conversation_3"
+            ]
+        );
+        // Opening another conversation moves the anchor; peers keep their order.
+        app.view.conversation = Some(id("conversation_3"));
+        draw(&mut app, 120, 40);
+        assert_eq!(
+            order(&app),
+            [
+                "conversation_3",
+                "conversation_2",
+                "conversation_4",
                 "conversation_1",
                 "conversation_0"
             ]
         );
+        // While browsing, positions hold even if the open conversation changes.
+        app.overview_event(&key(KeyCode::F(6)));
+        app.view.conversation = Some(id("conversation_1"));
+        draw(&mut app, 120, 40);
+        assert_eq!(
+            order(&app),
+            [
+                "conversation_3",
+                "conversation_2",
+                "conversation_4",
+                "conversation_1",
+                "conversation_0"
+            ]
+        );
+        app.overview_event(&key(KeyCode::Esc));
+        draw(&mut app, 120, 40);
+        assert_eq!(
+            order(&app),
+            [
+                "conversation_1",
+                "conversation_2",
+                "conversation_4",
+                "conversation_3",
+                "conversation_0"
+            ]
+        );
         assert_eq!(app.agent_grid.offset, 0);
+    }
+
+    #[test]
+    fn status_line_names_the_quota_limited_account() {
+        use xcb_core::{
+            Provider,
+            ui::{AccountRow, TaskRow},
+            usage::Estimate,
+        };
+        let mut app = fixture(1);
+        app.view.tasks.push(TaskRow {
+            id: id("task_0"),
+            revision: 1,
+            title: "Agent 0".into(),
+            state: State::Working,
+            status: Some("running".into()),
+            detail: String::new(),
+            route: Some("claude/haiku · a_0ccb8965".into()),
+            route_reason: None,
+            settle: None,
+            workspace: "/project".into(),
+            updated_at_ms: 1,
+        });
+        let now = crate::display_now_ms();
+        for (suffix, provider, blocked) in [
+            ("0", Provider::Claude, None),
+            ("1", Provider::Codex, Some(now + 3 * 24 * 60 * 60_000)),
+        ] {
+            app.view.accounts.push(AccountRow {
+                id: id(&format!("a_7042a73e0a074e4f8e789109e01c528{suffix}")),
+                provider,
+                name: format!("account {suffix}"),
+                email: None,
+                subscription: "Plan".into(),
+                remaining_percent: None,
+                resets_at_ms: None,
+                quota_blocked_until_ms: blocked,
+                runway: Estimate::unknown("unmeasured"),
+                busy: false,
+                enabled: true,
+                authentication_required: false,
+            });
+        }
+        let screen = draw(&mut app, 140, 40);
+        let footer = text(&screen);
+        assert!(
+            footer.contains("codex a_7042a73e… quota limited · retry in ~"),
+            "{footer}"
+        );
+        assert!(!footer.contains("claude a_7042a73e"));
     }
 
     #[test]
@@ -1062,7 +1187,11 @@ mod tests {
         assert!(text(&screen).contains("needs answer"));
         app.overview_event(&key(KeyCode::Esc));
         draw(&mut app, 120, 40);
-        assert_eq!(&order(&app)[..2], ["conversation_4", "new_attention"]);
+        // The open conversation keeps the anchor; attention follows it.
+        assert_eq!(
+            &order(&app)[..3],
+            ["conversation_0", "conversation_4", "new_attention"]
+        );
     }
 
     #[test]
@@ -1081,7 +1210,7 @@ mod tests {
         app.overview_event(&mouse(MouseEventKind::ScrollUp, 2, 2));
         draw(&mut app, 80, 24);
         assert_eq!(app.agent_grid.offset, 0);
-        assert_eq!(order(&app)[0], "conversation_11");
+        assert_eq!(&order(&app)[..2], ["conversation_0", "conversation_11"]);
     }
 
     #[test]

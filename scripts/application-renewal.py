@@ -181,7 +181,7 @@ def group_absent(pid):
 def command(argv, cwd, env, timeout, maximum=MAX_OUTPUT):
     """Bound output, deadline and direct process group; retain failure intent.
 
-    TERM permits native XCB/HRA cleanup. Never signal a reaped, reusable PGID.
+    TERM permits native XCB cleanup. Never signal a reaped, reusable PGID.
     A missing native joined receipt is still uncertain even after wrapper exit.
     """
     mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})

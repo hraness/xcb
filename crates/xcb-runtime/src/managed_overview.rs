@@ -143,6 +143,18 @@ impl ManagedStore {
                                 (row.state != State::Working).then(|| row.state.label().into())
                             })
                         };
+                        // A failed, limited, or unproven task with no output
+                        // shows its recorded detail so the card says why.
+                        if row.response.is_empty()
+                            && matches!(
+                                row.state,
+                                State::Failed | State::Limited | State::Uncertain
+                            )
+                            && !task.detail.trim().is_empty()
+                        {
+                            row.response = xcb_core::display_text(&task.detail, MAX_RESPONSE_BYTES);
+                            row.category = Some(row.state.label().into());
+                        }
                         // A provider preference on queued work is not an
                         // observed model. Bind metadata to this selected task.
                         row.model = task.session.and(task.route);

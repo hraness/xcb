@@ -144,7 +144,7 @@ def run(argv, cwd, timeout, maximum=MAX_LOG):
     """Bounded fixed-command capture; never signal a reaped/reusable PGID.
 
     A nonzero, incomplete, interrupted or unjoined command cannot produce a
-    successful capture. The outer HRA owner retains broader descendant custody;
+    successful capture. The outer host owner retains broader descendant custody;
     this receipt never substitutes for native tests' own process-join proofs.
     """
     started = now_ms()

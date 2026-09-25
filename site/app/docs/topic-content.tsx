@@ -145,7 +145,7 @@ function Workspace() {
       <p>Workspace file tools can inspect and change project files through xcb’s broker. Tests and builds use a separate, explicitly provisioned Linux VM. Commands run against a staged copy of the project, without host mounts, provider credentials, or network access.</p>
       <h2 id="setup">Set up the command runner</h2>
       <p>On macOS ARM64, install Lima 2.2 or later at <code>/opt/homebrew/bin/limactl</code> and Python 3. Use the source checkout matching your installed native CLI. The dedicated VM uses an 8 GiB sparse disk, 3 GiB memory, and two CPUs. Setup also enforces an 8 GiB host free-space floor plus provisioning capacity.</p>
-      <p>Run from that xcb checkout. Where the HRA host scheduler is installed, use the scheduler-wrapped setup command in the <a href="https://github.com/hraness/xcb/blob/main/docs/command-runner.md#setup-and-admission">command-runner contract</a>.</p>
+      <p>Run from that xcb checkout. Where the host scheduler is installed, use the scheduler-wrapped setup command in the <a href="https://github.com/hraness/xcb/blob/main/docs/command-runner.md#setup-and-admission">command-runner contract</a>.</p>
       <Code>{`/usr/bin/python3 scripts/setup-command-runner.py \\
   --root "$HOME/.local/share/xcb-command" --source "$PWD"`}</Code>
       <p>Setup installs the fixed Linux toolchains and runs the required boundary suite before admitting the backend. It includes Rust 1.97.1, Node 24.18.1, and Bun 1.3.14. When setup succeeds, ask xcb to run your project’s checks.</p>

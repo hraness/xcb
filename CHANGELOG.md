@@ -4,7 +4,46 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.8.3
+
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.3)
+for macOS ARM64 and Linux x86_64; [public verification run](https://github.com/hraness/xcb/actions/runs/36073107332).
+
+- Claude Code 2.1.282 reports usage meters for every window in one
+  `unifiedWindows` object and no longer sets the single top-level meter xcb
+  read, so no usage observation was recorded and an account that had hit its
+  limit still showed as unmeasured while routing refused it. xcb now reads
+  every reported window, still accepts the older single meter, and records a
+  rejected request as that window's exhaustion, so `xcb accounts` shows the
+  limit and the retry estimate again.
+- Package managers reinstall the Claude binary with group- and world-writable
+  permissions (bun's global install does), which failed xcb's executable check
+  on the next probe or run until `xcb doctor` ran. Pin verification now
+  tightens the mode of an executable you own, as `doctor` already did, and the
+  executable checks say which rule failed instead of one combined message.
+- On Claude Code 2.1.282 a metadata refresh observes no usage meters, because
+  that build reports them only on requests; the next routed turn records them.
+
+## 0.8.2
+
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.2)
+for macOS ARM64 and Linux x86_64; [public verification run](https://github.com/hraness/xcb/actions/runs/36068310101).
+
+- The conversation you have open comes first in the session grid, ahead of
+  other sessions needing attention, so the work you just started is never
+  pushed off screen. Attention, active, and earlier sessions follow as before,
+  and positions still hold while you browse.
+- The status line names the account a usage limit belongs to
+  (`codex a_7042a73e… quota limited · retry in ~3d`) instead of showing the
+  limit beside whichever route is running.
+- A session that failed without a response shows its failure reason on its
+  card, such as the runtime boundary property that changed, instead of
+  "No response yet". Managed tasks show their recorded detail the same way.
+
 ## 0.8.1
+
+[Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.1)
+for macOS ARM64 and Linux x86_64; [public verification run](https://github.com/hraness/xcb/actions/runs/36055853293).
 
 - Claude Code 2.1.281 lists its builtin `agents-md` plugin at session start, which
   failed xcb's runtime boundary check and stopped every Claude route on that

@@ -222,6 +222,42 @@ fn overview_direct_retains_previous_response_category_during_new_work() {
 }
 
 #[test]
+fn overview_direct_failed_session_without_response_shows_the_diagnostic() {
+    use xcb_core::policy::{EffectState, Terminal, TurnFacts};
+    let f = fixture();
+    append(&f, Role::User, "Add a test", 3);
+    let input = f.store.messages(&f.session.id, 1).unwrap().remove(0).id;
+    let current = f.store.session(&f.session.id).unwrap().unwrap();
+    let run = f
+        .store
+        .prepare_run(&current.id, current.revision, 4)
+        .unwrap();
+    let diagnostic = "provider protocol error: effective runtime boundary mismatch: plugins";
+    let outcome = crate::runner::Outcome {
+        text: String::new(),
+        state: State::Failed,
+        tool_calls: Some(0),
+        diagnostic: Some(crate::runner::Diagnostic::notice(diagnostic)),
+        facts: TurnFacts {
+            terminal: Terminal::Failed,
+            joined: true,
+            effects: EffectState::None,
+            pending_attention: false,
+            failure: None,
+        },
+    };
+    f.store.settle_outcome(&run, &input, &outcome, 5).unwrap();
+    let row = f.store.agent_overview(None).unwrap().remove(0);
+    assert_eq!(row.state, State::Failed);
+    assert_eq!(row.response, diagnostic);
+    assert_eq!(row.category.as_deref(), Some("failed"));
+    // A retained answer still wins over the diagnostic.
+    append(&f, Role::Assistant, "Recovered", 6);
+    let row = f.store.agent_overview(None).unwrap().remove(0);
+    assert_eq!(row.response, "Recovered");
+}
+
+#[test]
 fn overview_direct_legacy_store_without_outcome_table_keeps_response() {
     let f = fixture();
     append(&f, Role::Assistant, "Retained answer", 3);
