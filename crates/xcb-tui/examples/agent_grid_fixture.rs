@@ -12,9 +12,7 @@ use std::{
 use xcb_core::{
     Id,
     session::{Message, Role, State},
-    ui::{
-        AgentRow, ConversationRow, Intent, STALE_ATTENTION_MS, TranscriptContext, Update, View,
-    },
+    ui::{AgentRow, ConversationRow, Intent, STALE_ATTENTION_MS, TranscriptContext, Update, View},
 };
 
 const WORKSPACE: &str = "/synthetic/agent-grid/workspace";

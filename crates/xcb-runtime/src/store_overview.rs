@@ -58,8 +58,9 @@ impl Store {
             LEFT JOIN runs fr ON fr.id=f.run AND fr.phase='settled'",
         ))?;
         let recent = crate::agent_overview::recent_attention_since(now);
-        let records =
-            query.query_map(params![focused.map(Id::as_str), MAX_AGENTS as i64, recent], |row| {
+        let records = query.query_map(
+            params![focused.map(Id::as_str), MAX_AGENTS as i64, recent],
+            |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -70,7 +71,8 @@ impl Store {
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                 ))
-            })?;
+            },
+        )?;
         let mut rows = Vec::new();
         for record in records {
             let (

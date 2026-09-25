@@ -851,6 +851,12 @@ impl App {
         self.agent_grid.selected = items
             .get(next.min(items.len().saturating_sub(1)))
             .map(|row| row.context.clone());
+        if key.code == KeyCode::Home {
+            // Scroll now rather than on the next focused repaint, so Home
+            // then Escape before a frame still returns to the top and lets
+            // priority changes apply.
+            self.agent_grid.offset = 0;
+        }
         true
     }
 }
@@ -1693,5 +1699,14 @@ mod tests {
         app.overview_event(&key(KeyCode::Home));
         draw(&mut app, 160, 40);
         assert_eq!(app.agent_grid.offset, 0);
+        // Home and Escape inside one frame still leave the grid at the top.
+        app.overview_event(&key(KeyCode::End));
+        draw(&mut app, 160, 40);
+        assert!(app.agent_grid.offset > 0);
+        app.overview_event(&key(KeyCode::Home));
+        app.overview_event(&key(KeyCode::Esc));
+        draw(&mut app, 160, 40);
+        assert_eq!(app.agent_grid.offset, 0);
+        assert!(!app.agent_grid.focused);
     }
 }

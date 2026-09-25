@@ -61,7 +61,11 @@ fn append(f: &Fixture, role: Role, text: &str, at_ms: u64) {
 #[test]
 fn overview_direct_reads_only_latest_assistant_and_never_thinking_tool_or_user() {
     let f = fixture();
-    assert!(f.store.agent_overview(None, NOW).unwrap()[0].response.is_empty());
+    assert!(
+        f.store.agent_overview(None, NOW).unwrap()[0]
+            .response
+            .is_empty()
+    );
     append(&f, Role::Assistant, "Previous answer", 3);
     append(&f, Role::Assistant, &"é".repeat(1400), 4);
     append(&f, Role::Thinking, "Private thinking", 5);
@@ -129,7 +133,11 @@ fn overview_direct_corrupt_response_identity_is_not_presented() {
             [f.session.id.as_str()],
         )
         .unwrap();
-    assert!(f.store.agent_overview(None, NOW).unwrap()[0].response.is_empty());
+    assert!(
+        f.store.agent_overview(None, NOW).unwrap()[0]
+            .response
+            .is_empty()
+    );
 }
 
 #[test]
@@ -212,7 +220,9 @@ fn overview_direct_retains_previous_response_category_during_new_work() {
         };
         f.store.settle_outcome(&run, &input, &outcome, 6).unwrap();
         assert_eq!(
-            f.store.agent_overview(None, NOW).unwrap()[0].category.as_deref(),
+            f.store.agent_overview(None, NOW).unwrap()[0]
+                .category
+                .as_deref(),
             Some(previous_state.label())
         );
         append(&f, Role::User, "Version two", 7);
@@ -324,7 +334,10 @@ fn overview_direct_stale_attention_cannot_displace_running_work_from_the_limit()
     let later = STALE_ATTENTION_MS + 10_000;
     let result = f.store.agent_overview(None, later).unwrap();
     assert_eq!(result.len(), MAX_AGENTS);
-    assert_eq!(result[0].context, TranscriptContext::Session(f.session.id.clone()));
+    assert_eq!(
+        result[0].context,
+        TranscriptContext::Session(f.session.id.clone())
+    );
     assert_eq!(result[0].state, State::Working);
     assert!(result[1..].iter().all(|row| row.stale_attention(later)));
     // While the failures are recent they lead, and the limit keeps them.

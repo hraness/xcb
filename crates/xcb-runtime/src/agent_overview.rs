@@ -131,7 +131,10 @@ mod tests {
         }
         let working = session("working".into(), State::Working, 0);
         assert_eq!(working.overview_priority(NOW), 1);
-        assert_eq!(session("idle".into(), State::Idle, NOW).overview_priority(NOW), 3);
+        assert_eq!(
+            session("idle".into(), State::Idle, NOW).overview_priority(NOW),
+            3
+        );
     }
 
     #[test]
