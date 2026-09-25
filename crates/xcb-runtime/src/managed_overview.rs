@@ -67,9 +67,13 @@ impl ManagedStore {
             LEFT JOIN ranked r ON r.conversation=c.id AND r.position=1
             LEFT JOIN tasks t ON t.id=r.id
             ORDER BY c.id=?1 DESC,
-                CASE WHEN t.state='failed' AND CASE WHEN json_valid(t.payload)
-                    THEN COALESCE(json_extract(t.payload,'$.deferred'),0)=0 ELSE 1 END
-                    THEN 0 ELSE COALESCE(r.priority,3) END,
+                CASE
+                    WHEN (t.state='failed' AND CASE WHEN json_valid(t.payload)
+                            THEN COALESCE(json_extract(t.payload,'$.deferred'),0)=0 ELSE 1 END)
+                        OR r.priority=0
+                    THEN CASE WHEN max(c.updated_at,COALESCE(r.updated_at,0))>?5 THEN 0 ELSE 3 END
+                    WHEN r.priority IN (1,2) THEN r.priority
+                    ELSE 4 END,
                 max(c.updated_at,COALESCE(r.updated_at,0)) DESC,c.id LIMIT ?2",
         )?;
         let records = query.query_map(
@@ -77,7 +81,8 @@ impl ManagedStore {
                 focused.as_str(),
                 MAX_AGENTS as i64,
                 NO_ACCOUNT_DETAIL,
-                routing::NO_QUOTA_AVAILABLE_ROUTE
+                routing::NO_QUOTA_AVAILABLE_ROUTE,
+                crate::agent_overview::recent_attention_since(now)
             ],
             |row| {
                 Ok((
@@ -180,7 +185,7 @@ impl ManagedStore {
                 }
             }
         }
-        crate::agent_overview::sort(&mut rows);
+        crate::agent_overview::sort(&mut rows, now);
         Ok(rows)
     }
 }

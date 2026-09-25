@@ -19,7 +19,9 @@ stay above the overview.
   filters activity; `/overview filter <text>` and `/overview clear` filter names,
   models, status, and IDs. Hide/show controls visibility.
 - The open conversation's card comes first. Then order attention, active, and
-  earlier sessions. Preserve relative
+  earlier sessions. Attention unchanged for a day (`STALE_ATTENTION_MS`) ranks
+  after active work in the runtime selection, the 128-row cap, and the grid;
+  its card shows its age and the heading counts it apart. Preserve relative
   order within groups on updates; freeze existing card order while focused or
   scrolled away from the top. Returning to the top and chat applies priority
   changes. Show attention counts while positions are held.

@@ -642,6 +642,10 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         agent.response.hash(&mut hasher);
         agent.category.hash(&mut hasher);
         agent.updated_at_ms.hash(&mut hasher);
+        // Ageing reorders the grid and the card shows its age in hours.
+        agent_grid::stale_attention_age(agent, now)
+            .map(|age| age / 3_600_000)
+            .hash(&mut hasher);
     }
     if let Some(session) = &view.session {
         session.id.as_str().hash(&mut hasher);

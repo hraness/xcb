@@ -12,13 +12,24 @@ use std::{
 use xcb_core::{
     Id,
     session::{Message, Role, State},
-    ui::{AgentRow, ConversationRow, Intent, TranscriptContext, Update, View},
+    ui::{
+        AgentRow, ConversationRow, Intent, STALE_ATTENTION_MS, TranscriptContext, Update, View,
+    },
 };
 
 const WORKSPACE: &str = "/synthetic/agent-grid/workspace";
 
 fn id(value: &str) -> Id {
     Id::new(value).expect("synthetic identifier")
+}
+
+/// The grid ages attention against the wall clock, so rows are stamped now.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 fn fixture() -> View {
@@ -47,12 +58,13 @@ fn fixture() -> View {
         reduced_motion: true,
         ..View::default()
     };
+    let base = now_ms();
     view.conversations.push(ConversationRow {
         id: id("grid-main"),
         title: "Overview acceptance chat".into(),
         workspace: WORKSPACE.into(),
         messages: 2,
-        updated_at_ms: 1000,
+        updated_at_ms: base,
     });
     for (index, state) in states.into_iter().enumerate() {
         let number = index + 1;
@@ -110,7 +122,7 @@ fn fixture() -> View {
             activity: activity.into(),
             response: format!("RESPONSE-{number:02}: synthetic latest reply"),
             category: category.map(str::to_owned),
-            updated_at_ms: 1000 + number as u64,
+            updated_at_ms: base + number as u64,
         });
     }
     view.messages.push(Message {
@@ -186,8 +198,27 @@ fn main() -> io::Result<()> {
                 match command["action"].as_str() {
                     Some("recency") => {
                         view.agents.reverse();
+                        let base = now_ms() + 100_000;
                         for (index, row) in view.agents.iter_mut().enumerate() {
-                            row.updated_at_ms = 100_000 + index as u64;
+                            row.updated_at_ms = base + index as u64;
+                        }
+                    }
+                    Some("stale") => {
+                        let at = now_ms().saturating_sub(2 * STALE_ATTENTION_MS);
+                        for number in command["agents"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(serde_json::Value::as_u64)
+                        {
+                            let context = TranscriptContext::Conversation(id(&format!(
+                                "grid-agent-{number:02}"
+                            )));
+                            view.agents
+                                .iter_mut()
+                                .find(|row| row.context == context)
+                                .ok_or_else(|| io::Error::other("unknown synthetic agent"))?
+                                .updated_at_ms = at;
                         }
                     }
                     Some("attention") => {

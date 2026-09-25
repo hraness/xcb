@@ -274,6 +274,38 @@ pub struct AgentRow {
     pub updated_at_ms: u64,
 }
 
+/// Attention untouched for this long stops outranking running work. The
+/// overview lists it after active sessions and counts it separately, so a
+/// failure from days ago cannot bury the work started today.
+pub const STALE_ATTENTION_MS: u64 = 24 * 60 * 60 * 1000;
+
+impl AgentRow {
+    /// A question, approval, usage limit, failure or unproven outcome that
+    /// waits on the operator.
+    pub fn needs_attention(&self) -> bool {
+        self.state.attention() || matches!(self.state, State::Failed | State::Limited)
+    }
+
+    /// Attention whose session has not changed for [`STALE_ATTENTION_MS`].
+    pub fn stale_attention(&self, now_ms: u64) -> bool {
+        self.needs_attention() && now_ms.saturating_sub(self.updated_at_ms) >= STALE_ATTENTION_MS
+    }
+
+    /// Overview order: recent attention, running work, stale attention, then
+    /// everything else. Lower sorts first.
+    pub fn overview_priority(&self, now_ms: u64) -> u8 {
+        if self.stale_attention(now_ms) {
+            2
+        } else if self.needs_attention() {
+            0
+        } else if self.state == State::Working {
+            1
+        } else {
+            3
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct View {
     /// Up to 128 conversation/direct-session summaries; no worker transcripts.

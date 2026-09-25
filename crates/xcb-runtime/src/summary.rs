@@ -9,7 +9,7 @@ use xcb_core::{
 
 pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) -> Result<View> {
     let mut view = View {
-        agents: store.agent_overview(current)?,
+        agents: store.agent_overview(current, now)?,
         sessions: store.sessions(64)?,
         reduced_motion: config.reduced_motion,
         ..View::default()
