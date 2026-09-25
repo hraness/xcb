@@ -367,6 +367,8 @@ impl Composer {
                             return ComposerAction::Rejected(INPUT_TOO_LARGE);
                         }
                     }
+                    // TextArea reads Shift-Tab as Tab and would insert one.
+                    KeyCode::BackTab => {}
                     _ => {
                         let old = self.textarea.clone();
                         self.textarea.input(key);
