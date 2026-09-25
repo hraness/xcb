@@ -4,6 +4,18 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.8.9
+
+- `xcb daemons` installs named, durable ALGAL processes in a project
+  conversation. A daemon persists across restarts, wakes when its inbox
+  receives a message or a requested worker task settles, and stops after a
+  bounded number of generations. See `docs/plans/effectful-daemons.md`.
+- Daemon agent calls never run a provider inline: the daemon suspends on a
+  recorded request, the work runs as an ordinary managed task under the
+  conversation's project grant, and the daemon resumes only after the
+  result is recorded. Stopping a daemon cancels its open child and keeps
+  all evidence.
+
 ## 0.8.8
 
 [Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.8)

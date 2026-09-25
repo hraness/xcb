@@ -123,6 +123,59 @@ pub enum BacklogCommand {
 }
 
 #[derive(Subcommand)]
+pub enum DaemonCommand {
+    /// Install a named durable ALGAL process in a project conversation.
+    Run {
+        /// Persistent project conversation from `xcb conversations`.
+        conversation: Id,
+        /// Daemon name; lowercase kebab-case, at most 48 characters.
+        name: String,
+        /// Bounded ALGAL process manifest to validate and pin.
+        manifest: PathBuf,
+        /// JSON object of typed interface inputs; defaults to an empty object.
+        /// Mailbox capability ports are bound to this daemon's own mailboxes.
+        #[arg(long)]
+        inputs: Option<PathBuf>,
+        /// Admit managed agent calls under the current project grant.
+        #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=8))]
+        calls: u8,
+        /// Maximum process generations before the daemon record stops.
+        #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u64).range(1..=64))]
+        generations: u64,
+    },
+    /// Show a daemon's process state, wake evidence and pending child.
+    Inspect {
+        /// Daemon name from `xcb daemons`.
+        name: String,
+    },
+    /// Post a bounded message to a daemon's inbox mailbox.
+    Send {
+        /// Daemon name from `xcb daemons`.
+        name: String,
+        /// UTF-8 message, at most 8 KiB; the daemon reads it on a wake tick.
+        text: String,
+    },
+    /// Stop a daemon: no new calls or dispatches; a live child still settles.
+    Stop {
+        /// Daemon name from `xcb daemons`.
+        name: String,
+    },
+    /// Show the journal evidence when a daemon holds an uncertain intent.
+    Journal {
+        /// Daemon name from `xcb daemons`.
+        name: String,
+    },
+    /// Recover an uncertain intent only by its exact recorded digest.
+    Recover {
+        /// Daemon name from `xcb daemons`.
+        name: String,
+        /// Exact uncertain intent digest from `xcb daemons journal`.
+        #[arg(long)]
+        intent: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum ProjectCommand {
     /// Grant bounded automatic follow-up work for a project goal.
     Configure {
@@ -380,6 +433,114 @@ pub async fn memory(root: &Path, command: MemoryCommand, json: bool) -> Result<i
 
 fn wake(root: &Path) -> Result<()> {
     managed::ensure_daemon(root, &std::env::current_exe()?)
+}
+
+fn print_daemon(status: &managed::DaemonStatus, json: bool) -> Result<()> {
+    if json {
+        return crate::print_json(status);
+    }
+    println!(
+        "{} · {} · generation {}/{} · {} calls",
+        status.process, status.status, status.generation, status.max_generations, status.calls,
+    );
+    if let Some(digest) = &status.pending_call {
+        println!(
+            "  pending: {digest} · child {} · {}",
+            status
+                .pending_child
+                .as_ref()
+                .map(|id| id.as_str())
+                .unwrap_or("unpublished"),
+            status.pending_child_status.as_deref().unwrap_or("unknown"),
+        );
+    }
+    if !status.wake.is_empty() {
+        println!("  wake: {}", status.wake.len());
+    }
+    Ok(())
+}
+
+pub async fn daemons(root: &Path, command: Option<DaemonCommand>, json: bool) -> Result<i32> {
+    let store = std::sync::Arc::new(ManagedStore::open(root)?);
+    match command {
+        Some(DaemonCommand::Run {
+            conversation,
+            name,
+            manifest,
+            inputs,
+            calls,
+            generations,
+        }) => {
+            use xcb_runtime::managed::{AdmittedDaemon, MAX_DAEMON_GENERATIONS};
+            use xcb_runtime::managed_program::{MAX_INPUT_BYTES, MAX_MANIFEST_BYTES};
+            let manifest = serde_json::from_slice(&read_bounded(&manifest, MAX_MANIFEST_BYTES)?)?;
+            let inputs = match inputs {
+                Some(path) => serde_json::from_slice(&read_bounded(&path, MAX_INPUT_BYTES)?)?,
+                None => serde_json::json!({}),
+            };
+            let daemon = AdmittedDaemon::admit(
+                manifest,
+                inputs,
+                calls,
+                usize::try_from(generations)
+                    .ok()
+                    .filter(|value| *value <= MAX_DAEMON_GENERATIONS)
+                    .ok_or(Error::Unavailable("invalid daemon generation bound"))?,
+            )?;
+            let status = store.enqueue_daemon(&conversation, &name, &daemon)?;
+            wake(root)?;
+            print_daemon(&status, json)?;
+        }
+        Some(DaemonCommand::Inspect { name }) => {
+            let status = store
+                .daemon_status_for(&name)?
+                .ok_or(Error::Unavailable("daemon not found"))?;
+            print_daemon(&status, json)?;
+        }
+        Some(DaemonCommand::Send { name, text }) => {
+            store.daemon_send(&name, &text)?;
+            wake_saved_inbox(root, &new_id("wake"));
+            if json {
+                crate::print_json(serde_json::json!({"daemon":name,"sent":true}))?;
+            } else {
+                println!("Sent to {name}; the daemon reads it on its next wake tick.");
+            }
+        }
+        Some(DaemonCommand::Stop { name }) => {
+            store.daemon_stop(&name)?;
+            if json {
+                crate::print_json(serde_json::json!({"daemon":name,"stopped":true}))?;
+            } else {
+                println!("Daemon {name} stopped; a live child still settles before it counts.");
+            }
+        }
+        Some(DaemonCommand::Journal { name }) => {
+            let journal = store
+                .daemon_journal(&name)?
+                .ok_or(Error::Unavailable("no daemon journal recorded"))?;
+            crate::print_json(journal)?;
+        }
+        Some(DaemonCommand::Recover { name, intent }) => {
+            let status = store.daemon_recover(&name, &intent).await?;
+            wake(root)?;
+            print_daemon(&status, json)?;
+        }
+        None => {
+            let rows = store.daemons()?;
+            if json {
+                crate::print_json(rows)?;
+            } else if rows.is_empty() {
+                println!(
+                    "No daemons. Use xcb daemons run <conversation> <name> --manifest <file>."
+                );
+            } else {
+                for row in &rows {
+                    print_daemon(row, false)?;
+                }
+            }
+        }
+    }
+    Ok(0)
 }
 
 fn print_task(task: &ManagedTask, json: bool) -> Result<()> {

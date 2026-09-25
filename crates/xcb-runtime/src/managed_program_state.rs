@@ -56,13 +56,13 @@ pub(super) struct Call {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Settlement {
-    revision: u64,
-    receipt: String,
-    summary: String,
-    summary_digest: String,
-    session: Option<Id>,
-    message_count_before: usize,
-    outcome_digest: Option<String>,
+    pub(super) revision: u64,
+    pub(super) receipt: String,
+    pub(super) summary: String,
+    pub(super) summary_digest: String,
+    pub(super) session: Option<Id>,
+    pub(super) message_count_before: usize,
+    pub(super) outcome_digest: Option<String>,
 }
 pub(super) struct ChildPublication {
     task: ManagedTask,
@@ -239,6 +239,9 @@ pub(super) fn check_dispatch(db: &Connection, task: &ManagedTask, now: u64) -> R
         if task.detail == "program waits for other project work to settle" {
             no_other_work(db, task)?;
         }
+    }
+    if let Some(link) = &task.daemon_child {
+        daemon::check_child_dispatch(db, task, link, now)?;
     }
     if let Some(link) = &task.program_child {
         let policy = require_grant(db, &task.conversation, Some(&link.generation), now, false)?;
@@ -572,7 +575,7 @@ impl ManagedStore {
             tried_routes: vec![], failed_accounts: vec![], state: if routing_question { TaskState::NeedsInput } else { TaskState::Queued },
             deferred: false, priority: parent.priority, attention: routing_question.then_some(State::NeedsAnswer), backlog_prompt: None,
             project_proposal: None, routing_question, program: None, program_generation: None, program_receipt: None, program_waiting: false,
-            program_child: Some(ProgramChild { parent: parent.id.clone(), call: index, request_digest: call.digest.clone(), generation: policy.generation.clone(), required_provider: policy.required_provider }),
+            program_child: Some(ProgramChild { parent: parent.id.clone(), call: index, request_digest: call.digest.clone(), generation: policy.generation.clone(), required_provider: policy.required_provider }), daemon_child: None,
             schedule: None, detail: if routing_question { "This program request conflicts with the project provider requirement. Reply to this child with revised work for the required provider, or cancel it." } else { "managed program child; waiting for an eligible worker" }.into(),
             settle: None, acted: None, inbox_continuation: false, attempts: 0, max_attempts: MAX_TASK_ATTEMPTS, message_count_before: 0,
             cancel_requested: false, last_output: None, policy_digest: parent.policy_digest.clone(), last_receipt: "sha256:pending".into(), revision: 1, created_at_ms: now, updated_at_ms: now,
@@ -792,7 +795,11 @@ impl ManagedStore {
         next.updated_at_ms = now_ms().max(task.updated_at_ms);
         self.transition(task, next, None).await
     }
-    fn child_settlement(&self, store: &Store, child: &ManagedTask) -> Result<Option<Settlement>> {
+    pub(super) fn child_settlement(
+        &self,
+        store: &Store,
+        child: &ManagedTask,
+    ) -> Result<Option<Settlement>> {
         if !matches!(
             child.state,
             TaskState::Completed | TaskState::Failed | TaskState::Cancelled
