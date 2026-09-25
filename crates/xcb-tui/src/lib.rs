@@ -327,6 +327,13 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         summary: "inspect managed work",
         needs_args: false,
     },
+    SlashCommand {
+        name: "/vim",
+        alias: "",
+        args: "",
+        summary: "toggle Vim modal editing in the composer",
+        needs_args: false,
+    },
 ];
 
 #[derive(Clone, PartialEq, Eq)]
