@@ -1,4 +1,4 @@
-Excalibur, written `xcb`, routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. You give it a task. It picks one of your accounts that is signed in, idle, and not at a known quota limit, and it holds that account so no other task can use it until the provider's process has exited.
+xcb, short for Excalibur, routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. You give it a task. It picks one of your accounts that is signed in, idle, and not at a known quota limit, and it holds that account so no other task can use it until the provider's process has exited.
 
 ## One router in front of the agents you pay for
 

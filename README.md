@@ -1,20 +1,21 @@
 <!-- hraness:xcb-landing:start -->
 # xcb
 
-Excalibur (`xcb`) routes coding tasks across the Claude, Codex, and Devin
-subscriptions you already pay for. For each task it picks one of your accounts
-that is signed in, idle, and not at a known quota limit, and keeps that account
-locked until the provider process has exited. Another agent can call
-`xcb --json route`, and an application can embed the TypeScript SDK. The
-terminal workspace is built on the same router. The managed harness, which is
-being rebuilt as a self-evolving ALGAL harness, is experimental.
+xcb, short for Excalibur, routes coding tasks across the Claude, Codex, and
+Devin subscriptions you already pay for. Each task runs on an account that is
+signed in, idle, and not at a known usage limit, on a model that fits the
+work, and xcb holds that account until the provider process has exited.
 
-It is for developers who use more than one coding agent and want one workflow
-around them. The native Rust app is a source preview for supported Claude,
-Codex, and Devin runtimes. It includes workspace file tools, an isolated Linux
-command runner, customizable panes, and a separate application API. It does not
-replace every feature of the providers' own tools; provider support and limits
-are listed below.
+It is for developers who pay for more than one coding agent and want one
+workflow around them: another agent can hand it work with one JSON command,
+`xcb --json route`, an application can embed the TypeScript SDK, and the
+terminal workspace is built on the same router. The native Rust app is a
+source preview for supported Claude, Codex, and Devin runtimes. It includes
+workspace file tools, an isolated Linux command runner, customizable panes,
+and a separate application API. The managed harness, which is being rebuilt as
+a self-evolving ALGAL harness, is in development and does not run
+self-modifying routing policies. It does not replace every feature of the
+providers' own tools; provider support and limits are listed below.
 <!-- hraness:xcb-landing:end -->
 
 [Project site](https://xcb.sh) · [Getting started](https://xcb.sh/docs/getting-started) ·

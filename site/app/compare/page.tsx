@@ -49,7 +49,7 @@ export default function Compare() {
                 </thead>
                 <tbody>
                   <tr className="xcb-comparison-own-row">
-                    <th scope="row"><span className="xcb-comparison-name">xcb</span><span className="xcb-comparison-kind">Subscription router</span></th>
+                    <th scope="row"><span className="xcb-comparison-name">xcb</span><span className="xcb-comparison-kind">Agent subscription router</span></th>
                     <td><p>A local router that picks one of your coding-agent accounts for each task and runs it there. Another agent can call it with a JSON command, and apps can embed the TypeScript SDK. xcb’s own terminal workspace is built on the same router.</p><a href="/docs/route">Route tasks</a></td>
                     <td><p>You use more than one supported provider account and want each task sent to an idle one, with that account locked until the provider process exits. Native xcb is a source preview with specific platform and command limits.</p><a href="/docs/workspace">Workspace limits</a></td>
                   </tr>

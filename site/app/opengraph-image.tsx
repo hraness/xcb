@@ -17,9 +17,9 @@ function XcbMark() {
 
 export default function OpengraphImage() {
   return createSocialImageResponse({
-    description: "Sends each coding task to a signed-in, idle account that is not at a known quota limit.",
+    description: "One terminal for your Claude, Codex, and Devin accounts. Each task runs on an account that is signed in, idle, and not at a known limit.",
     domain: "xcb.sh",
-    eyebrow: "xcb / Excalibur",
+    eyebrow: "xcb",
     mark: <XcbMark />,
     theme: {
       accent: "#8A5A28",
@@ -27,6 +27,6 @@ export default function OpengraphImage() {
       foreground: "#1C1A18",
       muted: "#6A655E",
     },
-    title: "One router for your Claude, Codex, and Devin subscriptions",
+    title: "Keep coding when one subscription hits its limit.",
   });
 }
