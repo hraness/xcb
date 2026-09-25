@@ -32,6 +32,17 @@ fn grapheme_movement_deletion_and_yank_keep_combining_and_emoji_intact() {
     assert_eq!(composer.text(), "e\u{301}👩🏽‍💻");
 }
 #[test]
+fn shift_tab_leaves_the_draft_and_cursor_unchanged() {
+    let mut composer = Composer::default();
+    composer.set_text("keep\nthis draft");
+    let cursor = composer.textarea.cursor();
+    for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+        key(&mut composer, KeyCode::BackTab, modifiers);
+    }
+    assert_eq!(composer.text(), "keep\nthis draft");
+    assert_eq!(composer.textarea.cursor(), cursor);
+}
+#[test]
 fn readline_words_line_kills_and_vertical_keys_have_editing_meaning() {
     let mut composer = Composer::default();
     composer.set_text("one two\nthree four");

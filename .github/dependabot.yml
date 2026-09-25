@@ -27,6 +27,20 @@ updates:
     groups:
       site-minor-and-patch:
         update-types: [minor, patch]
+    ignore:
+      # The site deploys on Node 24.x (package.json engines); its Node types
+      # follow that runtime line, not the newest Node major.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+      # TypeScript 7.0 ships no compiler API. typescript-eslint (peer
+      # typescript <6.1) and the build-time type check in `next build` both
+      # load it, so the site stays on 6.x until they support TypeScript 7.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+      # eslint-config-next still depends on eslint-plugin-react 7.x, which
+      # calls context.getFilename(), an API ESLint 10 removed.
+      - dependency-name: "eslint"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
