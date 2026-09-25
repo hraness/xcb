@@ -44,8 +44,12 @@
     "gobstopper-editor": "bun src/gobstopper-editor.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "check:versions": "bun scripts/release-version-contract.ts",
-    "check": "bun run check:versions && bun run typecheck && bun run test && bun run build:dist && bun run check:package",
-    "prepack": "bun run check"
+    "check": "bun run check:versions && bun run typecheck && bun run check:convex && bun run test && bun run build:dist && bun run check:package",
+    "prepack": "bun run check",
+    "convex:init": "bun scripts/convex-local.ts init",
+    "convex:dev": "bun scripts/convex-local.ts dev --tail-logs disable",
+    "convex:codegen": "bun scripts/convex-local.ts dev --once --tail-logs disable",
+    "check:convex": "tsc -p convex/tsconfig.json && bun test ./convex"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.278",
@@ -54,8 +58,12 @@
     "zod": "4.6.5"
   },
   "devDependencies": {
+    "@convex-dev/auth": "0.0.95",
+    "@hraness/relay": "github:hraness/relay#7c6411fc73f1b7f203fca1383eadf1d6ebfee7a4",
     "@types/bun": "1.4.2",
     "@types/node": "26.6.2",
+    "convex": "1.45.0",
+    "convex-test": "0.0.59",
     "sigstore": "5.0.0",
     "typescript": "7.0.2"
   }
