@@ -167,6 +167,63 @@ async fn overview_bounds_rows_but_keeps_old_focused_and_attention_conversations(
 }
 
 #[tokio::test]
+async fn overview_stale_attention_cannot_displace_running_work_from_the_limit() {
+    let f = fixture().await;
+    let mut closed = f.task.clone();
+    closed.state = TaskState::Completed;
+    put_task(&f, &closed);
+    let mut running = None;
+    for index in 0..135 {
+        let mut conversation = f.conversation.clone();
+        conversation.id = new_id("c");
+        conversation.updated_at_ms = f.task.updated_at_ms + index + 1;
+        f.managed
+            .db()
+            .unwrap()
+            .execute(
+                "INSERT INTO conversations(id,updated_at,payload) VALUES(?1,?2,?3)",
+                params![
+                    conversation.id.as_str(),
+                    sql(conversation.updated_at_ms).unwrap(),
+                    serde_json::to_string(&conversation).unwrap()
+                ],
+            )
+            .unwrap();
+        let state = if index == 0 {
+            TaskState::Running
+        } else {
+            TaskState::Failed
+        };
+        let mut task = another_task(&f, state, conversation.updated_at_ms);
+        task.conversation = conversation.id.clone();
+        put_task(&f, &task);
+        if index == 0 {
+            running = Some(TranscriptContext::Conversation(conversation.id));
+        }
+    }
+    let running = running.unwrap();
+    // A day later the failures are stale and the running conversation leads.
+    let later = now_ms() + xcb_core::ui::STALE_ATTENTION_MS + 10_000;
+    let result = f
+        .managed
+        .agent_overview(&f.conversation.id, &BTreeMap::new(), later)
+        .unwrap();
+    assert_eq!(result.len(), MAX_AGENTS);
+    assert_eq!(result[0].context, running);
+    assert_eq!(result[0].state, State::Working);
+    assert!(result[1].stale_attention(later));
+    assert!(
+        result
+            .iter()
+            .any(|row| row.context == TranscriptContext::Conversation(f.conversation.id.clone()))
+    );
+    // Recent failures still lead and may fill the limit.
+    let result = rows(&f);
+    assert_eq!(result[0].state, State::Failed);
+    assert!(!result.iter().any(|row| row.context == running));
+}
+
+#[tokio::test]
 async fn overview_phases_are_generic_and_stale_future_or_settled_beats_are_ignored() {
     let f = fixture().await;
     let mut task = f.task.clone();
@@ -326,7 +383,7 @@ async fn overview_owner_exit_invalidates_once_without_a_database_write() {
             .unwrap()
     );
     assert_eq!(
-        store.agent_overview(None).unwrap()[0].state,
+        store.agent_overview(None, now_ms()).unwrap()[0].state,
         State::Uncertain
     );
     assert_eq!(

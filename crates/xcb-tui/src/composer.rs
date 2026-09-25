@@ -1,5 +1,5 @@
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui_textarea::{CursorMove, TextArea};
+use ratatui_textarea::{CursorMove, DataCursor, TextArea};
 use std::{collections::VecDeque, ops::Range};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -128,7 +128,8 @@ impl Composer {
                 && self.history_index.and_then(|index| self.history.get(index)) == Some(&text))
     }
     fn cursor_offset(&self) -> usize {
-        self.position_offset(self.textarea.cursor())
+        let DataCursor(row, column) = self.textarea.cursor();
+        self.position_offset((row, column))
     }
     fn position_offset(&self, (row, column): (usize, usize)) -> usize {
         let lines = self.textarea.lines();
@@ -366,6 +367,8 @@ impl Composer {
                             return ComposerAction::Rejected(INPUT_TOO_LARGE);
                         }
                     }
+                    // TextArea reads Shift-Tab as Tab and would insert one.
+                    KeyCode::BackTab => {}
                     _ => {
                         let old = self.textarea.clone();
                         self.textarea.input(key);

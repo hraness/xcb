@@ -199,6 +199,30 @@ fn ctrl_c_in_the_prompt_editor_returns_its_text_to_the_composer() {
 }
 
 #[test]
+fn shift_tab_inserts_nothing_in_the_composer_or_the_prompt_editor() {
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    app.composer.set_text("draft");
+    let back_tab = || Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    app.handle(back_tab(), &tx);
+    assert_eq!(app.composer.text(), "draft");
+    app.modal = Some(Modal::Editor {
+        title: "Prompt editor".into(),
+        textarea: Box::new(ratatui_textarea::TextArea::from(vec![
+            "edited in the dialog".to_owned(),
+        ])),
+        kind: xcb_tui::EditorKind::Prompt,
+        error: None,
+    });
+    app.handle(back_tab(), &tx);
+    let Some(Modal::Editor { textarea, .. }) = &app.modal else {
+        panic!("the prompt editor stays open");
+    };
+    assert_eq!(textarea.lines(), ["edited in the dialog"]);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn an_oversized_paste_is_rejected_with_a_notice() {
     let (tx, _rx) = sync_channel(4);
     let mut app = App::default();

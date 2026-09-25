@@ -4,28 +4,31 @@ The xcb pipeline publishes `@hraness/xcb` and native binaries from one tag
 channel. Releases tagged v0.3.0 and earlier are AgentMixer. This document
 describes the release contract, not publication evidence; the release assets
 and the site publication datum below record what is actually published.
-An immutable annotated `v<version>` tag at a reviewed commit in current `main`
-history is a release request. The tag version must equal `package.json`'s
+An immutable annotated `v<version>` tag at a commit in current `main` history
+(every `main` commit was admitted by the `Required` check) is a release request. The tag version must equal `package.json`'s
 `version`; no other tag shape is admitted.
 
 ## Release contract
 
 `.github/workflows/release.yml` runs the whole pipeline. Its jobs:
 
-1. **Verify release source.** Confirms the push is one exact `v*` tag, resolves
-   the tag to its commit, proves the commit is an ancestor of exact advertised
-   `main`, and proves the tag is the newest advertised stable tag. Stages the
-   dependency-free release writers from the tagged source and preserves them as
-   workflow artifacts so later jobs execute reviewed bytes, not a fresh
-   checkout. Runs the complete `bun run check` gate, then builds `dist/` and
-   packs the one release tarball with `npm pack --ignore-scripts`. Writes
-   `SHA256SUMS` over the tarball and preserves both as artifacts.
-2. **Exact tarball install.** On Ubuntu and macOS, downloads the release bytes
+1. **Resolve release identity.** Confirms the push is one exact `v*` tag,
+   resolves the tag to its commit, proves the commit is an ancestor of exact
+   advertised `main`, and proves the tag is the newest advertised stable tag.
+   Every later job checks out this verified commit; the native builds start
+   from it immediately, in parallel with the source verification below.
+2. **Verify release source.** Stages the dependency-free release writers from
+   the verified source and preserves them as workflow artifacts so later jobs
+   execute those exact bytes, not a fresh checkout. Runs the complete
+   `bun run check` gate, then builds `dist/` and packs the one release tarball
+   with `npm pack --ignore-scripts`. Writes `SHA256SUMS` over the tarball and
+   preserves both as artifacts.
+3. **Exact tarball install.** On Ubuntu and macOS, downloads the release bytes
    by numeric artifact ID, verifies the checksum, and runs the packed-package
    smoke check: the tarball installs into an isolated consumer and the public
    entry executes — including an account-lease custody round trip — under both
    Bun and Node.
-3. **Native binary build.** On Ubuntu and macOS, checks out the verified tag
+4. **Native binary build.** On Ubuntu and macOS, checks out the verified tag
    commit, builds `xcb` with the pinned Rust toolchain through
    `scripts/build-native.sh` with no dependency cache, and re-admits the
    packaged archive exactly like the installer through
@@ -36,23 +39,23 @@ history is a release request. The tag version must equal `package.json`'s
    `attestations: write` and `id-token: write`) and preserves
    `xcb-<version>-<os>-<arch>.tar.gz` plus its adjacent `.sha256` checksum as
    run-bound workflow artifacts.
-4. **Publish immutable GitHub Release.** The only job holding
+5. **Publish immutable GitHub Release.** The only job holding
    `contents: write`. Re-verifies every downloaded native archive against its
    adjacent checksum, then creates the immutable Latest GitHub Release
    carrying the exact tarball, `SHA256SUMS`, and every native
    archive/checksum pair, and proves it back.
-5. **GitHub parity and pre-npm admission.** Proves the immutable GitHub
+6. **GitHub parity and pre-npm admission.** Proves the immutable GitHub
    Release bytes — tarball, `SHA256SUMS`, and the exact native asset set —
    match the reviewed workflow artifacts. When `vars.XCB_PUBLISH_NPM` is
    `true` it also admits the npm retry state: absent, or an exact same-run
    retry only. When the variable is unset this parity check is the terminal
    artifact gate and no npm state exists.
-6. **Publish npm.** Runs only when the repository variable
+7. **Publish npm.** Runs only when the repository variable
    `XCB_PUBLISH_NPM` is `true`. Downloads the exact bytes and the reviewed
    dependency-free npm writer, rechecks the checksum, and publishes through
    npm OIDC trusted publishing with provenance. No npm token exists anywhere
    in the pipeline.
-7. **Admission.** Runs in both modes. Always verifies the exact annotated
+8. **Admission.** Runs in both modes. Always verifies the exact annotated
    tag, reviewed-main ancestry, immutable Latest GitHub Release, exact
    tarball/`SHA256SUMS` bytes, and every native pair's digest, size, and
    adjacent checksum. When `XCB_PUBLISH_NPM` is `true` it additionally
@@ -80,7 +83,8 @@ already public.
 ## Repository protections
 
 - `main` delivery is protected by the organization "Protect main delivery"
-  ruleset: changes arrive through reviewed pull requests with required checks.
+  ruleset: changes arrive through pull requests that auto-merge once the
+  required `Required` check passes; no human approval is requested.
 - `v*` tags are protected by the organization "Immutable version tags"
   ruleset: a tag names one commit forever.
 - Release-critical paths (workflows, release scripts, `package.json`,

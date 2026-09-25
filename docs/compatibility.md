@@ -774,8 +774,9 @@ socket-set and path removal — against a synthetic dialer, with no resolver
 or provider endpoint involved. `qualification/linux-loopback.ts` completes
 the chain: a stock `curl` under `HTTPS_PROXY` traverses forwarder → bridge →
 a local `openssl s_server`, proving the stock-binary path without provider
-cooperation. The `Qualification` workflow runs all three on `ubuntu-24.04`
-CI and uploads the JSON evidence — including the recorded fact that Ubuntu's
+cooperation. The `Check` workflow's `Linux kernel-boundary probes` job runs
+all three on `ubuntu-24.04` CI when the probes or sandbox sources change and
+uploads the JSON evidence — including the recorded fact that Ubuntu's
 default AppArmor user-namespace restriction blocks bwrap entirely until the
 host lifts it (`kernel.apparmor_restrict_unprivileged_userns=0`).
 

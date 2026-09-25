@@ -1109,7 +1109,8 @@ fn publish(
     active: &BTreeMap<Id, Active>,
     outbox: &Mutex<Outbox>,
 ) -> Result<()> {
-    let mut view = summary::snapshot(store, current, config, now_ms())?;
+    let now = now_ms();
+    let mut view = summary::snapshot(store, current, config, now)?;
     if let Some(active) = current.and_then(|id| active.get(id)) {
         view.state = State::Working;
         if let Ok(activity) = active.activity.lock() {
@@ -1143,7 +1144,7 @@ fn publish(
             row.activity = view.state.label().into();
         }
     }
-    crate::agent_overview::sort(&mut view.agents);
+    crate::agent_overview::sort(&mut view.agents, now);
     if current.is_none() {
         view.pending_route = usable_account(store, None, None, config)
             .ok()

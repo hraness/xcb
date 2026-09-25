@@ -5499,8 +5499,9 @@ fn managed_view(
     let progress = read_progress(managed.root());
     view.agents = crate::agent_overview::combine(
         managed.agent_overview(conversation, &progress, now)?,
-        store.agent_overview(None)?,
+        store.agent_overview(None, now)?,
         &xcb_core::ui::TranscriptContext::Conversation(conversation.clone()),
+        now,
     );
     view.tasks = tasks
         .iter()
