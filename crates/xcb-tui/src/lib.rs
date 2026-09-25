@@ -2610,8 +2610,10 @@ impl App {
                                     self.notice = EDITOR_PASTE_TOO_LARGE.into();
                                 }
                             }
+                            // TextArea reads Shift-Tab as Tab; keep it inert.
                             Event::Key(key)
                                 if key.kind != KeyEventKind::Release
+                                    && key.code != KeyCode::BackTab
                                     && (textarea
                                         .lines()
                                         .iter()
