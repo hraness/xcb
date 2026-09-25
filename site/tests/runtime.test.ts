@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
+import { blogPostPath, blogPosts, indexableBlogPosts } from "../app/blog/posts";
 import { publishedRelease } from "../app/publication";
 
 const site = join(import.meta.dir, "..");
@@ -127,7 +128,7 @@ describe("built xcb site", () => {
 
       // Follow every local link across the actual built public pages. Broken
       // doc routes or fragments must fail before publishing the marketing site.
-      const paths = ["/", "/compare", "/reflexes", "/download", "/docs", "/docs/getting-started", "/docs/providers", "/docs/workspace", "/docs/customization", "/docs/reflexes", "/docs/application-api", "/docs/reference"];
+      const paths = ["/", "/compare", "/reflexes", "/download", "/docs", "/docs/getting-started", "/docs/providers", "/docs/workspace", "/docs/customization", "/docs/reflexes", "/docs/application-api", "/docs/reference", "/blog", ...indexableBlogPosts.map(blogPostPath)];
       const documents = new Map<string, string>();
       for (const path of paths) {
         const response = await fetch(`${server.origin}${path}`, { redirect: "manual" });
@@ -159,6 +160,22 @@ describe("built xcb site", () => {
       expect(sitemapResponse.status).toBe(200);
       const sitemap = await sitemapResponse.text();
       for (const path of paths) expect(sitemap).toContain(`<loc>https://xcb.sh${path}</loc>`);
+
+      // Quarantined posts are readable by link, carry noindex, and stay out of discovery files.
+      const feed = await (await fetch(`${server.origin}/blog/feed.xml`)).text();
+      expect(feed).toContain("<feed xmlns=\"http://www.w3.org/2005/Atom\"");
+      for (const entry of blogPosts) {
+        const path = blogPostPath(entry);
+        const body = documents.get(path) ?? await (await fetch(`${server.origin}${path}`)).text();
+        expect(body).toContain("Drafted with AI from the source code and reviewed by");
+        const noindex = /<meta name="robots" content="noindex/u.test(body);
+        expect(noindex).toBe(entry.admission.lifecycle !== "indexable");
+        if (entry.admission.lifecycle !== "indexable") {
+          expect(sitemap).not.toContain(`<loc>https://xcb.sh${path}</loc>`);
+          expect(feed).not.toContain(`<id>https://xcb.sh${path}</id>`);
+          expect(documents.get("/blog")).not.toContain(`href="${path}"`);
+        }
+      }
     } finally {
       await stopBuiltSite(server);
     }
