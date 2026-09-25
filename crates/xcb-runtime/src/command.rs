@@ -546,7 +546,7 @@ impl CommandBackend {
         Ok(None)
     }
 
-    fn admission(&self) -> Result<std::fs::File> {
+    fn admission(&self) -> Result<private::ExclusiveLock> {
         let path = self.root.join("admission.lock");
         match private::create(&path, b"command-admission-v1\n") {
             Ok(()) => (),
@@ -558,6 +558,7 @@ impl CommandBackend {
             Error::Unavailable("command runner is busy; retry after its current command joins")
         })?;
         private::same_file(&path, &file)?;
+        let file = private::ExclusiveLock::held(file);
         // Only pending markers are scanned, so admission cost follows the
         // number of unjoined commands, not the retained job history. Each
         // named job is still verified against its exact receipts.
@@ -685,6 +686,7 @@ impl CommandBackend {
         lock.try_lock().map_err(|_| {
             Error::Unavailable("command runner is busy; retry after its current command joins")
         })?;
+        let _lock = private::ExclusiveLock::held(lock);
         let pending = jobs.join(PENDING);
         let mut report = PruneReport::default();
         let mut archive = None;

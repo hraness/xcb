@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -570,7 +570,7 @@ fn stamp_retention(root: &Path) {
     }
 }
 
-fn managed_migration_guard(root: &Path) -> Result<File> {
+fn managed_migration_guard(root: &Path) -> Result<private::ExclusiveLock> {
     let path = root.join("supervisor.lock");
     let file = OpenOptions::new()
         .read(true)
@@ -583,7 +583,7 @@ fn managed_migration_guard(root: &Path) -> Result<File> {
     private::check_file(&file, 4096)?;
     private::same_file(&path, &file)?;
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(private::ExclusiveLock::held(file)),
         Err(std::fs::TryLockError::WouldBlock) => Err(Error::Conflict(
             "managed state upgrade waits for the running supervisor to stop; let active work settle, pause schedules with the existing xcb, then restart xcb",
         )),
@@ -5303,6 +5303,7 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
         Err(std::fs::TryLockError::WouldBlock) => return Ok(0),
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
     }
+    let _lock = private::ExclusiveLock::held(lock);
     let mut identity = crate::managed_supervisor::SupervisorIdentity::register(&root)?;
     let store = Arc::new(Store::open(&root)?);
     // Lock, identity and store failures above are the only fatal startup
@@ -5403,7 +5404,7 @@ pub fn ensure_daemon(root: &Path, executable: &Path) -> Result<()> {
         .open(lock_path)?;
     private::check_file(&lock, 4096)?;
     match lock.try_lock() {
-        Ok(()) => drop(lock),
+        Ok(()) => drop(private::ExclusiveLock::held(lock)),
         Err(std::fs::TryLockError::WouldBlock) => {
             return crate::managed_supervisor::check_running(root, executable);
         }

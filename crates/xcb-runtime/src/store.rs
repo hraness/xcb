@@ -530,6 +530,7 @@ impl Store {
             .open(&lock_path)?;
         private::check_file(&initialization, 0)?;
         private::lock(&initialization)?;
+        let initialization = private::ExclusiveLock::held(initialization);
         private::same_file(&lock_path, &initialization)?;
         for name in [
             "accounts",

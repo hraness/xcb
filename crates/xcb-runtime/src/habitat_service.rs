@@ -150,7 +150,7 @@ fn load(root: &Path, home: &Path) -> Result<Option<Service>> {
     }
 }
 
-fn lock(root: &Path, name: &str) -> Result<File> {
+fn lock(root: &Path, name: &str) -> Result<private::ExclusiveLock> {
     let dir = private::directory(&root.join("managed"))?;
     let file = OpenOptions::new()
         .read(true)
@@ -161,8 +161,10 @@ fn lock(root: &Path, name: &str) -> Result<File> {
         .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(dir.join(name))?;
     private::check_file(&file, 4096)?;
-    file.try_lock().map_err(|_| Error::Conflict("habitat service or supervisor is active; pause schedules and project grants, let work settle, then retry"))?;
-    Ok(file)
+    file.try_lock().map_err(|_| {
+        Error::Conflict("habitat service or supervisor is active; pause schedules and project grants, let work settle, then retry")
+    })?;
+    Ok(private::ExclusiveLock::held(file))
 }
 
 fn read_manifest(path: &Path) -> Result<Vec<u8>> {

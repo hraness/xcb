@@ -303,6 +303,7 @@ impl WordcellConfig {
         let lock = private::open_file(&lock_path, 0)?;
         lock.try_lock()
             .map_err(|_| Error::Conflict("this Wordcell promotion is already running"))?;
+        let lock = private::ExclusiveLock::held(lock);
         private::same_file(&lock_path, &lock)?;
         let receipt_path = directory.join(format!("{request_digest}.json"));
         let mut old = match private::read(&receipt_path, MAX_RECEIPT_BYTES) {

@@ -9,7 +9,7 @@ use crate::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{
@@ -421,7 +421,7 @@ fn model_account(
     ))
 }
 
-fn workspace_lease(store: &Store, session: &Session) -> Result<File> {
+fn workspace_lease(store: &Store, session: &Session) -> Result<private::ExclusiveLock> {
     let directory = private::directory(&store.root().join("workspace-runs"))?;
     let path = directory.join(format!("{}.lock", digest(session.workspace.as_bytes())));
     let file = OpenOptions::new()
@@ -439,6 +439,7 @@ fn workspace_lease(store: &Store, session: &Session) -> Result<File> {
         }
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
     }
+    let file = private::ExclusiveLock::held(file);
     // Inspect durable custody only after excluding competing launchers. An
     // earlier owner may have released this lock with an unsettled run between
     // a pre-lock check and acquisition; the filesystem lock alone is no proof

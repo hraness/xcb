@@ -1,6 +1,6 @@
 {
   "name": "@hraness/xcb",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "description": "TypeScript SDK and compatibility CLI for xcb, which routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.",
   "type": "module",
   "license": "MIT",

@@ -970,7 +970,7 @@ pub async fn capture(mut command: Command, max: usize, deadline: Duration) -> Re
         .ok_or(Error::Protocol("child process identity"))?;
     let mut stdout = child.stdout.take().ok_or(Error::Protocol("stdout"))?;
     let stderr = child.stderr.take().ok_or(Error::Protocol("stderr"))?;
-    let result = tokio::time::timeout(deadline, async {
+    let result = match tokio::time::timeout(deadline, async {
         let output = async {
             let mut bytes = Vec::new();
             (&mut stdout)
@@ -985,18 +985,34 @@ pub async fn capture(mut command: Command, max: usize, deadline: Duration) -> Re
         let (bytes, _) = tokio::try_join!(output, drain(stderr, 1024 * 1024))?;
         Ok::<_, Error>(bytes)
     })
-    .await;
-    let _ = kill_process_group(group, Signal::KILL);
-    let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
-        .await
-        .map_err(|_| Error::Unavailable("child did not join"))??;
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(Error::Unavailable("provider command timed out")),
+    };
+    // EOF on the pipes only proves the descriptors closed; the leader can
+    // still be a moment from its own clean exit, and a group sweep landing in
+    // that window rewrites the exit as a signal. Only a failed or timed-out
+    // read stops the group before the leader's status is known — the same
+    // distinction capture_with_input and capture_supervised already make.
+    if result.is_err() {
+        let _ = kill_process_group(group, Signal::KILL);
+    }
+    let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(status) => status?,
+        Err(_) => {
+            let _ = kill_process_group(group, Signal::KILL);
+            let _ = child.wait().await;
+            return Err(Error::Unavailable("child did not join"));
+        }
+    };
     if !group_absent(group).await {
         return Err(Error::Unavailable("process group did not join"));
     }
     if !status.success() {
         return Err(Error::Unavailable("provider command failed"));
     }
-    result.map_err(|_| Error::Unavailable("provider command timed out"))?
+    result
 }
 
 #[cfg(test)]
