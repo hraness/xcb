@@ -212,7 +212,7 @@ fn readiness_requires_the_matching_rpc_and_rejects_early_execution() {
 
 #[test]
 fn pinned_thread_statuses_are_observations_not_turn_admission_or_completion() {
-    // Exported by the qualified 0.155.0-alpha.2.6 executable:
+    // Exported unchanged by the qualified 0.156.1 executable:
     // v2/ThreadStatusChangedNotification.json SHA256
     // 26f3c60c1b73f7fa2d31c74429cdc36f8746c76c33e3d314b3fb61d3661f05f6.
     for status in [

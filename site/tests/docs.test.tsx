@@ -108,7 +108,7 @@ describe("organized documentation", () => {
 
   test("keeps provider evidence and the application route distinct", async () => {
     const provider = await renderTopic("providers");
-    expect(provider).toContain("0.155.0-alpha.2.6");
+    expect(provider).toContain("0.156.1");
     expect(attributeValues(provider, '.xcb-docs-table-wrap[role="region"]', "aria-labelledby"))
       .toEqual(["provider-status-caption"]);
     expect(provider).toContain('<caption id="provider-status-caption">Native CLI evidence and current limits</caption>');

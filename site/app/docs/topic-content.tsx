@@ -93,7 +93,7 @@ function Providers() {
         <thead><tr><th scope="col">Provider</th><th scope="col">Current route</th><th scope="col">What has been checked</th></tr></thead>
         <tbody>
           <tr><th scope="row">Claude</th><td>Admitted Claude Code 2.1.268 or newer, major 2.</td><td>Installed coding workflow passed on macOS ARM64 with the tested account. Linux remains a candidate after its host checks.</td></tr>
-          <tr><th scope="row">Codex</th><td>Exact admitted 0.155.0-alpha.2.6 build on macOS.</td><td>Authenticated file operations and installed coding workflow passed with the tested account.</td></tr>
+          <tr><th scope="row">Codex</th><td>Exact admitted 0.156.1 build on macOS.</td><td>Sandbox and tool-list checks passed without signing in. Authenticated file operations and the installed coding workflow passed on the previous admitted build and have not been rerun on this one.</td></tr>
           <tr><th scope="row">Devin</th><td>Exact admitted 3000.11.1 and 3000.10.31 builds on macOS.</td><td>Both credential-free boundary fixtures passed. Authenticated coding acceptance requires separate account/model/build evidence; model availability is checked against the account’s fresh catalog at launch.</td></tr>
         </tbody>
       </table></div>
