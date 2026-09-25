@@ -1,9 +1,9 @@
 {
   "schema": "xcb.codex-native-boundary.v1",
-  "observedDate": "2026-09-20",
+  "observedDate": "2026-09-24",
   "platform": "macos-arm64",
-  "version": "0.155.0-alpha.2.6",
-  "binarySha256": "805f2102d573c580d8cad2fc774b81837e68f7e9bdd1adb559d67801bbc1f9bd",
+  "version": "0.156.1",
+  "binarySha256": "0196e89fe5a7598f816ee54232c3d7c26d75e502ab5cfe2c9240e81d90f7255a",
   "sandboxFunctionSha256": "3d1f1500b33e1f192f2304dedd53d5e31cbea5e46e54bd5d04778490fc770a75",
   "providerProbeSha256": "17b57d6a0794b430eb42319e2a7072bed5d4f3f95a227af91f9bc1caee3e1c1b",
   "kernelProbeSha256": "68b0f415a4a913477a3677b39f264d11d42ed40758588590d5a61eafc44abae1",
@@ -244,15 +244,15 @@
       "label": "config hard-link creation denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "catalog hard-link creation denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "config symlink creation (observational)",
@@ -264,36 +264,36 @@
       "label": "config symlink write denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "config chmod denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "config rename denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "config overwrite rename denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "profile rename denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "public CA read",
@@ -311,57 +311,57 @@
       "label": "public CA write denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "public CA symlink write denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "public CA hard-link creation denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "public CA chmod denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "public CA symlink chmod denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "public CA rename denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "public CA overwrite rename denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     },
     {
       "label": "public CA unlink denied",
       "expectedAllowed": false,
       "allowed": false,
-      "matched": true,
-      "errno": 1
+      "errno": 1,
+      "matched": true
     }
   ],
   "rootExitCode": 0,

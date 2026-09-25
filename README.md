@@ -46,7 +46,7 @@ for setup, supported boundaries, and current limits.
 | Provider | Native Rust CLI | TypeScript compatibility CLI |
 | --- | --- | --- |
 | Claude | Installed coding workflow verified on macOS ARM64 with the tested account; Linux remains an execution candidate after sign-in, binary admission, and confinement checks | Execution candidate, subject to its own admission and confinement checks |
-| Codex | Native app-server on macOS for exact build **0.155.0-alpha.2.6**; authenticated broker and installed coding workflow acceptance passed on macOS ARM64 with the tested account | Discovery only; managed task execution gated on host qualification |
+| Codex | Native app-server on macOS for exact build **0.156.1**; credential-free boundary and tool-manifest checks passed; authenticated coding acceptance was recorded on the previous admitted build and has not been rerun on this one | Discovery only; managed task execution gated on host qualification |
 | Devin | Native ACP candidate on macOS for exact builds **3000.11.1** and **3000.10.31**; both passed credential-free boundary checks; model availability is checked against the connected account's fresh catalog at launch | ACP implementation exists; task execution disabled pending exact-runtime qualification |
 
 A successful `doctor` or a visible model does not prove a working coding session.
@@ -259,10 +259,11 @@ An account, metadata pin, or model listing cannot activate an unqualified adapte
 
 ### Connect Codex on macOS
 
-Use the exact admitted **0.155.0-alpha.2.6** build. Authenticated broker
-read/write/read and installed coding-workflow acceptance passed on macOS ARM64
-with the tested account; this does not qualify arbitrary provider versions or
-the separate application API. xcb supervises the official
+Use the exact admitted **0.156.1** build. Its credential-free boundary and
+tool-manifest checks passed on macOS ARM64. Authenticated broker read/write/read
+and installed coding-workflow acceptance were recorded on the previous admitted
+build (0.155.0-alpha.2.6) and have not been rerun on this one. None of this
+qualifies arbitrary provider versions or the separate application API. xcb supervises the official
 CLI's ChatGPT device sign-in in a private profile:
 
 ```sh

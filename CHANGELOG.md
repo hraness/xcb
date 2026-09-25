@@ -4,6 +4,22 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+## 0.8.4
+
+- Codex updates itself, and the only build xcb accepted, 0.155.0-alpha.2.6, no
+  longer exists on the machines that ran it or in any public download, so no
+  Codex account could take work. xcb now accepts the exact 0.156.1 build. Its
+  sandbox checks pass with the same policy as before, and a new offline check
+  confirms that the model sees only xcb's tools, that a call to one of them
+  reaches xcb, and that nine Codex builtins, including shell commands, patches
+  and sub-agents, are refused without running. That check is now part of the
+  repository, so the next Codex release can be admitted the same way.
+- On 0.156.1, the `ultra` reasoning setting is sent to the model as `xhigh` for
+  gpt-6-astra and `max` for gpt-5.6-sol, because ultra's automatic task
+  delegation stays turned off under xcb.
+- Signed-in coding sessions were confirmed on the previous build and have not
+  been rerun on 0.156.1.
+
 ## 0.8.3
 
 [Verified native release](https://github.com/hraness/xcb/releases/tag/v0.8.3)

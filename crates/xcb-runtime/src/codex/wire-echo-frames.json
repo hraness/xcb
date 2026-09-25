@@ -22,7 +22,8 @@
         "type": "active",
         "activeFlags": []
       }
-    }
+    },
+    "emittedAtMs": 1790297642490
   },
   {
     "method": "turn/started",
@@ -34,18 +35,19 @@
         "itemsView": "notLoaded",
         "status": "inProgress",
         "error": null,
-        "startedAt": 1789833370,
+        "startedAt": 1790297642,
         "completedAt": null,
         "durationMs": null
       }
-    }
+    },
+    "emittedAtMs": 1790297642490
   },
   {
     "method": "item/started",
     "params": {
       "item": {
         "type": "userMessage",
-        "id": "01a0ba61-da33-7633-809e-0d3fa09e01b7",
+        "id": "01a0d60e-15fd-70f3-808d-96e861d3b404",
         "clientId": null,
         "content": [
           {
@@ -57,15 +59,16 @@
       },
       "threadId": "thread1",
       "turnId": "turn1",
-      "startedAtMs": 1789833370163
-    }
+      "startedAtMs": 1790297642493
+    },
+    "emittedAtMs": 1790297642493
   },
   {
     "method": "item/completed",
     "params": {
       "item": {
         "type": "userMessage",
-        "id": "01a0ba61-da33-7633-809e-0d3fa09e01b7",
+        "id": "01a0d60e-15fd-70f3-808d-96e861d3b404",
         "clientId": null,
         "content": [
           {
@@ -77,8 +80,9 @@
       },
       "threadId": "thread1",
       "turnId": "turn1",
-      "completedAtMs": 1789833370163
-    }
+      "completedAtMs": 1790297642493
+    },
+    "emittedAtMs": 1790297642494
   },
   {
     "method": "item/started",
@@ -98,8 +102,9 @@
       },
       "threadId": "thread1",
       "turnId": "turn1",
-      "startedAtMs": 1789833370164
-    }
+      "startedAtMs": 1790297642502
+    },
+    "emittedAtMs": 1790297642502
   },
   {
     "method": "item/tool/call",
@@ -138,8 +143,9 @@
       },
       "threadId": "thread1",
       "turnId": "turn1",
-      "completedAtMs": 1789833370164
-    }
+      "completedAtMs": 1790297642502
+    },
+    "emittedAtMs": 1790297642503
   },
   {
     "method": "thread/tokenUsage/updated",
@@ -148,31 +154,50 @@
       "turnId": "turn1",
       "tokenUsage": {
         "total": {
-          "totalTokens": 13,
-          "inputTokens": 10,
+          "totalTokens": 2,
+          "inputTokens": 1,
           "cachedInputTokens": 0,
           "cacheWriteInputTokens": 0,
-          "outputTokens": 3,
+          "outputTokens": 1,
           "reasoningOutputTokens": 0
         },
         "last": {
-          "totalTokens": 13,
-          "inputTokens": 10,
+          "totalTokens": 2,
+          "inputTokens": 1,
           "cachedInputTokens": 0,
           "cacheWriteInputTokens": 0,
-          "outputTokens": 3,
+          "outputTokens": 1,
           "reasoningOutputTokens": 0
         },
         "modelContextWindow": 258400
       }
-    }
+    },
+    "emittedAtMs": 1790297642503
+  },
+  {
+    "method": "account/rateLimits/updated",
+    "params": {
+      "rateLimits": {
+        "limitId": "codex",
+        "limitName": null,
+        "normalModelSlug": null,
+        "primary": null,
+        "secondary": null,
+        "credits": null,
+        "individualLimit": null,
+        "spendControlReached": null,
+        "planType": null,
+        "rateLimitReachedType": null
+      }
+    },
+    "emittedAtMs": 1790297642503
   },
   {
     "method": "item/started",
     "params": {
       "item": {
         "type": "agentMessage",
-        "id": "msg_3",
+        "id": "msg_1",
         "text": "synthetic-complete",
         "phase": "final_answer",
         "memoryCitation": null,
@@ -181,15 +206,16 @@
       },
       "threadId": "thread1",
       "turnId": "turn1",
-      "startedAtMs": 1789833370166
-    }
+      "startedAtMs": 1790297642507
+    },
+    "emittedAtMs": 1790297642508
   },
   {
     "method": "item/completed",
     "params": {
       "item": {
         "type": "agentMessage",
-        "id": "msg_3",
+        "id": "msg_1",
         "text": "synthetic-complete",
         "phase": "final_answer",
         "memoryCitation": null,
@@ -198,8 +224,9 @@
       },
       "threadId": "thread1",
       "turnId": "turn1",
-      "completedAtMs": 1789833370166
-    }
+      "completedAtMs": 1790297642508
+    },
+    "emittedAtMs": 1790297642508
   },
   {
     "method": "thread/tokenUsage/updated",
@@ -208,24 +235,43 @@
       "turnId": "turn1",
       "tokenUsage": {
         "total": {
-          "totalTokens": 26,
-          "inputTokens": 20,
+          "totalTokens": 4,
+          "inputTokens": 2,
           "cachedInputTokens": 0,
           "cacheWriteInputTokens": 0,
-          "outputTokens": 6,
+          "outputTokens": 2,
           "reasoningOutputTokens": 0
         },
         "last": {
-          "totalTokens": 13,
-          "inputTokens": 10,
+          "totalTokens": 2,
+          "inputTokens": 1,
           "cachedInputTokens": 0,
           "cacheWriteInputTokens": 0,
-          "outputTokens": 3,
+          "outputTokens": 1,
           "reasoningOutputTokens": 0
         },
         "modelContextWindow": 258400
       }
-    }
+    },
+    "emittedAtMs": 1790297642508
+  },
+  {
+    "method": "account/rateLimits/updated",
+    "params": {
+      "rateLimits": {
+        "limitId": "codex",
+        "limitName": null,
+        "normalModelSlug": null,
+        "primary": null,
+        "secondary": null,
+        "credits": null,
+        "individualLimit": null,
+        "spendControlReached": null,
+        "planType": null,
+        "rateLimitReachedType": null
+      }
+    },
+    "emittedAtMs": 1790297642508
   },
   {
     "method": "thread/status/changed",
@@ -234,7 +280,8 @@
       "status": {
         "type": "idle"
       }
-    }
+    },
+    "emittedAtMs": 1790297642508
   },
   {
     "method": "turn/completed",
@@ -245,7 +292,7 @@
         "items": [
           {
             "type": "agentMessage",
-            "id": "msg_3",
+            "id": "msg_1",
             "text": "synthetic-complete",
             "phase": "final_answer",
             "memoryCitation": null,
@@ -256,10 +303,11 @@
         "itemsView": "summary",
         "status": "completed",
         "error": null,
-        "startedAt": 1789833370,
-        "completedAt": 1789833370,
-        "durationMs": 3
+        "startedAt": 1790297642,
+        "completedAt": 1790297642,
+        "durationMs": 18
       }
-    }
+    },
+    "emittedAtMs": 1790297642508
   }
 ]
