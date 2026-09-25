@@ -10,7 +10,7 @@ use ratatui::{
     text::{Line, Span, StyledGrapheme, Text},
     widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
-use ratatui_textarea::{CursorMove, TextArea};
+use ratatui_textarea::{CursorMove, DataCursor, TextArea};
 use std::{
     collections::{HashMap, VecDeque, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
@@ -904,7 +904,7 @@ fn cursor_cells(line: &str, col: usize) -> usize {
 /// TextArea exposes scalar columns, including positions inside a grapheme.
 /// Normalize those before painting so insertion and both cursors agree.
 fn normalize_cursor(textarea: &mut TextArea<'static>, previous: &mut Option<(usize, usize)>) {
-    let (row, cursor) = textarea.cursor();
+    let DataCursor(row, cursor) = textarea.cursor();
     let Some(line) = textarea.lines().get(row) else {
         return;
     };
@@ -930,7 +930,8 @@ fn normalize_cursor(textarea: &mut TextArea<'static>, previous: &mut Option<(usi
             textarea.move_cursor(direction);
         }
     }
-    *previous = Some(textarea.cursor());
+    let DataCursor(row, column) = textarea.cursor();
+    *previous = Some((row, column));
 }
 
 fn render_textarea(
@@ -952,7 +953,7 @@ fn render_textarea(
     if let Some(block) = textarea.block() {
         frame.render_widget(block, area);
     }
-    let (cursor_row, cursor_col) = textarea.cursor();
+    let DataCursor(cursor_row, cursor_col) = textarea.cursor();
     let cursor_line = textarea.lines().get(cursor_row).map_or("", String::as_str);
     scroll.0 = next_scroll_top(scroll.0, cursor_row, inner.height as usize);
     let cursor_cell = cursor_cells(cursor_line, cursor_col);
@@ -1059,7 +1060,7 @@ fn place_textarea_cursor(
     if inner.is_empty() {
         return;
     }
-    let (row, col) = textarea.cursor();
+    let DataCursor(row, col) = textarea.cursor();
     let line = textarea.lines().get(row).map_or("", String::as_str);
     let x = inner.x.saturating_add(
         u16::try_from(cursor_cells(line, col).saturating_sub(scroll.1)).unwrap_or(u16::MAX),
