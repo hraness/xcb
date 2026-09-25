@@ -24,7 +24,7 @@ import { runCliTurn } from "./cli/run.ts";
 import { runCliChat } from "./cli/chat.ts";
 import { dim, green, red, yellow, printRemainingText } from "./cli/tui.ts";
 
-const VERSION = "0.8.8";
+const VERSION = "0.8.9";
 
 const USAGE = `xcb-compat: the TypeScript compatibility CLI for xcb, which routes coding tasks
 across the Claude, Codex, and Devin subscriptions you already pay for

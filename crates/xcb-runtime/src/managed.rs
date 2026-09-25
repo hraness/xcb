@@ -60,6 +60,9 @@ pub use inbox::{InboxEvent, InboxWatch};
 #[path = "managed_program_state.rs"]
 mod program_state;
 pub use program_state::{ProgramChild, ProgramStatus};
+#[path = "managed_daemon.rs"]
+mod daemon;
+pub use daemon::{AdmittedDaemon, DaemonChild, DaemonStatus, MAX_DAEMON_GENERATIONS, daemon_name};
 
 #[cfg(test)]
 #[path = "managed_mailbox_tests.rs"]
@@ -228,6 +231,8 @@ pub struct ManagedTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program_child: Option<ProgramChild>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_child: Option<DaemonChild>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Id>,
     pub detail: String,
     /// How the last settled worker turn ended, as categorized by the settle
@@ -264,6 +269,7 @@ impl ManagedTask {
             && self.program == other.program
             && self.program_generation == other.program_generation
             && self.program_child == other.program_child
+            && self.daemon_child == other.daemon_child
             && self.schedule == other.schedule
             && self
                 .project_proposal
@@ -337,6 +343,16 @@ impl ManagedTask {
             if self.program.is_some() || self.project_proposal.is_some() || self.schedule.is_some()
             {
                 return Err(Error::Conflict("managed program child identity is invalid"));
+            }
+        }
+        if let Some(child) = &self.daemon_child {
+            child.validate()?;
+            if self.program.is_some()
+                || self.program_child.is_some()
+                || self.project_proposal.is_some()
+                || self.schedule.is_some()
+            {
+                return Err(Error::Conflict("managed daemon child identity is invalid"));
             }
         }
         label(&self.title, 160)?;
@@ -621,7 +637,7 @@ impl ManagedStore {
         }
         connection.pragma_update(None, "synchronous", "FULL")?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 5 {
+        if version > 6 {
             return Err(Error::Unavailable(
                 "managed state was written by a newer xcb",
             ));
@@ -629,7 +645,7 @@ impl ManagedStore {
         // A prior supervisor owns the old writer contract until all its work
         // settles. Never advance the schema underneath that admitted writer.
         // The daemon itself opens/migrates before taking its dispatch lock.
-        let _migration_guard = if version < 5 {
+        let _migration_guard = if version < 6 {
             Some(managed_migration_guard(&root)?)
         } else {
             None
@@ -685,6 +701,7 @@ impl ManagedStore {
         project::migrate(&mut connection)?;
         inbox::migrate(&mut connection)?;
         program_state::migrate(&mut connection)?;
+        daemon::migrate(&mut connection)?;
         let mut store = Self {
             root,
             connection: Mutex::new(connection),
@@ -793,7 +810,7 @@ impl ManagedStore {
                 )? as u64;
                 let stale_tasks: Vec<String> = {
                     let mut query = tx.prepare(
-                        "SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled') AND updated_at<?1 AND id NOT IN (SELECT task FROM inbox_batches) AND id NOT IN (SELECT task FROM inbox_events WHERE status='waiting' OR updated_at>=?1) AND id NOT IN (SELECT source FROM inbox_watches w JOIN tasks target ON target.id=w.task WHERE (target.state NOT IN ('completed','failed','cancelled') OR target.updated_at>=?1)) AND id NOT IN (SELECT child FROM program_calls) AND id NOT IN (SELECT parent FROM program_calls pc JOIN tasks child_task ON child_task.id=pc.child WHERE child_task.state NOT IN ('completed','failed','cancelled')) AND id NOT IN (SELECT last_task FROM habitat_schedules WHERE last_task IS NOT NULL) AND id NOT IN (SELECT json_extract(payload,'$.project_proposal.parent') FROM tasks WHERE json_valid(payload) AND json_extract(payload,'$.project_proposal.parent') IS NOT NULL AND state IN ('queued','running','needs_input','uncertain')) LIMIT ?2",
+                        "SELECT id FROM tasks WHERE state IN ('completed','failed','cancelled') AND updated_at<?1 AND id NOT IN (SELECT task FROM inbox_batches) AND id NOT IN (SELECT task FROM inbox_events WHERE status='waiting' OR updated_at>=?1) AND id NOT IN (SELECT source FROM inbox_watches w JOIN tasks target ON target.id=w.task WHERE (target.state NOT IN ('completed','failed','cancelled') OR target.updated_at>=?1)) AND id NOT IN (SELECT child FROM program_calls) AND id NOT IN (SELECT parent FROM program_calls pc JOIN tasks child_task ON child_task.id=pc.child WHERE child_task.state NOT IN ('completed','failed','cancelled')) AND id NOT IN (SELECT child FROM daemon_calls WHERE child IS NOT NULL) AND id NOT IN (SELECT last_task FROM habitat_schedules WHERE last_task IS NOT NULL) AND id NOT IN (SELECT json_extract(payload,'$.project_proposal.parent') FROM tasks WHERE json_valid(payload) AND json_extract(payload,'$.project_proposal.parent') IS NOT NULL AND state IN ('queued','running','needs_input','uncertain')) LIMIT ?2",
                     )?;
                     query
                         .query_map(params![sql(cutoff)?, RETENTION_BATCH], |row| row.get(0))?
@@ -1301,7 +1318,8 @@ impl ManagedStore {
             .any(|task| {
                 task.session.as_ref() == Some(session) || task.worker_sessions.contains(session)
             })
-            || self.program_dependency_sessions()?.contains(session))
+            || self.program_dependency_sessions()?.contains(session)
+            || self.daemon_dependency_sessions()?.contains(session))
     }
     /// Session ids referenced by any nonterminal task — current session and
     /// worker history — computed with a single managed task scan so a prune
@@ -1315,6 +1333,7 @@ impl ManagedStore {
             ids.extend(task.worker_sessions.iter().cloned());
         }
         ids.extend(self.program_dependency_sessions()?);
+        ids.extend(self.daemon_dependency_sessions()?);
         Ok(ids)
     }
 
@@ -2214,6 +2233,7 @@ impl ManagedStore {
             program_receipt: None,
             program_waiting: false,
             program_child: None,
+            daemon_child: None,
             schedule: options.occurrence.map(|o| o.schedule_id().clone()),
             detail: if routing_question {
                 "This scheduled prompt requests a different provider from the project requirement. Reply with a revised task for the required provider, or cancel this occurrence."
@@ -4838,6 +4858,7 @@ impl Supervisor {
             );
         }
         self.managed.tick_programs(&self.store, !draining).await?;
+        self.managed.tick_daemons(&self.store, !draining).await?;
         if !draining {
             self.managed.tick_projects(now_ms()).await?;
             self.managed.tick_schedules(now_ms()).await?;
@@ -6632,7 +6653,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         let count: i64 = migrated
             .db()
             .unwrap()
@@ -7359,6 +7380,7 @@ mod tests {
             program_receipt: None,
             program_waiting: false,
             program_child: None,
+            daemon_child: None,
             schedule: None,
             detail: "x".into(),
             settle: None,

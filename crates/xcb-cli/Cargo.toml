@@ -19,7 +19,7 @@ clap_complete = "=4.6.9"
 serde = "=1.0.229"
 serde_json = "=1.0.151"
 tokio = { version = "=1.47.1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
-xcb-core = { version = "0.8.8", path = "../xcb-core" }
-xcb-runtime = { version = "0.8.8", path = "../xcb-runtime" }
-xcb-tui = { version = "0.8.8", path = "../xcb-tui" }
+xcb-core = { version = "0.8.9", path = "../xcb-core" }
+xcb-runtime = { version = "0.8.9", path = "../xcb-runtime" }
+xcb-tui = { version = "0.8.9", path = "../xcb-tui" }
 zeroize = "=1.9.0"

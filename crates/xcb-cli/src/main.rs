@@ -226,6 +226,11 @@ enum Commands {
         #[arg(long)]
         conversation: Option<Id>,
     },
+    /// Manage named durable ALGAL daemons in project conversations.
+    Daemons {
+        #[command(subcommand)]
+        command: Option<habitat::DaemonCommand>,
+    },
     /// Show questions, approvals and actions requiring attention across conversations.
     Attention,
     /// Configure bounded project autonomy and inspect remaining grants.
@@ -2041,6 +2046,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             command,
             conversation,
         }) => habitat::schedules(store.root(), command, conversation.as_ref(), cli.json).await,
+        Some(Commands::Daemons { command }) => {
+            habitat::daemons(store.root(), command, cli.json).await
+        }
         Some(Commands::Attention) => habitat::attention(store.root(), cli.json),
         Some(Commands::Projects { command }) => habitat::projects(store.root(), command, cli.json),
         Some(Commands::Memory { command }) => {

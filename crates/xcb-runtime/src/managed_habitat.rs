@@ -1076,7 +1076,7 @@ impl ManagedStore {
             [],
             |row| row.get(0),
         )?;
-        if enabled {
+        if enabled || self.daemon_pending_work()? {
             return Ok(true);
         }
         Ok(self.active_tasks(128)?.iter().any(|task| {
