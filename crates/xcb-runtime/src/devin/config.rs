@@ -2,12 +2,16 @@ use crate::{Error, Result, process::Pin};
 use serde_json::{Value, json};
 use xcb_core::Provider;
 
-pub const VERSION: &str = "3000.11.1";
-pub const BINARY_SHA256: &str = "1327c9ff28ec0799e29baa1fe0eeceba2a7c8965123d49058845b6746fea7940";
+pub const VERSION: &str = "3000.11.3";
+pub const BINARY_SHA256: &str = "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff";
 /// Independently reviewed version/digest pairs. Preserve admitted deployments
 /// when a new build passes the same unchanged native inventory and boundary.
 const REVIEWED_BUILDS: &[(&str, &str)] = &[
     (VERSION, BINARY_SHA256),
+    (
+        "3000.11.1",
+        "1327c9ff28ec0799e29baa1fe0eeceba2a7c8965123d49058845b6746fea7940",
+    ),
     (
         "3000.10.31",
         "4cd4d2e242ed78443fe26d6f55382fd888ece0ac4e80b205106f8f1bf2b0cfa4",
