@@ -1,8 +1,11 @@
 # Terminal workspace
 
-`xcb chat` opens a managed conversation. xcb chooses the account and model for
-each task. `/resume` lists saved conversations; `/new` starts another one.
-`/rename <name>` changes its title. `/status` shows routing and agent state.
+Plain `xcb` (or `xcb chat`) opens your thread from any directory. xcb chooses
+the project directory, account, and model for each task. `/sessions` (alias
+`/resume`) lists the thread first and then `project view · <name>` rows.
+`xcb chat --new` opens a new project view for the current directory.
+`/rename <name>` changes a conversation's title. `/status` shows routing and
+agent state.
 
 The editor follows familiar Codex CLI keys. Type `/` to search commands, use
 Up/Down to select, Tab to complete, and Enter to run. Escape closes a menu and
@@ -30,7 +33,7 @@ keeps your draft. Type `?` on an empty prompt or press F1 for scrollable help.
 | Recall the most recently updated queued task if it has not started and supports recall | Alt-Up |
 | Open attention across agents | F2 or Alt-Down |
 | Focus the agent overview; Enter adds a reference, Escape returns to chat | F6 |
-| Switch conversations with an empty prompt | Alt-Left / Alt-Right |
+| Move the thread's focus between projects, or switch conversations in a project view, with an empty prompt | Alt-Left / Alt-Right |
 
 Ctrl-C closes a dialog, clears a nonempty draft, or requests cancellation when
 the prompt is empty and work is active. With no work or draft, it quits.
@@ -44,6 +47,59 @@ Paste preserves multiple lines without sending them. Drafts accept up to
 `/detach [number|all]` removes it. With no number, `/detach` removes the last
 attachment. Mouse capture starts off so terminal selection works; `/mouse`
 enables wheel scrolling.
+
+## Work in the thread
+
+Each prompt in the thread becomes a task in one project directory. The reply
+names the directory and why xcb chose it, for example
+“Started Fix the parser in `app` · named `app` · /workspace to move”. The
+[managed harness guide](managed-harness.md#choosing-a-tasks-directory) lists
+the rules in order.
+
+The header shows `xcb · all projects · 2 active`, or `xcb · → app` while a
+project is focused, and the footer counts known projects. Task messages in the
+transcript carry a dim chip with their project's name. Task details show a line
+such as ``Project: app · continuing in `app` (medium)``, and `Moved from <task>`
+for a moved task.
+
+| Command | Effect |
+| --- | --- |
+| `/workspace` | Pick a project to focus. |
+| `/workspace <name\|path>` | Focus that project. If your last prompt's task has not started, it also moves that task there. |
+| `/workspace move <task> <name\|path>` | Move an unstarted task to another project. |
+| `/workspace go [task]` | Start a waiting task now. |
+| `/workspace clear` or `/workspace all` | Clear the focus. |
+| `/workspace add <dir>` | Register a directory as a project. |
+
+The focus belongs to this terminal. While a project is focused, new prompts,
+`/backlog`, and `/project` use it unless the prompt names another path or
+project. Opening a thread card in the overview focuses its project, and
+Alt-Left and Alt-Right move the focus along the overview's projects, wrapping
+through “all projects”. A directory that holds other projects cannot be
+focused until you register it with `/workspace add`.
+
+When xcb cannot tell which project a prompt is for, it keeps your draft, saves
+nothing, and opens a picker of known projects. Entries marked “new” are
+directories named in the prompt that xcb has not seen; picking one registers it.
+Picking a project focuses it and sends the draft again. Escape closes the picker
+and keeps the draft.
+
+A less certain choice, or a prompt that names a project other than the focused
+one, waits 8 seconds before it starts and shows a chip such as
+`→ app · starts in 6s · /workspace go`. Only prompts typed in the thread wait.
+A started task cannot move; cancel it and send the prompt again.
+
+`/new` in the thread clears the focus and the guidance target and creates no
+conversation; in a project view it starts a new view. `/sessions` offers
+`＋ new project view · <name>` when the focus, launch directory, or open view
+names a directory.
+
+`/project`, `/memory`, `/schedule`, and `/backlog add` act on a project only
+when you have made it clear: a project you name (for `/project` and `/memory`),
+the project view's directory, the focus, or the selected task's directory.
+Otherwise they ask and save nothing. `/project grant [dir|name] <tasks> <hours>
+<goal>` reads a first word that is a whole number as `<tasks>`; write a
+directory named only with digits as a path, such as `./2026`.
 
 ## Edit with Vim keys
 
@@ -122,7 +178,8 @@ current conversation. `/task` returns the composer to new work.
 Press `a` in task details to answer its current question. The answer carries
 the question's revision, so a replacement question cannot receive an old reply.
 Press `x` to request cancellation of that exact task. `/cancel` uses the selected
-target, or asks which task when several could be cancelled and none is selected.
+target, or asks which task when several could be cancelled and none is selected;
+in the thread each choice shows its project.
 Approvals, account access, and uncertain
 results keep their existing separate controls.
 
