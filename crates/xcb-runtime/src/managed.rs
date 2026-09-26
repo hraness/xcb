@@ -115,7 +115,7 @@ impl TaskState {
             Self::Uncertain => "uncertain",
         }
     }
-    fn terminal(self) -> bool {
+    pub(crate) fn terminal(self) -> bool {
         matches!(
             self,
             Self::Completed | Self::Failed | Self::Cancelled | Self::Uncertain
@@ -4484,7 +4484,7 @@ struct SupervisorFault {
 /// Records the last supervisor fault in the managed state directory so a
 /// client can show why the detached process stopped or what it skipped.
 /// Only bounded, host-selected text is written: no paths, secrets or stderr.
-fn record_supervisor_fault(root: &Path, message: &str) {
+pub(crate) fn record_supervisor_fault(root: &Path, message: &str) {
     let fault = SupervisorFault {
         version: 1,
         at_ms: now_ms(),
@@ -4578,7 +4578,7 @@ pub fn supervisor_fault(root: &Path) -> Option<String> {
         .then(|| xcb_core::display_text(&fault.message, 512))
 }
 
-fn fault_text(error: &Error) -> String {
+pub(crate) fn fault_text(error: &Error) -> String {
     Diagnostic::from_error(error).as_str().to_owned()
 }
 
@@ -5353,9 +5353,15 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
     let mut offer_check = Instant::now();
     let mut tick_faults = 0u32;
     let mut interval = tokio::time::interval(Duration::from_millis(250));
+    let mut relay = crate::managed_relay::RelayHost::new(&root);
+    let mut relay_poll = tokio::time::interval(relay.poll_interval());
+    relay_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     loop {
         tokio::select! {
+            _ = relay_poll.tick() => {
+                relay.tick(&managed).await;
+            }
             _ = interval.tick() => {
                 if offer_check.elapsed() >= Duration::from_secs(60 * 60)
                     && offer_refresh.as_ref().is_none_or(tokio::task::JoinHandle::is_finished)
@@ -5383,7 +5389,9 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                 }
                 let nonterminal = managed.has_habitat_work().unwrap_or(true);
                 if supervisor.active.is_empty() && draining { break; }
-                if supervisor.active.is_empty() && !nonterminal {
+                // A live relay lane means this machine serves remote
+                // commands — idle-exit would strand the fleet.
+                if supervisor.active.is_empty() && !nonterminal && !relay.live() {
                     if idle_since.elapsed() >= IDLE_EXIT {
                         // Settle the in-flight offer refresh while still holding
                         // the lock, then re-check: a client that committed a task
@@ -5404,6 +5412,7 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
             }
         }
     }
+    relay.shutdown().await;
     if let Some(handle) = offer_refresh.take() {
         let _ = handle.await;
     }

@@ -83,9 +83,10 @@ impl Controller {
         state_root: &std::path::Path,
     ) -> Result<Self> {
         let mut client = RelayClient::connect(deployment_url).await?;
-        client.authenticate(&session.token).await;
         let mut session = session;
+        // Refresh before attaching: an expired token poisons the socket.
         link::refresh_if_due(&mut client, state_root, &mut session).await?;
+        client.authenticate(&session.token).await;
         let peers = link::peers(&mut client).await?;
         Ok(Self {
             client,
