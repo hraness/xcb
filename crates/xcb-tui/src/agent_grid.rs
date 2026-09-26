@@ -12,8 +12,20 @@ use unicode_segmentation::UnicodeSegmentation;
 use xcb_core::{
     display_text,
     session::State,
-    ui::{AgentRow, TranscriptContext},
+    ui::{AgentRow, GLOBAL_THREAD_ID, TranscriptContext},
 };
+
+/// A card's identity. Thread cards share the thread's context and differ
+/// by project directory, so the directory is part of the key.
+type CardKey = (TranscriptContext, String);
+
+fn card_key(row: &AgentRow) -> CardKey {
+    (row.context.clone(), row.workspace.clone())
+}
+
+fn is_thread_card(row: &AgentRow) -> bool {
+    matches!(&row.context, TranscriptContext::Conversation(id) if id.as_str() == GLOBAL_THREAD_ID)
+}
 
 const CARD_HEIGHT: u16 = 6;
 const MAX_AGENTS: usize = 128;
@@ -49,15 +61,17 @@ pub(crate) struct AgentGrid {
     query: String,
     filter_editing: bool,
     focused: bool,
-    selected: Option<TranscriptContext>,
+    selected: Option<CardKey>,
     offset: usize,
     columns: usize,
     page_rows: usize,
     area: Rect,
     cards: Vec<PaintedCard>,
     // Keep every session's position, including those hidden by a filter.
-    order: Vec<TranscriptContext>,
-    displayed_order: Vec<TranscriptContext>,
+    order: Vec<CardKey>,
+    displayed_order: Vec<CardKey>,
+    /// A thread card was opened; the terminal loop sends its focus.
+    focus_request: Option<String>,
 }
 
 impl Default for AgentGrid {
@@ -76,7 +90,14 @@ impl Default for AgentGrid {
             cards: Vec::new(),
             order: Vec::new(),
             displayed_order: Vec::new(),
+            focus_request: None,
         }
+    }
+}
+
+impl AgentGrid {
+    pub(crate) fn take_focus_request(&mut self) -> Option<String> {
+        self.focus_request.take()
     }
 }
 
@@ -88,10 +109,15 @@ fn recent_attention(row: &AgentRow, now: u64) -> bool {
 
 /// The conversation or direct session the terminal has open. Its card is
 /// the operator's anchor: it stays first so the work just started is never
-/// pushed off screen by other sessions' attention.
+/// pushed off screen by other sessions' attention. In the thread, the
+/// anchor is the focused project's card.
 fn is_open(app: &App, row: &AgentRow) -> bool {
     match &row.context {
-        TranscriptContext::Conversation(id) => app.view.conversation.as_ref() == Some(id),
+        TranscriptContext::Conversation(id) => {
+            app.view.conversation.as_ref() == Some(id)
+                && (!is_thread_card(row)
+                    || app.view.focus.as_deref() == Some(row.workspace.as_str()))
+        }
         TranscriptContext::Session(id) => {
             app.view.conversation.is_none()
                 && app.view.session.as_ref().map(|session| &session.id) == Some(id)
@@ -109,7 +135,7 @@ fn all_rows_at(app: &App, now: u64) -> Vec<&AgentRow> {
         let position = grid
             .order
             .iter()
-            .position(|context| context == &row.context);
+            .position(|entry| entry.0 == row.context && entry.1 == row.workspace);
         let group = if held || is_open(app, row) {
             0
         } else {
@@ -143,6 +169,7 @@ fn matches_filter(row: &AgentRow, grid: &AgentGrid, now: u64) -> bool {
         row.activity.as_str(),
         row.category.as_deref().unwrap_or_default(),
         identity,
+        row.workspace.as_str(),
         row.task.as_ref().map(|id| id.as_str()).unwrap_or_default(),
     ]
     .iter()
@@ -191,6 +218,18 @@ pub(crate) fn grid_height(app: &App, transcript: Rect, total_height: u16) -> u16
     let needed = count.div_ceil(columns(transcript.width));
     let visible = usize::from((budget - 1) / CARD_HEIGHT).min(needed);
     1 + visible as u16 * CARD_HEIGHT
+}
+
+/// Thread-card directories in the overview's priority order. The focused
+/// card's anchoring is left out so cycling never bounces between two.
+pub(crate) fn project_order(app: &App) -> Vec<String> {
+    app.view
+        .agents
+        .iter()
+        .take(MAX_AGENTS)
+        .filter(|row| is_thread_card(row))
+        .map(|row| row.workspace.clone())
+        .collect()
 }
 
 pub(crate) fn is_visible(app: &App) -> bool {
@@ -294,7 +333,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
     let page_rows = usize::from(area.height.saturating_sub(1) / CARD_HEIGHT).max(1);
     let total_rows = count.div_ceil(cols);
     let grid = &mut app.agent_grid;
-    let order: Vec<_> = items.iter().map(|row| row.context.clone()).collect();
+    let order: Vec<_> = items.iter().map(card_key).collect();
     if ((order != grid.displayed_order && (grid.offset > 0 || grid.focused))
         || cols != grid.columns)
         && let Some(anchor) = grid.displayed_order.get(grid.offset * grid.columns)
@@ -302,7 +341,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
     {
         grid.offset = index / cols;
     }
-    grid.order = all.iter().map(|row| row.context.clone()).collect();
+    grid.order = all.iter().map(card_key).collect();
     grid.displayed_order = order;
     grid.area = area;
     grid.columns = cols;
@@ -311,14 +350,14 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
     if grid
         .selected
         .as_ref()
-        .is_none_or(|selected| !items.iter().any(|row| &row.context == selected))
+        .is_none_or(|selected| !items.iter().any(|row| &card_key(row) == selected))
     {
-        grid.selected = items.first().map(|row| row.context.clone());
+        grid.selected = items.first().map(card_key);
     }
     if grid.focused
         && let Some(index) = items
             .iter()
-            .position(|row| Some(&row.context) == grid.selected.as_ref())
+            .position(|row| Some(&card_key(row)) == grid.selected.as_ref())
     {
         grid.offset = grid.offset.min(index / cols);
         if index / cols >= grid.offset + page_rows {
@@ -383,7 +422,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
         let row = if grid.focused {
             items
                 .iter()
-                .find(|row| Some(&row.context) == grid.selected.as_ref())
+                .find(|row| Some(&card_key(row)) == grid.selected.as_ref())
         } else {
             items.get(grid.offset)
         };
@@ -457,7 +496,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
             width,
             CARD_HEIGHT,
         );
-        let selected = grid.focused && grid.selected.as_ref() == Some(&row.context);
+        let selected = grid.focused && grid.selected.as_ref() == Some(&card_key(row));
         let border = if selected {
             Style::default().fg(Color::Cyan)
         } else {
@@ -666,10 +705,17 @@ impl App {
     }
 
     fn insert_agent_reference(&mut self, row: AgentRow) {
+        // A thread card is a project: opening it focuses the thread there.
+        if is_thread_card(&row) && crate::in_thread(&self.view) {
+            self.agent_grid.focused = false;
+            self.agent_grid.focus_request = Some(row.workspace);
+            self.dirty = true;
+            return;
+        }
         // Use the painted identity, not the row now occupying its screen slot.
         if !rows(self)
             .iter()
-            .any(|current| current.context == row.context && current.task == row.task)
+            .any(|current| card_key(current) == card_key(&row) && current.task == row.task)
         {
             self.notice =
                 "That session changed. The overview will refresh; your draft is unchanged.".into();
@@ -764,13 +810,13 @@ impl App {
                     .agent_grid
                     .cards
                     .iter()
-                    .any(|card| Some(&card.row.context) == self.agent_grid.selected.as_ref())
+                    .any(|card| Some(&card_key(&card.row)) == self.agent_grid.selected.as_ref())
                 {
                     self.agent_grid.selected = self
                         .agent_grid
                         .cards
                         .first()
-                        .map(|card| card.row.context.clone());
+                        .map(|card| card_key(&card.row));
                 }
             }
             return true;
@@ -815,14 +861,14 @@ impl App {
         let items: Vec<_> = rows(self).into_iter().cloned().collect();
         let current = items
             .iter()
-            .position(|row| Some(&row.context) == self.agent_grid.selected.as_ref())
+            .position(|row| Some(&card_key(row)) == self.agent_grid.selected.as_ref())
             .unwrap_or(0);
         if key.code == KeyCode::Enter {
             if let Some(row) = self
                 .agent_grid
                 .cards
                 .iter()
-                .find(|card| Some(&card.row.context) == self.agent_grid.selected.as_ref())
+                .find(|card| Some(&card_key(&card.row)) == self.agent_grid.selected.as_ref())
                 .map(|card| card.row.clone())
             {
                 self.insert_agent_reference(row);
@@ -850,7 +896,7 @@ impl App {
         };
         self.agent_grid.selected = items
             .get(next.min(items.len().saturating_sub(1)))
-            .map(|row| row.context.clone());
+            .map(card_key);
         if key.code == KeyCode::Home {
             // Scroll now rather than on the next focused repaint, so Home
             // then Escape before a frame still returns to the top and lets
@@ -981,6 +1027,65 @@ mod tests {
                 assert!(app.agent_grid.cards.is_empty());
             }
         }
+    }
+
+    fn thread_fixture() -> App {
+        let mut app = fixture(0);
+        app.view.conversation = Some(id(GLOBAL_THREAD_ID));
+        app.view.agents = ["/src/api", "/src/site"]
+            .into_iter()
+            .map(|workspace| AgentRow {
+                context: TranscriptContext::Conversation(id(GLOBAL_THREAD_ID)),
+                task: None,
+                title: workspace.rsplit('/').next().unwrap().into(),
+                workspace: workspace.into(),
+                model: None,
+                state: State::Idle,
+                activity: "idle".into(),
+                response: String::new(),
+                category: None,
+                updated_at_ms: crate::display_now_ms(),
+            })
+            .collect();
+        app
+    }
+
+    #[test]
+    fn grid_identity_is_context_and_workspace() {
+        let (tx, rx) = sync_channel(4);
+        let mut app = thread_fixture();
+        draw(&mut app, 120, 40);
+        // Two thread cards share a context and stay distinct by directory.
+        assert_eq!(app.agent_grid.cards.len(), 2);
+        app.overview_event(&key(KeyCode::F(6)));
+        app.overview_event(&key(KeyCode::Right));
+        assert_eq!(
+            app.agent_grid.selected,
+            Some((
+                TranscriptContext::Conversation(id(GLOBAL_THREAD_ID)),
+                "/src/site".into()
+            ))
+        );
+        // Opening a thread card focuses its project; no reference is typed.
+        app.handle(key(KeyCode::Enter), &tx);
+        assert!(
+            matches!(rx.try_recv(), Ok(crate::Intent::Focus(Some(focus))) if focus == "/src/site")
+        );
+        assert!(app.composer.text().is_empty());
+        // The focused project's card anchors first.
+        app.view.focus = Some("/src/site".into());
+        assert_eq!(rows(&app)[0].workspace, "/src/site");
+    }
+
+    #[test]
+    fn filter_matches_workspace() {
+        let mut app = thread_fixture();
+        app.view.agents[0].title = "Parser".into();
+        app.view.agents[1].title = "Landing".into();
+        app.overview_command("filter src/site");
+        let found = rows(&app);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].title, "Landing");
     }
 
     #[test]
@@ -1197,6 +1302,7 @@ mod tests {
             workspace: "/project".into(),
             binding: None,
             hold_until_ms: None,
+            moved_from: None,
             updated_at_ms: 1,
         });
         let now = crate::display_now_ms();
@@ -1436,13 +1542,19 @@ mod tests {
         app.handle(key(KeyCode::Down), &tx);
         assert_eq!(
             app.agent_grid.selected,
-            Some(TranscriptContext::Conversation(id("conversation_2")))
+            Some((
+                TranscriptContext::Conversation(id("conversation_2")),
+                "/project".into()
+            ))
         );
         app.view.agents.reverse();
         draw(&mut app, 80, 24);
         assert_eq!(
             app.agent_grid.selected,
-            Some(TranscriptContext::Conversation(id("conversation_2")))
+            Some((
+                TranscriptContext::Conversation(id("conversation_2")),
+                "/project".into()
+            ))
         );
         app.handle(key(KeyCode::Enter), &tx);
         assert!(app.composer.text().starts_with("Please inspect "));
@@ -1686,18 +1798,24 @@ mod tests {
         draw(&mut app, 160, 40);
         assert_eq!(
             app.agent_grid.selected,
-            Some(TranscriptContext::Conversation(id("conversation_127")))
+            Some((
+                TranscriptContext::Conversation(id("conversation_127")),
+                "/project".into()
+            ))
         );
         assert!(
             app.agent_grid
                 .cards
                 .iter()
-                .any(|card| card.row.context == app.agent_grid.selected.clone().unwrap())
+                .any(|card| Some(super::card_key(&card.row)) == app.agent_grid.selected.clone())
         );
         app.overview_event(&key(KeyCode::PageUp));
         assert_eq!(
             app.agent_grid.selected,
-            Some(TranscriptContext::Conversation(id("conversation_115")))
+            Some((
+                TranscriptContext::Conversation(id("conversation_115")),
+                "/project".into()
+            ))
         );
         app.overview_event(&key(KeyCode::Home));
         draw(&mut app, 160, 40);

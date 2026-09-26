@@ -229,6 +229,11 @@ impl App {
                     && self.attachments.is_empty()
                     && !self.pending_image =>
             {
+                // The thread spans projects, so its arrows move the focus.
+                if in_thread(&self.view) {
+                    self.cycle_focus(key.code == KeyCode::Right, output);
+                    return Some(true);
+                }
                 let current = self
                     .view
                     .conversations
@@ -321,7 +326,7 @@ impl App {
                         .tasks
                         .iter()
                         .find(|row| &row.id == id)
-                        .map(inspect_task),
+                        .map(|task| inspect_task(task, &self.view)),
                     PickAction::Backlog(id) => self
                         .view
                         .backlog
@@ -510,7 +515,7 @@ impl App {
                     prompt: text.clone(),
                     deferred: false,
                     priority: 5,
-                    workspace: None,
+                    workspace: self.standing_workspace(),
                 },
                 context,
                 None,
@@ -687,7 +692,13 @@ impl App {
             let items = tasks
                 .iter()
                 .map(|row| PickItem {
-                    label: format!("{} · {} · {}", row.title, row.status, row.id),
+                    label: format!(
+                        "{} · {} · {} · {}",
+                        row.title,
+                        row.status,
+                        self.project_label(&row.workspace, &row.conversation),
+                        row.id
+                    ),
                     action: PickAction::CancelTask {
                         id: row.id.clone(),
                         revision: row.revision,
@@ -863,7 +874,7 @@ impl App {
             "PgUp/PgDn  Scroll     Ctrl-Home/End  Top/latest".into(),
             "Ctrl-L  Clear display     F4  Expand tools     Alt-Up  Recall queued work".into(),
             "? / F1  Shortcuts     /resume  Sessions     /agents  Tasks".into(),
-            "F2 / Alt-Down  Attention     Alt-Left/Right  Switch conversation (empty draft)".into(),
+            "F2 / Alt-Down  Attention     Alt-Left/Right  Switch project focus in the thread, else conversation (empty draft)".into(),
             "F6  Focus agent grid; arrows/PgUp/PgDn browse, Enter adds a reference".into(),
             "In the grid: / or Ctrl-F filters; 1 all, 2 active, 3 needs attention".into(),
             "/overview all|active|attention|filter <text>|clear|hide|show".into(),
@@ -1321,15 +1332,7 @@ impl LivePicker {
                     action: PickAction::Project(row.workspace.clone()),
                 })
                 .collect(),
-            Self::Conversations => std::iter::once(PickItem {
-                label: "＋ new conversation".into(),
-                action: PickAction::NewConversation,
-            })
-            .chain(view.conversations.iter().map(|row| PickItem {
-                label: format!("{} · {} msgs · {}", row.title, row.messages, row.workspace),
-                action: PickAction::Conversation(row.id.clone()),
-            }))
-            .collect(),
+            Self::Conversations => crate::conversation_items(view),
             Self::Sessions => view
                 .sessions
                 .iter()
