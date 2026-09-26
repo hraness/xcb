@@ -10,10 +10,11 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.8.13 - 2026-09-26
 
 Pinned Claude and Codex builds keep working when the provider updates itself,
-and `xcb` accepts shorter identifiers and longer generate requests.
+reviewed provider builds arrive through a published catalog, and `xcb`
+accepts shorter identifiers and longer generate requests.
 
 - A pinned provider now runs from a private copy of its checked executable
   under `providers/bin/`, so a Claude or Codex self-update no longer changes
@@ -21,6 +22,12 @@ and `xcb` accepts shorter identifiers and longer generate requests.
   hourly, and before `chat`, `resume`, `run`, or a bare `xcb` launch, and
   switches to it only when it passes the same checks; a rejected build is
   remembered and the previous pin keeps routing.
+- `qualified-builds.json` in the repository publishes reviewed
+  `(version, sha256)` pairs exact-artifact providers may admit without an
+  xcb release. A discovered build nothing yet admits is parked as awaiting
+  catalog admission — `xcb doctor` reports it — and a published entry adopts
+  on the next hourly pass. A denied digest is rejected outright, and the
+  stored catalog is reused when the network is unavailable.
 - Devin CLI 3000.11.3 is a supported build, alongside 3000.11.1 and
   3000.10.31.
 - Task, conversation, schedule, and fleet device identifiers accept any
