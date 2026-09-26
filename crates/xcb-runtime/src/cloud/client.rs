@@ -7,6 +7,7 @@
 //! JSON.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use convex::{ConvexClient, FunctionResult};
 use serde_json::Value;
@@ -15,8 +16,17 @@ use crate::{Error, Result};
 
 use super::wire::{to_convex, to_json};
 
+/// Every relay call is bounded: the crate's worker awaits a oneshot that a
+/// poisoned websocket can leave hanging forever, so a stalled transport
+/// must surface here rather than wedge a pump tick or a controller CLI.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn protocol(what: &'static str) -> Error {
     Error::Protocol(what)
+}
+
+fn timed_out() -> Error {
+    Error::Unavailable("relay request timed out")
 }
 
 /// A leaked, bounded protocol detail for errors that arrive from the relay
@@ -63,8 +73,9 @@ pub struct RelayClient {
 impl RelayClient {
     /// Connect unauthenticated (the OTP flow starts here).
     pub async fn connect(deployment_url: &str) -> Result<Self> {
-        let client = ConvexClient::new(deployment_url)
+        let client = tokio::time::timeout(REQUEST_TIMEOUT, ConvexClient::new(deployment_url))
             .await
+            .map_err(|_| timed_out())?
             .map_err(|error| protocol(dynamic(format!("convex connect: {error}"))))?;
         Ok(Self { client })
     }
@@ -81,31 +92,35 @@ impl RelayClient {
 
     /// Call a public mutation by `module:name` with a JSON object of args.
     pub async fn mutation(&mut self, path: &str, args: Vec<(&str, Value)>) -> Result<Value> {
-        let result = self
-            .client
-            .mutation(path, object_args(args)?)
-            .await
-            .map_err(|error| protocol(dynamic(format!("relay mutation {path}: {error}"))))?;
+        let result = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            self.client.mutation(path, object_args(args)?),
+        )
+        .await
+        .map_err(|_| timed_out())?
+        .map_err(|error| protocol(dynamic(format!("relay mutation {path}: {error}"))))?;
         unwrap(result)
     }
 
     /// Call a public query.
     pub async fn query(&mut self, path: &str, args: Vec<(&str, Value)>) -> Result<Value> {
-        let result = self
-            .client
-            .query(path, object_args(args)?)
-            .await
-            .map_err(|error| protocol(dynamic(format!("relay query {path}: {error}"))))?;
+        let result =
+            tokio::time::timeout(REQUEST_TIMEOUT, self.client.query(path, object_args(args)?))
+                .await
+                .map_err(|_| timed_out())?
+                .map_err(|error| protocol(dynamic(format!("relay query {path}: {error}"))))?;
         unwrap(result)
     }
 
     /// Call a public action — Convex Auth's `signIn` is an action.
     pub async fn action(&mut self, path: &str, args: Vec<(&str, Value)>) -> Result<Value> {
-        let result = self
-            .client
-            .action(path, object_args(args)?)
-            .await
-            .map_err(|error| protocol(dynamic(format!("relay action {path}: {error}"))))?;
+        let result = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            self.client.action(path, object_args(args)?),
+        )
+        .await
+        .map_err(|_| timed_out())?
+        .map_err(|error| protocol(dynamic(format!("relay action {path}: {error}"))))?;
         unwrap(result)
     }
 }

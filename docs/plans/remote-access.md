@@ -130,8 +130,21 @@ xcb fleet                          # devices, workspaces, states, staleness
 xcb dispatch <device> <workspace>  # enqueue a managed task remotely
 xcb attention --remote             # open attention across the fleet
 xcb send <device> <daemon> <text>  # post to a remote daemon inbox
+xcb remote admit <device>          # wrap the account key for a new device
 xcb remote revoke <device>         # retire a lost or retired device
+xcb remote steer <device> <task> <text>   # queue guidance on a remote task
+xcb remote cancel <device> <task>         # cancel a remote managed task
+xcb remote answer <device> <task> <text>  # answer remote attention
+xcb remote refresh <device>        # republish the fleet projection now
+xcb remote status <id> [--wait]    # lifecycle + result of a posted command
+xcb remote abort <id>              # withdraw a still-pending command
+xcb remote ack <id>                # acknowledge a terminal command
 ```
+
+Every remote verb returns the posted command's public id; `xcb remote
+status --wait` blocks until the lifecycle closes and exits 0 only on
+`applied`, so a controller agent can drive the whole loop —
+dispatch → wait → attention → answer — without holding a socket.
 
 ## Delivery graph and ownership
 

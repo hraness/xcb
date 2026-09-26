@@ -36,6 +36,9 @@ pub const MAX_COMMAND_PLAINTEXT: usize = 8 * 1024;
 pub const MAX_PROJECTION_PLAINTEXT: usize = 32 * 1024;
 /// Wire ciphertext bound the backend enforces.
 const CIPHERTEXT_CHARS: usize = 64 * 1024 * 2;
+/// Peer public keys are refreshed at this cadence — not every poll — and
+/// immediately when a command arrives from a requester we do not know.
+const PEER_REFRESH_MS: u64 = 60_000;
 
 /// Everything a boot needs out of custody.
 pub struct LaneKeys {
@@ -120,8 +123,11 @@ pub struct RelayLane {
     authority: AuthorityTuple,
     session: CloudSession,
     state_root: std::path::PathBuf,
-    /// deviceId → public keys, refreshed per poll so enrollments land.
+    /// deviceId → public keys, refreshed on `PEER_REFRESH_MS` and on
+    /// demand for an unknown requester so enrollments land promptly.
     peers: BTreeMap<String, PeerDevice>,
+    /// Wall-clock millisecond at which `peers` next counts as stale.
+    peers_fresh_until: u64,
     /// Presence connection this boot owns.
     connection_id: String,
     presence_until: u64,
@@ -150,6 +156,7 @@ impl RelayLane {
             session,
             state_root: keys.state_root,
             peers: BTreeMap::new(),
+            peers_fresh_until: 0,
             connection_id,
             presence_until: 0,
         };
@@ -201,8 +208,25 @@ impl RelayLane {
                 .ok_or(protocol("heartbeat missing presenceUntil"))?
                 as u64;
         }
-        self.peers = link::peers(&mut self.client).await?;
+        if self.peers_fresh_until <= now_ms {
+            self.refresh_peers(now_ms).await?;
+        }
         Ok(())
+    }
+
+    /// Re-fetch the device list so envelope verification sees enrollments.
+    /// Called by `keepalive` on the refresh cadence and by `pump` hosts
+    /// when a command arrives from a requester not yet in the map.
+    pub async fn refresh_peers(&mut self, now_ms: u64) -> Result<()> {
+        self.peers = link::peers(&mut self.client).await?;
+        self.peers_fresh_until = now_ms + PEER_REFRESH_MS;
+        Ok(())
+    }
+
+    /// Whether a requester device id already resolves in the peer map —
+    /// hosts use this to trigger an out-of-cadence refresh.
+    pub fn knows_requester(&self, device: &str) -> bool {
+        self.peers.contains_key(device)
     }
 
     /// List nonterminal commands addressed to this device, parsed through
@@ -423,7 +447,17 @@ impl RelayLane {
     {
         self.keepalive(now_ms()).await?;
         let mut settled = 0;
-        for command in self.poll(None).await? {
+        let commands = self.poll(None).await?;
+        // A command from a device enrolled after our last refresh can't be
+        // verified — pull the peer list out of cadence rather than close
+        // its payloads as rejected.
+        if commands
+            .iter()
+            .any(|command| !self.knows_requester(&command.requesting_device_id))
+        {
+            self.refresh_peers(now_ms()).await?;
+        }
+        for command in commands {
             if command.state == CommandState::EffectStarted {
                 self.recover(&command).await?;
                 continue;
