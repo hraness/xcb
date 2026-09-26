@@ -129,7 +129,8 @@ export function splitReleaseBody(body: unknown): Readonly<{ identity: string; no
   const start = body.lastIndexOf(RELEASE_IDENTITY_OPENER);
   if (start < 0) throw new Error("GitHub Release body carries no identity record.");
   const identity = body.slice(start);
-  if (identity.indexOf("-->") !== identity.length - 3) {
+  // The body ends with "-->", so exactly one closer means it is the final one.
+  if (identity.split("-->").length !== 2) {
     throw new Error("GitHub Release identity record is not one trailing HTML comment.");
   }
   const prefix = body.slice(0, start);
