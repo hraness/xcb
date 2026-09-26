@@ -1,6 +1,6 @@
 # Native Devin boundary fixture
 
-This credential-free macOS fixture exercises Devin 3000.11.1, the native xcb
+This credential-free macOS fixture exercises Devin 3000.11.3, the native xcb
 stdio MCP helper, the real Rust ACP codec, and the production Seatbelt profile.
 Only the network clause changes: the fixture replaces provider TCP 443 and DNS
 with one loopback-only fake control plane. It never reads existing Devin account
@@ -73,6 +73,15 @@ provider service reliability, or real-model task quality. Those require separate
 live acceptance before making daily-driver claims.
 
 ## Recorded boundary result
+
+The [2026-09-26 receipt](devin-native-3000.11.3-macos-arm64.json) passed all
+six scenarios for exact build 3000.11.3. Its complete observed native tool
+inventory matches the previously reviewed 3000.11.1 schemas. Candidate checks
+passed before admission changed; the recorded receipt then reran the default
+admitted path with freshly built helper and fixture binaries. Production keeps
+all three reviewed version/hash pairs, with no cross-version digest
+substitutions. This is credential-free boundary evidence, not live coding
+acceptance.
 
 The [2026-09-22 receipt](devin-native-3000.11.1-macos-arm64.json) passed all
 six scenarios for exact build 3000.11.1. Its complete observed native tool

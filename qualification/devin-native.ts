@@ -15,7 +15,7 @@ if (!['--runtime', '--helper', '--test-binary', '--output'].every(key => options
 const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 const harnessDigest = hash(await readFile(import.meta.path));
 const candidate = options.has('--candidate-inventory');
-const inventoryPath = options.get('--candidate-inventory') ?? new URL('./devin-3000.11.1-inventory.json', import.meta.url);
+const inventoryPath = options.get('--candidate-inventory') ?? new URL('./devin-3000.11.3-inventory.json', import.meta.url);
 if ((await stat(inventoryPath)).size > 1024 * 1024) throw Error('Inventory exceeds bound');
 const inventoryBytes = await readFile(inventoryPath);
 const expected = JSON.parse(inventoryBytes.toString('utf8'));
