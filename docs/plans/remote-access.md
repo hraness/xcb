@@ -183,9 +183,12 @@ dispatch → wait → attention → answer — without holding a socket.
 - [x] Controller surface covers the whole closed union plus the
       posted-command lifecycle: `remote steer|cancel|answer|refresh`,
       `status --wait` (exit 0 only on `applied`), `abort`, `ack`.
-- [x] Supervised residency on a release binary: HRA2 runs the managed
-      daemon under the repo's own LaunchAgent from the installed
-      `v0.8.10` archive; presence re-arms on boot and the fleet
-      projection stays fresh through the ten-minute touch.
+- [x] Supervised residency on a release binary: HRA2 and the prod-b
+      surrogate both run the managed daemon under the repo's own
+      LaunchAgents from the installed `v0.8.11` archive; presence
+      re-arms on boot and the fleet projection stays fresh through the
+      ten-minute touch. The same archive was smoke-tested for
+      cryptographically-dead session recovery on prod custody (~50s
+      forced refresh and retry instead of a permanent wedge).
 - [ ] Live two-physical-laptop acceptance recorded (laptop 2 enrollment
       is a documented runbook step in `docs/remote-operations.md`).
