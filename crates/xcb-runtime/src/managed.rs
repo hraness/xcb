@@ -4,6 +4,7 @@ use crate::{
     digest, judge, kernel, new_id, now_ms, private, reflex, routing,
     runner::{Diagnostic, Observer, Outcome, Progress},
     store::Store,
+    workspace_infer::{CONTINUE_WINDOW_MS, continue_like, workspaces_overlap},
 };
 use algal::{
     contract::Manifest, effects::Host, graph::Transports, runtime, store::Store as AlgalStore,
@@ -74,6 +75,10 @@ pub use xcb_core::ui::GLOBAL_THREAD_ID;
 #[cfg(test)]
 #[path = "managed_workspace_tests.rs"]
 mod workspace_tests;
+
+#[cfg(test)]
+#[path = "managed_global_thread_tests.rs"]
+mod global_thread_tests;
 
 #[cfg(test)]
 #[path = "managed_mailbox_tests.rs"]
@@ -2289,6 +2294,7 @@ impl ManagedStore {
         Ok(next)
     }
 
+    #[cfg(test)]
     async fn create_task(
         &self,
         conversation: &Id,
@@ -2934,11 +2940,26 @@ impl ManagedStore {
         let current = self
             .conversation(conversation)?
             .ok_or(Error::Unavailable("managed conversation not found"))?;
-        match current.workspace.as_deref() {
-            Some(bound) if bound == workspace.to_string_lossy() => (),
+        let scope = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
+        // The thread takes any canonical directory, named explicitly.
+        let binding = match current.workspace.as_deref() {
+            Some(bound) if bound == scope => None,
             Some(_) => return Err(Error::Conflict("managed conversation workspace changed")),
-            None => return Err(Error::Conflict(workspace::THREAD_SPANS)),
-        }
+            None if self.validate_workspace(workspace)? == scope => {
+                Some(crate::workspace_infer::WorkspaceBinding {
+                    source: crate::workspace_infer::BindingSource::Explicit,
+                    confidence: crate::workspace_infer::BindingConfidence::High,
+                    origin: crate::workspace_infer::BindingOrigin::Cli,
+                    reason: "named directory".into(),
+                    alternatives: vec![],
+                })
+            }
+            None => return Err(Error::Conflict("workspace is not canonical")),
+        };
+        let create = habitat::CreateOptions {
+            binding,
+            ..Default::default()
+        };
         let trimmed = text.trim();
         if attachments.is_empty() && offer_question(trimmed) {
             let root = self.root.parent().ok_or(Error::PrivateState)?;
@@ -3000,7 +3021,7 @@ impl ManagedStore {
             let task = match matches.as_slice() {
                 [task] => (*task).clone(),
                 [] if !needle.is_empty() && !needle.starts_with("t_") && !needle.starts_with("task ") => {
-                    self.create_task(conversation, id, text, attachments, workspace).await?;
+                    self.create_habitat_task(conversation, id, text, attachments, workspace, create).await?;
                     return Ok(());
                 }
                 [] => return self.record_pair(conversation, id, text, "I couldn’t identify an active task to cancel. Use `/tasks`, then say `cancel <task id or title>`.".into()),
@@ -3128,7 +3149,7 @@ impl ManagedStore {
         let finished = if force_new {
             None
         } else {
-            self.recently_completed(conversation)?
+            self.recently_completed(conversation, &scope)?
         };
         if let Some(task) = &finished {
             let learn = |reflex: Reflex, labels: &[(Option<&str>, bool, f64)], source: &str| {
@@ -3190,25 +3211,28 @@ impl ManagedStore {
         } else {
             text
         };
-        self.create_task(conversation, id, text, attachments, workspace)
+        self.create_habitat_task(conversation, id, text, attachments, workspace, create)
             .await?;
         Ok(())
     }
 
-    /// The conversation's most recent task when it completed within
-    /// [`CONTINUE_WINDOW_MS`] and no other task in the conversation is active.
-    fn recently_completed(&self, conversation: &Id) -> Result<Option<ManagedTask>> {
-        if self
-            .active_tasks(128)?
-            .iter()
-            .any(|task| &task.conversation == conversation && !task.deferred)
-        {
+    /// The most recent task of this conversation in this workspace when it
+    /// completed within [`CONTINUE_WINDOW_MS`] and no other such task is
+    /// active. The thread spans workspaces, so both keys scope it.
+    fn recently_completed(
+        &self,
+        conversation: &Id,
+        workspace: &str,
+    ) -> Result<Option<ManagedTask>> {
+        if self.active_tasks(128)?.iter().any(|task| {
+            &task.conversation == conversation && task.workspace == workspace && !task.deferred
+        }) {
             return Ok(None);
         }
         Ok(self
             .backlog(Some(conversation), 256)?
             .into_iter()
-            .filter(|task| !task.deferred)
+            .filter(|task| !task.deferred && task.workspace == workspace)
             .max_by_key(|task| (task.created_at_ms, task.id.as_str().to_owned()))
             .filter(|task| {
                 task.state == TaskState::Completed
@@ -4096,40 +4120,6 @@ fn reply_like(text: &str) -> bool {
     )
 }
 
-/// A follow-up within this window of a completed task can continue it.
-const CONTINUE_WINDOW_MS: u64 = 6 * 60 * 60 * 1000;
-
-/// A short message whose whole intent is "keep going".
-fn continue_like(text: &str) -> bool {
-    let lower = text
-        .trim()
-        .trim_end_matches(['.', '!'])
-        .trim()
-        .to_ascii_lowercase();
-    let lower = lower.strip_prefix("please ").unwrap_or(&lower);
-    let lower = lower.strip_suffix(" please").unwrap_or(lower);
-    matches!(
-        lower,
-        "continue"
-            | "keep going"
-            | "go on"
-            | "go ahead"
-            | "proceed"
-            | "carry on"
-            | "finish it"
-            | "finish"
-            | "keep at it"
-            | "don't stop"
-            | "dont stop"
-            | "you stopped"
-            | "you stopped early"
-            | "continue where you left off"
-            | "continue the work"
-            | "resume"
-            | "next"
-    )
-}
-
 /// A request for a stronger (`Some(true)`) or lighter (`Some(false)`) model
 /// tier, used as route feedback for the previous task.
 fn escalation_cue(text: &str) -> Option<bool> {
@@ -4523,12 +4513,13 @@ fn judged(verdict: bool, veto_only: bool, approved: bool) -> bool {
     }
 }
 
+/// Whether an unsettled run holds this workspace or one nested with it.
 fn workspace_busy(store: &Store, workspace: &str) -> Result<bool> {
     for run in store.unsettled_runs()? {
         if let Some(session) = run.session
             && store
                 .session(&session)?
-                .is_some_and(|session| session.workspace == workspace)
+                .is_some_and(|session| workspaces_overlap(&session.workspace, workspace))
         {
             return Ok(true);
         }
@@ -5162,21 +5153,36 @@ impl Supervisor {
                 }
             }
         }
+        let now = now_ms();
         for task in tasks.into_iter().filter(|task| {
             !draining
                 && task.state == TaskState::Queued
                 && !task.deferred
                 && !task.cancel_requested
                 && !task.program_waiting
+                // A held task waits out its hold and occupies no slot.
+                && task.hold_until_ms.is_none_or(|until| until <= now)
         }) {
             if self.active.len() >= MAX_ACTIVE {
                 break;
             }
+            let task = if task.hold_until_ms.is_some() {
+                match self.managed.expire_hold(&task).await {
+                    Ok(task) => task,
+                    Err(Error::Conflict(_)) => continue,
+                    Err(error) => {
+                        self.task_fault(&task, &error).await;
+                        continue;
+                    }
+                }
+            } else {
+                task
+            };
             if self.active.contains_key(&task.id)
                 || self
                     .active_workspaces
                     .values()
-                    .any(|workspace| workspace == &task.workspace)
+                    .any(|workspace| workspaces_overlap(workspace, &task.workspace))
                 || self
                     .launch_attempts
                     .get(&task.id)
@@ -5246,6 +5252,20 @@ impl Supervisor {
                 failed.revision,
             );
             return match managed.transition(task, failed, Some(message)).await {
+                Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
+                Err(error) => Err(error),
+            };
+        }
+        // The directory must still be the one bound: a rename or a symlink
+        // swapped in since then must not redirect the worker.
+        let replaced = match managed.validate_workspace(Path::new(&task.workspace)) {
+            Ok(canonical) if canonical == task.workspace => None,
+            Ok(_) => Some("workspace moved or was replaced since it was bound".to_owned()),
+            Err(Error::Conflict(why)) => Some(why.to_owned()),
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(reason) = replaced {
+            return match managed.fail_unstarted(task, &reason).await {
                 Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
                 Err(error) => Err(error),
             };
