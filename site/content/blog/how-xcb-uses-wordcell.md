@@ -12,12 +12,12 @@ If you run your agents through [xcb](/), you can point a project at that folder 
 
 ## How xcb wires a project to one vault
 
-xcb never finds or connects a vault on its own. You bind one vault and one installed copy of Wordcell to a project conversation, check the binding, and from then on the project's workers can search it:
+xcb never finds or connects a vault on its own. You bind one vault and one installed copy of Wordcell to a project directory, check the binding, and from then on every worker task in that directory can search it:
 
 ```sh
-xcb memory configure <conversation-id> --vault /absolute/project/vault --wordcell /absolute/bin/wordcell
-xcb memory status <conversation-id>
-xcb memory search <conversation-id> "parser decision"
+xcb memory configure <dir> --vault /absolute/project/vault --wordcell /absolute/bin/wordcell
+xcb memory status <dir>
+xcb memory search <dir> "parser decision"
 xcb memory promote <task-id> --body-file decision.md
 ```
 
