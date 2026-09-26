@@ -32,6 +32,9 @@ pub struct Status {
     pub registered: bool,
     pub supervisor_running: bool,
     pub service: Option<Service>,
+    /// Where the supervisor's output goes; `None` for a service installed
+    /// before 0.8.14, which discards it.
+    pub log: Option<PathBuf>,
 }
 
 fn xml(value: &str) -> String {
@@ -79,7 +82,41 @@ impl Service {
         })
     }
 
+    /// The supervisor's log: `~/Library/Logs/xcb/<label>.log`.
+    pub fn log_path(&self) -> PathBuf {
+        self.home
+            .join("Library/Logs/xcb")
+            .join(format!("{}.log", self.label))
+    }
+
     pub fn render(&self) -> Result<String> {
+        let log = self
+            .log_path()
+            .to_str()
+            .map(xml)
+            .ok_or(Error::PrivateState)?;
+        self.render_with_output(&log)
+    }
+
+    /// The manifest xcb wrote before 0.8.14, which sent output to
+    /// `/dev/null`. Status and uninstall still accept it.
+    fn render_legacy(&self) -> Result<String> {
+        self.render_with_output("/dev/null")
+    }
+
+    /// Whether `bytes` is this service's manifest, current or legacy, and
+    /// the log path it writes to.
+    fn recognize(&self, bytes: &[u8]) -> Result<Option<Option<PathBuf>>> {
+        if bytes == self.render()?.as_bytes() {
+            Ok(Some(Some(self.log_path())))
+        } else if bytes == self.render_legacy()?.as_bytes() {
+            Ok(Some(None))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn render_with_output(&self, output: &str) -> Result<String> {
         let path = |p: &Path| p.to_str().map(xml).ok_or(Error::PrivateState);
         let coordination = self
             .coordination_root
@@ -92,7 +129,7 @@ impl Service {
             .transpose()?
             .unwrap_or_default();
         Ok(format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>Label</key><string>{}</string><key>ProgramArguments</key><array><string>{}</string><string>--state</string><string>{}</string><string>managed-daemon</string></array><key>EnvironmentVariables</key><dict><key>HOME</key><string>{}</string>{coordination}</dict><key>RunAtLoad</key><true/><key>StartInterval</key><integer>60</integer><key>ProcessType</key><string>Background</string><key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string></dict></plist>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>Label</key><string>{}</string><key>ProgramArguments</key><array><string>{}</string><string>--state</string><string>{}</string><string>managed-daemon</string></array><key>EnvironmentVariables</key><dict><key>HOME</key><string>{}</string>{coordination}</dict><key>RunAtLoad</key><true/><key>StartInterval</key><integer>60</integer><key>ProcessType</key><string>Background</string><key>StandardOutPath</key><string>{output}</string><key>StandardErrorPath</key><string>{output}</string></dict></plist>\n",
             xml(&self.label),
             path(&self.executable)?,
             path(&self.state)?,
@@ -210,18 +247,20 @@ fn supported() -> Result<()> {
 pub fn status(root: &Path, home: &Path) -> Result<Status> {
     supported()?;
     let service = load(root, home)?;
-    let installed = match &service {
+    let (installed, log) = match &service {
         Some(s) => match read_manifest(&s.manifest) {
-            Ok(bytes) if bytes == s.render()?.as_bytes() => true,
-            Ok(_) => {
-                return Err(Error::Conflict(
-                    "habitat service manifest changed; foreign contents preserved",
-                ));
-            }
-            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Ok(bytes) => match s.recognize(&bytes)? {
+                Some(log) => (true, log),
+                None => {
+                    return Err(Error::Conflict(
+                        "habitat service manifest changed; foreign contents preserved",
+                    ));
+                }
+            },
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => (false, None),
             Err(e) => return Err(e),
         },
-        None => false,
+        None => (false, None),
     };
     let registered = match &service {
         Some(s) => registered(s)?,
@@ -237,6 +276,7 @@ pub fn status(root: &Path, home: &Path) -> Result<Status> {
         registered,
         supervisor_running,
         service,
+        log,
     })
 }
 
@@ -291,8 +331,19 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
         return Err(Error::PrivateState);
     }
     let body = service.render()?;
+    // Create the log folder first: launchd creates the file, not the folder.
+    let logs = service.home.join("Library/Logs/xcb");
+    if fs::symlink_metadata(&logs).is_err() {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .recursive(true)
+            .create(&logs)?;
+    }
     match read_manifest(&service.manifest) {
-        Ok(bytes) if bytes == body.as_bytes() => (),
+        // An existing legacy manifest stays as it is; reinstalling after
+        // `service uninstall` turns the log on.
+        Ok(bytes) if service.recognize(&bytes)?.is_some() => (),
         Ok(_) => {
             return Err(Error::Conflict(
                 "habitat service manifest changed; foreign contents preserved",
@@ -327,6 +378,32 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
     status(root, home)
 }
 
+/// The protected folder (`Documents`, `Desktop` or `Downloads`) the newest
+/// "Operation not permitted" line in the supervisor log names, if any: macOS
+/// blocked the launchd-run supervisor from a folder it needs Files & Folders
+/// access for. Reads at most the last 64 KiB of the log.
+pub fn protected_folder_denial(log: &Path) -> Option<&'static str> {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL: u64 = 64 * 1024;
+    let mut file = File::open(log).ok()?;
+    let length = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(TAIL)))
+        .ok()?;
+    let mut tail = Vec::new();
+    file.take(TAIL).read_to_end(&mut tail).ok()?;
+    let tail = String::from_utf8_lossy(&tail);
+    tail.lines().rev().find_map(|line| {
+        if !(line.contains("Operation not permitted") || line.contains("(os error 1)")) {
+            return None;
+        }
+        ["Documents", "Desktop", "Downloads"]
+            .into_iter()
+            .find(|folder| {
+                line.contains(&format!("/{folder}/")) || line.ends_with(&format!("/{folder}"))
+            })
+    })
+}
+
 pub fn uninstall(root: &Path, home: &Path) -> Result<Status> {
     supported()?;
     let _guard = lock(root, "service.lock")?;
@@ -335,9 +412,8 @@ pub fn uninstall(root: &Path, home: &Path) -> Result<Status> {
     };
     // Hold the dispatch lock through unload/removal. Never bootout a running agent.
     let _idle = lock(root, "supervisor.lock")?;
-    let expected = service.render()?;
     let matching_manifest = || match read_manifest(&service.manifest) {
-        Ok(bytes) if bytes == expected.as_bytes() => Ok(true),
+        Ok(bytes) if service.recognize(&bytes)?.is_some() => Ok(true),
         Ok(_) => Err(Error::Conflict(
             "habitat service manifest changed; foreign contents preserved",
         )),
@@ -410,6 +486,42 @@ mod tests {
         std::os::unix::fs::symlink(&original, &link).unwrap();
         assert!(read_manifest(&link).is_err());
         assert_eq!(fs::read_to_string(original).unwrap(), "foreign");
+    }
+
+    #[test]
+    fn manifest_logs_to_a_file_and_legacy_manifests_stay_recognized() {
+        let home = tempfile::tempdir().unwrap();
+        let state = private::directory(&home.path().canonicalize().unwrap().join("state")).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let service = Service::plan(&state, &executable, home.path()).unwrap();
+        let text = service.render().unwrap();
+        let log = service.log_path();
+        assert!(log.starts_with(home.path().canonicalize().unwrap().join("Library/Logs/xcb")));
+        assert!(text.contains(&format!(
+            "<key>StandardErrorPath</key><string>{}</string>",
+            log.display()
+        )));
+        assert!(!text.contains("/dev/null"));
+        assert_eq!(service.recognize(text.as_bytes()).unwrap(), Some(Some(log)));
+        let legacy = service.render_legacy().unwrap();
+        assert!(legacy.contains("<string>/dev/null</string>"));
+        assert_eq!(service.recognize(legacy.as_bytes()).unwrap(), Some(None));
+        assert_eq!(service.recognize(b"<plist/>").unwrap(), None);
+    }
+
+    #[test]
+    fn a_denied_protected_folder_is_found_in_the_log_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("habitat.log");
+        assert_eq!(protected_folder_denial(&log), None);
+        fs::write(
+            &log,
+            "started\nxcb: local I/O failed: Operation not permitted (os error 1): /Users/me/Documents/app/src\nok\n",
+        )
+        .unwrap();
+        assert_eq!(protected_folder_denial(&log), Some("Documents"));
+        fs::write(&log, "xcb: Operation not permitted (os error 1): /tmp/x\n").unwrap();
+        assert_eq!(protected_folder_denial(&log), None);
     }
 
     #[test]

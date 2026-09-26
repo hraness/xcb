@@ -421,6 +421,27 @@ fn elapsed_label(seconds: u64) -> String {
 }
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
+    draw_frame(frame, app, ticks);
+    if no_color(&|name| std::env::var_os(name)) {
+        strip_colors(frame.buffer_mut());
+    }
+}
+
+/// `NO_COLOR` set to any non-empty value turns color off
+/// (<https://no-color.org>). Bold, dim and reverse still mark state.
+pub fn no_color(env: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    env("NO_COLOR").is_some_and(|value| !value.is_empty())
+}
+
+/// Reset every cell's colors, keeping text and modifiers.
+pub fn strip_colors(buffer: &mut ratatui::buffer::Buffer) {
+    for cell in &mut buffer.content {
+        cell.set_fg(Color::Reset);
+        cell.set_bg(Color::Reset);
+    }
+}
+
+fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     let area = frame.area();
     crate::agent_grid::clear_geometry(app);
     if area.width < 24 || area.height < 7 {
@@ -728,7 +749,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     .max_by_key(|task| task.updated_at_ms)
                     .and_then(|task| task.route.clone());
                 let account_hint = if app.view.accounts.is_empty() {
-                    " · 0 accounts — xcb accounts add <provider>"
+                    " · no accounts — /quit, then xcb setup claude"
                 } else {
                     ""
                 };
@@ -788,7 +809,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                 .any(|(name, _)| name == "algal supervisor")
                 .then(|| {
                     if app.view.accounts.is_empty() {
-                        "no provider accounts — xcb accounts add <provider> · ? help".into()
+                        "No accounts yet: /quit, then run xcb setup claude (or codex) · ? help"
+                            .into()
                     } else {
                         "automatic routing · global dispatcher".into()
                     }
