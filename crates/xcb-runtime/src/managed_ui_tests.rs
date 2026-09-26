@@ -969,6 +969,34 @@ async fn thread_schedule_and_enqueue_never_use_launch_or_recent() {
         .await;
     assert!(f.store.schedules(None).unwrap().is_empty());
     assert!(f.store.tasks(16).unwrap().is_empty());
+    // With a focus, the schedule is saved in the focused directory and the
+    // notice echoes it.
+    ui.send(Intent::Focus(Some(workspace.clone())));
+    ui.notice("Focus:").await;
+    ui.send(Intent::HabitatAt {
+        conversation: thread.clone(),
+        command: HabitatCommand::Schedule {
+            prompt: "Check the build".into(),
+            interval_ms: 3_600_000,
+            workspace: None,
+        },
+    });
+    let placed = format!("in `{workspace}`");
+    let notice = match ui
+        .wait(|update| {
+            matches!(update, Update::Notice(notice)
+                if notice.contains(&placed) || notice.contains("not accepted"))
+        })
+        .await
+    {
+        Update::Notice(notice) => notice,
+        _ => unreachable!(),
+    };
+    assert!(notice.contains(&placed), "{notice}");
+    let schedules = f.store.schedules(None).unwrap();
+    assert_eq!(schedules.len(), 1);
+    assert_eq!(schedules[0].conversation, thread);
+    assert_eq!(schedules[0].workspace.as_deref(), Some(workspace.as_str()));
     ui.stop().await;
 }
 
