@@ -174,4 +174,14 @@ dispatch → wait → attention → answer — without holding a socket.
 - [x] A controller can observe the fleet and dispatch a task that lands
       as an ordinary managed task under the remote project's grant.
 - [x] No plaintext task content is observable in the relay database.
-- [ ] Live two-machine acceptance recorded.
+- [x] Production Convex deployment (`prod:terrific-rook-891`) serves the
+      schema end to end: OTP enrollment via `log` transport, bootstrap
+      first-owner admission, device admit + key wrap, presence, fenced
+      dispatch → managed task → `applied` settlement with decrypted
+      result, and CAS-revisioned fleet projection — all verified live
+      over the internet between two custody roots.
+- [x] Controller surface covers the whole closed union plus the
+      posted-command lifecycle: `remote steer|cancel|answer|refresh`,
+      `status --wait` (exit 0 only on `applied`), `abort`, `ack`.
+- [ ] Live two-physical-laptop acceptance recorded (laptop 2 enrollment
+      is a documented runbook step in `docs/remote-operations.md`).
