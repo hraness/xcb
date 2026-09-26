@@ -806,6 +806,24 @@ fn repo_from_url(url: &str) -> Option<String> {
     (repo.len() <= 256 && !repo.chars().any(char::is_control)).then_some(repo)
 }
 
+/// A prompt path token as a path: `~` and `~/…` expand to `$HOME`, which
+/// the validator then refuses or confines like any other path. Never
+/// relative to the process's working directory.
+fn home_path(token: &str) -> Result<PathBuf> {
+    let home = || home_dir().ok_or(Error::Unavailable("home directory is unknown"));
+    let path = if token == "~" {
+        home()?
+    } else if let Some(rest) = token.strip_prefix("~/") {
+        home()?.join(rest)
+    } else {
+        PathBuf::from(token)
+    };
+    if !path.is_absolute() {
+        return Err(xcb_core::Error::Invalid("workspace path").into());
+    }
+    Ok(path)
+}
+
 /// A `path:line[:col]` token names a file position; drop the position.
 fn strip_position(path: &str) -> &str {
     let mut path = path;
@@ -1591,7 +1609,10 @@ impl ManagedStore {
             None => None,
         };
         let usable_root = |root: Result<String>| -> std::result::Result<String, String> {
-            let root = root.map_err(|error| error.to_string())?;
+            let root = root.map_err(|error| match error {
+                Error::Conflict(why) => why.to_owned(),
+                error => error.to_string(),
+            })?;
             if known
                 .iter()
                 .any(|entry| entry.path == root && entry.container)
@@ -1606,7 +1627,7 @@ impl ManagedStore {
             .and_then(|hint| usable_root(self.snap_root(Path::new(hint))).ok());
         let prompt_roots: Vec<_> = workspace_infer::path_tokens(text)
             .iter()
-            .map(|token| usable_root(self.snap_root(Path::new(token))))
+            .map(|token| usable_root(home_path(token).and_then(|path| self.snap_root(&path))))
             .collect();
         let last_thread_task = self.last_thread_task(cues.infer_only)?;
         let resolver_cues = Cues {
@@ -1786,19 +1807,224 @@ impl ManagedStore {
         }
     }
 
-    /// Recreate an unstarted thread task in another directory. The intake
-    /// lane implements it.
+    /// Recreate an unstarted thread task in another directory: in one
+    /// transaction the task is cancelled (nothing ran, so it has no effects)
+    /// and recreated in `target` with a deterministic message id, so a retry
+    /// replays. Only prompts a person or controller typed can move; work that
+    /// carries a project's authority provenance is cancelled instead.
     pub async fn move_task(
         &self,
-        _task: &Id,
-        _expected_revision: u64,
-        _target: &str,
+        task: &Id,
+        expected_revision: u64,
+        target: &str,
     ) -> Result<ManagedTask> {
-        Err(Error::Unavailable("not implemented"))
+        let current = self
+            .task(task)?
+            .ok_or(Error::Unavailable("managed task not found"))?;
+        let workspace = self.validate_workspace(Path::new(target))?;
+        let thread = Id::new(GLOBAL_THREAD_ID)?;
+        let message = Id::new(format!(
+            "m_mv_{}",
+            digest(format!("{}\0{workspace}", current.id))
+        ))?;
+        let moved_id = Id::new(format!(
+            "t_{}",
+            digest(format!("xcb-task-v1\0{thread}\0{message}\0{workspace}"))
+        ))?;
+        if let Some(moved) = self.task(&moved_id)? {
+            return if moved.moved_from.as_ref() == Some(&current.id) {
+                Ok(moved)
+            } else {
+                Err(Error::Conflict(
+                    "message id was reused with different input",
+                ))
+            };
+        }
+        let binding = movable(&current)?;
+        if current.workspace == workspace {
+            return Ok(current);
+        }
+        let name = self.workspace_name(&current.workspace)?;
+        if current.state != TaskState::Queued
+            || current.attempts != 0
+            || current.session.is_some()
+            || !current.worker_sessions.is_empty()
+            || current.cancel_requested
+            || current.revision != expected_revision
+        {
+            return Err(Error::guided(
+                format!(
+                    "task already started in {name}; its effects stay there — cancel it and send the prompt again"
+                ),
+                "/tasks",
+            ));
+        }
+        if self
+            .known_workspaces(MAX_REGISTRY_ROWS as usize)?
+            .iter()
+            .any(|entry| entry.path == workspace && entry.container && !entry.explicit_add)
+        {
+            return Err(Error::Conflict(
+                "that directory holds other projects; /workspace add it to use it as one",
+            ));
+        }
+        let target_name = self.workspace_name(&workspace)?;
+        let mut cancelled = current.clone();
+        cancelled.state = TaskState::Cancelled;
+        cancelled.deferred = false;
+        cancelled.attention = None;
+        cancelled.hold_until_ms = None;
+        cancelled.detail = format!("moved to {target_name}");
+        cancelled.next_prompt.clear();
+        cancelled.attachments.clear();
+        cancelled.revision += 1;
+        cancelled.updated_at_ms = now_ms().max(current.updated_at_ms);
+        cancelled.validate()?;
+        if !cancelled.same_identity(&current) {
+            return Err(Error::Conflict("managed task transition changed identity"));
+        }
+        let (policy, receipt, receipt_json) = Self::algal_receipt(&cancelled).await?;
+        if policy != current.policy_digest {
+            return Err(Error::Conflict("managed task policy changed"));
+        }
+        cancelled.last_receipt = receipt.clone();
+        let notice = Self::assistant(
+            format!("**{}** · moved to `{target_name}`", cancelled.title),
+            Some(&cancelled.id),
+            cancelled.revision,
+        );
+        let options = habitat::CreateOptions {
+            deferred: current.deferred,
+            priority: current.priority,
+            binding: Some(WorkspaceBinding {
+                source: workspace_infer::BindingSource::Moved,
+                confidence: workspace_infer::BindingConfidence::High,
+                origin: binding.origin,
+                reason: format!("moved from {}", current.id),
+                alternatives: vec![],
+            }),
+            moved_from: Some(current.id.clone()),
+            ..Default::default()
+        };
+        let prepared = self
+            .prepare_habitat_task(
+                &thread,
+                message,
+                current.goal.clone(),
+                current.attachments.clone(),
+                Path::new(&workspace),
+                &options,
+            )
+            .await?;
+        let mut db = self.write_db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let saved =
+            task_from(&tx, &current.id)?.ok_or(Error::Unavailable("managed task not found"))?;
+        if serde_json::to_string(&saved)? != serde_json::to_string(&current)? {
+            return Err(Error::guided(
+                format!(
+                    "task already started in {name}; its effects stay there — cancel it and send the prompt again"
+                ),
+                "/tasks",
+            ));
+        }
+        if tx.execute(
+            "UPDATE tasks SET state=?1,revision=?2,updated_at=?3,payload=?4 WHERE id=?5 AND revision=?6",
+            params![
+                cancelled.state.as_str(),
+                sql(cancelled.revision)?,
+                sql(cancelled.updated_at_ms)?,
+                serde_json::to_string(&cancelled)?,
+                cancelled.id.as_str(),
+                sql(current.revision)?
+            ],
+        )? != 1
+        {
+            return Err(Error::Conflict("managed task revision changed"));
+        }
+        tx.execute(
+            "INSERT INTO receipts(digest,task,revision,payload) VALUES(?1,?2,?3,?4)",
+            params![
+                receipt,
+                cancelled.id.as_str(),
+                sql(cancelled.revision)?,
+                receipt_json
+            ],
+        )?;
+        Self::append_message_tx(&tx, &notice, &cancelled.conversation, Some(&cancelled.id))?;
+        inbox::transition(&tx, &current, &cancelled, None)?;
+        program_state::transition(&tx, &current, &cancelled, None)?;
+        let moved = Self::create_habitat_task_tx(&tx, &prepared, &options)?;
+        tx.commit()?;
+        Ok(moved)
     }
 
-    /// Dispatch a held thread task now. The intake lane implements it.
-    pub async fn release_hold(&self, _task: &Id, _expected_revision: u64) -> Result<ManagedTask> {
-        Err(Error::Unavailable("not implemented"))
+    /// Dispatch a held thread task now.
+    pub async fn release_hold(&self, task: &Id, expected_revision: u64) -> Result<ManagedTask> {
+        let current = self
+            .task(task)?
+            .ok_or(Error::Unavailable("managed task not found"))?;
+        if current.revision != expected_revision {
+            return Err(Error::Conflict("managed task revision changed"));
+        }
+        if current.hold_until_ms.is_none() {
+            return Ok(current);
+        }
+        self.clear_hold(&current).await
+    }
+
+    /// The supervisor's first tick after a hold expires clears it.
+    pub(super) async fn expire_hold(&self, task: &ManagedTask) -> Result<ManagedTask> {
+        match task.hold_until_ms {
+            Some(until) if until > now_ms() => Err(Error::Conflict("task is still held")),
+            Some(_) => self.clear_hold(task).await,
+            None => Ok(task.clone()),
+        }
+    }
+
+    async fn clear_hold(&self, task: &ManagedTask) -> Result<ManagedTask> {
+        let mut next = task.clone();
+        next.hold_until_ms = None;
+        next.revision += 1;
+        next.updated_at_ms = now_ms().max(task.updated_at_ms);
+        self.transition(task, next, None).await
+    }
+}
+
+/// The binding of a thread task a person or controller typed, or why it
+/// cannot move.
+fn movable(task: &ManagedTask) -> Result<&WorkspaceBinding> {
+    let binding = task
+        .binding
+        .as_ref()
+        .filter(|_| task.conversation.as_str() == GLOBAL_THREAD_ID)
+        .ok_or(Error::Conflict(
+            "this task belongs to a project view; cancel it instead",
+        ))?;
+    let creator = if task.daemon_child.is_some() {
+        BindingOrigin::Daemon
+    } else if task.program.is_some() || task.program_child.is_some() {
+        BindingOrigin::Program
+    } else if task.schedule.is_some() {
+        BindingOrigin::Schedule
+    } else if task.project_proposal.is_some() {
+        BindingOrigin::Worker
+    } else {
+        binding.origin
+    };
+    match creator {
+        BindingOrigin::Tui | BindingOrigin::Cli | BindingOrigin::Relay => Ok(binding),
+        BindingOrigin::Worker => Err(Error::Conflict(
+            "this task was created by worker; cancel it instead",
+        )),
+        BindingOrigin::Program => Err(Error::Conflict(
+            "this task was created by program; cancel it instead",
+        )),
+        BindingOrigin::Daemon => Err(Error::Conflict(
+            "this task was created by daemon; cancel it instead",
+        )),
+        BindingOrigin::Schedule => Err(Error::Conflict(
+            "this task was created by schedule; cancel it instead",
+        )),
     }
 }
