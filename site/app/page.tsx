@@ -8,6 +8,7 @@ import {
   ProductHero,
   ProviderMark,
 } from "@hraness/design-kit/react/server";
+import { product, type PortfolioProductId } from "@hraness/design-kit/portfolio";
 import { AskAiAboutThis } from "@hraness/ui";
 import { HeroField } from "./hero-field";
 import { HeroGraphic } from "./hero-graphic";
@@ -18,6 +19,12 @@ import { SiteHeader } from "./site-header";
 import { WorkspacePreview } from "./workspace-preview";
 
 const repository = "https://github.com/hraness/xcb";
+
+/** A related-product card from the portfolio snapshot: mark, name, and one-line role. */
+function related(id: PortfolioProductId, name: string) {
+  const { canonicalUrl, mark, oneLiner } = product(id);
+  return { href: canonicalUrl, mark, name, role: oneLiner };
+}
 const summary = "One terminal for your Claude, Codex, and Devin accounts. Each task runs on an account that is signed in, idle, and not at a known limit.";
 const metaDescription = "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
 const questions = [
@@ -142,54 +149,19 @@ xcb update enable --policy notify   # macOS only: daily release check`}</code></
                 headingId: "related-tools",
                 summary: "The layer your agent runs through: sessions, accounts, web reads, and the models behind them.",
                 items: [
-                  {
-                    name: "Gobstopper",
-                    href: "https://gobstopper.sh",
-                    role: "Automatic context compaction for agent sessions",
-                    relationship: "Gobstopper’s context management ships inside xcb as a plugin that is on by default.",
-                  },
-                  {
-                    name: "Ghostget",
-                    href: "https://ghostget.com",
-                    role: "A bounded bridge to provider data",
-                    relationship: "Ghostget is the bounded web capability an xcb-routed agent can call: named, attested operations instead of a driven browser.",
-                  },
-                  {
-                    name: "AI Charts",
-                    href: "https://aicharts.io",
-                    role: "AI model benchmarks and usage inspection",
-                    relationship: "AI Charts benchmarks the models and subscription usage across providers; xcb's local usage measurement stays local and upload is unavailable.",
-                  },
+                  related("gobstopper", "Gobstopper"),
+                  related("wrench", "Ghostget"),
+                  related("aicharts", "AI Charts"),
                 ],
               },
               {
                 heading: "The personal apps",
                 headingId: "related-apps",
                 items: [
-                  {
-                    name: "PeopleBlade",
-                    href: "https://peopleblade.com",
-                    role: "A private contact book for you and your agent",
-                    relationship: "PeopleBlade's CLI is the kind of local, bounded surface an xcb-managed agent can drive against a real private domain.",
-                  },
-                  {
-                    name: "Soulscrape",
-                    href: "https://soulscrape.com",
-                    role: "A dated, cited dossier on a person",
-                    relationship: "Soulscrape turns authorized evidence into a cited working model, a bounded artifact an xcb task can produce and inspect.",
-                  },
-                  {
-                    name: "Textbutler",
-                    href: "https://textbutler.app",
-                    role: "A personal message butler for Mac",
-                    relationship: "Textbutler studies message history and drafts replies locally, the same bring-your-own-agent shape xcb's workspace organizes.",
-                  },
-                  {
-                    name: "Wordcell",
-                    href: "https://wordcell.io",
-                    role: "A Markdown knowledge base for agents",
-                    relationship: "Wordcell is the queryable vault behind an agent's notes and sources, local files an xcb session can search and cite.",
-                  },
+                  related("peopleblade", "PeopleBlade"),
+                  related("soulscrape", "Soulscrape"),
+                  related("message-like-me", "Textbutler"),
+                  related("kb", "Wordcell"),
                 ],
               },
             ]}

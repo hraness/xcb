@@ -60,7 +60,7 @@
 .xcb-docs-main { min-inline-size: 0; max-inline-size: 52rem; }
 .xcb-docs-heading { margin-block-end: 2rem; }
 .xcb-docs-heading h1,
-.xcb-docs-body h1 { margin: 0 0 1.3rem; font-family: var(--font-heading, var(--font-text)); font-size: clamp(2.2rem, 4.5vw, 3.6rem); font-weight: 500; letter-spacing: -0.045em; line-height: 1.08; text-wrap: balance; }
+.xcb-docs-body h1 { margin: 0 0 1.3rem; font-family: var(--hraness-type-h1-font); font-size: var(--hraness-type-h1-size); font-weight: var(--hraness-type-h1-weight); letter-spacing: -0.045em; line-height: 1.08; text-wrap: balance; }
 .xcb-docs-lead { max-inline-size: 57ch; margin: 0; font-size: 1.15rem; line-height: 1.65; color: var(--muted); }
 .xcb-docs-note { padding: 1rem 1.2rem; margin-block: 1.5rem; border-inline-start: 2px solid var(--foreground); background: var(--hraness-material-warm-plane, var(--surface)); font-size: 0.94rem; line-height: 1.65; }
 .xcb-docs-note a,
@@ -68,8 +68,8 @@
 .xcb-docs-note a:hover,
 .xcb-docs-body a:hover { text-decoration-color: currentColor; }
 .xcb-docs-body { font-size: 1rem; line-height: 1.75; overflow-wrap: anywhere; }
-.xcb-docs-body h2 { margin: 2.8rem 0 1rem; padding-block-start: 1.5rem; font-size: 1.55rem; font-weight: 600; line-height: 1.25; letter-spacing: -0.025em; text-wrap: balance; }
-.xcb-docs-body h3 { margin: 1.8rem 0 0.6rem; font-size: 1.2rem; font-weight: 600; line-height: 1.35; }
+.xcb-docs-body h2 { margin: 2.8rem 0 1rem; padding-block-start: 1.5rem; font-family: var(--hraness-type-h2-font); font-size: var(--hraness-type-h2-size); font-weight: var(--hraness-type-h2-weight); line-height: 1.2; letter-spacing: -0.025em; text-wrap: balance; }
+.xcb-docs-body h3 { margin: 1.8rem 0 0.6rem; font-family: var(--hraness-type-h3-font); font-size: var(--hraness-type-h3-size); font-weight: var(--hraness-type-h3-weight); line-height: 1.3; }
 .xcb-docs-body :is(h1, h2, h3),
 .xcb-docs-body section { scroll-margin-block-start: 7rem; }
 .xcb-docs-body p { margin-block: 1rem; }
@@ -99,7 +99,8 @@
 .xcb-docs-card { display: block; padding: 1.5rem; border: 1px solid var(--ui-surface-edge, var(--hraness-material-seam)); border-radius: 1rem; box-shadow: var(--elevation-low, var(--hraness-material-lift)); color: var(--foreground); text-decoration: none; background: var(--hraness-material-plane, var(--surface)); }
 .xcb-docs-card:hover { box-shadow: var(--elevation-raised, var(--hraness-material-lift)); }
 .xcb-docs-card-index { display: block; margin-block-end: 1.2rem; font: 0.72rem var(--font-mono); color: var(--muted); }
-.xcb-docs-card h2 { display: flex; justify-content: space-between; gap: 0.5rem; margin: 0 0 0.65rem; font-size: 1.1rem; font-weight: 600; line-height: 1.35; }
+/* Topic cards are h2 in the outline but card titles by role: h3 type. */
+.xcb-docs-card h2 { display: flex; justify-content: space-between; gap: 0.5rem; margin: 0 0 0.65rem; font-family: var(--hraness-type-h3-font); font-size: var(--hraness-type-h3-size); font-weight: var(--hraness-type-h3-weight); line-height: 1.3; }
 .xcb-docs-card h2 span { color: var(--muted); }
 .xcb-docs-card p { margin: 0; color: var(--muted); font-size: 0.92rem; line-height: 1.6; }
 .xcb-docs-pagination { display: flex; justify-content: space-between; gap: 1rem; margin-block-start: 3rem; padding-block-start: 1.5rem; border-block-start: 1px solid var(--line); font-size: 0.95rem; }
@@ -122,7 +123,6 @@
   .xcb-docs-nav-group { margin-block-start: 0.5rem; }
   .xcb-docs-source { margin-block-start: 1rem; }
   .xcb-docs-body :is(h1, h2, h3), .xcb-docs-body section { scroll-margin-block-start: 1rem; }
-  .xcb-docs-heading h1, .xcb-docs-body h1 { font-size: 2.45rem; }
   .xcb-docs-card { padding: 1.25rem; }
 }
 
