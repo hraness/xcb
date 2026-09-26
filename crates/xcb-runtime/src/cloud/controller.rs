@@ -87,7 +87,11 @@ impl Controller {
         // Refresh before attaching: an expired token poisons the socket.
         link::refresh_if_due(&mut client, state_root, &mut session).await?;
         client.authenticate(&session.token).await;
-        let peers = link::peers(&mut client).await?;
+        // The peer pull doubles as the session's liveness probe: a token
+        // that fails server-side while locally fresh recovers through
+        // one forced refresh rather than wedging the socket.
+        let peers =
+            link::with_session_recovery(&mut client, state_root, &mut session, link::peers).await?;
         Ok(Self {
             client,
             device,

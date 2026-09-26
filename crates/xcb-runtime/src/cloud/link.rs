@@ -134,6 +134,21 @@ pub async fn refresh_session(
     ))
 }
 
+/// Clear auth, refresh regardless of local expiry, persist and
+/// re-authenticate in place.
+async fn force_refresh(
+    client: &mut RelayClient,
+    state_root: &Path,
+    session: &mut CloudSession,
+) -> Result<()> {
+    client.clear_auth().await;
+    let fresh = refresh_session(client, session).await?;
+    custody::store_session(state_root, &fresh)?;
+    client.authenticate(&fresh.token).await;
+    *session = fresh;
+    Ok(())
+}
+
 /// Refresh `session` when it is inside the expiry lead, persisting and
 /// re-authenticating the client in place. A no-op for a fresh token.
 pub async fn refresh_if_due(
@@ -147,12 +162,31 @@ pub async fn refresh_if_due(
     // An expired token stalls the sync worker — the server rejects it and
     // the socket reconnects forever, which also starves action calls. Drop
     // the dead token before refreshing so the sign-in action flows.
-    client.clear_auth().await;
-    let fresh = refresh_session(client, session).await?;
-    custody::store_session(state_root, &fresh)?;
-    client.authenticate(&fresh.token).await;
-    *session = fresh;
-    Ok(())
+    force_refresh(client, state_root, session).await
+}
+
+/// Run `call`; on failure under a locally-fresh session, force a refresh
+/// once and retry. Custody can only check expiry locally — a token that
+/// fails server-side (key rotation, a bad mint) poisons the socket
+/// exactly like an expired one, so the first authenticated call after
+/// open or boot doubles as the liveness probe. When the forced refresh
+/// cannot run either, the original error is the honest failure.
+pub async fn with_session_recovery<F, T>(
+    client: &mut RelayClient,
+    state_root: &Path,
+    session: &mut CloudSession,
+    mut call: F,
+) -> Result<T>
+where
+    F: AsyncFnMut(&mut RelayClient) -> Result<T>,
+{
+    match call(client).await {
+        Ok(value) => Ok(value),
+        Err(first) => match force_refresh(client, state_root, session).await {
+            Ok(()) => call(client).await,
+            Err(_) => Err(first),
+        },
+    }
 }
 
 /// Register a device identity on the authenticated session. Idempotent for
