@@ -16,8 +16,9 @@ The first run is shorter and every error says what to do next.
 
 - `xcb accounts login` and `xcb accounts refresh` check the provider
   themselves the first time, so the `Next:` step after `xcb accounts add`
-  works without a separate `xcb doctor` run. Account commands accept the shortened id the accounts
-  table shows, and say whether no account or several accounts matched.
+  works without a separate `xcb doctor` run. Account commands accept the
+  shortened id the accounts table shows, and say whether no account or
+  several accounts matched.
 - `xcb setup <provider>` adds an account (or reuses one), checks the
   provider, signs in, and loads models, printing ✓ for each step.
 - `xcb --help` groups commands under Start here, Accounts and models,
@@ -30,6 +31,16 @@ The first run is shorter and every error says what to do next.
   (`✗ No account matches "x".` then `→ xcb accounts`). With `--json`, or
   when an agent runs xcb, errors are a JSON object on stdout. Symbols fall
   back to ASCII when `TERM=dumb` or the locale isn't UTF-8.
+- `xcb service install` and `xcb update enable` say, before macOS shows
+  its login-item notice, what will open at login and how to turn it off.
+- The login service now writes its log to
+  `~/Library/Logs/xcb/<label>.log`, and `xcb service` shows that path.
+  When the log shows macOS kept the service out of Documents, Desktop or
+  Downloads, `xcb service` names the folder and the Files & Folders
+  setting to turn on. A service installed by an earlier version keeps
+  working; reinstall it to turn on the log.
+- The terminal UI honors `NO_COLOR`, and with no accounts it says to
+  `/quit` and run `xcb setup claude`.
 
 ## 0.8.13 - 2026-09-26
 
