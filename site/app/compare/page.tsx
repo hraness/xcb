@@ -59,6 +59,11 @@ export default function Compare() {
                     <td><p>You want one client’s API requests rerouted across providers. xcb hands a whole task to one of your accounts and holds that account until the turn ends; it does not proxy or rewrite API traffic.</p></td>
                   </tr>
                   <tr>
+                    <th scope="row"><span className="xcb-comparison-name">OpenRouter</span><span className="xcb-comparison-kind">Multi-provider model API</span></th>
+                    <td><p>One OpenAI-compatible endpoint, API key, and bill in front of hundreds of models from dozens of providers, billed per token, with model and provider routing and automatic fallbacks.</p><div className="xcb-comparison-sources"><a href="https://openrouter.ai">OpenRouter</a><a href="https://openrouter.ai/blog/insights/model-routing">Routing guide</a></div></td>
+                    <td><p>You want metered API access to many models inside one app, or a fallback chain across providers. xcb instead routes whole coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.</p><a href="/compare/openrouter">xcb compared with OpenRouter →</a></td>
+                  </tr>
+                  <tr>
                     <th scope="row"><span className="xcb-comparison-name">Superset</span><span className="xcb-comparison-kind">Agent workspace</span></th>
                     <td><p>Bring Claude Code, Codex, OpenCode, and other coding agents into one workspace. Run tasks in parallel, isolate changes, and review the results together.</p><div className="xcb-comparison-sources"><a href="https://superset.sh">Superset</a><a href="https://github.com/superset-sh/superset">Source</a></div></td>
                     <td><p>You want parallel agent runs with isolated changes in one workspace. xcb focuses on sending each task to one of your accounts rather than on reviewing parallel runs together.</p></td>
