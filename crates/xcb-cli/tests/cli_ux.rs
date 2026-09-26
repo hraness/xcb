@@ -91,14 +91,90 @@ fn every_command_help_exits_zero() {
         &["help", "accounts"],
         &["doctor", "--help"],
         &["service", "--help"],
+        &["setup", "--help"],
+        &["-h"],
+        &["help"],
     ] {
         let output = plain(args);
         assert!(output.status.success(), "{args:?}: {output:?}");
         assert!(!output.stdout.is_empty(), "{args:?}");
     }
     let root = text(&plain(&["--help"]).stdout);
-    assert!(root.contains("xcb accounts login <account>"), "{root}");
+    assert!(
+        root.contains("\nStart here\n  setup          Add an account"),
+        "{root}"
+    );
+    for internal in [
+        "managed-daemon",
+        "broker-stdio",
+        "egress-forward",
+        "qualify-application",
+        "application-diagnostic",
+        "  route ",
+    ] {
+        assert!(!root.contains(internal), "{internal} leaked into --help");
+    }
     assert!(!root.contains("<account-id>"), "{root}");
+    let setup = text(&plain(&["setup", "--help"]).stdout);
+    assert!(setup.contains("claude, codex, or devin"), "{setup}");
+}
+
+#[test]
+fn setup_adds_one_account_then_stops_at_the_provider_check() {
+    let sandbox = Sandbox::new("setup");
+    let output = sandbox.run(&["setup", "claude"], &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = text(&output.stdout);
+    assert!(stdout.starts_with("✓ Added claude/a_"), "{stdout}");
+    assert_eq!(
+        text(&output.stderr),
+        "→ Checking Claude Code first (the same check as xcb doctor --provider claude).\n\
+         ✗ xcb can't find `claude` on your PATH. Install it, or set XCB_CLAUDE to its absolute path.\n\
+         → xcb doctor --provider claude\n"
+    );
+    // Running it again reuses the account instead of adding a second one.
+    let again = sandbox.run(&["setup", "claude"], &[]);
+    assert!(
+        text(&again.stdout).starts_with("✓ Using claude/a_"),
+        "{again:?}"
+    );
+    let accounts = sandbox.run(&["--json", "accounts"], &[]);
+    let list: serde_json::Value = serde_json::from_slice(&accounts.stdout).unwrap();
+    assert_eq!(list["accounts"].as_array().map(Vec::len), Some(1), "{list}");
+    let json = sandbox.run(&["--json", "setup", "claude"], &[]);
+    assert_eq!(json.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(error["error"]["next"], "xcb --json accounts add claude");
+}
+
+#[test]
+fn doctor_marks_each_provider_and_names_one_next_step() {
+    let sandbox = Sandbox::new("doctor");
+    let output = sandbox.run(&["doctor"], &[("HRANESS_AUDIENCE", "human")]);
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = text(&output.stdout);
+    assert!(
+        stdout.contains("✗ claude: xcb can't find `claude` on your PATH."),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\n○ remote: not linked (xcb link connects this machine)\n"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("custody"), "{stdout}");
+    assert!(
+        text(&output.stderr).ends_with("Next: install Claude Code, or run xcb doctor --provider claude --executable <absolute path>\n"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn empty_sessions_say_so() {
+    let sandbox = Sandbox::new("sessions");
+    let output = sandbox.run(&["sessions"], &[("HRANESS_AUDIENCE", "human")]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(text(&output.stdout), "No provider sessions yet.\n");
+    assert_eq!(text(&output.stderr), "Next: xcb\n");
 }
 
 #[test]

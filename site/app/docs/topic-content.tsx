@@ -98,7 +98,7 @@ function Providers() {
           <tr><th scope="row">Devin</th><td>Exact admitted 3000.11.3, 3000.11.1 and 3000.10.31 builds on macOS.</td><td>All three credential-free boundary fixtures passed. Authenticated coding acceptance requires separate account/model/build evidence; model availability is checked against the account’s fresh catalog at launch.</td></tr>
         </tbody>
       </table></div>
-      <p>Codex and Devin admission checks both executable bytes and version. A visible model or <code>metadata pin only</code> from <code>doctor</code> does not prove successful coding on your host. The separate TypeScript CLI keeps Codex and Devin task execution disabled pending qualification.</p>
+      <p>Codex and Devin admission checks both executable bytes and version. A visible model or a ✓ from <code>doctor</code> does not prove successful coding on your host. The separate TypeScript CLI keeps Codex and Devin task execution disabled pending qualification.</p>
       <h2 id="claude" className="xcb-provider-heading"><ProviderMark mark="claudecode" label="Claude Code" size={24} />Claude</h2>
       <Code>{`xcb accounts add claude --plan Max
 xcb doctor --provider claude

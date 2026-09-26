@@ -56,7 +56,8 @@ that provider login is separate from xcb's explicit credential import and from
 an admitted coding turn. Devin validates the selected model against the
 connected account's fresh catalog before each turn. The September 20, 2026
 quota result is historical evidence, not a statement of current availability.
-Native `doctor` reports `metadata pin only` for unqualified providers. Codex and
+`xcb doctor` marks an unqualified provider build with ⚠ ("found, but xcb
+can't run this build yet"). Codex and
 Devin candidates require the checked executable digest as well as the version;
 other builds and their Linux execution paths remain unavailable. Automated
 fixtures check boundaries; they do not establish authentication, service
@@ -168,12 +169,20 @@ Account names come from observed provider identities;
 custom labels are not accepted.
 
 ```sh
+xcb setup claude --plan Max
+xcb --cwd /absolute/path/to/your/project
+```
+
+`xcb setup` adds the account (or reuses the one you have), checks Claude Code
+the way `xcb doctor` does, opens the browser sign-in, and loads the account's
+models. Each step is also its own command:
+
+```sh
 xcb accounts add claude --plan Max
 xcb doctor --provider claude
 xcb accounts login <account-id>
 xcb accounts refresh <account-id>
 xcb models
-xcb --cwd /absolute/path/to/your/project
 ```
 
 Plain `xcb` reopens the latest persistent control conversation for the workspace;
