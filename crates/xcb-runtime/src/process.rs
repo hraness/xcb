@@ -432,6 +432,10 @@ pub struct Pin {
 impl Pin {
     pub fn verify(&self) -> Result<()> {
         host_executable()?.verify_pin(&self.host_sha256)?;
+        self.verify_bytes()
+    }
+    /// Digest check only: the bytes at the pinned path still match the pin.
+    fn verify_bytes(&self) -> Result<()> {
         // Package managers reinstall the same bytes with group- and
         // world-writable modes (bun's global install does). Tighten the mode
         // of an executable we own before judging it, exactly as discovery
@@ -447,17 +451,40 @@ impl Pin {
         Ok(())
     }
     pub fn load(root: &Path, provider: Provider) -> Result<Self> {
-        let pin: Self = serde_json::from_slice(&private::read(
+        let mut pin: Self = serde_json::from_slice(&private::read(
             &root.join("providers").join(format!("{provider}.json")),
             16 * 1024,
         )?)?;
         if pin.provider != provider {
             return Err(Error::Unavailable("provider pin mismatch"));
         }
-        pin.verify()?;
+        match pin.verify() {
+            Ok(()) => {}
+            // Identical provider bytes under a replaced xcb binary drift only
+            // the host binding — a metadata rebind, so heal it instead of
+            // forcing `xcb doctor` after every upgrade.
+            Err(error) if pin.verify_bytes().is_ok() => {
+                let host = host_executable()?;
+                host.verify()?;
+                pin.host_sha256 = host.sha256.clone();
+                pin.observed_at_ms = crate::now_ms();
+                pin.save(root).map_err(|_| error)?;
+            }
+            Err(error) => return Err(error),
+        }
+        // Migrate pins written before executables were custodied: adopt the
+        // pinned bytes into private state so a provider upgrade can no
+        // longer move them out from under the pin.
+        if custody_dir(root).is_ok_and(|dir| !pin.executable.starts_with(&dir)) {
+            let _ = pin.save(root);
+        }
         Ok(pin)
     }
-    pub fn save(&self, root: &Path) -> Result<()> {
+    /// Custody the pinned executable bytes into private state, then record
+    /// the pin pointing at the custodied copy. A provider auto-update at the
+    /// original path can no longer break the pin.
+    pub fn save(&mut self, root: &Path) -> Result<()> {
+        self.executable = custody_executable(root, self.provider, &self.executable, &self.sha256)?;
         let directory = private::directory(&root.join("providers"))?;
         let path = directory.join(format!("{}.json", self.provider));
         let bytes = serde_json::to_vec_pretty(self)?;
@@ -551,6 +578,172 @@ pub async fn inspect(provider: Provider, explicit: Option<&Path>, home: &Path) -
         host_sha256: host.sha256.clone(),
         observed_at_ms: crate::now_ms(),
     })
+}
+
+/// Pinned executables live under `providers/bin`, named `<provider>-<sha256>`,
+/// so the pin binds private bytes an auto-update cannot replace.
+fn custody_dir(root: &Path) -> Result<PathBuf> {
+    private::directory(&root.join("providers").join("bin"))
+}
+
+/// Copy the admitted executable into private custody (idempotent for the same
+/// digest) and retire stale copies of the same provider. Returns the
+/// custodied path; the caller rewrites its pin to point at it.
+fn custody_executable(
+    root: &Path,
+    provider: Provider,
+    source: &Path,
+    sha256: &str,
+) -> Result<PathBuf> {
+    let dir = custody_dir(root)?;
+    if source.starts_with(&dir) {
+        return Ok(source.to_owned());
+    }
+    let name = format!("{provider}-{sha256}");
+    let target = dir.join(&name);
+    match executable_digest(&target) {
+        Ok(known) if known == sha256 => {}
+        _ => {
+            if target.is_file() {
+                fs::remove_file(&target)?;
+            }
+            let input = executable_file(source)?;
+            let mut bytes = Vec::new();
+            input.take(512 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+            if hex::encode(Sha256::digest(&bytes)) != sha256 {
+                return Err(Error::Unavailable(
+                    "provider executable changed while pinning",
+                ));
+            }
+            match private::create(&target, &bytes) {
+                Ok(()) => {}
+                Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+            fs::set_permissions(&target, fs::Permissions::from_mode(0o700))?;
+            if executable_digest(&target)? != sha256 {
+                let _ = fs::remove_file(&target);
+                return Err(Error::Unavailable("custodied executable digest mismatch"));
+            }
+        }
+    }
+    if let Ok(entries) = fs::read_dir(&dir) {
+        let prefix = format!("{provider}-");
+        for entry in entries.flatten() {
+            let stale = entry.file_name();
+            if stale
+                .to_str()
+                .is_some_and(|file| file.starts_with(&prefix) && file != name)
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+    Ok(target)
+}
+
+/// Outcome of one refresh pass over a pinned provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshOutcome {
+    /// The pinned build is still the discovered one.
+    Kept,
+    /// A newly discovered build passed admission and became the pin.
+    Adopted,
+    /// A newly discovered build failed admission; the previous pin stands and
+    /// this build is remembered so it is not re-inspected every command.
+    Rejected,
+    /// No pin exists — `xcb doctor` owns first admission.
+    Unpinned,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderRefresh {
+    pub provider: Provider,
+    pub outcome: RefreshOutcome,
+    pub detail: Option<String>,
+}
+
+/// Re-inspect the discovered provider binary and adopt it only when it is an
+/// admitted build. Runs at daemon boot, hourly in the supervisor, and before
+/// interactive launches: floor-admitted providers (Claude) track upstream
+/// updates without breaking routes, while exact-artifact providers (Codex,
+/// Devin) can only ever re-adopt the qualified build.
+pub async fn refresh_provider(
+    root: &Path,
+    provider: Provider,
+    explicit: Option<&Path>,
+    home: &Path,
+) -> ProviderRefresh {
+    let outcome = private::directory(home)
+        .and_then(|_| private::directory(&home.join("tmp")))
+        .map(|_| ());
+    let outcome = match outcome {
+        Ok(()) => refresh_provider_inner(root, provider, explicit, home).await,
+        Err(error) => Err(error),
+    };
+    let (outcome, detail) = match outcome {
+        Ok(outcome) => (outcome, None),
+        Err(error) => (RefreshOutcome::Rejected, Some(error.to_string())),
+    };
+    ProviderRefresh {
+        provider,
+        outcome,
+        detail,
+    }
+}
+
+async fn refresh_provider_inner(
+    root: &Path,
+    provider: Provider,
+    explicit: Option<&Path>,
+    home: &Path,
+) -> Result<RefreshOutcome> {
+    let record = root.join("providers").join(format!("{provider}.json"));
+    if !record.is_file() {
+        return Ok(RefreshOutcome::Unpinned);
+    }
+    let pin = Pin::load(root, provider).ok();
+    let executable = discover(provider, explicit)?;
+    let discovered_sha = executable_digest(&executable)?;
+    if let Some(pin) = &pin
+        && pin.sha256 == discovered_sha
+    {
+        return Ok(RefreshOutcome::Kept);
+    }
+    let marker = record.with_extension("rejected");
+    if private::read(&marker, 128)
+        .ok()
+        .is_some_and(|bytes| bytes == discovered_sha.as_bytes())
+    {
+        return Ok(RefreshOutcome::Rejected);
+    }
+    match inspect(provider, explicit, home).await {
+        Ok(mut fresh) if crate::runner::provider_admitted(&fresh) => {
+            fresh.save(root)?;
+            let _ = fs::remove_file(&marker);
+            Ok(RefreshOutcome::Adopted)
+        }
+        Ok(_fresh) => {
+            write_rejected(&marker, &discovered_sha)?;
+            Err(Error::Unavailable(
+                "provider build is not admitted; keeping the pinned build",
+            ))
+        }
+        Err(error) => {
+            write_rejected(&marker, &discovered_sha)?;
+            Err(error)
+        }
+    }
+}
+
+fn write_rejected(marker: &Path, sha256: &str) -> Result<()> {
+    match private::read(marker, 128) {
+        Ok(old) => private::replace(marker, sha256.as_bytes(), &digest(old)),
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            private::create(marker, sha256.as_bytes())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Bytes a provider may write to stderr before the host reports the excess.
@@ -1321,7 +1514,7 @@ mod tests {
 
     fn codex_pin(root: &Path, executable: &Path, sha256: String) -> Pin {
         let (_, host_sha256) = host_identity().unwrap();
-        let pin = Pin {
+        let mut pin = Pin {
             provider: Provider::Codex,
             executable: executable.to_owned(),
             sha256,
@@ -1339,12 +1532,15 @@ mod tests {
         let root = directory.path().canonicalize().unwrap();
         let executable = write_executable(&root, 0o755).canonicalize().unwrap();
         host_identity().unwrap();
-        codex_pin(&root, &executable, uncached_digest(&executable));
-        let digested = digested_executables(&executable);
+        let pin = codex_pin(&root, &executable, uncached_digest(&executable));
+        let digested = digested_executables(&pin.executable);
         for _ in 0..3 {
             Pin::load(&root, Provider::Codex).unwrap();
         }
-        assert_eq!(digested_executables(&executable) - digested, 1);
+        // Loads re-verify through the inode-bound digest cache; the custodied
+        // copy may already hold a verified digest from the save, so repeated
+        // loads add at most one digest of their own.
+        assert!(digested_executables(&pin.executable) - digested <= 1);
     }
 
     #[test]
@@ -1353,23 +1549,23 @@ mod tests {
         let root = directory.path().canonicalize().unwrap();
         let executable = write_executable(&root, 0o755).canonicalize().unwrap();
         host_identity().unwrap();
-        codex_pin(&root, &executable, uncached_digest(&executable));
+        let pin = codex_pin(&root, &executable, uncached_digest(&executable));
         Pin::load(&root, Provider::Codex).unwrap();
-        let digested = digested_executables(&executable);
+        let digested = digested_executables(&pin.executable);
         // A pure metadata touch still re-hashes; identical bytes pass again.
         File::options()
             .write(true)
-            .open(&executable)
+            .open(&pin.executable)
             .unwrap()
             .set_modified(std::time::SystemTime::now() - Duration::from_secs(60))
             .unwrap();
         Pin::load(&root, Provider::Codex).unwrap();
-        assert_eq!(digested_executables(&executable) - digested, 1);
+        assert_eq!(digested_executables(&pin.executable) - digested, 1);
         // A size change re-hashes and the changed bytes fail verification.
-        fs::write(&executable, b"#!/bin/sh\necho changed\n").unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&pin.executable, b"#!/bin/sh\necho changed\n").unwrap();
+        fs::set_permissions(&pin.executable, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(Pin::load(&root, Provider::Codex).is_err());
-        assert_eq!(digested_executables(&executable) - digested, 2);
+        assert_eq!(digested_executables(&pin.executable) - digested, 2);
     }
 
     #[test]
@@ -1378,17 +1574,183 @@ mod tests {
         let root = directory.path().canonicalize().unwrap();
         let executable = write_executable(&root, 0o755).canonicalize().unwrap();
         host_identity().unwrap();
-        codex_pin(&root, &executable, uncached_digest(&executable));
+        let pin = codex_pin(&root, &executable, uncached_digest(&executable));
         Pin::load(&root, Provider::Codex).unwrap();
-        let digested = digested_executables(&executable);
+        let digested = digested_executables(&pin.executable);
         // Same size, different inode and bytes: a stale path or size cache
         // would return the old digest; verification must fail closed.
         let replacement = root.join("replacement");
         fs::write(&replacement, b"#!/bin/sh\necho no\n").unwrap();
         fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::rename(&replacement, &executable).unwrap();
+        fs::rename(&replacement, &pin.executable).unwrap();
         assert!(Pin::load(&root, Provider::Codex).is_err());
-        assert_eq!(digested_executables(&executable) - digested, 1);
+        assert_eq!(digested_executables(&pin.executable) - digested, 1);
+    }
+
+    fn claude_pin(root: &Path, executable: &Path, version: &str) -> Pin {
+        let (_, host_sha256) = host_identity().unwrap();
+        let mut pin = Pin {
+            provider: Provider::Claude,
+            executable: executable.to_owned(),
+            sha256: uncached_digest(executable),
+            version: version.into(),
+            host_sha256,
+            observed_at_ms: crate::now_ms(),
+        };
+        pin.save(root).unwrap();
+        pin
+    }
+
+    /// The failure this whole change exists to prevent: a provider upgrade
+    /// replaces the discovered binary, and the pin must keep pointing at the
+    /// admitted bytes rather than the moved path.
+    #[test]
+    fn a_pinned_provider_update_cannot_move_the_custodied_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        let pin = claude_pin(&root, &executable, "2.1.300");
+        let custody = pin.executable.clone();
+        assert!(custody.starts_with(root.join("providers").join("bin")));
+        assert_eq!(fs::metadata(&custody).unwrap().mode() & 0o777, 0o700);
+        // The provider's own path is replaced — the pinned copy does not move.
+        fs::write(&executable, b"#!/bin/sh\necho newer\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let loaded = Pin::load(&root, Provider::Claude).unwrap();
+        assert_eq!(loaded.executable, custody);
+        // Stale custody copies for the same provider are retired on save.
+        assert_eq!(
+            fs::read_dir(root.join("providers").join("bin"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    /// A pin recorded by an older xcb binds its host hash; identical provider
+    /// bytes prove nothing about the artifact changed, so the binding heals
+    /// instead of demanding `xcb doctor` after every upgrade.
+    #[test]
+    fn load_heals_a_pin_bound_to_a_replaced_host_binary() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        let pin = claude_pin(&root, &executable, "2.1.300");
+        let record = root.join("providers").join("claude.json");
+        let stale = "0".repeat(64);
+        let bytes = fs::read_to_string(&record)
+            .unwrap()
+            .replace(&pin.host_sha256, &stale);
+        fs::write(&record, bytes).unwrap();
+        let healed = Pin::load(&root, Provider::Claude).unwrap();
+        let (_, host_sha256) = host_identity().unwrap();
+        assert_eq!(healed.host_sha256, host_sha256);
+        // A drifted provider digest still refuses to heal.
+        fs::write(
+            &record,
+            fs::read_to_string(&record)
+                .unwrap()
+                .replace(&host_sha256, &stale),
+        )
+        .unwrap();
+        fs::write(&pin.executable, b"#!/bin/sh\necho tampered\n").unwrap();
+        fs::set_permissions(&pin.executable, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(Pin::load(&root, Provider::Claude).is_err());
+    }
+
+    /// Pins written before custody point at the live provider path; loading
+    /// one migrates the admitted bytes into private custody so subsequent
+    /// provider upgrades cannot break it.
+    #[test]
+    fn load_migrates_a_live_path_pin_into_custody() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        let (_, host_sha256) = host_identity().unwrap();
+        let legacy = Pin {
+            provider: Provider::Claude,
+            executable: executable.clone(),
+            sha256: uncached_digest(&executable),
+            version: "2.1.300".into(),
+            host_sha256,
+            observed_at_ms: 0,
+        };
+        private::directory(&root.join("providers")).unwrap();
+        private::create(
+            &root.join("providers").join("claude.json"),
+            serde_json::to_vec_pretty(&legacy).unwrap().as_slice(),
+        )
+        .unwrap();
+        let migrated = Pin::load(&root, Provider::Claude).unwrap();
+        assert!(migrated.executable.starts_with(root.join("providers/bin")));
+        fs::write(&executable, b"#!/bin/sh\necho newer\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(Pin::load(&root, Provider::Claude).is_ok());
+    }
+
+    fn version_script(directory: &Path, version: &str) -> PathBuf {
+        let path = directory.join("provider");
+        fs::write(&path, format!("#!/bin/sh\necho {version}\n")).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        path.canonicalize().unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn refresh_adopts_an_admitted_update_and_keeps_routes_on_the_pin() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        let pin = claude_pin(&root, &executable, "2.1.300");
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Kept);
+        // An upstream update at the same path: admitted, so the pin follows it.
+        fs::write(&executable, b"#!/bin/sh\necho 2.1.301\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Adopted);
+        let loaded = Pin::load(&root, Provider::Claude).unwrap();
+        assert_eq!(loaded.version, "2.1.301");
+        assert_ne!(loaded.executable, pin.executable);
+        // The retired custody copy was collected with the adoption.
+        assert!(!pin.executable.exists());
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_an_unadmitted_build_and_remembers_the_decision() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        let pin = claude_pin(&root, &executable, "2.1.300");
+        fs::write(&executable, b"#!/bin/sh\necho 9.9.9\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Rejected);
+        // The previous pin is untouched and still resolves.
+        let loaded = Pin::load(&root, Provider::Claude).unwrap();
+        assert_eq!(loaded.executable, pin.executable);
+        // The rejected digest is cached: a second pass must not re-inspect.
+        let marker = root.join("providers").join("claude.rejected");
+        assert_eq!(
+            String::from_utf8(fs::read(&marker).unwrap()).unwrap(),
+            uncached_digest(&executable)
+        );
+        fs::remove_file(&executable).unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Rejected);
+    }
+
+    #[tokio::test]
+    async fn refresh_leaves_unpinned_providers_to_doctor() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Unpinned);
+        assert!(!root.join("providers").join("claude.json").exists());
     }
 
     #[test]
@@ -1408,7 +1770,7 @@ mod tests {
         // also proves the clone path produced launch-owned bytes.
         assert_ne!(
             fs::metadata(&snapshot).unwrap().ino(),
-            fs::metadata(&executable).unwrap().ino()
+            fs::metadata(&pin.executable).unwrap().ino()
         );
         assert!(pin.snapshot(&launch).is_err());
     }
@@ -1458,7 +1820,7 @@ mod tests {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let sha256 = executable_digest(&executable).unwrap();
         let (_, host_sha256) = host_identity().unwrap();
-        let pin = Pin {
+        let mut pin = Pin {
             provider: Provider::Codex,
             executable: executable.clone(),
             sha256: sha256.clone(),

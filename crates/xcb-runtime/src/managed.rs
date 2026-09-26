@@ -5412,9 +5412,22 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
             let _ = crate::offers::refresh_if_due(&root, now_ms());
         })
     };
+    let spawn_pins = |root: PathBuf| {
+        tokio::spawn(async move {
+            let home = root.join("metadata-home");
+            for provider in xcb_core::Provider::ALL {
+                let report = crate::process::refresh_provider(&root, provider, None, &home).await;
+                if let Some(detail) = report.detail {
+                    record_supervisor_fault(&root, &format!("{provider} refresh: {detail}"));
+                }
+            }
+        })
+    };
     let mut offer_refresh = Some(spawn_refresh(root.clone()));
+    let mut provider_refresh = Some(spawn_pins(root.clone()));
     let mut idle_since = Instant::now();
     let mut offer_check = Instant::now();
+    let mut pin_check = Instant::now();
     let mut tick_faults = 0u32;
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     let mut relay = crate::managed_relay::RelayHost::new(&root);
@@ -5435,6 +5448,15 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                     }
                     offer_check = Instant::now();
                     offer_refresh = Some(spawn_refresh(root.clone()));
+                }
+                if pin_check.elapsed() >= Duration::from_secs(60 * 60)
+                    && provider_refresh.as_ref().is_none_or(tokio::task::JoinHandle::is_finished)
+                {
+                    if let Some(handle) = provider_refresh.take() {
+                        let _ = handle.await;
+                    }
+                    pin_check = Instant::now();
+                    provider_refresh = Some(spawn_pins(root.clone()));
                 }
                 let draining = identity.binary_replaced();
                 match supervisor.tick(draining).await {
