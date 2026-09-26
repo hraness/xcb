@@ -3407,9 +3407,7 @@ async fn managed_chat(
         ));
     }
     let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
-    // The surfaces lane adds a `launch_hint` parameter to `serve_ui`; the
-    // hint is passed there once both lanes are integrated.
-    let (conversation, _launch_hint) = chat_conversation(&managed, &cwd, resume, new).await?;
+    let (conversation, launch_hint) = chat_conversation(&managed, &cwd, resume, new).await?;
     let executable = std::env::current_exe()?;
     let (updates, display) = sync_channel(256);
     let (commands, input) = sync_channel(32);
@@ -3418,9 +3416,15 @@ async fn managed_chat(
     };
     let ui =
         tokio::task::spawn_blocking(move || xcb_tui::run_with_options(display, commands, options));
-    let result =
-        xcb_runtime::managed::serve_ui(store, conversation.id, None, input, updates, executable)
-            .await;
+    let result = xcb_runtime::managed::serve_ui(
+        store,
+        conversation.id,
+        launch_hint,
+        input,
+        updates,
+        executable,
+    )
+    .await;
     let ui = ui
         .await
         .map_err(|_| Error::Unavailable("terminal task failed"))?;
