@@ -1537,10 +1537,11 @@ mod tests {
         for _ in 0..3 {
             Pin::load(&root, Provider::Codex).unwrap();
         }
-        // Loads re-verify through the inode-bound digest cache; the custodied
-        // copy may already hold a verified digest from the save, so repeated
-        // loads add at most one digest of their own.
-        assert!(digested_executables(&pin.executable) - digested <= 1);
+        // Each load re-verifies through the inode-bound digest cache: at most
+        // one digest per load. The shared 16-entry cache may evict the
+        // custodied copy between loads when sibling tests run in parallel, so
+        // three loads can digest up to three times.
+        assert!(digested_executables(&pin.executable) - digested <= 3);
     }
 
     #[test]
