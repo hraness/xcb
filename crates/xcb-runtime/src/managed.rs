@@ -5415,6 +5415,9 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
     let spawn_pins = |root: PathBuf| {
         tokio::spawn(async move {
             let home = root.join("metadata-home");
+            let catalog_root = root.clone();
+            let _ =
+                tokio::task::spawn_blocking(move || crate::catalog::refresh(&catalog_root)).await;
             for provider in xcb_core::Provider::ALL {
                 let report = crate::process::refresh_provider(&root, provider, None, &home).await;
                 if let Some(detail) = report.detail {

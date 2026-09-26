@@ -85,7 +85,8 @@ pub async fn auto_route(
     let admitted_providers: BTreeSet<_> = Provider::ALL
         .into_iter()
         .filter(|provider| {
-            Pin::load(store.root(), *provider).is_ok_and(|pin| runner::provider_admitted(&pin))
+            Pin::load(store.root(), *provider)
+                .is_ok_and(|pin| runner::provider_admitted(store.root(), &pin))
         })
         .collect();
     let mut candidates: Vec<(Id, ModelChoice, Option<f64>)> = Vec::new();
@@ -463,7 +464,7 @@ fn ready(store: &Store, session: &Session) -> Result<()> {
     store.require_quota_available(&session.account, now_ms())?;
     store.require_authenticated_account(&session.account)?;
     let pin = Pin::load(store.root(), session.model.provider)?;
-    if !runner::provider_admitted(&pin) {
+    if !runner::provider_admitted(store.root(), &pin) {
         return Err(Error::Unavailable(
             "native execution for this provider/runtime is not qualified; run xcb doctor",
         ));
@@ -839,7 +840,7 @@ async fn execute_inner(
                 .into_iter()
                 .filter(|provider| {
                     Pin::load(store.root(), *provider)
-                        .is_ok_and(|pin| runner::provider_admitted(&pin))
+                        .is_ok_and(|pin| runner::provider_admitted(store.root(), &pin))
                 })
                 .collect();
             let mut candidates = Vec::new();

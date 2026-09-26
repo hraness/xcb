@@ -5,6 +5,7 @@ mod application_qualification;
 pub mod attachments;
 pub mod auth;
 pub mod broker;
+pub mod catalog;
 pub mod claude;
 mod claude_protocol;
 pub mod cloud;

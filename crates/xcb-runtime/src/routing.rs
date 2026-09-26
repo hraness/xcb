@@ -433,7 +433,8 @@ pub async fn smart_route(
     let admitted: BTreeSet<_> = Provider::ALL
         .into_iter()
         .filter(|provider| {
-            Pin::load(store.root(), *provider).is_ok_and(|pin| runner::provider_admitted(&pin))
+            Pin::load(store.root(), *provider)
+                .is_ok_and(|pin| runner::provider_admitted(store.root(), &pin))
         })
         .collect();
     route_with_admitted(store, config, request, &admitted).await

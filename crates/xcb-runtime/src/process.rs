@@ -649,8 +649,11 @@ pub enum RefreshOutcome {
     Kept,
     /// A newly discovered build passed admission and became the pin.
     Adopted,
-    /// A newly discovered build failed admission; the previous pin stands and
-    /// this build is remembered so it is not re-inspected every command.
+    /// The discovered build is inspectable but not yet catalog-admitted —
+    /// the pinned build keeps routing while the catalog catches up.
+    PendingCatalog,
+    /// A newly discovered build failed inspection or was denied; the
+    /// previous pin stands and this build is not re-inspected every pass.
     Rejected,
     /// No pin exists — `xcb doctor` owns first admission.
     Unpinned,
@@ -682,7 +685,7 @@ pub async fn refresh_provider(
         Err(error) => Err(error),
     };
     let (outcome, detail) = match outcome {
-        Ok(outcome) => (outcome, None),
+        Ok((outcome, detail)) => (outcome, detail),
         Err(error) => (RefreshOutcome::Rejected, Some(error.to_string())),
     };
     ProviderRefresh {
@@ -697,10 +700,10 @@ async fn refresh_provider_inner(
     provider: Provider,
     explicit: Option<&Path>,
     home: &Path,
-) -> Result<RefreshOutcome> {
+) -> Result<(RefreshOutcome, Option<String>)> {
     let record = root.join("providers").join(format!("{provider}.json"));
     if !record.is_file() {
-        return Ok(RefreshOutcome::Unpinned);
+        return Ok((RefreshOutcome::Unpinned, None));
     }
     let pin = Pin::load(root, provider).ok();
     let executable = discover(provider, explicit)?;
@@ -708,39 +711,151 @@ async fn refresh_provider_inner(
     if let Some(pin) = &pin
         && pin.sha256 == discovered_sha
     {
-        return Ok(RefreshOutcome::Kept);
+        return Ok((RefreshOutcome::Kept, None));
     }
     let marker = record.with_extension("rejected");
-    if private::read(&marker, 128)
-        .ok()
-        .is_some_and(|bytes| bytes == discovered_sha.as_bytes())
+    if let Some(rejected) = read_rejected(&marker)
+        && rejected.sha256 == discovered_sha
+        && !crate::catalog::listed(root, &discovered_sha)
     {
-        return Ok(RefreshOutcome::Rejected);
+        // The catalog still does not admit a build seen before. Inspection
+        // failures stay terminal while the bytes are unchanged; a denied
+        // digest is rejected only while the catalog still denies it.
+        return Ok(
+            if crate::catalog::denied(root, &discovered_sha)
+                || rejected.reason == RejectedReason::Inspection
+            {
+                (RefreshOutcome::Rejected, None)
+            } else {
+                (
+                    RefreshOutcome::PendingCatalog,
+                    Some(pending_detail(&rejected)),
+                )
+            },
+        );
     }
     match inspect(provider, explicit, home).await {
-        Ok(mut fresh) if crate::runner::provider_admitted(&fresh) => {
+        Ok(mut fresh) if crate::runner::provider_admitted(root, &fresh) => {
             fresh.save(root)?;
             let _ = fs::remove_file(&marker);
-            Ok(RefreshOutcome::Adopted)
+            Ok((RefreshOutcome::Adopted, None))
         }
-        Ok(_fresh) => {
-            write_rejected(&marker, &discovered_sha)?;
-            Err(Error::Unavailable(
-                "provider build is not admitted; keeping the pinned build",
-            ))
+        Ok(fresh) => {
+            let denied = crate::catalog::denied(root, &discovered_sha);
+            let reason = if denied {
+                RejectedReason::Denied
+            } else {
+                RejectedReason::Unadmitted
+            };
+            write_rejected(&marker, &discovered_sha, Some(&fresh.version), reason)?;
+            if denied {
+                Err(Error::Unavailable(
+                    "provider build is denied by the reviewed-builds catalog",
+                ))
+            } else {
+                Ok((
+                    RefreshOutcome::PendingCatalog,
+                    Some(format!("{} awaiting catalog admission", fresh.version)),
+                ))
+            }
         }
         Err(error) => {
-            write_rejected(&marker, &discovered_sha)?;
+            write_rejected(&marker, &discovered_sha, None, RejectedReason::Inspection)?;
             Err(error)
         }
     }
 }
 
-fn write_rejected(marker: &Path, sha256: &str) -> Result<()> {
-    match private::read(marker, 128) {
-        Ok(old) => private::replace(marker, sha256.as_bytes(), &digest(old)),
+fn pending_detail(rejected: &Rejected) -> String {
+    match &rejected.provider_version {
+        Some(version) => format!("{version} awaiting catalog admission"),
+        None => "discovered build awaiting catalog admission".to_owned(),
+    }
+}
+
+/// A discovered build the refresh pass marked as awaiting catalog
+/// admission. Doctor and status surfaces report it without re-inspecting;
+/// inspection failures and denied builds are not pending.
+pub struct PendingBuild {
+    pub version: Option<String>,
+    pub sha256: String,
+}
+pub fn pending_build(root: &Path, provider: Provider) -> Option<PendingBuild> {
+    let marker = root
+        .join("providers")
+        .join(format!("{provider}.json"))
+        .with_extension("rejected");
+    let rejected = read_rejected(&marker)?;
+    if rejected.reason != RejectedReason::Unadmitted {
+        return None;
+    }
+    Some(PendingBuild {
+        version: rejected.provider_version,
+        sha256: rejected.sha256,
+    })
+}
+
+/// A build the refresh pass already judged: pending builds wait on the
+/// catalog; inspection failures and catalog-denied builds are terminal
+/// until the bytes change.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Rejected {
+    version: u32,
+    sha256: String,
+    #[serde(default)]
+    provider_version: Option<String>,
+    reason: RejectedReason,
+    observed_at_ms: u64,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum RejectedReason {
+    Unadmitted,
+    Inspection,
+    Denied,
+}
+
+fn read_rejected(marker: &Path) -> Option<Rejected> {
+    let bytes = private::read(marker, 1024).ok()?;
+    if let Ok(rejected) = serde_json::from_slice::<Rejected>(&bytes)
+        && rejected.version == 1
+    {
+        return Some(rejected);
+    }
+    // Markers written before the catalog flow store the raw digest bytes;
+    // treat them as unadmitted builds awaiting review.
+    std::str::from_utf8(&bytes)
+        .ok()
+        .map(str::trim)
+        .filter(|sha256| sha256.len() == 64)
+        .map(|sha256| Rejected {
+            version: 1,
+            sha256: sha256.to_owned(),
+            provider_version: None,
+            reason: RejectedReason::Unadmitted,
+            observed_at_ms: 0,
+        })
+}
+
+fn write_rejected(
+    marker: &Path,
+    sha256: &str,
+    provider_version: Option<&str>,
+    reason: RejectedReason,
+) -> Result<()> {
+    let record = Rejected {
+        version: 1,
+        sha256: sha256.to_owned(),
+        provider_version: provider_version.map(str::to_owned),
+        reason,
+        observed_at_ms: crate::now_ms(),
+    };
+    let bytes = serde_json::to_vec_pretty(&record)?;
+    match private::read(marker, 1024) {
+        Ok(old) => private::replace(marker, &bytes, &digest(old)),
         Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            private::create(marker, sha256.as_bytes())
+            private::create(marker, &bytes)
         }
         Err(error) => Err(error),
     }
@@ -1718,8 +1833,50 @@ mod tests {
         assert!(!pin.executable.exists());
     }
 
+    /// Exact-artifact adoption without an xcb release: a pending Codex
+    /// build adopts on the first pass after the catalog lists its
+    /// `(version, digest)` pair.
+    #[cfg(target_os = "macos")]
     #[tokio::test]
-    async fn refresh_rejects_an_unadmitted_build_and_remembers_the_decision() {
+    async fn a_pending_codex_build_adopts_once_the_catalog_lists_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "codex-cli 0.156.1");
+        let pin = codex_pin(&root, &executable, uncached_digest(&executable));
+        fs::write(&executable, b"#!/bin/sh\necho codex-cli 0.157.1\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let report = refresh_provider(&root, Provider::Codex, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
+        let report = refresh_provider(&root, Provider::Codex, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
+        // The catalog publication lists the pending pair.
+        let sha = uncached_digest(&executable);
+        let catalog = serde_json::json!({
+            "version": 1,
+            "codex": [{"version": "0.157.1", "sha256": sha,
+                "platform": "darwin-aarch64"}],
+        });
+        private::create(
+            &root.join("providers").join("catalog.json"),
+            catalog.to_string().as_bytes(),
+        )
+        .unwrap();
+        let report = refresh_provider(&root, Provider::Codex, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Adopted);
+        let loaded = Pin::load(&root, Provider::Codex).unwrap();
+        assert_eq!(loaded.version, "0.157.1");
+        assert_eq!(loaded.sha256, sha);
+        assert_ne!(loaded.executable, pin.executable);
+        assert!(!root.join("providers").join("codex.rejected").exists());
+    }
+
+    /// A build the host can inspect but no admission path accepts waits on
+    /// the reviewed-builds catalog rather than being rejected outright: the
+    /// pin keeps routing, the digest is remembered, and a later catalog
+    /// publication adopts it.
+    #[tokio::test]
+    async fn refresh_parks_an_unadmitted_build_for_the_catalog() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let home = private::directory(&root.join("home")).unwrap();
@@ -1728,19 +1885,104 @@ mod tests {
         fs::write(&executable, b"#!/bin/sh\necho 9.9.9\n").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
-        assert_eq!(report.outcome, RefreshOutcome::Rejected);
+        assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("9.9.9 awaiting catalog admission")
+        );
         // The previous pin is untouched and still resolves.
         let loaded = Pin::load(&root, Provider::Claude).unwrap();
         assert_eq!(loaded.executable, pin.executable);
-        // The rejected digest is cached: a second pass must not re-inspect.
+        // The marker records the pending decision: a second pass skips
+        // inspection and reports the stored version.
         let marker = root.join("providers").join("claude.rejected");
-        assert_eq!(
-            String::from_utf8(fs::read(&marker).unwrap()).unwrap(),
-            uncached_digest(&executable)
-        );
+        let marker: serde_json::Value =
+            serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(marker["sha256"], uncached_digest(&executable));
+        assert_eq!(marker["providerVersion"], "9.9.9");
+        assert_eq!(marker["reason"], "unadmitted");
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
         fs::remove_file(&executable).unwrap();
         let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
         assert_eq!(report.outcome, RefreshOutcome::Rejected);
+    }
+
+    /// A build that could not even be inspected stays rejected while its
+    /// bytes stand: the catalog must never be consulted for it.
+    #[tokio::test]
+    async fn an_inspection_failure_stays_rejected_until_the_bytes_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        claude_pin(&root, &executable, "2.1.300");
+        // A binary whose --version output never parses cannot be qualified.
+        fs::write(&executable, b"#!/bin/sh\necho not-a-version\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Rejected);
+        let marker = root.join("providers").join("claude.rejected");
+        let marker: serde_json::Value =
+            serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(marker["reason"], "inspection");
+        // Even listing the digest would not help: the marker-hit arm only
+        // reconsiders for catalog-listed digests.
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Rejected);
+        assert_eq!(report.detail, None);
+    }
+
+    #[tokio::test]
+    async fn a_catalog_denied_build_is_rejected_outright() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        claude_pin(&root, &executable, "2.1.300");
+        fs::write(&executable, b"#!/bin/sh\necho 9.9.9\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let sha = uncached_digest(&executable);
+        let catalog = serde_json::json!({
+            "version": 1,
+            "claude": [], "codex": [], "devin": [],
+            "deny": {"claude": [sha]}
+        });
+        private::create(
+            &root.join("providers").join("catalog.json"),
+            catalog.to_string().as_bytes(),
+        )
+        .unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Rejected);
+        assert!(report.detail.unwrap().contains("denied"));
+        // The denial is remembered; a second pass stays rejected.
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::Rejected);
+    }
+
+    /// Markers written before the catalog flow stored the raw digest bytes;
+    /// they read as unadmitted builds awaiting review.
+    #[tokio::test]
+    async fn a_raw_digest_marker_is_read_as_pending() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        claude_pin(&root, &executable, "2.1.300");
+        fs::write(&executable, b"#!/bin/sh\necho 9.9.9\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        private::create(
+            &root.join("providers").join("claude.rejected"),
+            uncached_digest(&executable).as_bytes(),
+        )
+        .unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("discovered build awaiting catalog admission")
+        );
     }
 
     #[tokio::test]
