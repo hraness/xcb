@@ -24,7 +24,13 @@ Deployment env (`npx convex env set <KEY> <value>` with
 `CONVEX_DEPLOYMENT=prod:terrific-rook-891`):
 
 - `JWT_PRIVATE_KEY`, `JWKS` — the RS256 pair that mints and verifies
-  device sessions. Rotate by replacing both.
+  device sessions. Rotate by replacing both together, always with
+  `npx convex env set JWT_PRIVATE_KEY --from-file <pem>` (a multi-line
+  value passed inline is stored mangled and breaks minting). After a
+  rotation, devices holding the old session recover automatically: the
+  first authenticated call under the dead token fails, one forced
+  refresh mints a fresh session, and the call retries — bound roughly
+  a request timeout plus a refresh.
 - `XCB_RELAY_BOOTSTRAP` — one-shot first-owner invite. Inert once a
   subject is verified; set a fresh value only when rebuilding a fleet.
 - `XCB_RELAY_EMAIL` — `log`, `sendgrid`, `resend`, or `webhook`.

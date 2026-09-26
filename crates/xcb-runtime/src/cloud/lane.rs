@@ -160,17 +160,29 @@ impl RelayLane {
             connection_id,
             presence_until: 0,
         };
-        let response = lane
-            .client
-            .mutation(
-                "relayDevices:connect",
-                vec![
-                    ("connectionId", json!(lane.connection_id)),
-                    ("deviceId", json!(lane.device.device)),
-                    ("fingerprint", json!(fingerprint)),
-                ],
-            )
-            .await?;
+        // `connect` doubles as the session's liveness probe: a token that
+        // fails server-side while locally fresh recovers through one
+        // forced refresh rather than wedging the socket.
+        let device_id = lane.device.device.clone();
+        let connection_id = lane.connection_id.clone();
+        let response = link::with_session_recovery(
+            &mut lane.client,
+            &lane.state_root,
+            &mut lane.session,
+            async |client: &mut RelayClient| {
+                client
+                    .mutation(
+                        "relayDevices:connect",
+                        vec![
+                            ("connectionId", json!(connection_id.clone())),
+                            ("deviceId", json!(device_id.clone())),
+                            ("fingerprint", json!(fingerprint.clone())),
+                        ],
+                    )
+                    .await
+            },
+        )
+        .await?;
         lane.presence_until = response
             .get("presenceUntil")
             .and_then(Value::as_f64)
