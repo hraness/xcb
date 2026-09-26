@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Codex version to qualify (default: npm latest)
+        description: "Codex version to qualify (default: npm latest)"
         required: false
         type: string
 
