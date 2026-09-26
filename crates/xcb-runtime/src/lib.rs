@@ -99,6 +99,23 @@ pub enum Error {
     /// `Core(Invalid)` when the text is guidance, not a noun fragment.
     #[error("{0}")]
     Message(&'static str),
+    /// A user-facing sentence built at runtime (it can name the input), plus
+    /// the one command to run next. The CLI prints `next` on its own line;
+    /// other surfaces get it appended to the sentence.
+    #[error("{message}{}", next.as_deref().map(|next| format!(" Next: {next}")).unwrap_or_default())]
+    Guided {
+        message: String,
+        next: Option<String>,
+    },
+}
+impl Error {
+    /// A [`Error::Guided`] error with a next command.
+    pub fn guided(message: impl Into<String>, next: impl Into<String>) -> Self {
+        Self::Guided {
+            message: message.into(),
+            next: Some(next.into()),
+        }
+    }
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
