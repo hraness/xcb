@@ -976,8 +976,8 @@ fn service_text(status: &xcb_runtime::habitat_service::Status, style: ux::Style)
     match &status.log {
         Some(log) => {
             out.push_str(&format!("Log: {}\n", log.display()));
-            if let Some(folder) = xcb_runtime::habitat_service::protected_folder_denial(log) {
-                out.push_str(&ux::files_and_folders_denial(folder, style));
+            if let Some(denial) = xcb_runtime::habitat_service::current_denial(log) {
+                out.push_str(&ux::files_and_folders_denial(denial.folder, style));
             }
         }
         None if status.installed => {
@@ -2562,7 +2562,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 Some(ServiceCommand::Install) => {
                     let loaded = xcb_runtime::habitat_service::status(store.root(), &home)
                         .is_ok_and(|status| status.registered);
-                    if !loaded {
+                    if cfg!(target_os = "macos") && !loaded {
                         ux::login_item_notice(
                             "It resumes your conversations' background work after you log in.",
                             "xcb service uninstall",
@@ -3384,7 +3384,7 @@ mod tests {
         let log = dir.join("habitat.log");
         std::fs::write(
             &log,
-            "xcb: Operation not permitted (os error 1): /Users/me/Desktop/app\n",
+            "xcb: local I/O failed: Operation not permitted (os error 1)\n",
         )
         .unwrap();
         let env = |name: &str| (name == "LANG").then(|| "en_US.UTF-8".to_owned());
@@ -3414,8 +3414,8 @@ mod tests {
                 "✓ Starts at login · ○ supervisor idle\n\
                  File: /Users/me/Library/LaunchAgents/dev.hraness.xcb.habitat.x.plist\n\
                  Log: {}\n\
-                 ✗ xcb can't open files in ~/Desktop: macOS access is off for xcb.\n  \
-                 Turn on xcb under Desktop in System Settings › Privacy & Security › Files & Folders.\n\
+                 ✗ xcb can't open a project folder: macOS access is off for xcb.\n  \
+                 Turn on xcb for Documents, Desktop or Downloads in System Settings › Privacy & Security › Files & Folders.\n\
                  → open 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders'\n",
                 log.display()
             )

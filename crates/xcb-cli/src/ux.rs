@@ -169,11 +169,21 @@ pub fn login_item_notice(why: &str, off: &str) {
     }
 }
 
-/// The SPEC CLI recovery block for a folder macOS kept from the
-/// launchd-run supervisor.
-pub fn files_and_folders_denial(folder: &str, style: Style) -> String {
+/// The SPEC CLI recovery block for a protected folder macOS kept from the
+/// launchd-run supervisor. `folder` is named when the log line says which.
+pub fn files_and_folders_denial(folder: Option<&str>, style: Style) -> String {
+    let (what, turn_on) = match folder {
+        Some(folder) => (
+            format!("open files in ~/{folder}"),
+            format!("under {folder}"),
+        ),
+        None => (
+            "open a project folder".to_owned(),
+            "for Documents, Desktop or Downloads".to_owned(),
+        ),
+    };
     format!(
-        "{} xcb can't open files in ~/{folder}: macOS access is off for xcb.\n  Turn on xcb under {folder} in {FILES_AND_FOLDERS_PATH}.\n{} open '{FILES_AND_FOLDERS_URL}'\n",
+        "{} xcb can't {what}: macOS access is off for xcb.\n  Turn on xcb {turn_on} in {FILES_AND_FOLDERS_PATH}.\n{} open '{FILES_AND_FOLDERS_URL}'\n",
         style.sym(Symbol::Fail),
         style.sym(Symbol::Next)
     )
@@ -495,7 +505,7 @@ mod notice_tests {
         let env = |name: &str| (name == "LANG").then(|| "en_US.UTF-8".to_owned());
         let plain = Style::detect(&env, false);
         assert_eq!(
-            files_and_folders_denial("Documents", plain),
+            files_and_folders_denial(Some("Documents"), plain),
             "✗ xcb can't open files in ~/Documents: macOS access is off for xcb.\n  Turn on xcb under Documents in System Settings › Privacy & Security › Files & Folders.\n→ open 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders'\n"
         );
     }

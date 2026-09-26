@@ -305,22 +305,7 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
     // Check each ancestor before creating the next directory; do not create a
     // LaunchAgents directory through a symlinked Library and reject it afterward.
     for directory in [service.home.join("Library"), parent.to_path_buf()] {
-        match fs::symlink_metadata(&directory) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                use std::os::unix::fs::DirBuilderExt;
-                fs::DirBuilder::new().mode(0o700).create(&directory)?;
-            }
-            Err(e) => return Err(e.into()),
-            Ok(_) => (),
-        }
-        let metadata = fs::symlink_metadata(&directory)?;
-        if !metadata.is_dir()
-            || metadata.uid() != rustix::process::getuid().as_raw()
-            || metadata.mode() & 0o022 != 0
-            || directory.canonicalize()? != directory
-        {
-            return Err(Error::PrivateState);
-        }
+        private_directory(&directory)?;
     }
     let meta = fs::symlink_metadata(parent)?;
     if !meta.is_dir()
@@ -331,25 +316,29 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
         return Err(Error::PrivateState);
     }
     let body = service.render()?;
-    // Create the log folder first: launchd creates the file, not the folder.
-    let logs = service.home.join("Library/Logs/xcb");
-    if fs::symlink_metadata(&logs).is_err() {
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .recursive(true)
-            .create(&logs)?;
-    }
+    let log_folders = || -> Result<()> {
+        // launchd creates the log file but not its folder. Check each level
+        // the way the LaunchAgents folder is checked.
+        for directory in [
+            service.home.join("Library/Logs"),
+            service.home.join("Library/Logs/xcb"),
+        ] {
+            private_directory(&directory)?;
+        }
+        Ok(())
+    };
     match read_manifest(&service.manifest) {
         // An existing legacy manifest stays as it is; reinstalling after
         // `service uninstall` turns the log on.
-        Ok(bytes) if service.recognize(&bytes)?.is_some() => (),
+        Ok(bytes) if service.recognize(&bytes)? == Some(None) => (),
+        Ok(bytes) if service.recognize(&bytes)?.is_some() => log_folders()?,
         Ok(_) => {
             return Err(Error::Conflict(
                 "habitat service manifest changed; foreign contents preserved",
             ));
         }
         Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            log_folders()?;
             let mut staged = tempfile::NamedTempFile::new_in(parent)?;
             staged.write_all(body.as_bytes())?;
             staged.as_file().sync_all()?;
@@ -378,30 +367,74 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
     status(root, home)
 }
 
-/// The protected folder (`Documents`, `Desktop` or `Downloads`) the newest
-/// "Operation not permitted" line in the supervisor log names, if any: macOS
-/// blocked the launchd-run supervisor from a folder it needs Files & Folders
-/// access for. Reads at most the last 64 KiB of the log.
-pub fn protected_folder_denial(log: &Path) -> Option<&'static str> {
+/// Create `directory` (mode 0700) if it is missing, then require a real,
+/// canonical directory owned by this user that others can't write.
+fn private_directory(directory: &Path) -> Result<()> {
+    match fs::symlink_metadata(directory) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            use std::os::unix::fs::DirBuilderExt;
+            fs::DirBuilder::new().mode(0o700).create(directory)?;
+        }
+        Err(e) => return Err(e.into()),
+        Ok(_) => (),
+    }
+    let metadata = fs::symlink_metadata(directory)?;
+    if !metadata.is_dir()
+        || metadata.uid() != rustix::process::getuid().as_raw()
+        || metadata.mode() & 0o022 != 0
+        || directory.canonicalize()? != directory
+    {
+        return Err(Error::PrivateState);
+    }
+    Ok(())
+}
+
+/// A current "Operation not permitted" denial in the supervisor log.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Denial {
+    /// `Documents`, `Desktop` or `Downloads` when the line names one.
+    pub folder: Option<&'static str>,
+}
+
+/// Whether the supervisor's latest run was refused by macOS: the log's
+/// last line is an "Operation not permitted" error and the log changed in
+/// the last ten minutes (the supervisor runs every minute, so a denial that
+/// persists keeps the file fresh, and one the user fixed ages out). Reads at
+/// most the last 64 KiB.
+pub fn current_denial(log: &Path) -> Option<Denial> {
+    let modified = fs::metadata(log).ok()?.modified().ok()?;
+    let age = std::time::SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+    if age > std::time::Duration::from_secs(600) {
+        return None;
+    }
+    denial_in(&tail(log)?)
+}
+
+fn tail(log: &Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     const TAIL: u64 = 64 * 1024;
     let mut file = File::open(log).ok()?;
     let length = file.metadata().ok()?.len();
     file.seek(SeekFrom::Start(length.saturating_sub(TAIL)))
         .ok()?;
-    let mut tail = Vec::new();
-    file.take(TAIL).read_to_end(&mut tail).ok()?;
-    let tail = String::from_utf8_lossy(&tail);
-    tail.lines().rev().find_map(|line| {
-        if !(line.contains("Operation not permitted") || line.contains("(os error 1)")) {
-            return None;
-        }
-        ["Documents", "Desktop", "Downloads"]
-            .into_iter()
-            .find(|folder| {
-                line.contains(&format!("/{folder}/")) || line.ends_with(&format!("/{folder}"))
-            })
-    })
+    let mut bytes = Vec::new();
+    file.take(TAIL).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn denial_in(text: &str) -> Option<Denial> {
+    let line = text.lines().rev().find(|line| !line.trim().is_empty())?;
+    if !(line.contains("Operation not permitted") || line.contains("(os error 1)")) {
+        return None;
+    }
+    let folder = ["Documents", "Desktop", "Downloads"]
+        .into_iter()
+        .find(|folder| {
+            line.contains(&format!("/{folder}/")) || line.ends_with(&format!("/{folder}"))
+        });
+    Some(Denial { folder })
 }
 
 pub fn uninstall(root: &Path, home: &Path) -> Result<Status> {
@@ -510,18 +543,40 @@ mod tests {
     }
 
     #[test]
-    fn a_denied_protected_folder_is_found_in_the_log_tail() {
+    fn only_a_fresh_denial_on_the_last_line_counts() {
+        // xcb's own I/O errors carry no path.
+        assert_eq!(
+            denial_in("started\nxcb: local I/O failed: Operation not permitted (os error 1)\n\n"),
+            Some(Denial { folder: None })
+        );
+        assert_eq!(
+            denial_in("provider: Operation not permitted (os error 1): /Users/me/Desktop/app\n"),
+            Some(Denial {
+                folder: Some("Desktop")
+            })
+        );
+        // A later line means the supervisor got past it.
+        assert_eq!(
+            denial_in("xcb: local I/O failed: Operation not permitted (os error 1)\nrecovered\n"),
+            None
+        );
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("habitat.log");
-        assert_eq!(protected_folder_denial(&log), None);
+        assert_eq!(current_denial(&log), None);
         fs::write(
             &log,
-            "started\nxcb: local I/O failed: Operation not permitted (os error 1): /Users/me/Documents/app/src\nok\n",
+            "xcb: local I/O failed: Operation not permitted (os error 1)\n",
         )
         .unwrap();
-        assert_eq!(protected_folder_denial(&log), Some("Documents"));
-        fs::write(&log, "xcb: Operation not permitted (os error 1): /tmp/x\n").unwrap();
-        assert_eq!(protected_folder_denial(&log), None);
+        assert_eq!(current_denial(&log), Some(Denial { folder: None }));
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        File::options()
+            .write(true)
+            .open(&log)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        assert_eq!(current_denial(&log), None);
     }
 
     #[test]

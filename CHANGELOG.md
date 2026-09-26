@@ -35,9 +35,9 @@ The first run is shorter and every error says what to do next.
   its login-item notice, what will open at login and how to turn it off.
 - The login service now writes its log to
   `~/Library/Logs/xcb/<label>.log`, and `xcb service` shows that path.
-  When the log shows macOS kept the service out of Documents, Desktop or
-  Downloads, `xcb service` names the folder and the Files & Folders
-  setting to turn on. A service installed by an earlier version keeps
+  When the service's latest run ended with macOS refusing access,
+  `xcb service` names the Files & Folders setting to turn on for
+  Documents, Desktop or Downloads. A service installed by an earlier version keeps
   working; reinstall it to turn on the log.
 - The terminal UI honors `NO_COLOR`, and with no accounts it says to
   `/quit` and run `xcb setup claude`.
