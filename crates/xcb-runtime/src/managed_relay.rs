@@ -25,8 +25,12 @@ use crate::{Error, Result, digest};
 
 /// Remote commands land at most this long after a controller posts them.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-/// Lane boot retry after a transport or custody failure.
+/// Lane boot retry after a transport or custody failure. Consecutive
+/// failures double the delay up to `BOOT_RETRY_MAX`; one healthy pump
+/// resets it.
 const BOOT_RETRY: Duration = Duration::from_secs(15);
+/// Longest delay between lane reboot attempts.
+const BOOT_RETRY_MAX: Duration = Duration::from_secs(300);
 /// Fleet projection publish cadence when nothing changed sooner.
 const PROJECTION_INTERVAL: Duration = Duration::from_secs(30);
 /// Nonterminal task rows a fleet projection carries at most.
@@ -42,6 +46,9 @@ pub struct RelayHost {
     lane: Option<RelayLane>,
     root: PathBuf,
     next_boot: Instant,
+    /// Delay applied to the next reboot attempt; grows on consecutive
+    /// failures and resets on a healthy pump.
+    boot_delay: Duration,
     disabled: bool,
     projection_due: bool,
     projection_next: Instant,
@@ -58,6 +65,7 @@ impl RelayHost {
             lane: None,
             root: root.to_path_buf(),
             next_boot: Instant::now(),
+            boot_delay: BOOT_RETRY,
             disabled: false,
             projection_due: false,
             projection_next: Instant::now() + PROJECTION_INTERVAL,
@@ -85,7 +93,7 @@ impl RelayHost {
             if self.disabled || Instant::now() < self.next_boot {
                 return;
             }
-            self.next_boot = Instant::now() + BOOT_RETRY;
+            self.next_boot = Instant::now() + self.boot_delay;
             match lane::load_lane_keys(&self.root) {
                 Ok(Some(keys)) => match RelayLane::boot(keys).await {
                     Ok(mut lane) => {
@@ -100,6 +108,7 @@ impl RelayHost {
                         if fatal(&error) {
                             self.disabled = true;
                         }
+                        self.boot_delay = (self.boot_delay * 2).min(BOOT_RETRY_MAX);
                         record_supervisor_fault(
                             managed.root(),
                             &format!("relay lane boot failed: {}", fault_text(&error)),
@@ -107,10 +116,13 @@ impl RelayHost {
                     }
                 },
                 Ok(None) => {}
-                Err(error) => record_supervisor_fault(
-                    managed.root(),
-                    &format!("relay lane custody failed: {}", fault_text(&error)),
-                ),
+                Err(error) => {
+                    self.boot_delay = (self.boot_delay * 2).min(BOOT_RETRY_MAX);
+                    record_supervisor_fault(
+                        managed.root(),
+                        &format!("relay lane custody failed: {}", fault_text(&error)),
+                    );
+                }
             }
             return;
         }
@@ -131,8 +143,13 @@ impl RelayHost {
                 &format!("relay lane pump failed: {}", fault_text(&error)),
             );
             self.lane = None;
+            self.next_boot = Instant::now() + self.boot_delay;
+            self.boot_delay = (self.boot_delay * 2).min(BOOT_RETRY_MAX);
             return;
         }
+        // A full pump without an error proves the lane healthy — reset
+        // the reboot delay.
+        self.boot_delay = BOOT_RETRY;
         if refresh.get() {
             self.projection_due = true;
         }

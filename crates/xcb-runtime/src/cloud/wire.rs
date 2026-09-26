@@ -205,6 +205,20 @@ impl CommandState {
             Self::Applied | Self::Failed | Self::Ambiguous | Self::Cancelled | Self::Expired
         )
     }
+
+    /// The wire spelling — identical to the serde `snake_case` tag.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Prepared => "prepared",
+            Self::EffectStarted => "effect_started",
+            Self::Applied => "applied",
+            Self::Failed => "failed",
+            Self::Ambiguous => "ambiguous",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+        }
+    }
 }
 
 // Envelope shapes -------------------------------------------------------------------

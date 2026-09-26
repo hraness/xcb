@@ -34,6 +34,59 @@ pub enum RemoteCommand {
         /// Device id from `xcb fleet`.
         device: String,
     },
+    /// Queue guidance for a running managed task on a remote device —
+    /// the remote form of `xcb steer`.
+    Steer {
+        /// Target daemon device id from `xcb fleet`.
+        device: String,
+        /// Nonclosed task id on the target.
+        task: String,
+        /// Guidance text within the task's existing authority and budget.
+        text: String,
+    },
+    /// Cancel a managed task on a remote device.
+    Cancel {
+        /// Target daemon device id from `xcb fleet`.
+        device: String,
+        /// Task id on the target; terminal tasks report alreadyTerminal.
+        task: String,
+    },
+    /// Answer an attention item on a remote device. The attention id is
+    /// the task id shown by `xcb attention --remote`.
+    Answer {
+        /// Target daemon device id from `xcb fleet`.
+        device: String,
+        /// Attention (task) id on the target.
+        task: String,
+        /// The answer text.
+        text: String,
+    },
+    /// Ask a device to publish a fresh fleet projection now rather than
+    /// on its usual cadence.
+    Refresh {
+        /// Target daemon device id from `xcb fleet`.
+        device: String,
+    },
+    /// Read a posted command's lifecycle state and, once terminal, its
+    /// result. `--wait` polls until it settles.
+    Status {
+        /// Command public id returned by dispatch, send, or a remote verb.
+        command: String,
+        /// Poll until the command reaches a terminal state.
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Withdraw a still-pending command before the target device claims
+    /// it. Already-claimed commands are untouched.
+    Abort {
+        /// Command public id returned by dispatch, send, or a remote verb.
+        command: String,
+    },
+    /// Acknowledge a terminal command so retention can collect it.
+    Ack {
+        /// Command public id returned by dispatch, send, or a remote verb.
+        command: String,
+    },
 }
 
 /// The relay the CLI reaches when nothing overrides it: the anonymous
@@ -326,10 +379,21 @@ async fn wait_for_wrap(
 
 /// `xcb fleet` — every enrolled device plus its published projections.
 pub async fn fleet(state_root: &Path, json_out: bool) -> Result<i32> {
+    /// A projection older than this is stale: the daemon publishes on a
+    /// 30s cadence when contents change, so several missed intervals mean
+    /// the device stopped writing, not just that nothing changed.
+    const PROJECTION_STALE_MS: u64 = 120_000;
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
     let mut controller = open_controller(state_root).await?;
     let devices = controller.fleet().await?;
     let projections = controller.projections().await.unwrap_or_default();
     if json_out {
+        let now = now_ms();
         let projection_summary: Vec<Value> = projections
             .iter()
             .map(|row| {
@@ -338,6 +402,7 @@ pub async fn fleet(state_root: &Path, json_out: bool) -> Result<i32> {
                     "scope": row.scope,
                     "revision": row.revision,
                     "updatedAt": row.updated_at,
+                    "stale": now.saturating_sub(row.updated_at as u64) > PROJECTION_STALE_MS,
                 })
             })
             .collect();
@@ -362,6 +427,7 @@ pub async fn fleet(state_root: &Path, json_out: bool) -> Result<i32> {
         println!("No devices enrolled.");
         return Ok(0);
     }
+    let now = now_ms();
     for device in &devices {
         let presence = if device.online { "online" } else { "offline" };
         println!(
@@ -369,7 +435,16 @@ pub async fn fleet(state_root: &Path, json_out: bool) -> Result<i32> {
             device.device, device.label, device.device_class, presence, device.status
         );
         for row in projections.iter().filter(|row| row.device == device.device) {
-            println!("  projection {} · rev {}", row.scope, row.revision);
+            let age = now.saturating_sub(row.updated_at as u64) / 1000;
+            let stale = if age * 1000 > PROJECTION_STALE_MS {
+                " · STALE"
+            } else {
+                ""
+            };
+            println!(
+                "  projection {} · rev {} · {}s old{}",
+                row.scope, row.revision, age, stale
+            );
         }
     }
     Ok(0)
@@ -384,35 +459,16 @@ pub async fn dispatch(
     prompt_text: &str,
     json_out: bool,
 ) -> Result<i32> {
-    let body = CommandBody::TaskDispatch {
-        workspace: workspace.to_string(),
-        prompt: prompt_text.to_string(),
-    };
-    let plaintext = commands::encode(&body)?;
-    let mut controller = open_controller(state_root).await?;
-    let sent = controller
-        .dispatch(device, commands::kind_of(&body), &plaintext, None, None)
-        .await?;
-    print_json_or(
-        json_out,
-        || {
-            println!(
-                "Dispatched to {} as {} (idempotency {}).",
-                device, sent.command.public_id, sent.idempotency_key
-            );
-            if sent.replayed {
-                println!("Matched an in-flight dispatch — no second effect.");
-            }
+    post(
+        state_root,
+        device,
+        &CommandBody::TaskDispatch {
+            workspace: workspace.to_string(),
+            prompt: prompt_text.to_string(),
         },
-        json!({
-            "version": 1,
-            "command": sent.command.public_id,
-            "idempotencyKey": sent.idempotency_key,
-            "state": sent.command.state,
-            "replayed": sent.replayed,
-        }),
-    )?;
-    Ok(0)
+        json_out,
+    )
+    .await
 }
 
 /// `xcb send <device> <daemon> <text>` — post to a remote daemon inbox.
@@ -423,28 +479,16 @@ pub async fn send(
     text: &str,
     json_out: bool,
 ) -> Result<i32> {
-    let body = CommandBody::DaemonSend {
-        daemon: daemon.to_string(),
-        text: text.to_string(),
-    };
-    let plaintext = commands::encode(&body)?;
-    let mut controller = open_controller(state_root).await?;
-    let sent = controller
-        .dispatch(device, commands::kind_of(&body), &plaintext, None, None)
-        .await?;
-    print_json_or(
-        json_out,
-        || {
-            println!("Sent to {} as {}.", device, sent.command.public_id);
+    post(
+        state_root,
+        device,
+        &CommandBody::DaemonSend {
+            daemon: daemon.to_string(),
+            text: text.to_string(),
         },
-        json!({
-            "version": 1,
-            "command": sent.command.public_id,
-            "idempotencyKey": sent.idempotency_key,
-            "state": sent.command.state,
-        }),
-    )?;
-    Ok(0)
+        json_out,
+    )
+    .await
 }
 
 /// `xcb attention --remote` — decrypted fleet projections whose bodies
@@ -484,11 +528,43 @@ pub async fn attention_remote(state_root: &Path, json_out: bool) -> Result<i32> 
     Ok(0)
 }
 
-/// `xcb remote <admit|revoke>`.
-pub async fn remote(state_root: &Path, command: &RemoteCommand, json_out: bool) -> Result<i32> {
+/// Encode a command body, seal it to the target device and enqueue it.
+/// Shared by every remote verb — `dispatch`, `send` and the `remote`
+/// family all ride the same closed union.
+async fn post(state_root: &Path, device: &str, body: &CommandBody, json_out: bool) -> Result<i32> {
+    let plaintext = commands::encode(body)?;
     let mut controller = open_controller(state_root).await?;
+    let sent = controller
+        .dispatch(device, commands::kind_of(body), &plaintext, None, None)
+        .await?;
+    print_json_or(
+        json_out,
+        || {
+            println!(
+                "Posted to {} as {} (idempotency {}).",
+                device, sent.command.public_id, sent.idempotency_key
+            );
+            if sent.replayed {
+                println!("Matched an in-flight command — no second effect.");
+            }
+        },
+        json!({
+            "version": 1,
+            "command": sent.command.public_id,
+            "idempotencyKey": sent.idempotency_key,
+            "state": sent.command.state.as_str(),
+            "replayed": sent.replayed,
+        }),
+    )
+}
+
+/// `xcb remote …` — linkage verbs plus the rest of the command union a
+/// controller agent needs: steer, cancel, answer, refresh, and the
+/// posted-command lifecycle reads.
+pub async fn remote(state_root: &Path, command: &RemoteCommand, json_out: bool) -> Result<i32> {
     match command {
         RemoteCommand::Admit { device } => {
+            let mut controller = open_controller(state_root).await?;
             controller.admit(device).await?;
             print_json_or(
                 json_out,
@@ -496,9 +572,10 @@ pub async fn remote(state_root: &Path, command: &RemoteCommand, json_out: bool) 
                     println!("Admitted {device} — it can now collect the account key.");
                 },
                 json!({ "version": 1, "admitted": device }),
-            )?;
+            )
         }
         RemoteCommand::Revoke { device } => {
+            let mut controller = open_controller(state_root).await?;
             controller.revoke(device).await?;
             print_json_or(
                 json_out,
@@ -506,10 +583,135 @@ pub async fn remote(state_root: &Path, command: &RemoteCommand, json_out: bool) 
                     println!("Revoked {device}.");
                 },
                 json!({ "version": 1, "revoked": device }),
-            )?;
+            )
+        }
+        RemoteCommand::Steer { device, task, text } => {
+            post(
+                state_root,
+                device,
+                &CommandBody::TaskSteer {
+                    task: task.clone(),
+                    text: text.clone(),
+                },
+                json_out,
+            )
+            .await
+        }
+        RemoteCommand::Cancel { device, task } => {
+            post(
+                state_root,
+                device,
+                &CommandBody::TaskCancel { task: task.clone() },
+                json_out,
+            )
+            .await
+        }
+        RemoteCommand::Answer { device, task, text } => {
+            post(
+                state_root,
+                device,
+                &CommandBody::AttentionAnswer {
+                    attention: task.clone(),
+                    answer: text.clone(),
+                },
+                json_out,
+            )
+            .await
+        }
+        RemoteCommand::Refresh { device } => {
+            post(
+                state_root,
+                device,
+                &CommandBody::ProjectionRefresh,
+                json_out,
+            )
+            .await
+        }
+        RemoteCommand::Status { command, wait } => {
+            status(state_root, command, *wait, json_out).await
+        }
+        RemoteCommand::Abort { command } => {
+            let mut controller = open_controller(state_root).await?;
+            controller.cancel(command).await?;
+            print_json_or(
+                json_out,
+                || {
+                    println!("Aborted {command} — it cannot be claimed now.");
+                },
+                json!({ "version": 1, "aborted": command }),
+            )
+        }
+        RemoteCommand::Ack { command } => {
+            let mut controller = open_controller(state_root).await?;
+            controller.acknowledge(command).await?;
+            print_json_or(
+                json_out,
+                || {
+                    println!("Acknowledged {command}.");
+                },
+                json!({ "version": 1, "acknowledged": command }),
+            )
         }
     }
-    Ok(0)
+}
+
+/// `xcb remote status` — read one posted command. With `--wait`, poll
+/// until it settles (bounded); the exit code mirrors the outcome so an
+/// agent can branch on it: `applied` is 0, every other terminal state 1,
+/// and a still-running command without `--wait` is informational 0.
+async fn status(state_root: &Path, public_id: &str, wait: bool, json_out: bool) -> Result<i32> {
+    const POLL: Duration = Duration::from_secs(2);
+    const WAIT_MAX: Duration = Duration::from_secs(10 * 60);
+    let mut controller = open_controller(state_root).await?;
+    let deadline = Instant::now() + WAIT_MAX;
+    let row = loop {
+        let row = controller.command(public_id).await?;
+        if !wait || row.state.is_terminal() || Instant::now() >= deadline {
+            break row;
+        }
+        tokio::time::sleep(POLL).await;
+    };
+    let result = if row.state.is_terminal() && row.result.is_some() {
+        controller.open_result(&row).ok()
+    } else {
+        None
+    };
+    let result_text = result
+        .as_deref()
+        .map(|bytes| xcb_core::display_text(&String::from_utf8_lossy(bytes), 4096));
+    print_json_or(
+        json_out,
+        || {
+            println!(
+                "{} · {} · target {}{}",
+                row.public_id,
+                row.state.as_str(),
+                row.target_device_id,
+                row.result_code
+                    .as_deref()
+                    .map(|code| format!(" · {code}"))
+                    .unwrap_or_default(),
+            );
+            if let Some(text) = &result_text {
+                println!("{text}");
+            }
+        },
+        json!({
+            "version": 1,
+            "command": row.public_id,
+            "state": row.state.as_str(),
+            "resultCode": row.result_code,
+            "target": row.target_device_id,
+            "result": result_text,
+        }),
+    )?;
+    Ok(
+        if row.state.is_terminal() && row.state != wire::CommandState::Applied {
+            1
+        } else {
+            0
+        },
+    )
 }
 
 fn print_json_or(json_out: bool, text: impl FnOnce(), value: Value) -> Result<i32> {
