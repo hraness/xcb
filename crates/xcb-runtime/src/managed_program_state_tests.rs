@@ -941,3 +941,107 @@ async fn live_controller_pins_completed_child_sessions_until_controller_settles(
     assert!(!f.managed.has_active_session(&session).unwrap());
     assert!(!f.managed.active_session_ids().unwrap().contains(&session));
 }
+
+#[tokio::test]
+async fn program_registered_in_a_cannot_publish_children_in_b() {
+    let f = fixture().await;
+    let a = f.workspace.clone();
+    let b = private::directory(&a.parent().unwrap().join("other")).unwrap();
+    let thread = f.managed.global_thread().await.unwrap().id;
+    let enqueue_in = |workspace: PathBuf| {
+        let managed = f.managed.clone();
+        let thread = thread.clone();
+        async move {
+            managed
+                .enqueue_program_at(
+                    &thread,
+                    Some(&workspace),
+                    crate::workspace_infer::BindingOrigin::Cli,
+                    new_id("m"),
+                    "Controller".into(),
+                    program(1),
+                )
+                .await
+        }
+    };
+    // Without a grant in B a managed program cannot even register there,
+    // although A holds one.
+    assert!(enqueue_in(b.clone()).await.is_err());
+    f.managed
+        .configure_project_policy_in(&b, None, "Maintain B".into(), 8, now_ms() + 7_200_000, None)
+        .unwrap();
+    // Registered in A, it publishes only under A's grant: pausing A holds it
+    // even though B's grant is active.
+    let parent = enqueue_in(a.clone()).await.unwrap();
+    assert_eq!(parent.workspace, a.to_str().unwrap());
+    let (running, slice) = run_slice(&f, &parent).await;
+    let policy = f
+        .managed
+        .project_policy_in(a.to_str().unwrap())
+        .unwrap()
+        .unwrap();
+    let paused = f
+        .managed
+        .set_project_policy_enabled_in(&policy.workspace, policy.revision, false)
+        .unwrap();
+    let held = f
+        .managed
+        .finish_program_slice(&running.id, running.revision, &Ok(slice))
+        .await
+        .unwrap();
+    assert_eq!(held.state, TaskState::Queued);
+    assert!(held.detail.starts_with("project authority"));
+    assert!(
+        f.managed
+            .program_status(&parent.id)
+            .unwrap()
+            .unwrap()
+            .child
+            .is_none()
+    );
+    let b_policy = f
+        .managed
+        .project_policy_in(b.to_str().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(b_policy.admitted_tasks, 0);
+    // Resumed, the child lands in A and consumes A's budget only.
+    f.managed
+        .set_project_policy_enabled_in(&policy.workspace, paused.revision, true)
+        .unwrap();
+    let (running, slice) = run_slice(&f, &held).await;
+    f.managed
+        .finish_program_slice(&running.id, running.revision, &Ok(slice))
+        .await
+        .unwrap();
+    let child = f
+        .managed
+        .task(
+            &f.managed
+                .program_status(&parent.id)
+                .unwrap()
+                .unwrap()
+                .child
+                .unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(child.workspace, a.to_str().unwrap());
+    assert_eq!(child.conversation, thread);
+    assert_eq!(
+        f.managed
+            .project_policy_in(a.to_str().unwrap())
+            .unwrap()
+            .unwrap()
+            .admitted_tasks,
+        1
+    );
+    assert_eq!(
+        f.managed
+            .project_policy_in(b.to_str().unwrap())
+            .unwrap()
+            .unwrap()
+            .admitted_tasks,
+        0
+    );
+}

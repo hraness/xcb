@@ -6,16 +6,18 @@ use std::{
 use xcb_core::{Id, Provider, session::State};
 use xcb_runtime::{
     Error, Result,
-    managed::{self, ManagedStore, ManagedTask},
+    managed::{self, GLOBAL_THREAD_ID, ManagedStore, ManagedTask},
     new_id, now_ms,
+    workspace_infer::BindingOrigin,
 };
 
 #[derive(Subcommand)]
 pub enum BacklogCommand {
-    /// Run a pinned ALGAL program now in an existing project conversation.
+    /// Run a pinned ALGAL program now in a project.
     Program {
-        /// Persistent project conversation from `xcb conversations`.
-        conversation: Id,
+        /// Conversation id from `xcb conversations`, or a project directory or
+        /// name (the thread, in that directory).
+        target: String,
         /// Bounded ALGAL manifest to validate and pin for this run.
         manifest: PathBuf,
         /// JSON object of typed inputs; defaults to an empty object.
@@ -30,6 +32,9 @@ pub enum BacklogCommand {
         /// Stable operation identity for an idempotent submission retry.
         #[arg(long)]
         id: Option<Id>,
+        /// Exact project directory; required when the target is the thread.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
     },
     /// Inspect a managed program's checkpoint and linked worker status.
     ProgramStatus {
@@ -56,9 +61,10 @@ pub enum BacklogCommand {
     },
     /// Hold work for later; --ready releases it immediately.
     Add {
-        /// Persistent conversation id from `xcb conversations`.
-        conversation: Id,
-        /// Work to retain in this conversation's backlog.
+        /// Conversation id from `xcb conversations`, or a project directory or
+        /// name (the thread, in that directory).
+        target: String,
+        /// Work to retain in this project's backlog.
         prompt: String,
         /// Dispatch immediately instead of holding the task for later.
         #[arg(long)]
@@ -69,6 +75,9 @@ pub enum BacklogCommand {
         /// Stable submission identity for retrying the same prompt and options.
         #[arg(long)]
         id: Option<Id>,
+        /// Exact project directory; required when the target is the thread.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
     },
     /// Edit undispatched work; a revision protects against concurrent edits.
     Edit {
@@ -115,19 +124,20 @@ pub enum BacklogCommand {
         #[arg(long)]
         operation: Id,
     },
-    /// Read recent work summaries for a persistent conversation.
+    /// Read recent work summaries for a project, from every conversation over it.
     Memory {
-        /// Persistent conversation id from `xcb conversations`.
-        conversation: Id,
+        /// Project directory or name; a conversation id names its directory.
+        scope: String,
     },
 }
 
 #[derive(Subcommand)]
 pub enum DaemonCommand {
-    /// Install a named durable ALGAL process in a project conversation.
+    /// Install a named durable ALGAL process in a project.
     Run {
-        /// Persistent project conversation from `xcb conversations`.
-        conversation: Id,
+        /// Conversation id from `xcb conversations`, or a project directory or
+        /// name (the thread, in that directory).
+        target: String,
         /// Daemon name; lowercase kebab-case, at most 48 characters.
         name: String,
         /// Bounded ALGAL process manifest to validate and pin.
@@ -142,6 +152,9 @@ pub enum DaemonCommand {
         /// Maximum process generations before the daemon record stops.
         #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u64).range(1..=64))]
         generations: u64,
+        /// Exact project directory; required when the target is the thread.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
     },
     /// Show a daemon's process state, wake evidence and pending child.
     Inspect {
@@ -179,8 +192,8 @@ pub enum DaemonCommand {
 pub enum ProjectCommand {
     /// Grant bounded automatic follow-up work for a project goal.
     Configure {
-        /// Persistent project conversation from `xcb conversations`.
-        conversation: Id,
+        /// Project directory or name; a conversation id names its directory.
+        scope: String,
         /// Authoritative project goal for automatically admitted work.
         goal: String,
         /// Maximum automatically admitted tasks in this grant.
@@ -198,20 +211,77 @@ pub enum ProjectCommand {
     },
     /// Pause automatic dispatch; running work is allowed to settle.
     Pause {
-        /// Project conversation from `xcb projects`.
-        conversation: Id,
+        /// Project directory or name from `xcb projects`.
+        scope: String,
         /// Current policy revision; stale updates are rejected.
         #[arg(long)]
         revision: u64,
     },
     /// Resume the same grant without replenishing its task budget or expiry.
     Resume {
-        /// Project conversation from `xcb projects`.
-        conversation: Id,
+        /// Project directory or name from `xcb projects`.
+        scope: String,
         /// Current policy revision; resuming does not renew the grant.
         #[arg(long)]
         revision: u64,
     },
+}
+
+/// The directory `scope` names, resolved once by the shared scope order.
+fn scope(store: &ManagedStore, value: &str) -> Result<String> {
+    store.resolve_scope(value, &std::env::current_dir()?)
+}
+
+/// `--workspace <dir>`: validated to its canonical path, never snapped.
+fn exact_workspace(store: &ManagedStore, dir: &Path) -> Result<PathBuf> {
+    Ok(PathBuf::from(
+        store.validate_workspace(&std::env::current_dir()?.join(dir))?,
+    ))
+}
+
+/// Where `backlog add|program`, `schedules add|program` and `daemons run`
+/// create work. A conversation id keeps its conversation; the thread needs
+/// `--workspace`. Anything else is a project scope, which means the thread
+/// in that directory.
+async fn entry_target(
+    store: &ManagedStore,
+    target: &str,
+    workspace: Option<&Path>,
+) -> Result<(Id, Option<PathBuf>)> {
+    let exact = workspace
+        .map(|dir| exact_workspace(store, dir))
+        .transpose()?;
+    let conversation = match Id::new(target) {
+        Ok(id) if target.starts_with("c_") => match store.resolve_conversation(&id) {
+            Ok(id) => Some(id),
+            Err(Error::Unavailable(_)) => None,
+            Err(error) => return Err(error),
+        },
+        _ => None,
+    };
+    let (conversation, workspace) = match conversation {
+        Some(id) if id.as_str() != GLOBAL_THREAD_ID => return Ok((id, exact)),
+        Some(id) => (
+            id,
+            exact.ok_or_else(|| {
+                Error::guided(
+                    "The thread spans projects; name the directory this work runs in.",
+                    "repeat with --workspace <dir>",
+                )
+            })?,
+        ),
+        None => {
+            let scope = PathBuf::from(scope(store, target)?);
+            if exact.as_ref().is_some_and(|dir| *dir != scope) {
+                return Err(Error::Conflict(
+                    "--workspace names a different directory than the project",
+                ));
+            }
+            (Id::new(GLOBAL_THREAD_ID)?, scope)
+        }
+    };
+    store.global_thread().await?;
+    Ok((conversation, Some(workspace)))
 }
 
 pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Result<i32> {
@@ -219,7 +289,7 @@ pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Res
     let rows = match command {
         None => store.project_policies()?,
         Some(ProjectCommand::Configure {
-            conversation,
+            scope: value,
             goal,
             tasks,
             hours,
@@ -229,9 +299,9 @@ pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Res
             let expiry = now_ms()
                 .checked_add(hours * 3_600_000)
                 .ok_or(Error::Unavailable("project expiry overflow"))?;
-            let conversation = store.resolve_conversation(&conversation)?;
-            let row = store.configure_project_policy(
-                &conversation,
+            let workspace = scope(&store, &value)?;
+            let row = store.configure_project_policy_in(
+                Path::new(&workspace),
                 revision,
                 goal,
                 tasks,
@@ -242,55 +312,59 @@ pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Res
             vec![row]
         }
         Some(ProjectCommand::Pause {
-            conversation,
+            scope: value,
             revision,
         }) => {
-            let conversation = store.resolve_conversation(&conversation)?;
-            vec![store.set_project_policy_enabled(&conversation, revision, false)?]
+            let workspace = scope(&store, &value)?;
+            vec![store.set_project_policy_enabled_in(&workspace, revision, false)?]
         }
         Some(ProjectCommand::Resume {
-            conversation,
+            scope: value,
             revision,
         }) => {
-            let conversation = store.resolve_conversation(&conversation)?;
-            let row = store.set_project_policy_enabled(&conversation, revision, true)?;
+            let workspace = scope(&store, &value)?;
+            let row = store.set_project_policy_enabled_in(&workspace, revision, true)?;
             wake(root)?;
             vec![row]
         }
     };
     // Grants are keyed by directory; `conversation` names the latest
     // project view over it, or null.
-    let views: Vec<Option<Id>> = rows
-        .iter()
-        .map(|row| {
-            store
-                .latest_conversation_for_workspace(Path::new(&row.workspace))
-                .ok()
-                .flatten()
-                .map(|conversation| conversation.id)
-        })
-        .collect();
+    let mut described = Vec::new();
+    for row in &rows {
+        let view = store
+            .latest_conversation_for_workspace(Path::new(&row.workspace))
+            .ok()
+            .flatten()
+            .map(|conversation| conversation.id);
+        described.push((
+            view,
+            store.workspace_name(&row.workspace)?,
+            store.project_status(row)?,
+        ));
+    }
     if json {
         let rows = rows
             .iter()
-            .zip(&views)
-            .map(|(row, view)| {
+            .zip(&described)
+            .map(|(row, (view, name, status))| {
                 let mut value = serde_json::to_value(row)?;
                 value["conversation"] = serde_json::to_value(view)?;
+                value["name"] = serde_json::to_value(name)?;
+                value["status"] = serde_json::to_value(status)?;
                 Ok(value)
             })
             .collect::<Result<Vec<_>>>()?;
         crate::print_json(rows)?;
     } else if rows.is_empty() {
-        println!(
-            "No project grants. Use xcb projects configure <conversation> <goal> --tasks N --hours N."
-        );
+        println!("No project grants. Use xcb projects configure <dir> <goal> --tasks N --hours N.");
     } else {
-        for (row, view) in rows.into_iter().zip(views) {
+        for (row, (_, name, status)) in rows.into_iter().zip(described) {
             println!(
-                "{} · {} · {}/{} tasks used · expires {} · rev {}\n  {}",
-                view.map_or_else(|| row.workspace.clone(), |id| id.to_string()),
-                row.status(),
+                "{} · {} · {} · {}/{} tasks used · expires {} · rev {}\n  {}",
+                xcb_core::display_text(&name, 160),
+                xcb_core::display_text(&row.workspace, 4096),
+                status,
                 row.admitted_tasks,
                 row.max_tasks,
                 row.expires_at_ms,
@@ -306,8 +380,9 @@ pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Res
 pub enum ScheduleCommand {
     /// Schedule a pinned ALGAL planner or bounded managed-agent program.
     Program {
-        /// Persistent project conversation from `xcb conversations`.
-        conversation: Id,
+        /// Conversation id from `xcb conversations`, or a project directory or
+        /// name (the thread, in that directory).
+        target: String,
         /// ALGAL manifest with a text summary output and optional prompt output.
         manifest: PathBuf,
         /// JSON object satisfying the manifest's input interface.
@@ -322,16 +397,23 @@ pub enum ScheduleCommand {
         /// Seconds between wake-ups, from 60 seconds to 365 days.
         #[arg(long, value_parser = clap::value_parser!(u64).range(60..=31_536_000))]
         every: u64,
+        /// Exact project directory; required when the target is the thread.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
     },
     /// Enable a recurring prompt; first wake-up occurs after the interval.
     Add {
-        /// Persistent conversation to wake, from `xcb conversations`.
-        conversation: Id,
+        /// Conversation id from `xcb conversations`, or a project directory or
+        /// name (the thread, in that directory).
+        target: String,
         /// Prompt to enqueue on each eligible wake-up.
         prompt: String,
         /// Seconds between wake-ups, from 60 seconds to 365 days.
         #[arg(long, value_parser = clap::value_parser!(u64).range(60..=31_536_000))]
         every: u64,
+        /// Exact project directory; required when the target is the thread.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
     },
     /// Pause future wake-ups; already queued work is unchanged.
     Pause {
@@ -355,8 +437,8 @@ pub enum ScheduleCommand {
 pub enum MemoryCommand {
     /// Bind an explicit local Wordcell vault and trusted executable to a project.
     Configure {
-        /// Persistent project conversation from `xcb conversations`.
-        conversation: Id,
+        /// Project directory or name; a conversation id names its directory.
+        scope: String,
         /// Existing local Wordcell vault directory.
         #[arg(long)]
         vault: PathBuf,
@@ -367,15 +449,15 @@ pub enum MemoryCommand {
         #[arg(long)]
         revision: Option<u64>,
     },
-    /// Inspect the project binding without reading the vault.
+    /// Inspect the project binding and open upgrade conflicts without reading the vault.
     Status {
-        /// Persistent project conversation from `xcb conversations`.
-        conversation: Id,
+        /// Project directory or name; a conversation id names its directory.
+        scope: String,
     },
     /// Search only the project's bound local vault; results are historical context.
     Search {
-        /// Project conversation with an explicit memory binding.
-        conversation: Id,
+        /// Project directory or name with an explicit memory binding.
+        scope: String,
         /// Exact local search text, at most 1024 bytes.
         query: String,
         /// Maximum number of returned hits, from 1 to 16.
@@ -384,7 +466,7 @@ pub enum MemoryCommand {
     },
     /// Explicitly promote a supplied note with task provenance; never a transcript.
     Promote {
-        /// Source task whose conversation owns the Wordcell binding.
+        /// Source task; its project directory owns the Wordcell binding.
         task: Id,
         /// UTF-8 note, at most 8 KiB; identical promotion is idempotent.
         #[arg(long)]
@@ -409,42 +491,46 @@ pub async fn memory(root: &Path, command: MemoryCommand, json: bool) -> Result<i
     let store = ManagedStore::open(root)?;
     let value = match command {
         MemoryCommand::Configure {
-            conversation,
+            scope: value,
             vault,
             wordcell,
             revision,
         } => {
+            let workspace = scope(&store, &value)?;
             let config =
                 xcb_runtime::wordcell::WordcellConfig::admit(&wordcell, &vault.canonicalize()?)?;
-            serde_json::to_value(store.bind_memory(
-                &store.resolve_conversation(&conversation)?,
-                revision,
-                config,
-            )?)?
+            serde_json::to_value(store.bind_memory_in(Path::new(&workspace), revision, config)?)?
         }
-        MemoryCommand::Status { conversation } => serde_json::to_value(
-            store.memory_binding(&store.resolve_conversation(&conversation)?)?,
-        )?,
+        MemoryCommand::Status { scope: value } => {
+            let workspace = scope(&store, &value)?;
+            let conflicts: Vec<_> = store
+                .migration_conflicts(true)?
+                .into_iter()
+                .filter(|conflict| {
+                    conflict.kind == "memory" && conflict.workspace.as_deref() == Some(&workspace)
+                })
+                .collect();
+            serde_json::json!({
+                "workspace": workspace,
+                "binding": store.memory_binding_in(&workspace)?,
+                "conflicts": conflicts,
+            })
+        }
         MemoryCommand::Search {
-            conversation,
+            scope: value,
             query,
             limit,
         } => {
-            let conversation = store.resolve_conversation(&conversation)?;
+            let workspace = scope(&store, &value)?;
             store
-                .search_memory(&conversation, &query, usize::from(limit))
+                .search_memory_in(&workspace, &query, usize::from(limit))
                 .await?
         }
         MemoryCommand::Promote { task, body_file } => {
             let task = store.resolve_task(&task)?;
-            let item = store
-                .task(&task)?
-                .ok_or(Error::Unavailable("managed task not found"))?;
             let note = String::from_utf8(read_bounded(&body_file, 8192)?)
                 .map_err(|_| Error::Unavailable("memory note must be UTF-8"))?;
-            let receipt = store
-                .promote_memory(&item.conversation, &task, &note)
-                .await?;
+            let receipt = store.promote_memory(&task, &note).await?;
             let unsettled = receipt.status != xcb_runtime::wordcell::PromotionStatus::Completed;
             crate::print_json(&receipt)?;
             return Ok(if unsettled { 2 } else { 0 });
@@ -494,12 +580,13 @@ pub async fn daemons(root: &Path, command: Option<DaemonCommand>, json: bool) ->
     let store = std::sync::Arc::new(ManagedStore::open(root)?);
     match command {
         Some(DaemonCommand::Run {
-            conversation,
+            target,
             name,
             manifest,
             inputs,
             calls,
             generations,
+            workspace,
         }) => {
             use xcb_runtime::managed::{AdmittedDaemon, MAX_DAEMON_GENERATIONS};
             use xcb_runtime::managed_program::{MAX_INPUT_BYTES, MAX_MANIFEST_BYTES};
@@ -517,7 +604,10 @@ pub async fn daemons(root: &Path, command: Option<DaemonCommand>, json: bool) ->
                     .filter(|value| *value <= MAX_DAEMON_GENERATIONS)
                     .ok_or(Error::Unavailable("invalid daemon generation bound"))?,
             )?;
-            let status = store.enqueue_daemon(&conversation, &name, &daemon)?;
+            let (conversation, workspace) =
+                entry_target(&store, &target, workspace.as_deref()).await?;
+            let status =
+                store.enqueue_daemon_at(&conversation, workspace.as_deref(), &name, &daemon)?;
             wake(root)?;
             print_daemon(&status, json)?;
         }
@@ -560,9 +650,7 @@ pub async fn daemons(root: &Path, command: Option<DaemonCommand>, json: bool) ->
             if json {
                 crate::print_json(rows)?;
             } else if rows.is_empty() {
-                println!(
-                    "No daemons. Use xcb daemons run <conversation> <name> --manifest <file>."
-                );
+                println!("No daemons. Use xcb daemons run <dir> <name> <manifest>.");
             } else {
                 for row in &rows {
                     print_daemon(row, false)?;
@@ -598,24 +686,29 @@ pub async fn backlog(
     root: &Path,
     command: Option<BacklogCommand>,
     conversation: Option<&Id>,
+    workspace: Option<&Path>,
     json: bool,
 ) -> Result<i32> {
     let store = ManagedStore::open(root)?;
     let mut runnable = false;
     let task = match command {
         Some(BacklogCommand::Program {
-            conversation,
+            target,
             manifest,
             inputs,
             managed_calls,
             title,
             id,
+            workspace,
         }) => {
             let program = load_program(&manifest, inputs.as_deref(), managed_calls)?;
-            let conversation = store.resolve_conversation(&conversation)?;
+            let (conversation, workspace) =
+                entry_target(&store, &target, workspace.as_deref()).await?;
             let task = store
-                .enqueue_program(
+                .enqueue_program_at(
                     &conversation,
+                    workspace.as_deref(),
+                    BindingOrigin::Cli,
                     id.unwrap_or_else(|| new_id("input")),
                     title,
                     program,
@@ -672,10 +765,20 @@ pub async fn backlog(
             task
         }
         None => {
-            let conversation = conversation
-                .map(|id| store.resolve_conversation(id))
-                .transpose()?;
-            let tasks = store.backlog(conversation.as_ref(), 256)?;
+            let tasks = match workspace {
+                Some(dir) => store.backlog_in(
+                    exact_workspace(&store, dir)?
+                        .to_str()
+                        .ok_or(Error::PrivateState)?,
+                    256,
+                )?,
+                None => {
+                    let conversation = conversation
+                        .map(|id| store.resolve_conversation(id))
+                        .transpose()?;
+                    store.backlog(conversation.as_ref(), 256)?
+                }
+            };
             if json {
                 crate::print_json(tasks)?;
             } else if tasks.is_empty() {
@@ -687,8 +790,8 @@ pub async fn backlog(
             }
             return Ok(0);
         }
-        Some(BacklogCommand::Memory { conversation }) => {
-            let memory = store.working_memory(&store.resolve_conversation(&conversation)?, 32)?;
+        Some(BacklogCommand::Memory { scope: value }) => {
+            let memory = store.working_memory_in(&scope(&store, &value)?, 32)?;
             if json {
                 crate::print_json(memory)?;
             } else if memory.is_empty() {
@@ -707,17 +810,21 @@ pub async fn backlog(
             return Ok(0);
         }
         Some(BacklogCommand::Add {
-            conversation,
+            target,
             prompt,
             ready,
             priority,
             id,
+            workspace,
         }) => {
             runnable = ready;
-            let conversation = store.resolve_conversation(&conversation)?;
+            let (conversation, workspace) =
+                entry_target(&store, &target, workspace.as_deref()).await?;
             store
-                .enqueue_backlog(
+                .enqueue_backlog_at(
                     &conversation,
+                    workspace.as_deref(),
+                    BindingOrigin::Cli,
                     id.unwrap_or_else(|| new_id("input")),
                     prompt,
                     !ready,
@@ -919,21 +1026,25 @@ pub async fn schedules(
     let store = ManagedStore::open(root)?;
     let rows = match command {
         Some(ScheduleCommand::Program {
-            conversation,
+            target,
             manifest,
             inputs,
             managed_calls,
             title,
             every,
+            workspace,
         }) => {
             let program = load_program(&manifest, inputs.as_deref(), managed_calls)?;
             let interval = every * 1000;
             let first = now_ms()
                 .checked_add(interval)
                 .ok_or(Error::Unavailable("schedule time overflow"))?;
+            let (conversation, workspace) =
+                entry_target(&store, &target, workspace.as_deref()).await?;
             let schedule = store
-                .create_program_schedule(
-                    &store.resolve_conversation(&conversation)?,
+                .create_program_schedule_at(
+                    &conversation,
+                    workspace.as_deref(),
                     title,
                     program,
                     interval,
@@ -950,9 +1061,10 @@ pub async fn schedules(
                 .as_ref(),
         )?,
         Some(ScheduleCommand::Add {
-            conversation,
+            target,
             prompt,
             every,
+            workspace,
         }) => {
             let interval = every
                 .checked_mul(1000)
@@ -960,13 +1072,10 @@ pub async fn schedules(
             let first = now_ms()
                 .checked_add(interval)
                 .ok_or(Error::Unavailable("schedule time overflow"))?;
+            let (conversation, workspace) =
+                entry_target(&store, &target, workspace.as_deref()).await?;
             let schedule = store
-                .create_schedule(
-                    &store.resolve_conversation(&conversation)?,
-                    prompt,
-                    interval,
-                    first,
-                )
+                .create_schedule_at(&conversation, workspace.as_deref(), prompt, interval, first)
                 .await?;
             wake(root)?;
             vec![schedule]
@@ -984,7 +1093,7 @@ pub async fn schedules(
     if json {
         crate::print_json(rows)?;
     } else if rows.is_empty() {
-        println!("No schedules. Use xcb schedules add <conversation> <prompt> --every <seconds>.");
+        println!("No schedules. Use xcb schedules add <dir> <prompt> --every <seconds>.");
     } else {
         for row in rows {
             println!(
@@ -1027,4 +1136,127 @@ pub fn attention(root: &Path, json: bool) -> Result<i32> {
         }
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn parses(args: &[&str]) -> bool {
+        crate::Cli::try_parse_from(std::iter::once("xcb").chain(args.iter().copied())).is_ok()
+    }
+
+    #[test]
+    fn scope_and_workspace_arguments_parse() {
+        assert!(parses(&[
+            "memory",
+            "configure",
+            "/abs/project",
+            "--vault",
+            "/abs/vault",
+            "--wordcell",
+            "/abs/bin/wordcell"
+        ]));
+        assert!(parses(&["memory", "status", "/abs/project"]));
+        assert!(parses(&["memory", "search", "project", "parser"]));
+        assert!(parses(&[
+            "projects",
+            "configure",
+            "/abs/project",
+            "Maintain parser",
+            "--tasks",
+            "2",
+            "--hours",
+            "1"
+        ]));
+        assert!(parses(&["projects", "pause", ".", "--revision", "1"]));
+        assert!(parses(&[
+            "backlog",
+            "add",
+            "c_global",
+            "Fix the parser",
+            "--workspace",
+            "/abs/project"
+        ]));
+        assert!(parses(&["backlog", "add", "project", "Fix the parser"]));
+        assert!(parses(&["backlog", "--workspace", "/abs/project"]));
+        assert!(!parses(&[
+            "backlog",
+            "--workspace",
+            "/abs/project",
+            "--conversation",
+            "c_view"
+        ]));
+        assert!(parses(&["backlog", "memory", "project"]));
+        assert!(parses(&[
+            "schedules",
+            "add",
+            "c_global",
+            "Check",
+            "--every",
+            "3600",
+            "--workspace",
+            "/abs/project"
+        ]));
+        assert!(parses(&[
+            "daemons",
+            "run",
+            "project",
+            "worker",
+            "daemon.json",
+            "--workspace",
+            "/abs/project"
+        ]));
+    }
+
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn scopes_resolve_directories_and_refuse_the_thread_and_ambiguous_names() {
+        let path = std::env::temp_dir().join(new_id("habitat_scope").as_str());
+        std::fs::create_dir_all(&path).unwrap();
+        let scratch = Scratch(path.canonicalize().unwrap());
+        let base = &scratch.0;
+        let (one, two) = (base.join("one/app"), base.join("two/app"));
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        let store = ManagedStore::open(&base.join("state")).unwrap();
+        let view = store.create_conversation(&one).await.unwrap();
+        store.admit_workspace(&one, "command", None).unwrap();
+        let thread = store.global_thread().await.unwrap().id;
+        let one_text = one.to_str().unwrap().to_owned();
+        assert_eq!(scope(&store, &one_text).unwrap(), one_text);
+        assert_eq!(scope(&store, view.id.as_str()).unwrap(), one_text);
+        assert_eq!(scope(&store, "app").unwrap(), one_text);
+        assert!(matches!(
+            scope(&store, GLOBAL_THREAD_ID),
+            Err(Error::Conflict(_))
+        ));
+        store.admit_workspace(&two, "command", None).unwrap();
+        assert!(matches!(scope(&store, "app"), Err(Error::Guided { .. })));
+        // Entry targets: a view keeps its conversation, a scope means the
+        // thread in that directory, and the thread itself needs --workspace.
+        assert_eq!(
+            entry_target(&store, view.id.as_str(), None).await.unwrap(),
+            (view.id.clone(), None)
+        );
+        assert_eq!(
+            entry_target(&store, &one_text, None).await.unwrap(),
+            (thread.clone(), Some(one.clone()))
+        );
+        assert!(entry_target(&store, GLOBAL_THREAD_ID, None).await.is_err());
+        assert_eq!(
+            entry_target(&store, GLOBAL_THREAD_ID, Some(&two))
+                .await
+                .unwrap(),
+            (thread, Some(two.clone()))
+        );
+        assert!(entry_target(&store, &one_text, Some(&two)).await.is_err());
+    }
 }

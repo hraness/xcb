@@ -14,6 +14,7 @@ use super::*;
 use crate::managed_program::{
     MAX_INPUT_BYTES, MAX_MANAGED_CALLS, MAX_MANIFEST_BYTES, MAX_PROMPT_BYTES, MAX_SUMMARY_BYTES,
 };
+use crate::workspace_infer::BindingOrigin;
 use algal::{
     canonical,
     contract::{bind_output, check_value},
@@ -661,18 +662,33 @@ impl ManagedStore {
         Ok(settled)
     }
 
-    /// Create a named daemon bound to a conversation's workspace. Mailbox
-    /// creation is idempotent; the process record is the single durable name
-    /// allocation and the metadata row lands in the same store open.
+    /// Shim: a named daemon in a project view's directory.
     pub fn enqueue_daemon(
         self: &Arc<Self>,
         conversation: &Id,
         name: &str,
         daemon: &AdmittedDaemon,
     ) -> Result<DaemonStatus> {
+        self.enqueue_daemon_at(conversation, None, name, daemon)
+    }
+
+    /// Create a named daemon bound to `workspace` (see `entry_workspace`);
+    /// in the thread the directory is required and its grant governs every
+    /// child. Mailbox creation is idempotent; the process record is the
+    /// single durable name allocation and the metadata row lands in the same
+    /// store open.
+    pub fn enqueue_daemon_at(
+        self: &Arc<Self>,
+        conversation: &Id,
+        workspace: Option<&Path>,
+        name: &str,
+        daemon: &AdmittedDaemon,
+    ) -> Result<DaemonStatus> {
         let name = daemon_name(name)?;
         daemon.verify()?;
-        let workspace = self.conversation_workspace(conversation)?;
+        let workspace = self.entry_workspace(conversation, workspace)?;
+        self.conversation(conversation)?
+            .ok_or(Error::Unavailable("managed conversation not found"))?;
         let db = self.write_db()?;
         {
             let count: i64 =
@@ -1137,7 +1153,7 @@ impl ManagedStore {
     }
 
     /// Publish the deterministic managed child for a suspended call, in one
-    /// transaction with the call row link, under the conversation's current
+    /// transaction with the call row link, under the workspace's current
     /// project grant. Deterministic identity makes a retry after an
     /// interrupted publication a no-op rather than a second child. The ALGAL
     /// receipt is computed before the write transaction so no database guard
@@ -1166,7 +1182,7 @@ impl ManagedStore {
         ))?;
         let policy = {
             let db = self.db()?;
-            program_state::require_grant(&db, &meta.conversation, None, now, true)?
+            program_state::require_grant(&db, &meta.workspace, None, now, true)?
         };
         let (preference, required) =
             self.initial_route_preferences(Path::new(&meta.workspace), &call.prompt)?;
@@ -1190,7 +1206,7 @@ impl ManagedStore {
             deferred: false, priority: 0, attention: routing_question.then_some(State::NeedsAnswer), backlog_prompt: None,
             project_proposal: None, routing_question, program: None, program_generation: None, program_receipt: None, program_waiting: false,
             program_child: None, daemon_child: Some(DaemonChild { process: meta.process.clone(), request_digest: call.request_digest.clone(), generation: policy.generation.clone(), required_provider: policy.required_provider }),
-            schedule: None, binding: None, hold_until_ms: None, moved_from: None, detail: if routing_question { "This daemon request conflicts with the project provider requirement. Reply to this child with revised work for the required provider, or cancel it." } else { "managed daemon child; waiting for an eligible worker" }.into(),
+            schedule: None, binding: habitat::inherited_binding(&meta.conversation, BindingOrigin::Daemon, format!("from daemon {}", meta.process)), hold_until_ms: None, moved_from: None, detail: if routing_question { "This daemon request conflicts with the project provider requirement. Reply to this child with revised work for the required provider, or cancel it." } else { "managed daemon child; waiting for an eligible worker" }.into(),
             settle: None, acted: None, inbox_continuation: false, attempts: 0, max_attempts: MAX_TASK_ATTEMPTS, message_count_before: 0,
             cancel_requested: false, last_output: None, policy_digest, last_receipt: "sha256:pending".into(), revision: 1, created_at_ms: now, updated_at_ms: now,
         };
@@ -1220,7 +1236,7 @@ impl ManagedStore {
         task.validate()?;
         let mut db = self.write_db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = program_state::require_grant(&tx, &meta.conversation, None, now, true)?;
+        let current = program_state::require_grant(&tx, &meta.workspace, None, now, true)?;
         if current.generation != policy.generation
             || current.revision != policy.revision
             || current.required_provider != policy.required_provider
@@ -1341,13 +1357,14 @@ pub(super) fn check_child_dispatch(
     now: u64,
 ) -> Result<()> {
     let policy =
-        program_state::require_grant(db, &task.conversation, Some(&link.generation), now, false)?;
+        program_state::require_grant(db, &task.workspace, Some(&link.generation), now, false)?;
     let call = read_call(db, &link.request_digest)?
         .ok_or(Error::Conflict("daemon call evidence is missing"))?;
     let meta =
         read_meta(db, &call.process)?.ok_or(Error::Conflict("daemon metadata is missing"))?;
     if meta.stopped
         || meta.conversation != task.conversation
+        || meta.workspace != task.workspace
         || call.process != link.process
         || call.child.as_ref() != Some(&task.id)
         || call.result.is_some()
@@ -1607,6 +1624,81 @@ mod tests {
         let link = child_task.daemon_child.clone().unwrap();
         assert_eq!(link.process, "worker");
         assert_eq!(link.request_digest, digest);
+    }
+
+    #[tokio::test]
+    async fn daemon_run_in_thread_requires_workspace_and_uses_its_grant() {
+        let fixture = fixture().await;
+        let a = PathBuf::from(
+            fixture
+                .managed
+                .conversation_workspace(&fixture.conversation)
+                .unwrap(),
+        );
+        let b = private::directory(&a.parent().unwrap().join("other")).unwrap();
+        let thread = fixture.managed.global_thread().await.unwrap().id;
+        let daemon = admitted(agent_manifest(), 1);
+        assert!(
+            fixture
+                .managed
+                .enqueue_daemon(&thread, "unscoped", &daemon)
+                .is_err()
+        );
+        // Only B holds a grant; a daemon in A never borrows it.
+        fixture
+            .managed
+            .configure_project_policy_in(&b, None, "B".into(), 8, now_ms() + 3_600_000, None)
+            .unwrap();
+        let status = fixture
+            .managed
+            .enqueue_daemon_at(&thread, Some(&a), "worker", &daemon)
+            .unwrap();
+        assert_eq!(status.conversation, thread);
+        for _ in 0..3 {
+            fixture
+                .managed
+                .tick_daemons(&fixture.store, true)
+                .await
+                .unwrap();
+        }
+        let status = fixture
+            .managed
+            .daemon_status_for("worker")
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.status, "suspended");
+        assert!(status.pending_child.is_none());
+        // A's own grant publishes the child in A.
+        fixture
+            .managed
+            .configure_project_policy_in(&a, None, "A".into(), 8, now_ms() + 3_600_000, None)
+            .unwrap();
+        fixture
+            .managed
+            .tick_daemons(&fixture.store, true)
+            .await
+            .unwrap();
+        let status = fixture
+            .managed
+            .daemon_status_for("worker")
+            .unwrap()
+            .unwrap();
+        let child = fixture
+            .managed
+            .task(status.pending_child.as_ref().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(child.workspace, a.to_str().unwrap());
+        assert_eq!(child.conversation, thread);
+        assert_eq!(
+            child.daemon_child.as_ref().unwrap().generation,
+            fixture
+                .managed
+                .project_policy_in(a.to_str().unwrap())
+                .unwrap()
+                .unwrap()
+                .generation
+        );
     }
 
     #[tokio::test]

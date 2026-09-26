@@ -401,7 +401,7 @@ def main():
               str(program_file), ok=False)[0] != 0)
         check("managed admission requires project authority", command("backlog", "program", conversation,
               str(program_file), "--managed-calls", "2", ok=False)[0] != 0)
-        value("projects", "configure", conversation, "Exercise bounded controller admission", "--tasks", "2", "--hours", "1")
+        value("projects", "configure", str(paths["workspace"]), "Exercise bounded controller admission", "--tasks", "2", "--hours", "1")
         program_args = ("backlog", "program", conversation, str(program_file), "--managed-calls", "2", "--id", "acceptance_controller")
         program = value(*program_args)
         def program_status():
@@ -418,7 +418,7 @@ def main():
               "--managed-calls", "2", "--id", "conflicting_controller", ok=False)[0] != 0)
         check("program inputs reject steering", command("steer", program["id"], "Change pinned program", ok=False)[0] != 0)
         policies = value("projects")
-        policy = next(row for row in policies if row["conversation"] == conversation)
+        policy = next(row for row in policies if row["workspace"] == str(paths["workspace"].resolve()))
         check("exactly one grant task consumed", policy["admitted_tasks"] == 1)
         # File edits cannot mutate a registered manifest or its suspended call.
         program_file.write_text("{}")
