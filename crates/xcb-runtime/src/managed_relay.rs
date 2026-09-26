@@ -20,7 +20,9 @@ use xcb_core::Id;
 
 use crate::cloud::commands::{self, CommandBody};
 use crate::cloud::lane::{self, CommandOutcome, OpenedCommand, RelayLane};
-use crate::managed::{ManagedStore, fault_text, record_supervisor_fault};
+use crate::managed::{
+    Intake, IntakeCues, ManagedStore, Origin, fault_text, record_supervisor_fault,
+};
 use crate::{Error, Result, digest};
 
 /// Remote commands land at most this long after a controller posts them.
@@ -315,36 +317,103 @@ fn failed(result_code: &str, detail: &str) -> CommandOutcome {
     }
 }
 
-/// Task dispatch lands as an ordinary managed task in the workspace's
-/// live conversation — or a fresh conversation when none exists.
+/// The wire `workspace` value that asks the device to infer the project.
+const INFER: &str = "@infer";
+
+/// Task dispatch lands in the device's thread. The wire `workspace` is an
+/// absolute path (bound exactly, never snapped), a known project name (never
+/// resolved against the supervisor's cwd) or `@infer`. A retried operation
+/// replays its committed task.
 async fn dispatch(
     managed: &Arc<ManagedStore>,
     workspace: &str,
     prompt: &str,
     operation: &Id,
 ) -> Result<Value> {
-    // The store records canonical workspace paths; a spelled alias like
-    // /tmp/… must canonicalise to the same bytes or the conversation
-    // conflict check rejects the submit.
-    let path = std::fs::canonicalize(workspace)?;
-    let conversation = match managed.latest_conversation_for_workspace(&path)? {
-        Some(conversation) => conversation,
-        None => managed.create_conversation(&path).await?,
+    let mut cues = IntakeCues {
+        origin: Origin::Relay,
+        explicit: None,
+        target: None,
+        focus: None,
+        launch_hint: None,
+        infer_only: false,
     };
-    managed
-        .submit_new(
-            &conversation.id,
-            operation.clone(),
-            prompt.to_string(),
-            vec![],
-            &path,
-        )
-        .await?;
-    Ok(json!({
-        "conversation": conversation.id.as_str(),
-        "dispatched": true,
-    }))
+    if workspace == INFER {
+        cues.infer_only = true;
+    } else if Path::new(workspace).is_absolute() {
+        // A controller naming a directory is an explicit act: admit it.
+        // The canonical spelling is what the task records.
+        let path = managed.admit_workspace(Path::new(workspace), "dispatch", None)?;
+        cues.explicit = Some(PathBuf::from(path));
+    } else {
+        cues.explicit = Some(PathBuf::from(named_workspace(managed, workspace)?));
+    }
+    match managed
+        .submit_to_thread(operation.clone(), prompt.to_string(), vec![], cues)
+        .await?
+    {
+        Intake::Accepted {
+            task,
+            workspace,
+            binding,
+            ..
+        } => Ok(json!({
+            "conversation": task.conversation.as_str(),
+            "dispatched": true,
+            "task": task.id.as_str(),
+            "workspace": workspace,
+            "workspaceSource": binding.source.as_str(),
+        })),
+        Intake::Ask { candidates, reason } => {
+            let names: Vec<&str> = candidates.iter().map(|row| row.name.as_str()).collect();
+            Err(Error::Guided {
+                message: if names.is_empty() {
+                    format!("workspace ambiguous: {reason}")
+                } else {
+                    format!("workspace ambiguous: {}", names.join(", "))
+                },
+                next: None,
+            })
+        }
+    }
 }
+
+/// A relative wire workspace is a registry name with exactly one hit.
+fn named_workspace(managed: &ManagedStore, name: &str) -> Result<String> {
+    match managed.lookup_name(name)?.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => {
+            let mut known: Vec<String> = managed
+                .known_workspaces(8)?
+                .into_iter()
+                .filter(|entry| !entry.container)
+                .map(|entry| entry.name)
+                .collect();
+            known.sort();
+            Err(Error::Guided {
+                message: if known.is_empty() {
+                    format!("no project named `{name}` on this device")
+                } else {
+                    format!(
+                        "no project named `{name}` on this device; known projects: {}",
+                        known.join(", ")
+                    )
+                },
+                next: None,
+            })
+        }
+        several => Err(Error::Guided {
+            message: format!("`{name}` names several projects: {}", several.join(", ")),
+            next: None,
+        }),
+    }
+}
+
+/// Fleet projection schema version; `xcb` and `capabilities` are additive.
+const FLEET_VERSION: u64 = 1;
+/// What this build accepts in `task_dispatch.workspace` besides an absolute
+/// path, so a controller can gate names and `@infer` per device.
+const FLEET_CAPABILITIES: [&str; 3] = ["thread", "workspace-names", "infer"];
 
 /// The bounded `fleet` projection: device id, nonterminal tasks and open
 /// attention. Ids and states only — titles and details truncate hard.
@@ -364,6 +433,11 @@ fn fleet_projection(managed: &Arc<ManagedStore>) -> Result<Vec<u8>> {
                 "task": task.id.as_str(),
                 "state": state,
                 "workspace": task.workspace,
+                // A task without a binding was bound by its project view.
+                "workspaceSource": task
+                    .binding
+                    .as_ref()
+                    .map_or("explicit", |binding| binding.source.as_str()),
             }));
         }
         if task.attention.is_some() && attention.len() < PROJECTION_TASK_ROWS {
@@ -373,47 +447,380 @@ fn fleet_projection(managed: &Arc<ManagedStore>) -> Result<Vec<u8>> {
             }));
         }
     }
-    serde_json::to_vec(&json!({
-        "version": 1,
-        "counts": counts,
-        "tasks": rows,
-        "attention": attention,
-    }))
-    .map_err(crate::Error::Json)
+    fleet_body(counts, rows, attention)
+}
+
+/// Serialize the fleet body, dropping the newest-listed rows until it fits
+/// the relay's plaintext bound. Counts always survive.
+fn fleet_body(
+    counts: BTreeMap<String, u64>,
+    mut rows: Vec<Value>,
+    mut attention: Vec<Value>,
+) -> Result<Vec<u8>> {
+    loop {
+        let body = serde_json::to_vec(&json!({
+            "version": FLEET_VERSION,
+            "xcb": env!("CARGO_PKG_VERSION"),
+            "capabilities": FLEET_CAPABILITIES,
+            "counts": counts,
+            "tasks": rows,
+            "attention": attention,
+        }))
+        .map_err(crate::Error::Json)?;
+        if body.len() <= lane::MAX_PROJECTION_PLAINTEXT || (rows.is_empty() && attention.is_empty())
+        {
+            return Ok(body);
+        }
+        if attention.len() > rows.len() {
+            attention.pop();
+        } else {
+            rows.pop();
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_infer::{BindingConfidence, BindingOrigin, BindingSource};
     use std::sync::Arc;
     use tempfile::TempDir;
+    use xcb_core::ui::GLOBAL_THREAD_ID;
+
+    struct Fixture {
+        _temp: TempDir,
+        base: PathBuf,
+        store: Arc<ManagedStore>,
+    }
+
+    /// Custody rejects symlinked ancestors (/var → /private/var on macOS),
+    /// so the state root itself must be canonical; workspaces live beside it.
+    fn fixture() -> Fixture {
+        let temp = TempDir::new().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let store = Arc::new(ManagedStore::open(&base.join("state")).unwrap());
+        Fixture {
+            _temp: temp,
+            base,
+            store,
+        }
+    }
+
+    impl Fixture {
+        fn dir(&self, name: &str) -> PathBuf {
+            let path = self.base.join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            path.canonicalize().unwrap()
+        }
+
+        async fn dispatch(&self, workspace: &str, prompt: &str, operation: &str) -> Result<Value> {
+            dispatch(
+                &self.store,
+                workspace,
+                prompt,
+                &Id::new(format!("m_remote_{operation}")).unwrap(),
+            )
+            .await
+        }
+
+        fn task(&self, result: &Value) -> crate::managed::ManagedTask {
+            let id = Id::new(result["task"].as_str().unwrap()).unwrap();
+            self.store.task(&id).unwrap().unwrap()
+        }
+
+        fn projection(&self) -> Value {
+            serde_json::from_slice(&fleet_projection(&self.store).unwrap()).unwrap()
+        }
+    }
+
+    fn text(path: &Path) -> &str {
+        path.to_str().unwrap()
+    }
+
+    fn error_text(result: Result<Value>) -> String {
+        result.unwrap_err().to_string()
+    }
 
     /// The store records canonical workspace paths; a spelled alias must
     /// resolve to the same bytes or the submit conflicts.
     #[tokio::test]
     async fn dispatch_accepts_noncanonical_workspace_spelling() {
-        let root = TempDir::new().unwrap();
-        // Custody rejects symlinked ancestors (/var → /private/var on
-        // macOS), so the state root itself must be canonical.
-        let root = root.path().canonicalize().unwrap();
-        let store = Arc::new(ManagedStore::open(&root.join("state")).unwrap());
-        let workspace = root.join("work");
-        std::fs::create_dir(&workspace).unwrap();
+        let f = fixture();
+        let workspace = f.dir("work");
         // A symlinked workspace is the /tmp → /private/tmp shape the bug
         // came from: the alias exists but spells differently.
-        let alias = root.join("ws-link");
+        let alias = f.base.join("ws-link");
         #[cfg(unix)]
         std::os::unix::fs::symlink(&workspace, &alias).unwrap();
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(&workspace, &alias).unwrap();
-        let result = dispatch(
-            &store,
-            alias.to_str().unwrap(),
-            "remote prompt",
-            &Id::new("m_remote_test".to_string()).unwrap(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(result["dispatched"], serde_json::json!(true));
+        let result = f
+            .dispatch(text(&alias), "remote prompt", "test")
+            .await
+            .unwrap();
+        assert_eq!(result["dispatched"], json!(true));
+        assert_eq!(result["conversation"], json!(GLOBAL_THREAD_ID));
+        assert_eq!(result["workspace"], json!(text(&workspace)));
+        assert_eq!(f.task(&result).workspace, text(&workspace));
+    }
+
+    #[tokio::test]
+    async fn two_dispatches_share_the_thread() {
+        let f = fixture();
+        let a = f.dir("a");
+        let b = f.dir("b");
+        let first = f.dispatch(text(&a), "first", "one").await.unwrap();
+        let second = f.dispatch(text(&b), "second", "two").await.unwrap();
+        assert_eq!(first["conversation"], json!(GLOBAL_THREAD_ID));
+        assert_eq!(second["conversation"], json!(GLOBAL_THREAD_ID));
+        assert_ne!(first["task"], second["task"]);
+        let conversations = f.store.conversations(16).unwrap();
+        assert_eq!(conversations.len(), 1, "no per-directory view is created");
+        assert!(conversations[0].workspace.is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_subdirectory_is_not_snapped() {
+        let f = fixture();
+        let repo = f.dir("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let sub = f.dir("repo/sub");
+        let result = f
+            .dispatch(text(&sub), "in the subdirectory", "sub")
+            .await
+            .unwrap();
+        assert_eq!(result["workspace"], json!(text(&sub)));
+        assert_eq!(f.task(&result).workspace, text(&sub));
+    }
+
+    /// A relative value is a registry name, never a path under the
+    /// supervisor's inherited cwd (the test binary runs in the crate, where
+    /// `src` exists).
+    #[tokio::test]
+    async fn relative_workspace_is_name_lookup_not_cwd() {
+        let f = fixture();
+        assert!(std::path::Path::new("src").is_dir());
+        let refused = error_text(f.dispatch("src", "no cwd lookup", "cwd").await);
+        assert!(refused.contains("no project named `src`"), "{refused}");
+        let named = f.dir("elsewhere/proj");
+        f.store.admit_workspace(&named, "command", None).unwrap();
+        let result = f.dispatch("proj", "by name", "name").await.unwrap();
+        assert_eq!(result["workspace"], json!(text(&named)));
+        assert_eq!(result["workspaceSource"], json!("explicit"));
+        assert!(f.store.tasks(16).unwrap().len() == 1);
+    }
+
+    #[tokio::test]
+    async fn ambiguous_name_rejected_with_candidates() {
+        let f = fixture();
+        let one = f.dir("one/proj");
+        let two = f.dir("two/proj");
+        f.store.admit_workspace(&one, "command", None).unwrap();
+        f.store.admit_workspace(&two, "command", None).unwrap();
+        let refused = error_text(f.dispatch("proj", "which one?", "ambiguous").await);
+        assert!(refused.contains("names several projects"), "{refused}");
+        assert!(refused.contains(text(&one)), "{refused}");
+        assert!(refused.contains(text(&two)), "{refused}");
+        assert!(f.store.tasks(16).unwrap().is_empty());
+    }
+
+    /// Needs the intake lane's name-mention rung.
+    #[tokio::test]
+    async fn infer_sentinel_binds_named_project_and_fails_ambiguous() {
+        let f = fixture();
+        let alpha = f.dir("alpha");
+        let beta = f.dir("beta");
+        f.store.admit_workspace(&alpha, "command", None).unwrap();
+        f.store.admit_workspace(&beta, "command", None).unwrap();
+        let result = f
+            .dispatch(INFER, "fix the flaky parser test in alpha", "mention")
+            .await
+            .unwrap();
+        assert_eq!(result["workspace"], json!(text(&alpha)));
+        assert_eq!(result["workspaceSource"], json!("mention"));
+        // Two unrelated directories share the name: the device asks.
+        let other = f.dir("other/alpha");
+        f.store.admit_workspace(&other, "command", None).unwrap();
+        let refused = error_text(
+            f.dispatch(INFER, "fix the flaky parser test in alpha", "twice")
+                .await,
+        );
+        assert!(refused.starts_with("workspace ambiguous: "), "{refused}");
+        assert!(refused.contains("alpha"), "{refused}");
+    }
+
+    /// A short remote prompt never binds to whatever ran last; it asks.
+    #[tokio::test]
+    async fn infer_short_prompt_without_cue_asks() {
+        let f = fixture();
+        let alpha = f.dir("alpha");
+        let beta = f.dir("beta");
+        f.store.admit_workspace(&beta, "command", None).unwrap();
+        f.dispatch(text(&alpha), "earlier relay work", "earlier")
+            .await
+            .unwrap();
+        let refused = error_text(f.dispatch(INFER, "run the tests", "short").await);
+        assert!(refused.starts_with("workspace ambiguous: "), "{refused}");
+        assert!(
+            refused.contains("alpha") && refused.contains("beta"),
+            "{refused}"
+        );
+        assert_eq!(f.store.tasks(16).unwrap().len(), 1, "an ask writes nothing");
+    }
+
+    #[tokio::test]
+    async fn home_workspace_refused() {
+        let f = fixture();
+        let home = std::env::var("HOME").unwrap();
+        let refused = error_text(f.dispatch(&home, "anything", "home").await);
+        assert!(refused.contains("workspace is not allowed"), "{refused}");
+        assert!(f.store.tasks(16).unwrap().is_empty());
+        assert!(f.store.all_workspaces().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn hidden_home_workspace_refused() {
+        let f = fixture();
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let Ok(hidden) = tempfile::Builder::new()
+            .prefix(".xcb-relay-")
+            .tempdir_in(&home)
+        else {
+            return;
+        };
+        let inside = hidden.path().join("repo");
+        std::fs::create_dir_all(&inside).unwrap();
+        for path in [hidden.path(), inside.as_path()] {
+            let refused = error_text(f.dispatch(text(path), "anything", "hidden").await);
+            assert!(refused.contains("hidden or library directory"), "{refused}");
+        }
+        assert!(f.store.tasks(16).unwrap().is_empty());
+    }
+
+    /// I9: every key a 0.8 controller read is still there with its meaning.
+    #[tokio::test]
+    async fn result_keys_are_additive() {
+        let f = fixture();
+        let work = f.dir("work");
+        let result = f.dispatch(text(&work), "keys", "keys").await.unwrap();
+        let keys: Vec<&str> = result
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        for key in [
+            "conversation",
+            "dispatched",
+            "task",
+            "workspace",
+            "workspaceSource",
+        ] {
+            assert!(keys.contains(&key), "{key} missing from {result}");
+        }
+        assert_eq!(keys.len(), 5, "{result}");
+        assert!(result["conversation"].is_string());
+        assert_eq!(result["dispatched"], json!(true));
+        assert!(result["task"].as_str().unwrap().starts_with("t_"));
+    }
+
+    #[tokio::test]
+    async fn fleet_rows_carry_workspace_source() {
+        let f = fixture();
+        let work = f.dir("work");
+        let view_dir = f.dir("view");
+        f.dispatch(text(&work), "thread task", "fleet")
+            .await
+            .unwrap();
+        let view = f.store.create_conversation(&view_dir).await.unwrap();
+        f.store
+            .submit_new(
+                &view.id,
+                Id::new("m_view_task").unwrap(),
+                "view task".into(),
+                vec![],
+                &view_dir,
+            )
+            .await
+            .unwrap();
+        let projection = f.projection();
+        let rows = projection["tasks"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "{projection}");
+        for row in rows {
+            assert_eq!(row["workspaceSource"], json!("explicit"), "{row}");
+            for key in ["task", "state", "workspace"] {
+                assert!(row.get(key).is_some(), "{key} missing from {row}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fleet_projection_carries_version_and_capabilities() {
+        let f = fixture();
+        let projection = f.projection();
+        assert_eq!(projection["version"], json!(1));
+        assert_eq!(projection["xcb"], json!(env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            projection["capabilities"],
+            json!(["thread", "workspace-names", "infer"])
+        );
+        for key in ["counts", "tasks", "attention"] {
+            assert!(projection.get(key).is_some(), "{key} missing");
+        }
+    }
+
+    #[test]
+    fn fleet_body_stays_within_the_relay_bound() {
+        let long = format!("/{}", "w".repeat(4000));
+        let rows: Vec<Value> = (0..PROJECTION_TASK_ROWS)
+            .map(|n| json!({"task": format!("t_{n}"), "state": "queued", "workspace": long, "workspaceSource": "explicit"}))
+            .collect();
+        let attention: Vec<Value> = (0..PROJECTION_TASK_ROWS)
+            .map(
+                |n| json!({"task": format!("t_{n}"), "detail": "d".repeat(PROJECTION_FIELD_CHARS)}),
+            )
+            .collect();
+        let mut counts = BTreeMap::new();
+        counts.insert("queued".to_string(), 64);
+        let body = fleet_body(counts, rows, attention).unwrap();
+        assert!(body.len() <= lane::MAX_PROJECTION_PLAINTEXT);
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["counts"]["queued"], json!(64));
+        assert!(!value["tasks"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn repeated_operation_replays() {
+        let f = fixture();
+        let work = f.dir("work");
+        let first = f
+            .dispatch(text(&work), "same prompt", "again")
+            .await
+            .unwrap();
+        let second = f
+            .dispatch(text(&work), "same prompt", "again")
+            .await
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(f.store.tasks(16).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn relay_tasks_carry_relay_origin_binding() {
+        let f = fixture();
+        let work = f.dir("work");
+        let result = f.dispatch(text(&work), "bound", "origin").await.unwrap();
+        let binding = f.task(&result).binding.unwrap();
+        assert_eq!(binding.origin, BindingOrigin::Relay);
+        assert_eq!(binding.source, BindingSource::Explicit);
+        assert_eq!(binding.confidence, BindingConfidence::High);
+        let entry = f
+            .store
+            .all_workspaces()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.path == text(&work))
+            .unwrap();
+        assert_eq!(entry.admitted_by, "dispatch");
     }
 }
