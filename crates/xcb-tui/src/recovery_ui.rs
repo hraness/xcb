@@ -583,6 +583,10 @@ impl App {
         if !input.context.starts_with("unbound:") {
             return false;
         }
+        // The thread spans every project, so an unbound draft belongs there.
+        if crate::in_thread(&self.view) {
+            return true;
+        }
         let workspace = if let Some(conversation) = &self.view.conversation {
             self.view
                 .conversations

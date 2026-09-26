@@ -3261,7 +3261,8 @@ async fn managed_chat(
     let ui =
         tokio::task::spawn_blocking(move || xcb_tui::run_with_options(display, commands, options));
     let result =
-        xcb_runtime::managed::serve_ui(store, conversation.id, input, updates, executable).await;
+        xcb_runtime::managed::serve_ui(store, conversation.id, None, input, updates, executable)
+            .await;
     let ui = ui
         .await
         .map_err(|_| Error::Unavailable("terminal task failed"))?;

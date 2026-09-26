@@ -112,6 +112,7 @@ fn fixture() -> View {
             workspace: "/tmp/xcb-fixture".into(),
             binding: None,
             hold_until_ms: None,
+            moved_from: None,
             updated_at_ms: now_ms(),
         });
     }
@@ -135,6 +136,7 @@ fn fixture() -> View {
         first_sequence: Some(10),
         has_older: true,
         workspaces: Default::default(),
+        sequences: Vec::new(),
     });
     view
 }
@@ -231,7 +233,7 @@ fn main() -> io::Result<()> {
                 Intent::TranscriptPage {
                     request, context, ..
                 } => {
-                    let _ = updates.send(Update::TranscriptPage { request, page: TranscriptPage { context, messages: vec![message("fixture-older", Role::Assistant, "Earlier conversation: the history needle is here.\nThis page is fetched through the normal UI channel.")], first_sequence: Some(1), has_older: false, workspaces: Default::default() } });
+                    let _ = updates.send(Update::TranscriptPage { request, page: TranscriptPage { context, messages: vec![message("fixture-older", Role::Assistant, "Earlier conversation: the history needle is here.\nThis page is fetched through the normal UI channel.")], first_sequence: Some(1), has_older: false, workspaces: Default::default(), sequences: Vec::new() } });
                     continue;
                 }
                 Intent::Habitat(HabitatCommand::Steer { task, event, text }) => {

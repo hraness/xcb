@@ -5,6 +5,7 @@ pub mod input_recovery;
 mod interaction;
 #[cfg(test)]
 mod overview_tests;
+mod projects;
 mod recovery_ui;
 pub mod render;
 
@@ -183,7 +184,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/project",
         alias: "",
-        args: "[all|grant <tasks> <hours> <goal>|pause|resume]",
+        args: "[all|grant [project] <tasks> <hours> <goal>|pause|resume [project]]",
         summary: "bounded automatic project work and remaining budget",
         needs_args: false,
     },
@@ -197,9 +198,16 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/memory",
         alias: "",
-        args: "search <query>",
+        args: "[project] search <query>",
         summary: "search the project's bound Wordcell vault",
         needs_args: true,
+    },
+    SlashCommand {
+        name: "/workspace",
+        alias: "",
+        args: "[name|path|add <dir>|move <task> <name|path>|go|clear]",
+        summary: "focus the thread on a project or move new work",
+        needs_args: false,
     },
     SlashCommand {
         name: "/attention",
@@ -343,6 +351,15 @@ pub enum PickAction {
     Account(Id),
     Conversation(Id),
     NewConversation,
+    /// Open a new project view for this directory from the thread.
+    NewProjectView(String),
+    /// Focus the thread on a project; `new` admits it first and `resubmit`
+    /// sends the retained draft once focused.
+    Workspace {
+        path: String,
+        new: bool,
+        resubmit: bool,
+    },
     Session(Id),
     Task(Id),
     Backlog(Id),
@@ -488,7 +505,7 @@ fn task_queued(task: &xcb_core::ui::TaskRow) -> bool {
 
 /// Scrollable detail view for a managed task — the routed model/account,
 /// workspace and latest detail that a one-line notice could not show.
-fn inspect_task(task: &xcb_core::ui::TaskRow) -> Modal {
+fn inspect_task(task: &xcb_core::ui::TaskRow, view: &View) -> Modal {
     let status = task_status(task);
     let mut headline = status.to_owned();
     // The mapped view state only adds signal when it asks for the user.
@@ -513,6 +530,15 @@ fn inspect_task(task: &xcb_core::ui::TaskRow) -> Modal {
     ];
     if let Some(reason) = &task.route_reason {
         lines.push(format!("routing    {reason}"));
+    }
+    if let Some(binding) = &task.binding {
+        lines.push(format!(
+            "Project: {} · {binding}",
+            workspace_name(view, &task.workspace)
+        ));
+    }
+    if let Some(previous) = &task.moved_from {
+        lines.push(format!("Moved from {previous}"));
     }
     if let Some(settle) = &task.settle {
         lines.push(format!("last turn  {}", settle.replace('_', " ")));
@@ -623,8 +649,140 @@ pub(crate) fn open_workspace(view: &View) -> Option<&str> {
         .map(|row| row.workspace.as_str())
 }
 
-const NAME_THE_PROJECT: &str =
-    "In the thread, name the project: open its project view, or use xcb projects configure <dir>.";
+const NAME_THE_PROJECT: &str = "name the project: /project grant <name|dir> …";
+
+/// True when the open conversation is the thread.
+pub(crate) fn in_thread(view: &View) -> bool {
+    view.conversation
+        .as_ref()
+        .is_some_and(|id| id.as_str() == xcb_core::ui::GLOBAL_THREAD_ID)
+}
+
+/// A project directory's display name: its registry name, else basename.
+pub(crate) fn workspace_name(view: &View, path: &str) -> String {
+    view.workspaces
+        .iter()
+        .find(|row| row.path == path)
+        .map(|row| row.name.clone())
+        .or_else(|| {
+            std::path::Path::new(path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| path.to_owned())
+}
+
+/// Resolve a typed project argument at keystroke time: a known path, a
+/// registry name or repository tail, or a path to an existing directory.
+/// Containers are refused by name; the runtime re-validates every path.
+fn resolve_project(view: &View, value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if let Some(row) = view.workspaces.iter().find(|row| row.path == value) {
+        return Ok(row.path.clone());
+    }
+    if value.contains('/') || value.starts_with('~') || value == "." || value == ".." {
+        let expanded = match value.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => std::env::var_os("HOME")
+                .map(|home| std::path::PathBuf::from(home).join(rest.trim_start_matches('/'))),
+            _ => Some(std::path::PathBuf::from(value)),
+        };
+        return expanded
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .filter(|path| path.is_dir())
+            .and_then(|path| path.to_str().map(str::to_owned))
+            .ok_or_else(|| format!("`{value}` is not a directory"));
+    }
+    let hits: Vec<_> = view
+        .workspaces
+        .iter()
+        .filter(|row| {
+            !row.container
+                && (row.name == value
+                    || row.repo.as_deref().and_then(|repo| repo.rsplit('/').next()) == Some(value))
+        })
+        .collect();
+    match hits.as_slice() {
+        [row] => Ok(row.path.clone()),
+        [] => Err(format!(
+            "no known project is named `{value}`; /workspace add <dir> admits one"
+        )),
+        _ => Err(format!(
+            "`{value}` names several projects: {}",
+            hits.iter()
+                .map(|row| row.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// The items `/sessions` offers in a managed chat: the thread first, then
+/// project views, with a new-view entry only when a directory is named.
+pub(crate) fn conversation_items(view: &View) -> Vec<PickItem> {
+    let mut items = Vec::new();
+    if let Some(workspace) = open_workspace(view) {
+        items.push(PickItem {
+            label: format!("＋ new project view · {}", workspace_name(view, workspace)),
+            action: PickAction::NewConversation,
+        });
+    } else if let Some(workspace) = view.focus.as_ref().or(view.launch_hint.as_ref()) {
+        items.push(PickItem {
+            label: format!("＋ new project view · {}", workspace_name(view, workspace)),
+            action: PickAction::NewProjectView(workspace.clone()),
+        });
+    }
+    let age = |updated: u64| age_label(display_now_ms().saturating_sub(updated));
+    let (threads, views): (Vec<_>, Vec<_>) =
+        view.conversations.iter().partition(|row| row.is_thread());
+    items.extend(threads.into_iter().map(|row| PickItem {
+        label: format!(
+            "Thread · all projects · {} msgs · {}",
+            row.messages,
+            age(row.updated_at_ms)
+        ),
+        action: PickAction::Conversation(row.id.clone()),
+    }));
+    items.extend(views.into_iter().map(|row| PickItem {
+        label: format!(
+            "project view · {} · {} · {} msgs · {}",
+            workspace_name(view, &row.workspace),
+            row.title,
+            row.messages,
+            age(row.updated_at_ms)
+        ),
+        action: PickAction::Conversation(row.id.clone()),
+    }));
+    items
+}
+
+/// Picker rows for project directories. `new` rows are prompt roots the
+/// registry has not admitted; picking one adds it first.
+fn workspace_items(rows: &[xcb_core::ui::WorkspaceRow], resubmit: bool) -> Vec<PickItem> {
+    rows.iter()
+        .map(|row| PickItem {
+            label: if row.new {
+                format!("new — add · {}", row.path)
+            } else {
+                format!(
+                    "{} · {}{}",
+                    row.name,
+                    row.path,
+                    if row.active > 0 {
+                        format!(" · {} active", row.active)
+                    } else {
+                        String::new()
+                    }
+                )
+            },
+            action: PickAction::Workspace {
+                path: row.path.clone(),
+                new: row.new,
+                resubmit,
+            },
+        })
+        .collect()
+}
 
 fn fingerprint_at(view: &View, now: u64) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -723,8 +881,23 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         page.first_sequence.hash(&mut hasher);
         page.has_older.hash(&mut hasher);
     }
+    view.focus.hash(&mut hasher);
+    view.launch_hint.hash(&mut hasher);
+    for row in &view.workspaces {
+        row.path.hash(&mut hasher);
+        row.name.hash(&mut hasher);
+        row.active.hash(&mut hasher);
+        row.container.hash(&mut hasher);
+    }
+    if let Some(page) = &view.transcript {
+        page.workspaces.hash(&mut hasher);
+    }
     for task in &view.tasks {
         task.id.as_str().hash(&mut hasher);
+        task.workspace.hash(&mut hasher);
+        task.binding.hash(&mut hasher);
+        task.hold_until_ms.hash(&mut hasher);
+        task.moved_from.hash(&mut hasher);
         task.revision.hash(&mut hasher);
         task.title.hash(&mut hasher);
         (task.state as u8).hash(&mut hasher);
@@ -913,6 +1086,9 @@ pub struct App {
     notice_seen: String,
     notice_since: Option<Instant>,
     composer_target: Option<interaction::ComposerTarget>,
+    /// The last thread task this terminal submitted; `/workspace <name>`
+    /// moves it while it is still queued and undispatched.
+    last_bound: Option<Id>,
     pending_habitat: VecDeque<interaction::PendingHabitat>,
     live_picker: Option<interaction::LivePicker>,
     live_inspect: Option<PickAction>,
@@ -1059,6 +1235,7 @@ impl App {
             "/project",
             "/program",
             "/memory",
+            "/workspace",
             "/attention",
             "/backlog",
             "/reply",
@@ -1491,6 +1668,30 @@ impl App {
                 self.notice = xcb_core::display_text(&text, 1024);
                 self.dirty = true;
             }
+            Update::WorkspaceBound {
+                task,
+                workspace,
+                label,
+                ..
+            } => {
+                self.notice = format!(
+                    "→ {} · {} · {task}",
+                    workspace_name(&self.view, &workspace),
+                    xcb_core::display_text(&label, 160)
+                );
+                self.last_bound = Some(task);
+                self.dirty = true;
+            }
+            Update::ProjectPicker {
+                candidates, reason, ..
+            } => {
+                self.notice = format!(
+                    "{} · Enter picks and resends; Esc keeps the draft",
+                    xcb_core::display_text(&reason, 240)
+                );
+                self.picker("Which project?", workspace_items(&candidates, true));
+                self.dirty = true;
+            }
             Update::Stopped => return false,
             _ => (),
         }
@@ -1518,10 +1719,10 @@ impl App {
     }
     fn try_send(&mut self, output: &SyncSender<Intent>, intent: Intent) -> bool {
         let intent = match intent {
+            // Project settings carry their directory; only standing work
+            // that depends on the open conversation is pinned to it.
             Intent::Habitat(
-                command @ (HabitatCommand::ConfigureProject { .. }
-                | HabitatCommand::Schedule { .. }
-                | HabitatCommand::MemorySearch { .. }),
+                command @ (HabitatCommand::Schedule { .. } | HabitatCommand::Enqueue { .. }),
             ) => {
                 let Some(conversation) = self.view.conversation.clone() else {
                     self.notice =
@@ -1687,9 +1888,9 @@ impl App {
             }
             "/project" if arguments.is_empty() || arguments == "all" => {
                 let all = arguments == "all";
-                let open = open_workspace(&self.view);
+                let scope = self.authority_workspace();
                 self.picker("Project grants · goal / budget / status", self.view.projects.iter()
-                    .filter(|project| all || open == Some(project.workspace.as_str()))
+                    .filter(|project| all || scope.as_deref() == Some(project.workspace.as_str()))
                     .map(|project| PickItem {
                         label: format!("{} · {} · {} tasks left · {}", xcb_core::display_text(&project.goal, 52), project.status, project.remaining_tasks, project.name),
                         action: PickAction::Project(project.workspace.clone()),
@@ -1699,25 +1900,48 @@ impl App {
                 // A conversation id still names its project view's directory.
                 let named = self.view.conversations.iter()
                     .find(|row| row.id.as_str() == tail && !row.workspace.is_empty())
-                    .map(|row| row.workspace.as_str());
-                let open = open_workspace(&self.view);
-                if let Some(project) = self.view.projects.iter().find(|project| if tail.is_empty() {
-                    open == Some(project.workspace.as_str())
-                } else { project.workspace == tail || project.name == tail || named == Some(project.workspace.as_str()) }) {
+                    .map(|row| row.workspace.clone());
+                let scope = match (tail.is_empty(), named) {
+                    (true, _) => self.authority_workspace().ok_or_else(|| NAME_THE_PROJECT.to_owned()),
+                    (false, Some(workspace)) => Ok(workspace),
+                    (false, None) => self.view.projects.iter()
+                        .find(|project| project.name == tail)
+                        .map(|project| Ok(project.workspace.clone()))
+                        .unwrap_or_else(|| resolve_project(&self.view, tail)),
+                };
+                let workspace = match scope {
+                    Ok(workspace) => workspace,
+                    Err(reason) => { self.notice = reason; return; }
+                };
+                if let Some(project) = self.view.projects.iter().find(|project| project.workspace == workspace) {
                     self.send_habitat(output, Intent::Habitat(HabitatCommand::ProjectEnabled { workspace: project.workspace.clone(), expected_revision: project.revision, enabled: action == "resume" }), command, arguments);
-                } else { self.notice = "No matching project grant. /project all lists grants.".into(); }
+                    self.notice = format!("Project `{workspace}` {}", if action == "resume" { "resumes" } else { "pauses" });
+                } else { self.notice = format!("No project grant for `{workspace}`. /project all lists grants."); }
             }
             "/project" if action == "grant" => {
-                let mut parts = tail.splitn(3, ' ');
+                // A first token that parses as a count is <tasks>; any other
+                // first token names the project (an all-digit directory is
+                // written as a path, `./2026`).
+                let first = tail.split(' ').next().unwrap_or("");
+                let (scope, rest) = if first.parse::<u32>().is_ok() || first.is_empty() {
+                    (None, tail)
+                } else {
+                    (Some(first), tail[first.len()..].trim())
+                };
+                let mut parts = rest.splitn(3, ' ');
                 let tasks = parts.next().and_then(|v| v.parse::<u32>().ok());
                 let hours = parts.next().and_then(|v| v.parse::<u64>().ok());
                 let goal = parts.next().unwrap_or("").trim();
                 if let (Some(max_tasks), Some(hours)) = (tasks, hours)
                     && (1..=100).contains(&max_tasks) && (1..=720).contains(&hours) && !goal.is_empty() {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-                    let Some(workspace) = open_workspace(&self.view).map(str::to_owned) else {
-                        self.notice = NAME_THE_PROJECT.into();
-                        return;
+                    let workspace = match scope {
+                        Some(scope) => resolve_project(&self.view, scope),
+                        None => self.authority_workspace().ok_or_else(|| NAME_THE_PROJECT.to_owned()),
+                    };
+                    let workspace = match workspace {
+                        Ok(workspace) => workspace,
+                        Err(reason) => { self.notice = reason; return; }
                     };
                     let current = self.view.projects.iter().find(|p| p.workspace == workspace);
                     self.send_habitat(output, Intent::Habitat(HabitatCommand::ConfigureProject {
@@ -1725,17 +1949,28 @@ impl App {
                         expected_revision: current.map(|p| p.revision), goal: goal.into(), max_tasks,
                         expires_at_ms: now.saturating_add(hours * 3_600_000), required_provider: current.and_then(|p| p.required_provider),
                     }), command, arguments);
-                } else { self.notice = "Use /project grant <1–100 tasks> <1–720 hours> <goal>. This authorizes automatic follow-up work.".into(); }
+                    self.notice = format!("Granting `{workspace}`");
+                } else { self.notice = "Use /project grant [project] <1–100 tasks> <1–720 hours> <goal>. This authorizes automatic follow-up work.".into(); }
             }
-            "/project" => self.notice = "Use /project [all], /project grant <tasks> <hours> <goal>, or /project pause|resume [conversation].".into(),
-            "/memory" if action == "search" && !tail.is_empty() => {
-                let Some(workspace) = open_workspace(&self.view).map(str::to_owned) else {
-                    self.notice = NAME_THE_PROJECT.into();
-                    return;
+            "/project" => self.notice = "Use /project [all], /project grant [project] <tasks> <hours> <goal>, or /project pause|resume [project].".into(),
+            "/memory" if (action == "search" && !tail.is_empty()) || tail.starts_with("search ") => {
+                // `/memory search <query>` uses the ladder; `/memory <project>
+                // search <query>` names it. The query never names a project.
+                let (workspace, query) = if action == "search" {
+                    (self.authority_workspace().ok_or_else(|| NAME_THE_PROJECT.to_owned()), tail)
+                } else {
+                    (resolve_project(&self.view, action), tail["search ".len()..].trim())
                 };
-                self.send_habitat(output, Intent::Habitat(HabitatCommand::MemorySearch { workspace, query: tail.into() }), command, arguments);
+                let workspace = match workspace {
+                    Ok(workspace) if !query.is_empty() => workspace,
+                    Ok(_) => { self.notice = "Use /memory [project] search <query>.".into(); return; }
+                    Err(reason) => { self.notice = reason; return; }
+                };
+                self.send_habitat(output, Intent::Habitat(HabitatCommand::MemorySearch { workspace: workspace.clone(), query: query.into() }), command, arguments);
+                self.notice = format!("Searching the vault for `{workspace}`");
             }
-            "/memory" => self.notice = "Use /memory search <query>. Bind a vault first with xcb memory configure.".into(),
+            "/memory" => self.notice = "Use /memory [project] search <query>. Bind a vault first with xcb memory configure.".into(),
+            "/workspace" => self.workspace_command(action, tail, output),
             "/backlog" if action == "complete" => {
                 let (id, summary) = tail.split_once(' ').unwrap_or((tail, ""));
                 if !summary.trim().is_empty() && let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == id) {
@@ -1750,13 +1985,16 @@ impl App {
             "/attention" | "/backlog" if command == "/attention" || arguments.is_empty() || arguments == "all" => {
                 let attention = command == "/attention";
                 let all = attention || arguments == "all";
+                // The thread's focus narrows every list to its project.
+                let focus = self.view.focus.as_deref().filter(|_| in_thread(&self.view) && arguments != "all");
                 let items = self.view.backlog.iter()
                     .filter(|task| all || self.view.conversation.as_ref() == Some(&task.conversation))
+                    .filter(|task| focus.is_none_or(|focus| task.workspace == focus))
                     .filter(|task| !attention || task.state.attention())
                     .map(|task| PickItem {
                         label: format!("{} · {} · P{} · {} · {}", xcb_core::display_text(&task.title, 52),
                             if attention { task.state.label() } else { &task.status }, task.priority,
-                            xcb_core::display_text(task.conversation.as_str(), 12), xcb_core::display_text(task.id.as_str(), 12)),
+                            xcb_core::display_text(&self.project_label(&task.workspace, &task.conversation), 24), xcb_core::display_text(task.id.as_str(), 12)),
                         action: PickAction::Backlog(task.id.clone()),
                     }).collect();
                 self.picker(if attention { "Attention · questions / approvals / actions" } else if all { "All agents · backlog and history" } else { "This agent · backlog and history" }, items);
@@ -1767,7 +2005,8 @@ impl App {
                     self.notice = "Open a conversation before adding work.".into(); return;
                 };
                 let id = self.inbox_event_id(command, arguments);
-                self.send_habitat(output, Intent::Habitat(HabitatCommand::EnqueueIn { conversation, id, prompt: tail.into(), deferred: true, priority: 5, workspace: None }), command, arguments);
+                let workspace = self.standing_workspace();
+                self.send_habitat(output, Intent::Habitat(HabitatCommand::EnqueueIn { conversation, id, prompt: tail.into(), deferred: true, priority: 5, workspace }), command, arguments);
             }
             "/backlog" if action == "run" => {
                 if let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == tail) {
@@ -1803,13 +2042,15 @@ impl App {
             }
             "/schedule" if arguments.is_empty() || arguments == "all" => {
                 let all = arguments == "all";
+                let focus = self.view.focus.as_deref().filter(|_| in_thread(&self.view) && !all);
                 self.picker(if all { "All agents · schedules" } else { "This agent · schedules" },
                     self.view.schedules.iter()
                         .filter(|schedule| all || self.view.conversation.as_ref() == Some(&schedule.conversation))
+                        .filter(|schedule| focus.is_none_or(|focus| schedule.workspace == focus))
                         .map(|schedule| PickItem {
                             label: format!("{} · {} · every {}s · {} · {}", xcb_core::display_text(&schedule.prompt, 52),
                                 if schedule.enabled { "enabled" } else { "paused" }, schedule.interval_ms / 1000,
-                                xcb_core::display_text(schedule.conversation.as_str(), 12), xcb_core::display_text(schedule.id.as_str(), 16)),
+                                xcb_core::display_text(&self.project_label(&schedule.workspace, &schedule.conversation), 24), xcb_core::display_text(schedule.id.as_str(), 16)),
                             action: PickAction::Schedule(schedule.id.clone()),
                         }).collect());
             }
@@ -1817,7 +2058,8 @@ impl App {
                 let (seconds, prompt) = tail.split_once(' ').unwrap_or((tail, ""));
                 if let Ok(seconds) = seconds.parse::<u64>()
                     && (60..=31_536_000).contains(&seconds) && !prompt.trim().is_empty() {
-                    self.send_habitat(output, Intent::Habitat(HabitatCommand::Schedule { prompt: prompt.trim().into(), interval_ms: seconds * 1000, workspace: None }), command, arguments);
+                    let workspace = self.standing_workspace();
+                    self.send_habitat(output, Intent::Habitat(HabitatCommand::Schedule { prompt: prompt.trim().into(), interval_ms: seconds * 1000, workspace }), command, arguments);
                 } else { self.notice = "Use /schedule every <seconds> <prompt>; interval must be 60 seconds to 365 days.".into(); }
             }
             "/schedule" if matches!(action, "pause" | "resume") => {
@@ -1856,6 +2098,7 @@ impl App {
                 | "/project"
                 | "/program"
                 | "/memory"
+                | "/workspace"
                 | "/steer"
                 | "/watch"
                 | "/inbox"
@@ -1973,20 +2216,7 @@ impl App {
                     .collect(),
             ),
             "/sessions" if self.managed_mode() => {
-                let mut items = vec![PickItem {
-                    label: "＋ new conversation".into(),
-                    action: PickAction::NewConversation,
-                }];
-                items.extend(self.view.conversations.iter().map(|conversation| PickItem {
-                    label: format!(
-                        "{} · {} msgs · {} · {}",
-                        conversation.title,
-                        conversation.messages,
-                        age_label(display_now_ms().saturating_sub(conversation.updated_at_ms)),
-                        conversation.workspace
-                    ),
-                    action: PickAction::Conversation(conversation.id.clone()),
-                }));
+                let items = conversation_items(&self.view);
                 self.picker("Control conversations", items)
             }
             "/sessions" => self.picker(
@@ -2098,6 +2328,10 @@ impl App {
             return self.modal_event(event, output);
         }
         if self.overview_event(&event) {
+            // Opening a thread card focuses its project.
+            if let Some(workspace) = self.agent_grid.take_focus_request() {
+                self.send(output, Intent::Focus(Some(workspace)));
+            }
             return true;
         }
         if let Event::Key(key) = &event {
@@ -2707,10 +2941,18 @@ impl App {
                 PickAction::Account(id) => self.send(output, Intent::Account(id)),
                 PickAction::Conversation(id) => self.send(output, Intent::Conversation(id)),
                 PickAction::NewConversation => self.send(output, Intent::NewSession),
+                PickAction::NewProjectView(workspace) => {
+                    self.send(output, Intent::NewProjectView { workspace })
+                }
+                PickAction::Workspace {
+                    path,
+                    new,
+                    resubmit,
+                } => self.pick_workspace(path, new, resubmit, output),
                 PickAction::Session(id) => self.send(output, Intent::Resume(id)),
                 PickAction::Task(id) => {
                     if let Some(task) = self.view.tasks.iter().find(|task| task.id == id) {
-                        let mut modal = inspect_task(task);
+                        let mut modal = inspect_task(task, &self.view);
                         if let Modal::Inspect { lines, .. } = &mut modal {
                             let events = self
                                 .view
@@ -2933,7 +3175,8 @@ pub fn run_with_options(
         }
         let live = matches!(app.view.state, State::Working)
             || app.view.remote_active
-            || app.overview_animating();
+            || app.overview_animating()
+            || !app.held_tasks(display_now_ms()).is_empty();
         if !needs_draw && live && ticks.is_multiple_of(4) {
             needs_draw = true;
         }
@@ -3415,9 +3658,9 @@ mod habitat_surface_tests {
         }
         app.slash("/project grant 5 24 Maintain the parser", &tx);
         assert!(
-            matches!(rx.try_recv(), Ok(Intent::HabitatAt { command: HabitatCommand::ConfigureProject {
-            expected_revision: Some(17), max_tasks: 5, required_provider: Some(xcb_core::Provider::Codex), goal, ..
-        }, .. }) if goal == "Maintain the parser")
+            matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::ConfigureProject {
+            expected_revision: Some(17), max_tasks: 5, required_provider: Some(xcb_core::Provider::Codex), goal, workspace, ..
+        })) if goal == "Maintain the parser" && workspace == "/work/project_a")
         );
         app.slash("/project pause", &tx);
         assert!(matches!(
@@ -3440,7 +3683,7 @@ mod habitat_surface_tests {
         );
         app.slash("/memory search parser decisions", &tx);
         assert!(
-            matches!(rx.try_recv(), Ok(Intent::HabitatAt { conversation, command: HabitatCommand::MemorySearch { query, workspace } }) if query == "parser decisions" && conversation.as_str() == "project_a" && workspace == "/work/project_a")
+            matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::MemorySearch { query, workspace })) if query == "parser decisions" && workspace == "/work/project_a")
         );
     }
 }

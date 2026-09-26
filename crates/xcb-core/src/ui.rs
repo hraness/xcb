@@ -91,6 +91,8 @@ pub struct TaskRow {
     pub binding: Option<String>,
     /// A doubtful binding waits until this instant before its first dispatch.
     pub hold_until_ms: Option<u64>,
+    /// The unstarted task this one replaced when it moved directories.
+    pub moved_from: Option<Id>,
     pub updated_at_ms: u64,
 }
 
@@ -213,6 +215,18 @@ pub struct TranscriptPage {
     /// Sequence → task workspace for task-attributed messages.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub workspaces: BTreeMap<u64, String>,
+    /// The durable sequence of each entry in `messages`, in the same order,
+    /// so `workspaces` can be joined to a message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequences: Vec<u64>,
+}
+
+impl TranscriptPage {
+    /// The task workspace a message was attributed to, if any.
+    pub fn workspace_of(&self, index: usize) -> Option<&str> {
+        let sequence = self.sequences.get(index)?;
+        self.workspaces.get(sequence).map(String::as_str)
+    }
 }
 
 pub enum HabitatCommand {
@@ -513,6 +527,11 @@ pub enum Intent {
     /// Admit a directory to the known-workspace registry by explicit act.
     AddWorkspace {
         path: String,
+    },
+    /// Open a new project view for this directory (from the thread, where
+    /// `NewSession` only clears the focus).
+    NewProjectView {
+        workspace: String,
     },
 }
 

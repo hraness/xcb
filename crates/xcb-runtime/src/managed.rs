@@ -5879,8 +5879,12 @@ fn managed_view(
                 route_reason: task.route_reason.clone(),
                 settle: task.settle.clone(),
                 workspace: task.workspace.clone(),
-                binding: task.binding.as_ref().map(|binding| binding.reason.clone()),
+                binding: task
+                    .binding
+                    .as_ref()
+                    .map(|binding| format!("{} ({})", binding.reason, binding.confidence.as_str())),
                 hold_until_ms: task.hold_until_ms,
+                moved_from: task.moved_from.clone(),
                 updated_at_ms: task.updated_at_ms,
             }
         })
@@ -5961,14 +5965,19 @@ fn managed_view(
     } else {
         State::Idle
     };
+    view.workspaces = managed.workspace_rows(64)?;
     view.pane = xcb_core::panes::Pane::focus();
     let mut status = format!(
         "on · {} tasks · {}",
         tasks.len(),
-        workspace
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("workspace")
+        if conversation.as_str() == GLOBAL_THREAD_ID {
+            "all projects"
+        } else {
+            workspace
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("workspace")
+        }
     );
     let unreadable = managed.unreadable_tasks();
     if unreadable > 0 {
@@ -5985,15 +5994,23 @@ fn managed_view(
 pub async fn serve_ui(
     store: Arc<Store>,
     mut conversation: Id,
+    launch_hint: Option<String>,
     input: Receiver<Intent>,
     output: SyncSender<Update>,
     executable: PathBuf,
 ) -> Result<()> {
+    use xcb_core::ui::{HabitatCommand, TranscriptContext};
     let managed = Arc::new(ManagedStore::open(store.root())?);
     let selected = managed
         .conversation(&conversation)?
         .ok_or(Error::Unavailable("managed conversation not found"))?;
-    let mut workspace = PathBuf::from(selected.workspace.unwrap_or_default());
+    // The open project view's directory; `None` in the thread, which binds
+    // each task's directory when the task is created.
+    let mut bound = selected.workspace;
+    let mut workspace = PathBuf::from(bound.clone().unwrap_or_default());
+    // Session-local project focus for the thread. It is never persisted and
+    // never shared with another terminal.
+    let mut focus: Option<String> = None;
     if store.accounts()?.is_empty() {
         output
             .try_send(Update::Notice(
@@ -6035,6 +6052,7 @@ pub async fn serve_ui(
                 Err(TryRecvError::Disconnected) => Intent::Quit,
             };
             handled = true;
+            let thread = conversation.as_str() == GLOBAL_THREAD_ID;
             let intent = match intent {
                 Intent::HabitatAt {
                     conversation: expected,
@@ -6053,8 +6071,7 @@ pub async fn serve_ui(
                 _ => None,
             };
             match intent {
-                Intent::Habitat(command) => {
-                    use xcb_core::ui::HabitatCommand;
+                Intent::Habitat(mut command) => {
                     if let HabitatCommand::RecallQueued {
                         id,
                         expected_revision,
@@ -6097,6 +6114,53 @@ pub async fn serve_ui(
                         } => Some((Some(id.clone()), reply.clone(), text.clone())),
                         _ => None,
                     };
+                    // A thread schedule or backlog item is standing authority,
+                    // so its directory comes from the authority ladder, never
+                    // from inference: the explicit argument, the view's
+                    // directory, then this terminal's focus (I7). The TUI has
+                    // already applied the selected-task rung at keystroke time.
+                    let mut placed = None;
+                    if thread {
+                        let slot = match &mut command {
+                            HabitatCommand::Enqueue { workspace, .. }
+                            | HabitatCommand::EnqueueIn { workspace, .. }
+                            | HabitatCommand::Schedule { workspace, .. } => Some(workspace),
+                            _ => None,
+                        };
+                        if let Some(slot) = slot {
+                            match slot
+                                .clone()
+                                .or_else(|| bound.clone())
+                                .or_else(|| focus.clone())
+                            {
+                                Some(directory) => {
+                                    *slot = Some(directory.clone());
+                                    placed = Some(directory);
+                                }
+                                None => {
+                                    let id = match &recovery {
+                                        Some((_, operation, _)) => operation.clone(),
+                                        None => new_id("m"),
+                                    };
+                                    if let Some((task, operation, text)) = recovery {
+                                        pending_updates.push_back(Update::HabitatDraft {
+                                            context: command_context.clone(),
+                                            task,
+                                            operation,
+                                            text,
+                                        });
+                                    }
+                                    pending_updates.push_back(Update::ProjectPicker {
+                                        id,
+                                        candidates: managed.workspace_rows(8).unwrap_or_default(),
+                                        reason: "name the project for this work; nothing was saved"
+                                            .into(),
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     match managed.habitat_command(&conversation, command).await {
                         Ok(notice) => {
                             if let Some((task, operation, text)) = recovery {
@@ -6107,6 +6171,10 @@ pub async fn serve_ui(
                                     text,
                                 });
                             }
+                            let notice = match placed {
+                                Some(directory) => format!("{notice} · in `{directory}`"),
+                                None => notice,
+                            };
                             output.try_send(Update::Notice(notice)).ok();
                             last_ensure = Instant::now();
                             if let Err(error) = ensure_daemon(store.root(), &executable) {
@@ -6140,7 +6208,7 @@ pub async fn serve_ui(
                     title,
                 } => {
                     let result = match context {
-                        xcb_core::ui::TranscriptContext::Conversation(id) => managed
+                        TranscriptContext::Conversation(id) => managed
                             .rename_conversation(&id, &expected_title, &title)
                             .map(|_| ()),
                         _ => Err(Error::Unavailable(
@@ -6159,9 +6227,7 @@ pub async fn serve_ui(
                     request,
                 } => {
                     let result = match &context {
-                        xcb_core::ui::TranscriptContext::Conversation(id)
-                            if *id == conversation =>
-                        {
+                        TranscriptContext::Conversation(id) if *id == conversation => {
                             managed.transcript_page(id, Some(before_sequence), 256)
                         }
                         _ => Err(Error::Conflict("transcript context changed")),
@@ -6188,9 +6254,9 @@ pub async fn serve_ui(
                     attachments,
                     ..
                 } => {
+                    let context = TranscriptContext::Conversation(conversation.clone());
                     if let Some(expected) = &submit_context
-                        && expected
-                            != &xcb_core::ui::TranscriptContext::Conversation(conversation.clone())
+                        && expected != &context
                     {
                         pending_updates.push_back(Update::SubmitRejected {
                             id,
@@ -6201,23 +6267,68 @@ pub async fn serve_ui(
                         });
                         continue;
                     }
-                    match managed
-                        .submit_new(
-                            &conversation,
-                            id.clone(),
-                            text.clone(),
-                            attachments.clone(),
-                            &workspace,
-                        )
-                        .await
-                    {
-                        Ok(()) => {
-                            pending_updates.push_back(Update::Submitted {
-                                id,
-                                context: xcb_core::ui::TranscriptContext::Conversation(
-                                    conversation.clone(),
-                                ),
+                    // In the thread the harness picks the directory; a view
+                    // submits into its own directory as before.
+                    let result = if thread {
+                        let cues = IntakeCues {
+                            origin: Origin::Tui,
+                            explicit: None,
+                            target: None,
+                            focus: focus.clone(),
+                            launch_hint: launch_hint.clone(),
+                            infer_only: false,
+                        };
+                        managed
+                            .submit_to_thread(id.clone(), text.clone(), attachments.clone(), cues)
+                            .await
+                            .map(Some)
+                    } else {
+                        managed
+                            .submit_new(
+                                &conversation,
+                                id.clone(),
+                                text.clone(),
+                                attachments.clone(),
+                                &workspace,
+                            )
+                            .await
+                            .map(|()| None)
+                    };
+                    match result {
+                        Ok(Some(Intake::Ask { candidates, reason })) => {
+                            // Nothing was written: keep the draft, then ask.
+                            pending_updates.push_back(Update::SubmitRejected {
+                                id: id.clone(),
+                                context: Some(context),
+                                text,
+                                attachments,
+                                reason: "which project?".into(),
                             });
+                            pending_updates.push_back(Update::ProjectPicker {
+                                id,
+                                candidates,
+                                reason,
+                            });
+                        }
+                        Ok(accepted) => {
+                            pending_updates.push_back(Update::Submitted {
+                                id: id.clone(),
+                                context,
+                            });
+                            if let Some(Intake::Accepted {
+                                task,
+                                workspace,
+                                binding,
+                                ..
+                            }) = accepted
+                            {
+                                pending_updates.push_back(Update::WorkspaceBound {
+                                    id,
+                                    task: task.id,
+                                    workspace,
+                                    label: binding.reason,
+                                });
+                            }
                             last_ensure = Instant::now();
                             if let Err(error) = ensure_daemon(store.root(), &executable) {
                                 output.try_send(Update::Notice(format!("Task was saved, but the background supervisor could not start: {error}"))).ok();
@@ -6226,9 +6337,7 @@ pub async fn serve_ui(
                         Err(error) => {
                             pending_updates.push_back(Update::SubmitRejected {
                                 id,
-                                context: Some(xcb_core::ui::TranscriptContext::Conversation(
-                                    conversation.clone(),
-                                )),
+                                context: Some(context),
                                 text,
                                 attachments,
                                 reason: error.to_string(),
@@ -6253,16 +6362,65 @@ pub async fn serve_ui(
                     break;
                 }
                 Intent::Refresh => (),
-                Intent::Focus(_)
-                | Intent::MoveTask { .. }
-                | Intent::ReleaseHold { .. }
-                | Intent::AddWorkspace { .. } => {
-                    let _ = output.try_send(Update::Notice("not available yet".into()));
+                Intent::Focus(None) => {
+                    focus = None;
+                    pending_updates.push_back(Update::Notice(
+                        "Focus cleared; the thread picks each prompt's project.".into(),
+                    ));
+                }
+                Intent::Focus(Some(value)) => match managed.ui_workspace(&value) {
+                    Ok(directory) => {
+                        pending_updates.push_back(Update::Notice(format!("Focus: `{directory}`")));
+                        focus = Some(directory);
+                    }
+                    Err(reason) => pending_updates
+                        .push_back(Update::Notice(format!("Focus was not changed: {reason}"))),
+                },
+                Intent::MoveTask {
+                    task,
+                    revision,
+                    target,
+                } => {
+                    let notice = match managed.ui_workspace(&target) {
+                        Err(reason) => format!("{task} was not moved: {reason}"),
+                        Ok(directory) => match managed.move_task(&task, revision, &directory).await
+                        {
+                            Ok(moved) => {
+                                last_ensure = Instant::now();
+                                ensure_daemon(store.root(), &executable).ok();
+                                format!("Moved {task} to `{directory}` as {}", moved.id)
+                            }
+                            Err(error) => format!("{task} was not moved: {error}"),
+                        },
+                    };
+                    pending_updates.push_back(Update::Notice(notice));
+                }
+                Intent::ReleaseHold { task, revision } => {
+                    let notice = match managed.release_hold(&task, revision).await {
+                        Ok(released) => {
+                            last_ensure = Instant::now();
+                            ensure_daemon(store.root(), &executable).ok();
+                            format!("{} starts now in `{}`", released.id, released.workspace)
+                        }
+                        Err(error) => format!("{task} is still held: {error}"),
+                    };
+                    pending_updates.push_back(Update::Notice(notice));
+                }
+                Intent::AddWorkspace { path } => {
+                    let notice = match managed
+                        .snap_root(&overview::expand_home(&path))
+                        .and_then(|root| managed.admit_workspace(Path::new(&root), "command", None))
+                    {
+                        Ok(directory) => format!("Added project `{directory}`"),
+                        Err(error) => format!("Project was not added: {error}"),
+                    };
+                    pending_updates.push_back(Update::Notice(notice));
                 }
                 Intent::Conversation(id) => match managed.conversation(&id)? {
                     Some(selected) => {
                         conversation = selected.id;
-                        workspace = PathBuf::from(selected.workspace.unwrap_or_default());
+                        bound = selected.workspace;
+                        workspace = PathBuf::from(bound.clone().unwrap_or_default());
                     }
                     None => {
                         output
@@ -6270,6 +6428,14 @@ pub async fn serve_ui(
                             .ok();
                     }
                 },
+                // In the thread, new work starts from a clean slate: the
+                // focus clears and no conversation is created.
+                Intent::NewSession if thread => {
+                    focus = None;
+                    pending_updates.push_back(Update::Notice(
+                        "New work in the thread; focus cleared.".into(),
+                    ));
+                }
                 Intent::NewSession => match managed.create_conversation(&workspace).await {
                     Ok(created) => {
                         conversation = created.id;
@@ -6283,6 +6449,23 @@ pub async fn serve_ui(
                             .ok();
                     }
                 },
+                Intent::NewProjectView { workspace: path } => {
+                    match managed.create_conversation(Path::new(&path)).await {
+                        Ok(created) => {
+                            conversation = created.id;
+                            bound = created.workspace;
+                            workspace = PathBuf::from(bound.clone().unwrap_or_default());
+                            last_stamp = None;
+                        }
+                        Err(error) => {
+                            output
+                                .try_send(Update::Notice(format!(
+                                    "Project view was not created: {error}"
+                                )))
+                                .ok();
+                        }
+                    }
+                }
                 Intent::AttachPath(path) => {
                     match attachments::from_path(store.root(), Path::new(&path)) {
                         Ok(attachment) => {
@@ -6348,7 +6531,9 @@ pub async fn serve_ui(
         // otherwise idle terminal crossed a wall-clock time bucket.
         let liveness_changed = session_liveness.changed(&store, Instant::now(), refresh)?;
         if refresh || liveness_changed {
-            let view = managed_view(&store, &managed, &conversation, &workspace)?;
+            let mut view = managed_view(&store, &managed, &conversation, &workspace)?;
+            view.focus = focus.clone();
+            view.launch_hint = launch_hint.clone();
             dispatch_pending = view
                 .tasks
                 .iter()
@@ -7577,6 +7762,7 @@ mod tests {
         let task = tokio::spawn(serve_ui(
             xcb,
             chat.clone(),
+            None,
             input,
             updates,
             PathBuf::from("/usr/bin/true"),
@@ -8488,6 +8674,7 @@ mod tests {
         let ui = tokio::spawn(serve_ui(
             xcb,
             chat,
+            None,
             input,
             updates,
             PathBuf::from("/usr/bin/true"),
