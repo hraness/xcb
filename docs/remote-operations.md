@@ -95,6 +95,24 @@ device that no longer exists locally fails closed rather than rebinding.
 
 ## Controller contract (agents: Grok or otherwise)
 
+An agent drives the fleet through its own controller-class device and a
+dedicated state root — never by sharing a daemon's custody (two writers
+on one `session.json` race refresh-token rotation). Setup on whatever
+machine the agent invokes from, or a dedicated root here:
+
+```sh
+XCB_VERSION=0.8.11 sh scripts/install-native.sh
+xcb --state ~/.local/share/xcb-grok link --controller \
+  --relay https://terrific-rook-891.convex.cloud \
+  --email <owner email> --label grok
+# the code arrives by email; complete with --code <8 digits>
+xcb remote admit <device-id>      # from any enrolled device
+```
+
+Then point the agent at `xcb --state ~/.local/share/xcb-grok --json
+<verb>`. A controller device cannot be dispatched to — it only reads
+fleet state and posts commands.
+
 Every verb is scriptable: `--json` prints one JSON object on stdout,
 diagnostics stay on stderr, and the only interactive step in the whole
 surface is the `xcb link` code prompt. A controller agent holds a
