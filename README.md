@@ -419,6 +419,28 @@ reports an unsettled run, inspect `xcb recover` and the process state; an expire
 lease or a quiet terminal is not proof that the provider stopped. Recovery is
 an explicit operation, not a reason to delete state or lock files.
 
+### Fleet and remote devices
+
+Each machine can enroll as a device on a shared relay fleet. Linked machines
+publish an encrypted presence and task projection and accept fenced commands;
+a controller device or another enrolled machine drives them through the same
+CLI. Remote task content stays encrypted at the device boundary.
+
+```sh
+xcb link --relay <relay-url> --email <owner email>   # enroll this machine (email one-time code)
+xcb remote admit <device>                          # admit a newly linked device
+xcb fleet                                          # devices, presence, projection staleness
+xcb dispatch <device> <workspace> -p "<task>"      # run a managed task on a remote machine
+xcb remote status <command-id> --wait              # wait for a posted command to settle
+xcb remote steer|cancel|answer <device> <task>     # drive a remote task
+```
+
+Ids may be typed as unambiguous prefixes (`xcb remote cancel 513c t_a65b`).
+Every remote verb is `--json`-scriptable with closed exit codes, which is the
+contract a driving agent (for example a bot) should use. See
+[remote operations](docs/remote-operations.md) for enrollment, controller
+semantics and recovery.
+
 ### Optional behavior
 
 Auto-continue and Gobstopper context management default on with bounded
