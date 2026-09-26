@@ -12,6 +12,7 @@ import {
   releasePackageForName,
 } from "./release-distribution-policy.ts";
 import { parseGitHubIncludedJsonResponse } from "./release-included-response.ts";
+import { releaseTitle, renderReleaseBody, renderReleaseNotes } from "./release-notes.ts";
 import { publicReleaseEnvironment } from "./release-process-environment.ts";
 import { assertReviewedMainComparison } from "./release-ref-authority.ts";
 
@@ -63,9 +64,19 @@ if (basename(tarball) !== distribution.releaseArchiveName(manifest.version) || b
 const tarballBytes = readFileSync(tarball);
 const checksumBytes = readFileSync(checksum);
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-const expectedTitle = `${releasePackage.title} ${tagArgument}`;
-const expectedBody =
-  `Automated public release of ${releasePackage.name}@${manifest.version} from ${tagArgument}.`;
+const expectedTitle = releaseTitle(releasePackage, releaseVersion);
+// The staged writer carries CHANGELOG.md from the verified tag commit beside
+// its package.json; the release notes are that version's section plus the
+// generated install and verify sections. A missing, empty, or Unreleased
+// section fails here, before any release or draft is created.
+const releaseNotesInput = Object.freeze({
+  changelog: readFileSync(resolve(import.meta.dir, "..", "CHANGELOG.md"), "utf8"),
+  commit: verifiedSha,
+  releasePackage,
+  version: releaseVersion,
+});
+const expectedNotes = renderReleaseNotes(releaseNotesInput);
+const expectedBody = renderReleaseBody(releaseNotesInput);
 
 type NativeSource = Readonly<{
   archiveBytes: Buffer;
@@ -357,7 +368,11 @@ async function verifyPublishedRelease(): Promise<void> {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
     try {
-      const coordinate = distribution.parseGitHubRelease(await readRelease(), releaseVersion);
+      const coordinate = distribution.parseGitHubRelease(
+        await readRelease(),
+        releaseVersion,
+        expectedNotes,
+      );
       assertReleaseAssetBytes(coordinate, tarballBytes, checksumBytes, sha256);
       if (coordinate.natives.length !== nativeSources.length) {
         throw new Error(`GitHub Release ${tagArgument} does not carry the exact native asset set.`);

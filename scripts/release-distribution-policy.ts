@@ -28,7 +28,7 @@ export const rootReleasePackage: ReleasePackage = Object.freeze({
   name: publicPackageName,
   repository: publicRepository,
   tagPrefix: "v",
-  title: "XCB",
+  title: "xcb",
   workflowPath: ".github/workflows/release.yml",
 });
 const releasePackages: ReadonlyMap<string, ReleasePackage> = new Map([
@@ -91,6 +91,67 @@ export type GitHubReleaseCoordinate = Readonly<{
   natives: readonly GitHubNativeAssetPair[];
   tarball: GitHubReleaseAsset;
 }>;
+
+/** Opening bytes of the release identity record. The record is the trailing
+ * HTML comment of every GitHub Release body: invisible on the rendered page,
+ * and the final bytes of the body. Readers parse it from the last occurrence
+ * of this opener so the human-readable notes above it cannot shadow it. */
+export const RELEASE_IDENTITY_OPENER = "<!-- Automated public release of ";
+
+/** The repository's machine-readable identity for one release. */
+export function releaseIdentityRecord(
+  releasePackage: ReleasePackage,
+  version: string,
+  tag: string,
+): string {
+  text(version, SEMVER, "release identity version");
+  if (tag !== `${releasePackage.tagPrefix}${version}`) {
+    throw new Error("Release identity tag does not match its version.");
+  }
+  return `${RELEASE_IDENTITY_OPENER}${releasePackage.name}@${version} from ${tag}. -->`;
+}
+
+/** Join rendered notes and the identity record into one release body. */
+export function releaseBody(notes: string, identity: string): string {
+  if (notes.length === 0 || notes !== notes.trim()) {
+    throw new Error("Release notes must be non-empty and carry no surrounding whitespace.");
+  }
+  return `${notes}\n\n${identity}`;
+}
+
+/** Split a release body at the last identity opener. The body must end with
+ * the identity comment's closing `-->`; everything before the separator is the
+ * human-readable notes. */
+export function splitReleaseBody(body: unknown): Readonly<{ identity: string; notes: string }> {
+  if (typeof body !== "string" || !body.endsWith("-->")) {
+    throw new Error("GitHub Release body does not end with its identity record.");
+  }
+  const start = body.lastIndexOf(RELEASE_IDENTITY_OPENER);
+  if (start < 0) throw new Error("GitHub Release body carries no identity record.");
+  const identity = body.slice(start);
+  // The body ends with "-->", so exactly one closer means it is the final one.
+  if (identity.split("-->").length !== 2) {
+    throw new Error("GitHub Release identity record is not one trailing HTML comment.");
+  }
+  const prefix = body.slice(0, start);
+  if (!prefix.endsWith("\n\n")) {
+    throw new Error("GitHub Release identity record is not separated from the notes.");
+  }
+  return Object.freeze({ identity, notes: prefix.slice(0, -2) });
+}
+
+/** Require the identity record to be byte-identical to the expected record and
+ * the notes above it to be byte-identical to the rendered notes, so a hand edit
+ * to a published page is detected like any other change. */
+export function assertReleaseBody(body: unknown, expectedNotes: string, expectedIdentity: string): void {
+  const parsed = splitReleaseBody(body);
+  if (parsed.identity !== expectedIdentity) {
+    throw new Error("GitHub Release identity record does not match this release.");
+  }
+  if (parsed.notes !== expectedNotes) {
+    throw new Error("GitHub Release notes do not match the rendered changelog section.");
+  }
+}
 
 /** Pair one complete set of `xcb-<version>-<os>-<arch>.tar.gz` archive names
  * with their adjacent `.sha256` checksum names for the exact release version.
@@ -204,14 +265,18 @@ export function releaseDistribution(releasePackage: ReleasePackage) {
     });
   }
 
-  function parseGitHubRelease(value: unknown, version: string): GitHubReleaseCoordinate {
+  function parseGitHubRelease(
+    value: unknown,
+    version: string,
+    expectedNotes: string,
+  ): GitHubReleaseCoordinate {
     text(version, SEMVER, "GitHub release version");
     const tag = `${releasePackage.tagPrefix}${version}`;
     const release = record(value, "GitHub Release");
+    assertReleaseBody(release.body, expectedNotes, releaseIdentityRecord(releasePackage, version, tag));
     if (
       release.tag_name !== tag
       || release.name !== `${releasePackage.title} ${tag}`
-      || release.body !== `Automated public release of ${releasePackage.name}@${version} from ${tag}.`
       || release.draft !== false
       || release.prerelease !== false
       || release.immutable !== true
@@ -288,8 +353,9 @@ export function parseNpmRelease(
 export function parseGitHubRelease(
   value: unknown,
   version: string,
+  expectedNotes: string,
 ): GitHubReleaseCoordinate {
-  return root.parseGitHubRelease(value, version);
+  return root.parseGitHubRelease(value, version, expectedNotes);
 }
 
 export function assertReleaseAssetBytes(

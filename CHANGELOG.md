@@ -4,6 +4,55 @@ Release notes for the `v<version>` tag channel. Published GitHub Release
 assets, not this file, are the evidence that a version shipped; see
 [docs/publishing.md](docs/publishing.md).
 
+Each version's section is headed `## X.Y.Z` (optionally ` - YYYY-MM-DD`) and
+holds a summary paragraph followed by a bulleted list of changes. The release
+workflow copies that section onto the GitHub Release page and refuses to
+publish when it is missing, empty, or still says Unreleased. Write it in the
+version bump pull request by renaming `## Unreleased` to the version.
+
+## Unreleased
+
+Pinned Claude and Codex builds keep working when the provider updates itself,
+and `xcb` accepts shorter identifiers and longer generate requests.
+
+- A pinned provider now runs from a private copy of its checked executable
+  under `providers/bin/`, so a Claude or Codex self-update no longer changes
+  the bytes a route runs. xcb re-checks the updated build at daemon start,
+  hourly, and before `chat`, `resume`, `run`, or a bare `xcb` launch, and
+  switches to it only when it passes the same checks; a rejected build is
+  remembered and the previous pin keeps routing.
+- Devin CLI 3000.11.3 is a supported build, alongside 3000.11.1 and
+  3000.10.31.
+- Task, conversation, schedule, and fleet device identifiers accept any
+  unambiguous prefix, including over the remote command channel.
+  `xcb tasks list` lists tasks, and `xcb doctor` reports whether this machine
+  is linked to the relay.
+- `xcb generate` accepts a `timeoutMs` of up to 300000 (five minutes), up
+  from 120000.
+
+## 0.8.11
+
+A linked machine whose session token the relay rejects before it expires now
+refreshes the token and carries on, instead of timing out every call until the
+token expires.
+
+- After `xcb` opens a controller or a relay lane, the first signed-in call
+  checks the session. If the relay rejects it, `xcb` forces one token refresh
+  and retries; when a refresh cannot run, the original error is shown.
+- The relay can send `xcb link` sign-in codes by email through SendGrid when
+  `XCB_RELAY_EMAIL=sendgrid` is set with `XCB_SENDGRID_API_KEY` and
+  `XCB_SENDGRID_FROM`. Without it, codes are still written to the relay log.
+- The remote operations guide shows how to install a release on a laptop
+  before linking it: `XCB_VERSION=<version> ./scripts/install-native.sh`.
+
+## 0.8.10
+
+Remote status no longer reports a healthy but idle fleet as stale.
+
+- An idle relay lane republishes its unchanged status at least every ten
+  minutes, and readers mark a lane stale only after twenty minutes without an
+  update. `xcb attention --remote --json` includes the same `stale` field.
+
 ## 0.8.9
 
 - `xcb daemons` installs named, durable ALGAL processes in a project
