@@ -1,0 +1,121 @@
+name: Codex catalog
+
+# Once a day (and on demand): when the npm-published Codex build is not yet
+# catalogued, run the scripted native inventory against it and, only when
+# every check passes, open an auto-merging pull request that adds the
+# reviewed (version, sha256) pair to qualified-builds.json. A schema drift
+# fails the inventory — wire-protocol changes still ship through an xcb
+# release.
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Codex version to qualify (default: npm latest)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-catalog
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Qualify the latest Codex build
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Resolve the candidate binary
+        id: candidate
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          meta="$(mktemp)"
+          curl -sf "https://registry.npmjs.org/@openai%2Fcodex" -o "$meta"
+          version="${EXPECTED_VERSION:-$(python3 -c "import json;print(json.load(open('$meta'))['dist-tags']['latest'])")}"
+          if python3 - "$version" <<'EOF'
+          import json, sys
+          catalog = json.load(open("qualified-builds.json"))
+          sys.exit(0 if any(b["version"] == sys.argv[1] for b in catalog.get("codex", [])) else 1)
+          EOF
+          then
+            echo "codex $version is already catalogued"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The platform package ships the exact binary users install; its
+          # digest is what the catalog names.
+          curl -sfL "https://registry.npmjs.org/@openai/codex/-/codex-${version}-darwin-arm64.tgz" -o candidate.tgz
+          tar xzf candidate.tgz package/vendor/aarch64-apple-darwin/bin/codex
+          mkdir -p candidate
+          mv package/vendor/aarch64-apple-darwin/bin/codex candidate/codex
+          chmod 700 candidate/codex
+          sha="$(shasum -a 256 candidate/codex | cut -d' ' -f1)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+          echo "candidate codex $version sha256 $sha"
+      - name: Run the scripted inventory against the candidate
+        if: steps.candidate.outputs.needed == 'true'
+        run: |
+          python3 qualification/codex-inventory.py \
+            --executable "$PWD/candidate/codex" \
+            --output "$PWD/inventory-out" \
+            --expect-version "${{ steps.candidate.outputs.version }}" \
+            --expect-sha256 "${{ steps.candidate.outputs.sha256 }}"
+      - name: Upload inventory evidence
+        if: always() && steps.candidate.outputs.needed == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codex-inventory-${{ steps.candidate.outputs.version }}
+          path: inventory-out/
+          retention-days: 30
+      - name: Publish the catalog entry
+        if: steps.candidate.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.candidate.outputs.version }}
+          SHA256: ${{ steps.candidate.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          python3 - "$VERSION" "$SHA256" <<'EOF'
+          import json, re, sys
+          version, sha256 = sys.argv[1], sys.argv[2]
+          path = "qualified-builds.json"
+          catalog = json.load(open(path))
+          entries = [b for b in catalog["codex"]
+                     if not (b["version"] == version and b["sha256"] == sha256)]
+          entries.append({"version": version, "sha256": sha256,
+                          "platform": "darwin-aarch64", "qualifiedBy": "ci-inventory"})
+          key = lambda b: [int(p) for p in re.split(r"[.-]", b["version"]) if p.isdigit()]
+          catalog["codex"] = sorted(entries, key=key, reverse=True)
+          with open(path, "w") as f:
+              json.dump(catalog, f, indent=2)
+              f.write("\n")
+          EOF
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          branch="catalog/codex-$VERSION"
+          git checkout -B "$branch"
+          git add qualified-builds.json
+          git commit -m "Catalog codex $VERSION after a passing scripted inventory"
+          git push -f origin "$branch"
+          pr="$(gh pr list --head "$branch" --json url --jq '.[0].url')"
+          if [ -z "$pr" ]; then
+            pr="$(gh pr create \
+              --title "Catalog codex $VERSION" \
+              --body "Adds the reviewed (version, sha256) pair to \`qualified-builds.json\` after \`qualification/codex-inventory.py\` passed on the npm-published darwin-arm64 build. Generated by the Codex catalog workflow; the inventory evidence is attached to its run.")"
+          fi
+          gh pr merge --auto --squash "$pr"

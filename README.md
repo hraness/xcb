@@ -255,7 +255,14 @@ If discovery finds the wrong binary, use
 The pin binds a private copy of the executable bytes plus version, so a
 provider auto-update cannot move the pinned install: xcb adopts an updated
 build automatically only when it is an admitted version and keeps routing the
-pinned build otherwise. After upgrading xcb, restart open xcb terminals; the
+pinned build otherwise. For exact-artifact providers, admission also accepts
+reviewed (version, digest) pairs published in the repository's
+`qualified-builds.json`: a discovered build nothing yet admits is parked as
+awaiting catalog admission (`xcb doctor` reports it), and a published entry
+adopts it on the next hourly refresh without an xcb upgrade. The catalog is
+admission-only — a denied digest is rejected outright, and the stored copy
+is reused when the network is unavailable. After upgrading xcb, restart open
+xcb terminals; the
 pins rebind to the new host build on next use. A process started from the old
 binary cannot adopt the replacement binary's pin, and older clients refuse
 new run records whose credential-custody format they do not understand.

@@ -141,8 +141,10 @@ jobs:
             scripts/release-artifact-checksum.ts \
             scripts/release-distribution-policy.ts \
             scripts/release-included-response.ts \
+            scripts/release-notes.ts \
             scripts/release-process-environment.ts \
-            scripts/release-ref-authority.ts
+            scripts/release-ref-authority.ts \
+            CHANGELOG.md
           do
             copy_regular_source "$source" "$github_writer_root"
           done
@@ -152,7 +154,7 @@ jobs:
           npm_writer_inventory="$(find "$npm_writer_root" -mindepth 1 -maxdepth 2 -printf '%P\t%y\n' | LC_ALL=C sort)"
           github_writer_inventory="$(find "$github_writer_root" -mindepth 1 -maxdepth 2 -printf '%P\t%y\n' | LC_ALL=C sort)"
           expected_npm_writer_inventory=$'package.json\tf\nscripts\td\nscripts/check-npm-trusted-publisher-oidc.ts\tf\nscripts/check-npm-trusted-publishing.ts\tf\nscripts/npm-publisher-boundary.ts\tf\nscripts/npm-release-policy.ts\tf\nscripts/publish-npm-release.ts\tf\nscripts/release-artifact-checksum.ts\tf\nscripts/release-distribution-policy.ts\tf\nscripts/release-process-environment.ts\tf'
-          expected_github_writer_inventory=$'package.json\tf\nscripts\td\nscripts/publish-github-release.ts\tf\nscripts/release-artifact-checksum.ts\tf\nscripts/release-distribution-policy.ts\tf\nscripts/release-included-response.ts\tf\nscripts/release-process-environment.ts\tf\nscripts/release-ref-authority.ts\tf'
+          expected_github_writer_inventory=$'CHANGELOG.md\tf\npackage.json\tf\nscripts\td\nscripts/publish-github-release.ts\tf\nscripts/release-artifact-checksum.ts\tf\nscripts/release-distribution-policy.ts\tf\nscripts/release-included-response.ts\tf\nscripts/release-notes.ts\tf\nscripts/release-process-environment.ts\tf\nscripts/release-ref-authority.ts\tf'
           if [[ "$npm_writer_inventory" != "$expected_npm_writer_inventory" || "$github_writer_inventory" != "$expected_github_writer_inventory" ]]; then
             echo "::error::Release writer closure is not the exact regular-file allowlist"
             exit 1
@@ -182,6 +184,13 @@ jobs:
           node-version: "24.19.0"
           registry-url: https://registry.npmjs.org
       - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Render the release page notes from CHANGELOG.md
+        # Fails before any build or publication when this version's section
+        # is missing, empty, or still says Unreleased.
+        env:
+          VERIFIED_SHA: ${{ needs.identity.outputs.verified_sha }}
+          VERIFIED_TAG: ${{ needs.identity.outputs.verified_tag }}
+        run: bun run ./scripts/release-notes.ts "${VERIFIED_TAG#v}" "$VERIFIED_SHA" > /dev/null
       - run: bun run check
       - name: Create the one exact release tarball and checksum
         run: |

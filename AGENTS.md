@@ -71,6 +71,15 @@
 - Admit a provider only after the host proves the exact runtime, effective tool
   inventory, configuration isolation and read/write confinement. Unqualified
   adapters remain disabled.
+- Exact-artifact admission has two sources: constants baked into a release and
+  `qualified-builds.json` at the repository root. The Codex catalog workflow
+  qualifies npm-published darwin-arm64 builds through
+  `qualification/codex-inventory.py` and opens an auto-merging catalog pull
+  request. To qualify a build by hand, run the inventory with
+  `--expect-version`/`--expect-sha256`, then append the reviewed pair with a
+  `qualifiedBy` naming the evidence source. Never append a pair whose
+  inventory failed, and never relax the schema-digest check: a wire-protocol
+  change ships through an xcb release instead.
 - Keep broker inputs closed and bounded; applications own filesystem custody
   and messaging authorization.
 - Preserve exclusive account custody after uncertain provider failures.
@@ -89,6 +98,11 @@
 - Take one-line product and sibling descriptions from the portfolio registry and versions from the release record. Tests pin facts, not prose.
 - Run `bun run check:copy` before handoff when the repository has it.
 <!-- hraness-public-copy:end -->
+
+<!-- hraness-releases:start -->
+- GitHub Release pages follow `RELEASES.md` in hraness/.github: the title is the registry product name and the tag, and the body is a summary, `## Changes`, `## Install`, `## Verify`, then the repository's identity record as a trailing HTML comment.
+- The summary and changes come from the version's section of `CHANGELOG.md` in the tagged commit. Write that section in the version bump pull request. The release workflow copies it, generates Install and Verify from the release record, fails when the section is missing or empty, and never uses GitHub's generated notes.
+<!-- hraness-releases:end -->
 
 <!-- hraness-delivery:start -->
 - Treat the user's request to change this repository as standing authorization for routine task-owned commits, pushes, pull requests, merges, releases, deployments, and production verification after the gates applicable to that action pass. Do not ask for duplicate confirmation. Build confidence through relevant automated checks, bounded diagnostics, and independent review, not another human approval. Passing checks does not expand task scope or authority.

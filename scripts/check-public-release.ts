@@ -10,6 +10,7 @@ import {
   releasePackageForName,
 } from "./release-distribution-policy";
 import { verifyNpmProvenance } from "./npm-provenance-verification";
+import { renderReleaseNotes } from "./release-notes";
 import { assertReviewedMainComparison } from "./release-ref-authority";
 
 const maximumJsonBytes = 512 * 1_024;
@@ -274,7 +275,15 @@ const [releasePayload, githubLatestPayload] = await Promise.all([
 if ((githubLatestPayload as Readonly<{ tag_name?: unknown }>).tag_name !== verifiedTag) {
   throw new Error("Latest GitHub Release does not match the admitted annotated tag.");
 }
-const release = distribution.parseGitHubRelease(releasePayload, releaseVersion);
+// The page notes must be byte-identical to this commit's CHANGELOG.md section
+// plus the generated install and verify sections.
+const expectedNotes = renderReleaseNotes({
+  changelog: await readFile(resolve(import.meta.dir, "..", "CHANGELOG.md"), "utf8"),
+  commit: verifiedSha,
+  releasePackage: distribution.package,
+  version: releaseVersion,
+});
+const release = distribution.parseGitHubRelease(releasePayload, releaseVersion, expectedNotes);
 const [githubTarball, githubChecksum] = await Promise.all([
   fetchArtifact(release.tarball.browserDownloadUrl, "GitHub Release tarball"),
   fetchArtifact(release.checksum.browserDownloadUrl, "GitHub Release checksum"),

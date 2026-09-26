@@ -1218,13 +1218,21 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             | Some(Commands::Run { .. })
     ) {
         let home = root.join("metadata-home");
+        // One catalog fetch per sweep, at most hourly; failures keep the
+        // stored copy so offline launches degrade to the baked constants.
+        let catalog_root = root.clone();
+        let _ =
+            tokio::task::spawn_blocking(move || xcb_runtime::catalog::refresh(&catalog_root)).await;
         for provider in Provider::ALL {
             let report = process::refresh_provider(&root, provider, None, &home).await;
             match (report.outcome, report.detail) {
                 (process::RefreshOutcome::Adopted, _) => {
                     eprintln!("xcb: {provider}: adopted the updated build");
                 }
-                (process::RefreshOutcome::Rejected, Some(detail)) => {
+                (
+                    process::RefreshOutcome::PendingCatalog | process::RefreshOutcome::Rejected,
+                    Some(detail),
+                ) => {
                     eprintln!("xcb: {provider}: {detail}");
                 }
                 _ => {}
@@ -1480,7 +1488,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let account = store.resolve_account(&account)?;
                     require_account_credentials(&store, &account)?;
                     let pin = Pin::load(store.root(), account.provider)?;
-                    if !runner::provider_admitted(&pin) {
+                    if !runner::provider_admitted(store.root(), &pin) {
                         return Err(Error::Unavailable(
                             "native account metadata querying for this runtime is not yet qualified",
                         ));
@@ -1541,7 +1549,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 match process::inspect(provider, executable.as_deref(), &home).await {
                     Ok(mut pin) => {
                         pin.save(&root)?;
-                        let native = runner::provider_admitted(&pin);
+                        let native = runner::provider_admitted(store.root(), &pin);
                         let detail = if native && provider == Provider::Devin {
                             "pinned · accounts refresh <account> loads the catalog after credential import"
                         } else if native {
@@ -1565,7 +1573,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     }
                     Err(error) => match process::Pin::load(&root, provider) {
                         Ok(pin) => {
-                            let native = runner::provider_admitted(&pin);
+                            let native = runner::provider_admitted(store.root(), &pin);
                             let detail = if native {
                                 "pinned · per-run boundary verification required"
                             } else {
@@ -1586,6 +1594,16 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     },
                 }
             }
+            // Reviewed-builds catalog state and builds parked on it.
+            let catalog_status = xcb_runtime::catalog::status(&root);
+            let pending_admissions: Vec<_> = Provider::ALL
+                .iter()
+                .filter_map(|provider| {
+                    process::pending_build(&root, *provider).map(|build| {
+                        json!({"provider":provider,"version":build.version,"sha256":build.sha256})
+                    })
+                })
+                .collect();
             let judge_key = judge::judge_token(store.root())?.map(|(_, source)| source);
             if let Some(source) = judge_key {
                 judge::check_key_target(source, &config.extensions.judge)?;
@@ -1631,6 +1649,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 let mut report = json!({"version":1,"providers":reports,"unsettledRuns":store.unsettled_runs()?});
                 report["judge"] = judge_status;
                 report["remote"] = remote_status;
+                report["catalog"] = json!({
+                    "reviewedBuilds": catalog_status.builds,
+                    "denied": catalog_status.denied,
+                    "ageSeconds": catalog_status.age_secs,
+                    "pendingAdmissions": pending_admissions,
+                });
                 report["launchArtifacts"] = json!({
                     "reclaimed": sweep.reclaimed,
                     "reclaimedBytes": sweep.reclaimed_bytes,
@@ -1661,6 +1685,28 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         },
                     ),
                     _ => println!("remote: not linked — run `xcb link`"),
+                }
+                let catalog_age = match catalog_status.age_secs {
+                    Some(secs) if secs < 120 => format!("refreshed {secs}s ago"),
+                    Some(secs) if secs < 7200 => format!("refreshed {}m ago", secs / 60),
+                    Some(secs) => format!("refreshed {}h ago", secs / 3600),
+                    None => "not fetched yet".to_owned(),
+                };
+                println!(
+                    "catalog: {} reviewed builds{} · {catalog_age}",
+                    catalog_status.builds,
+                    if catalog_status.denied > 0 {
+                        format!(" · {} denied", catalog_status.denied)
+                    } else {
+                        String::new()
+                    },
+                );
+                for pending in &pending_admissions {
+                    println!(
+                        "{}: {} awaiting catalog admission",
+                        pending["provider"].as_str().unwrap_or("provider"),
+                        pending["version"].as_str().unwrap_or("discovered build"),
+                    );
                 }
                 if cfg!(target_os = "linux") {
                     let status = xcb_runtime::sandbox::linux_sandbox(&root);
@@ -1736,7 +1782,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let account =
                         catalog_account(&store, provider, account.as_deref(), from_native)?;
                     let pin = Pin::load(store.root(), provider)?;
-                    if !runner::provider_admitted(&pin) {
+                    if !runner::provider_admitted(store.root(), &pin) {
                         return Err(Error::Unavailable(
                             "native catalog discovery for this runtime is not yet qualified",
                         ));
