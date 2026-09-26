@@ -262,13 +262,13 @@ async fn execute_command(
             dispatch(managed, workspace, prompt, &operation).await
         }
         CommandBody::TaskSteer { task, text } => {
-            let task = Id::new(task.clone())?;
+            let task = managed.resolve_task(&Id::new(task.clone())?)?;
             managed
                 .steer_task(&task, operation, text.clone())
                 .map(|_| json!({"steered": task.as_str()}))
         }
         CommandBody::TaskCancel { task } => {
-            let task = Id::new(task.clone())?;
+            let task = managed.resolve_task(&Id::new(task.clone())?)?;
             match managed.task(&task)? {
                 Some(row) if !row.state.terminal() => managed
                     .cancel_task(&task, row.revision)
@@ -279,7 +279,7 @@ async fn execute_command(
             }
         }
         CommandBody::AttentionAnswer { attention, answer } => {
-            let task = Id::new(attention.clone())?;
+            let task = managed.resolve_task(&Id::new(attention.clone())?)?;
             managed
                 .reply_to_task(&task, answer.clone())
                 .await

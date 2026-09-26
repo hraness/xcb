@@ -105,9 +105,7 @@ fn invalid(what: &'static str) -> Error {
 }
 
 fn not_linked() -> Error {
-    Error::from(xcb_core::Error::Invalid(
-        "this machine is not linked — run `xcb link`",
-    ))
+    Error::Message("this machine is not linked — run `xcb link`")
 }
 
 /// Resolve the relay URL: explicit flag, then environment, then the
@@ -167,9 +165,9 @@ async fn open_controller(state_root: &Path) -> Result<Controller> {
     };
     let session = custody::load_session(state_root)?.ok_or_else(not_linked)?;
     let Some((account_key, key_version)) = custody::load_account_key(state_root)? else {
-        return Err(Error::from(xcb_core::Error::Invalid(
+        return Err(Error::Message(
             "device enrolled but not admitted — run `xcb remote admit <device>` on a linked device",
-        )));
+        ));
     };
     Controller::open(
         device,
@@ -253,9 +251,9 @@ pub async fn link(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
         // Phase 1 — request the code (silent rejection is the contract).
         let email = match email {
             Some(email) => email.to_string(),
-            None => prompt("Email:")?.ok_or_else(|| {
-                Error::from(xcb_core::Error::Invalid("email required — pass --email"))
-            })?,
+            None => {
+                prompt("Email:")?.ok_or_else(|| Error::Message("email required — pass --email"))?
+            }
         };
         if !email_ok(&email) {
             return Err(invalid("email"));
@@ -271,9 +269,7 @@ pub async fn link(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
             Some(code) => code.to_string(),
             None => {
                 eprintln!("A sign-in code was emailed to {email}.");
-                prompt("Code:")?.ok_or_else(|| {
-                    Error::from(xcb_core::Error::Invalid("code required — pass --code"))
-                })?
+                prompt("Code:")?.ok_or_else(|| Error::Message("code required — pass --code"))?
             }
         };
         if code.len() != 8 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -534,14 +530,37 @@ pub async fn attention_remote(state_root: &Path, json_out: bool) -> Result<i32> 
     Ok(0)
 }
 
+/// Resolve a user-typed fleet device id — an exact id or an unambiguous
+/// prefix of one — against the live device list, so `xcb remote … 513c`
+/// routes without the full id.
+async fn resolve_device(controller: &mut Controller, typed: &str) -> Result<String> {
+    let rows = controller.fleet().await?;
+    if rows.iter().any(|row| row.device == typed) {
+        return Ok(typed.to_string());
+    }
+    let matches: Vec<&str> = rows
+        .iter()
+        .filter(|row| row.device.starts_with(typed))
+        .map(|row| row.device.as_str())
+        .collect();
+    match matches.as_slice() {
+        [] => Err(Error::Message("unknown fleet device — see `xcb fleet`")),
+        [only] => Ok((*only).to_string()),
+        _ => Err(Error::Message(
+            "device id prefix is ambiguous — pass more characters",
+        )),
+    }
+}
+
 /// Encode a command body, seal it to the target device and enqueue it.
 /// Shared by every remote verb — `dispatch`, `send` and the `remote`
 /// family all ride the same closed union.
 async fn post(state_root: &Path, device: &str, body: &CommandBody, json_out: bool) -> Result<i32> {
     let plaintext = commands::encode(body)?;
     let mut controller = open_controller(state_root).await?;
+    let device = resolve_device(&mut controller, device).await?;
     let sent = controller
-        .dispatch(device, commands::kind_of(body), &plaintext, None, None)
+        .dispatch(&device, commands::kind_of(body), &plaintext, None, None)
         .await?;
     print_json_or(
         json_out,
@@ -571,7 +590,8 @@ pub async fn remote(state_root: &Path, command: &RemoteCommand, json_out: bool) 
     match command {
         RemoteCommand::Admit { device } => {
             let mut controller = open_controller(state_root).await?;
-            controller.admit(device).await?;
+            let device = resolve_device(&mut controller, device).await?;
+            controller.admit(&device).await?;
             print_json_or(
                 json_out,
                 || {
@@ -582,7 +602,8 @@ pub async fn remote(state_root: &Path, command: &RemoteCommand, json_out: bool) 
         }
         RemoteCommand::Revoke { device } => {
             let mut controller = open_controller(state_root).await?;
-            controller.revoke(device).await?;
+            let device = resolve_device(&mut controller, device).await?;
+            controller.revoke(&device).await?;
             print_json_or(
                 json_out,
                 || {

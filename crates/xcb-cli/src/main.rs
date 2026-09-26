@@ -182,7 +182,8 @@ enum Commands {
         /// Message text.
         text: String,
     },
-    /// Manage remote linkage: admit a newly enrolled device or revoke one.
+    /// Drive commands on remote devices: task steer, cancel, answer, refresh,
+    /// command status, abort, ack — plus device admit and revoke.
     Remote {
         #[command(subcommand)]
         command: remote::RemoteCommand,
@@ -632,6 +633,8 @@ enum CommandJobs {
 }
 #[derive(Subcommand)]
 enum TaskCommand {
+    /// List managed tasks (same as bare `xcb tasks`).
+    List,
     /// Replay local ALGAL transition receipts and verify their chain and task record.
     Verify {
         /// Managed task id (listed by `xcb tasks`).
@@ -1580,9 +1583,31 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 "model": judge_model,
                 "endpoint": judge_endpoint,
             });
+            // Custody-level relay state; reachability belongs to `xcb fleet`.
+            let remote_status = {
+                use xcb_runtime::cloud::custody;
+                match (custody::load_device(&root)?, custody::load_link(&root)?) {
+                    (Some(device), Some(link)) => {
+                        let session = custody::load_session(&root)?;
+                        let admitted = custody::load_account_key(&root)?.is_some();
+                        json!({
+                            "linked": true,
+                            "device": device.device,
+                            "relay": link.deployment_url,
+                            "admitted": admitted,
+                            "sessionDueForRefresh": session
+                                .as_ref()
+                                .map(|session| session.due_for_refresh(now_ms()))
+                                .unwrap_or(true),
+                        })
+                    }
+                    _ => json!({"linked": false}),
+                }
+            };
             if cli.json {
                 let mut report = json!({"version":1,"providers":reports,"unsettledRuns":store.unsettled_runs()?});
                 report["judge"] = judge_status;
+                report["remote"] = remote_status;
                 report["launchArtifacts"] = json!({
                     "reclaimed": sweep.reclaimed,
                     "reclaimedBytes": sweep.reclaimed_bytes,
@@ -1601,6 +1626,19 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 }
                 print_json(report)?;
             } else {
+                match remote_status.get("linked").and_then(|v| v.as_bool()) {
+                    Some(true) => println!(
+                        "remote: linked · device {} · relay {}{}",
+                        remote_status["device"].as_str().unwrap_or("?"),
+                        remote_status["relay"].as_str().unwrap_or("?"),
+                        if remote_status["admitted"].as_bool().unwrap_or(false) {
+                            ""
+                        } else {
+                            " · awaiting admit"
+                        },
+                    ),
+                    _ => println!("remote: not linked — run `xcb link`"),
+                }
                 if cfg!(target_os = "linux") {
                     let status = xcb_runtime::sandbox::linux_sandbox(&root);
                     let detail = match &status.candidate {
@@ -2272,13 +2310,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             if direct {
                 print_json(store.rename_session(&id, &expected_title, &title)?)?;
             } else {
-                print_json(
-                    xcb_runtime::managed::ManagedStore::open(store.root())?.rename_conversation(
-                        &id,
-                        &expected_title,
-                        &title,
-                    )?,
-                )?;
+                let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
+                print_json(managed.rename_conversation(
+                    &managed.resolve_conversation(&id)?,
+                    &expected_title,
+                    &title,
+                )?)?;
             }
             Ok(0)
         }
@@ -2304,7 +2341,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         Some(Commands::Tasks { command }) => {
             let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
             match command {
-                None => {
+                None | Some(TaskCommand::List) => {
                     let tasks = xcb_runtime::managed::list(&managed)?;
                     if cli.json {
                         print_json(tasks)?;
@@ -2327,19 +2364,23 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     }
                 }
                 Some(TaskCommand::Verify { id }) => {
-                    print_json(managed.verify_task(&id).await?)?;
+                    print_json(managed.verify_task(&managed.resolve_task(&id)?).await?)?;
                 }
                 Some(TaskCommand::Show { id }) => {
-                    let task = xcb_runtime::managed::inspect(&managed, &id)?
-                        .ok_or(Error::Unavailable("managed task not found"))?;
+                    let task =
+                        xcb_runtime::managed::inspect(&managed, &managed.resolve_task(&id)?)?
+                            .ok_or(Error::Unavailable("managed task not found"))?;
                     print_json(task)?;
                 }
                 Some(TaskCommand::Cancel { id, revision }) => {
-                    let task = managed.cancel_task(&id, revision).await?;
+                    let task = managed
+                        .cancel_task(&managed.resolve_task(&id)?, revision)
+                        .await?;
                     print_json(task)?;
                     xcb_runtime::managed::ensure_daemon(store.root(), &std::env::current_exe()?)?;
                 }
                 Some(TaskCommand::Messages { id, after }) => {
+                    let id = managed.resolve_task(&id)?;
                     managed
                         .task(&id)?
                         .ok_or(Error::Unavailable("managed task not found"))?;
@@ -2892,7 +2933,7 @@ async fn managed_chat(
     let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
     let conversation = match resume {
         Some(id) => managed
-            .conversation(&id)?
+            .conversation(&managed.resolve_conversation(&id)?)?
             .ok_or(Error::Unavailable("managed conversation not found"))?,
         // The ambient launch reopens this directory's live thread; `/new` or
         // `--new` is the explicit way to start a parallel conversation.
@@ -3025,6 +3066,13 @@ mod tests {
             .is_ok()
         );
         assert!(super::Cli::try_parse_from(["xcb", "service", "plan"]).is_ok());
+    }
+
+    #[test]
+    fn tasks_list_matches_the_bare_tasks_listing() {
+        use clap::Parser;
+        assert!(super::Cli::try_parse_from(["xcb", "tasks"]).is_ok());
+        assert!(super::Cli::try_parse_from(["xcb", "tasks", "list"]).is_ok());
     }
 
     #[test]

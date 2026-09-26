@@ -229,6 +229,7 @@ pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Res
             let expiry = now_ms()
                 .checked_add(hours * 3_600_000)
                 .ok_or(Error::Unavailable("project expiry overflow"))?;
+            let conversation = store.resolve_conversation(&conversation)?;
             let row = store.configure_project_policy(
                 &conversation,
                 revision,
@@ -244,12 +245,14 @@ pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Res
             conversation,
             revision,
         }) => {
+            let conversation = store.resolve_conversation(&conversation)?;
             vec![store.set_project_policy_enabled(&conversation, revision, false)?]
         }
         Some(ProjectCommand::Resume {
             conversation,
             revision,
         }) => {
+            let conversation = store.resolve_conversation(&conversation)?;
             let row = store.set_project_policy_enabled(&conversation, revision, true)?;
             wake(root)?;
             vec![row]
@@ -392,21 +395,27 @@ pub async fn memory(root: &Path, command: MemoryCommand, json: bool) -> Result<i
         } => {
             let config =
                 xcb_runtime::wordcell::WordcellConfig::admit(&wordcell, &vault.canonicalize()?)?;
-            serde_json::to_value(store.bind_memory(&conversation, revision, config)?)?
+            serde_json::to_value(store.bind_memory(
+                &store.resolve_conversation(&conversation)?,
+                revision,
+                config,
+            )?)?
         }
-        MemoryCommand::Status { conversation } => {
-            serde_json::to_value(store.memory_binding(&conversation)?)?
-        }
+        MemoryCommand::Status { conversation } => serde_json::to_value(
+            store.memory_binding(&store.resolve_conversation(&conversation)?)?,
+        )?,
         MemoryCommand::Search {
             conversation,
             query,
             limit,
         } => {
+            let conversation = store.resolve_conversation(&conversation)?;
             store
                 .search_memory(&conversation, &query, usize::from(limit))
                 .await?
         }
         MemoryCommand::Promote { task, body_file } => {
+            let task = store.resolve_task(&task)?;
             let item = store
                 .task(&task)?
                 .ok_or(Error::Unavailable("managed task not found"))?;
@@ -582,6 +591,7 @@ pub async fn backlog(
             id,
         }) => {
             let program = load_program(&manifest, inputs.as_deref(), managed_calls)?;
+            let conversation = store.resolve_conversation(&conversation)?;
             let task = store
                 .enqueue_program(
                     &conversation,
@@ -594,6 +604,7 @@ pub async fn backlog(
             task
         }
         Some(BacklogCommand::ProgramStatus { id }) => {
+            let id = store.resolve_task(&id)?;
             let status = store
                 .program_status(&id)?
                 .ok_or(Error::Unavailable("managed program not found"))?;
@@ -627,15 +638,23 @@ pub async fn backlog(
             id,
             summary,
             revision,
-        }) => store.complete_backlog(&id, revision, summary).await?,
+        }) => {
+            store
+                .complete_backlog(&store.resolve_task(&id)?, revision, summary)
+                .await?
+        }
         Some(BacklogCommand::Reconcile { id, revision }) => {
+            let id = store.resolve_task(&id)?;
             let runs = xcb_runtime::store::Store::open(root)?;
             let task = store.reconcile_uncertain(&runs, &id, revision).await?;
             runnable = true;
             task
         }
         None => {
-            let tasks = store.backlog(conversation, 256)?;
+            let conversation = conversation
+                .map(|id| store.resolve_conversation(id))
+                .transpose()?;
+            let tasks = store.backlog(conversation.as_ref(), 256)?;
             if json {
                 crate::print_json(tasks)?;
             } else if tasks.is_empty() {
@@ -648,7 +667,7 @@ pub async fn backlog(
             return Ok(0);
         }
         Some(BacklogCommand::Memory { conversation }) => {
-            let memory = store.working_memory(&conversation, 32)?;
+            let memory = store.working_memory(&store.resolve_conversation(&conversation)?, 32)?;
             if json {
                 crate::print_json(memory)?;
             } else if memory.is_empty() {
@@ -674,6 +693,7 @@ pub async fn backlog(
             id,
         }) => {
             runnable = ready;
+            let conversation = store.resolve_conversation(&conversation)?;
             store
                 .enqueue_backlog(
                     &conversation,
@@ -690,6 +710,7 @@ pub async fn backlog(
             revision,
             priority,
         }) => {
+            let id = store.resolve_task(&id)?;
             let priority = match priority {
                 Some(priority) => priority,
                 None => {
@@ -703,14 +724,18 @@ pub async fn backlog(
         }
         Some(BacklogCommand::Release { id, revision }) => {
             runnable = true;
-            store.release_backlog(&id, revision).await?
+            store
+                .release_backlog(&store.resolve_task(&id)?, revision)
+                .await?
         }
         Some(BacklogCommand::Recall {
             id,
             revision,
             operation,
         }) => {
-            let task = store.recall_queued(&id, revision, &operation).await?;
+            let task = store
+                .recall_queued(&store.resolve_task(&id)?, revision, &operation)
+                .await?;
             if json {
                 crate::print_json(&task)?;
             } else {
@@ -731,6 +756,7 @@ pub async fn backlog(
             reply_id,
         }) => {
             runnable = true;
+            let id = store.resolve_task(&id)?;
             let revision = match revision {
                 Some(revision) => revision,
                 None => {
@@ -759,6 +785,7 @@ pub async fn backlog(
 
 pub fn steer(root: &Path, task: &Id, id: Option<Id>, text: String, json: bool) -> Result<i32> {
     let store = ManagedStore::open(root)?;
+    let task = &store.resolve_task(task)?;
     let event = store.steer_task(task, id.unwrap_or_else(|| new_id("inbox")), text)?;
     print_inbox_event(&event, json)?;
     wake_saved_inbox(root, &event.id);
@@ -767,6 +794,8 @@ pub fn steer(root: &Path, task: &Id, id: Option<Id>, text: String, json: bool) -
 
 pub fn watch(root: &Path, target: &Id, source: &Id, id: Option<Id>, json: bool) -> Result<i32> {
     let store = ManagedStore::open(root)?;
+    let target = &store.resolve_task(target)?;
+    let source = &store.resolve_task(source)?;
     let id = id.unwrap_or_else(|| new_id("watch"));
     let subscription = store.watch_task(target, source, id.clone())?;
     if json {
@@ -797,7 +826,11 @@ pub fn inbox(
     json: bool,
 ) -> Result<i32> {
     let store = ManagedStore::open(root)?;
-    let events = store.inbox(task, conversation, before, limit)?;
+    let task = task.map(|id| store.resolve_task(id)).transpose()?;
+    let conversation = conversation
+        .map(|id| store.resolve_conversation(id))
+        .transpose()?;
+    let events = store.inbox(task.as_ref(), conversation.as_ref(), before, limit)?;
     if json {
         crate::print_json(events)?;
     } else if events.is_empty() {
@@ -878,12 +911,23 @@ pub async fn schedules(
                 .checked_add(interval)
                 .ok_or(Error::Unavailable("schedule time overflow"))?;
             let schedule = store
-                .create_program_schedule(&conversation, title, program, interval, first)
+                .create_program_schedule(
+                    &store.resolve_conversation(&conversation)?,
+                    title,
+                    program,
+                    interval,
+                    first,
+                )
                 .await?;
             wake(root)?;
             vec![schedule]
         }
-        None => store.schedules(conversation)?,
+        None => store.schedules(
+            conversation
+                .map(|id| store.resolve_conversation(id))
+                .transpose()?
+                .as_ref(),
+        )?,
         Some(ScheduleCommand::Add {
             conversation,
             prompt,
@@ -896,16 +940,22 @@ pub async fn schedules(
                 .checked_add(interval)
                 .ok_or(Error::Unavailable("schedule time overflow"))?;
             let schedule = store
-                .create_schedule(&conversation, prompt, interval, first)
+                .create_schedule(
+                    &store.resolve_conversation(&conversation)?,
+                    prompt,
+                    interval,
+                    first,
+                )
                 .await?;
             wake(root)?;
             vec![schedule]
         }
         Some(ScheduleCommand::Pause { id, revision }) => {
-            vec![store.set_schedule_enabled(&id, revision, false)?]
+            vec![store.set_schedule_enabled(&store.resolve_schedule(&id)?, revision, false)?]
         }
         Some(ScheduleCommand::Resume { id, revision }) => {
-            let schedule = store.set_schedule_enabled(&id, revision, true)?;
+            let schedule =
+                store.set_schedule_enabled(&store.resolve_schedule(&id)?, revision, true)?;
             wake(root)?;
             vec![schedule]
         }

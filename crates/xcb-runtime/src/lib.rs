@@ -67,7 +67,9 @@ pub enum Error {
     Database(#[from] rusqlite::Error),
     #[error("invalid local record")]
     Json(#[from] serde_json::Error),
-    #[error("state must be an owned physical directory with private permissions")]
+    #[error(
+        "state must be an owned real directory with private permissions; symlinked, foreign-owned or shared paths are refused"
+    )]
     PrivateState,
     #[error("conflict: {0}")]
     Conflict(&'static str),
@@ -92,6 +94,10 @@ pub enum Error {
         code: i64,
         category: &'static str,
     },
+    /// A complete user-facing sentence, printed verbatim — use instead of
+    /// `Core(Invalid)` when the text is guidance, not a noun fragment.
+    #[error("{0}")]
+    Message(&'static str),
 }
 pub type Result<T> = std::result::Result<T, Error>;
 

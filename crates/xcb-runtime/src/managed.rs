@@ -73,6 +73,10 @@ mod mailbox_integrity_tests;
 mod recovery_tests;
 
 #[cfg(test)]
+#[path = "managed_resolve_tests.rs"]
+mod resolve_tests;
+
+#[cfg(test)]
 #[path = "managed_ui_tests.rs"]
 mod ui_tests;
 
@@ -1218,6 +1222,66 @@ impl ManagedStore {
             Ok(task)
         })
         .transpose()
+    }
+
+    /// Resolve a user-typed task id — an exact id or an unambiguous prefix of
+    /// one — to the stored id. Fails when nothing matches or the prefix names
+    /// several tasks, so a guessed id can never steer the wrong task.
+    pub fn resolve_task(&self, id: &Id) -> Result<Id> {
+        if self.task(id)?.is_some() {
+            return Ok(id.clone());
+        }
+        self.resolve_prefix(
+            "tasks",
+            id,
+            "managed task not found",
+            "task id prefix is ambiguous — pass more characters",
+        )
+    }
+
+    /// Same resolution for a user-typed schedule id.
+    pub fn resolve_schedule(&self, id: &Id) -> Result<Id> {
+        self.resolve_prefix(
+            "habitat_schedules",
+            id,
+            "schedule not found",
+            "schedule id prefix is ambiguous — pass more characters",
+        )
+    }
+
+    /// Same resolution for a user-typed conversation id.
+    pub fn resolve_conversation(&self, id: &Id) -> Result<Id> {
+        if self.conversation(id)?.is_some() {
+            return Ok(id.clone());
+        }
+        self.resolve_prefix(
+            "conversations",
+            id,
+            "managed conversation not found",
+            "conversation id prefix is ambiguous — pass more characters",
+        )
+    }
+
+    fn resolve_prefix(
+        &self,
+        table: &str,
+        id: &Id,
+        not_found: &'static str,
+        ambiguous: &'static str,
+    ) -> Result<Id> {
+        let db = self.db()?;
+        let prefix = id.as_str().replace('%', "\\%").replace('_', "\\_");
+        let matches: Vec<String> = db
+            .prepare(&format!(
+                "SELECT id FROM {table} WHERE id LIKE ?1 ESCAPE '\\' LIMIT 8"
+            ))?
+            .query_map([format!("{prefix}%")], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        match matches.as_slice() {
+            [] => Err(Error::Unavailable(not_found)),
+            [only] => Id::new(only.clone()).map_err(Into::into),
+            _ => Err(Error::Message(ambiguous)),
+        }
     }
 
     /// Replay the task's complete ALGAL receipt chain and bind it to the
