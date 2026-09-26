@@ -88,7 +88,7 @@ export function HeroField() {
           } as CSSProperties}
         >
           <span className="xcb-field-note-type">{note.type}</span>
-          <h3 className="xcb-field-note-title">{note.title}</h3>
+          <p className="xcb-field-note-title">{note.title}</p>
           <p className="xcb-field-note-body">{note.body}</p>
           {note.tags !== undefined && <div className="xcb-field-note-tags">{note.tags.map((tag) => <span key={tag}>#{tag}</span>)}</div>}
         </article>

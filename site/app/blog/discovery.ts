@@ -55,5 +55,5 @@ export function blogRelatedProducts(entry: BlogPost) {
   if (entry.relation === null) return [];
   const items = relatedFor("xcb");
   const chosen = entry.relation === "all" ? items : items.filter((item) => item.relationId === entry.relation);
-  return chosen.slice(0, 3).map(({ name, href, role, relationship }) => ({ name, href, role, relationship }));
+  return chosen.slice(0, 3).map(({ name, href, mark, role }) => ({ name, href, mark, role }));
 }
