@@ -2,6 +2,7 @@ mod application;
 mod habitat;
 mod remote;
 mod route;
+mod ux;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::json;
@@ -32,7 +33,7 @@ use xcb_runtime::{
     name = "xcb",
     version,
     about = "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for",
-    after_help = "Plain `xcb` opens a persistent managed conversation in the terminal UI.\n\nFirst run:\n  xcb accounts add <provider> --plan <label>\n  xcb doctor --provider <provider>\n  xcb accounts login <account-id>\n  xcb accounts refresh <account-id>\n  xcb"
+    after_help = "Plain `xcb` opens a persistent managed conversation in the terminal UI.\n\nFirst run:\n  xcb accounts add <provider>\n  xcb accounts login <account>\n  xcb accounts refresh <account>\n  xcb"
 )]
 struct Cli {
     /// State root for accounts, sessions, and tasks (default:
@@ -899,22 +900,61 @@ impl<'a> From<&'a xcb_runtime::store::Account> for PublicAccount<'a> {
 }
 
 impl PublicAccount<'_> {
-    fn added_message(&self) -> String {
+    /// What `accounts add` prints: the added account on stdout, then the one
+    /// next step (sign-in) as a `Next:` hint.
+    fn added_message(&self) -> (String, String) {
         let added = format!(
             "Added {} ({}) · {}",
             xcb_core::display_text(&self.name, 80),
             self.provider,
             self.id
         );
-        if matches!(self.provider, Provider::Claude | Provider::Codex) {
-            format!("{added}\nNext: xcb accounts login {}", self.id)
+        let next = if matches!(self.provider, Provider::Claude | Provider::Codex) {
+            format!("xcb accounts login {}", self.id)
         } else {
             format!(
-                "{added}\nNext: pipe a Devin token into xcb accounts token {}.\nTo copy an existing CLI sign-in into a new account: xcb accounts import-devin --source /absolute/path/credentials.toml",
+                "pipe a Devin token into xcb accounts token {}, or copy an existing sign-in with xcb accounts import-devin --source <path to credentials.toml>",
                 self.id
             )
-        }
+        };
+        (added, next)
     }
+}
+
+/// The provider's product name, for sentences.
+fn provider_name(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Claude => "Claude Code",
+        Provider::Codex => "Codex",
+        Provider::Devin => "Devin",
+    }
+}
+
+/// Load the provider pin. On a state root that has never checked this
+/// provider, first do what `xcb doctor --provider <p>` does, so the first
+/// sign-in after `xcb accounts add` works without a separate doctor step.
+async fn ensure_pin(root: &std::path::Path, provider: Provider) -> Result<Pin> {
+    if Pin::recorded(root, provider) {
+        return Pin::load(root, provider);
+    }
+    let name = provider_name(provider);
+    eprintln!(
+        "{} Checking {name} first (the same check as xcb doctor --provider {provider}).",
+        ux::Style::stderr().sym(ux::Symbol::Next)
+    );
+    let home = private::directory(&root.join("metadata-home"))?;
+    private::directory(&home.join("tmp"))?;
+    let mut pin = process::inspect(provider, None, &home)
+        .await
+        .map_err(|error| match error {
+            guided @ Error::Guided { .. } => guided,
+            error => Error::guided(
+                format!("xcb couldn't check {name}: {}", ux::sentence(&error)),
+                format!("xcb doctor --provider {provider}"),
+            ),
+        })?;
+    pin.save(root)?;
+    Ok(pin)
 }
 
 fn require_account_credentials(store: &Store, account: &xcb_runtime::store::Account) -> Result<()> {
@@ -977,9 +1017,8 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
         );
     }
     if view.accounts.is_empty() {
-        println!(
-            "No accounts yet.\n\nxcb accounts add claude --plan Max\nxcb doctor --provider claude\nxcb accounts login <account>\nxcb accounts refresh <account>"
-        );
+        println!("No accounts yet.");
+        ux::next("xcb accounts add claude");
         return Ok(());
     }
     println!(
@@ -1040,7 +1079,7 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
         );
     }
     println!(
-        "\n> marks the default account · ids are shortened; xcb accounts --json prints them in full"
+        "\n> marks the default account · a shortened id works in any accounts command; xcb accounts --json prints full ids"
     );
     if let Some(seconds) = view.total_runway_seconds {
         println!(
@@ -1391,7 +1430,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     if cli.json {
                         print_json(public)?;
                     } else {
-                        println!("{}", public.added_message());
+                        let (added, next) = public.added_message();
+                        println!("{} {added}", ux::Style::stdout().sym(ux::Symbol::Ok));
+                        ux::next(&next);
                     }
                 }
                 Some(AccountCommand::Login { account }) => {
@@ -1401,11 +1442,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             "sign in with devin auth login, then use xcb accounts import-devin --source <absolute credentials.toml path>; to connect this account directly, pipe a token into xcb accounts token <account>",
                         ));
                     }
-                    let pin = Pin::load(store.root(), account.provider)?;
+                    let pin = ensure_pin(store.root(), account.provider).await?;
                     match account.provider {
                         Provider::Claude => {
                             eprintln!(
-                                "Complete the provider's browser sign-in. Credential output is captured, not printed."
+                                "{} Opening your browser to sign in to Claude for xcb. xcb keeps the token in its own state folder, never in your keychain.",
+                                ux::Style::stderr().sym(ux::Symbol::Next)
                             );
                             let (cancel, receiver) = tokio::sync::watch::channel(false);
                             let mut interrupt = tokio::signal::unix::signal(
@@ -1423,7 +1465,13 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                                 _ = terminate.recv() => { let _ = cancel.send(true); login.await?; },
                             }
                         }
-                        Provider::Codex => runner::login_codex(&store, &account.id, &pin).await?,
+                        Provider::Codex => {
+                            eprintln!(
+                                "{} Codex will print a sign-in page and a code. Open the page and enter the code to connect this account to xcb.",
+                                ux::Style::stderr().sym(ux::Symbol::Next)
+                            );
+                            runner::login_codex(&store, &account.id, &pin).await?
+                        }
                         Provider::Devin => unreachable!("Devin sign-in is gated above"),
                     }
                     if cli.json {
@@ -1433,10 +1481,11 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         // the user's own provider email, intentionally shown as
                         // the account's display identity after sign-in.
                         println!(
-                            "Sign-in completed for {}. Run xcb accounts refresh {} to refresh available account metadata.",
-                            account.name(),
-                            account.id
+                            "{} Signed in to {}.",
+                            ux::Style::stdout().sym(ux::Symbol::Ok),
+                            account.name()
                         );
+                        ux::next(&format!("xcb accounts refresh {}", account.id));
                     }
                 }
                 Some(AccountCommand::Token { account }) => {
@@ -1487,7 +1536,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 Some(AccountCommand::Refresh { account }) => {
                     let account = store.resolve_account(&account)?;
                     require_account_credentials(&store, &account)?;
-                    let pin = Pin::load(store.root(), account.provider)?;
+                    let pin = ensure_pin(store.root(), account.provider).await?;
                     if !runner::provider_admitted(store.root(), &pin) {
                         return Err(Error::Unavailable(
                             "native account metadata querying for this runtime is not yet qualified",
@@ -1781,7 +1830,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 }) => {
                     let account =
                         catalog_account(&store, provider, account.as_deref(), from_native)?;
-                    let pin = Pin::load(store.root(), provider)?;
+                    let pin = ensure_pin(store.root(), provider).await?;
                     if !runner::provider_admitted(store.root(), &pin) {
                         return Err(Error::Unavailable(
                             "native catalog discovery for this runtime is not yet qualified",
@@ -3064,11 +3113,19 @@ async fn direct_chat(
 
 #[tokio::main]
 async fn main() {
+    ux::restore_sigpipe();
     let cli = Cli::parse();
+    let json = cli.json;
+    // Internal helpers speak a protocol on stdout; their errors stay on
+    // stderr whoever runs them.
+    let protocol = matches!(
+        cli.command,
+        Some(Commands::ManagedDaemon | Commands::BrokerStdio | Commands::EgressForward { .. })
+    );
     let code = match dispatch(cli).await {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("xcb: {error}");
+            ux::report_error(&error, json, protocol);
             1
         }
     };
@@ -3365,6 +3422,10 @@ mod tests {
         );
     }
 
+    fn joined((added, next): (String, String)) -> String {
+        format!("{added}\nNext: {next}")
+    }
+
     #[test]
     fn devin_added_account_explains_token_and_explicit_import_paths() {
         let id = Id::new("a_devin").unwrap();
@@ -3376,7 +3437,7 @@ mod tests {
             subscription: "Subscription",
             enabled: true,
         };
-        let message = account.added_message();
+        let message = joined(account.added_message());
         assert!(message.contains("xcb accounts token a_devin"));
         assert!(message.contains("xcb accounts import-devin --source"));
         assert!(!message.contains("metadata only"));
@@ -3580,11 +3641,7 @@ mod tests {
             subscription: "Pro",
             enabled: true,
         };
-        assert!(
-            account
-                .added_message()
-                .ends_with("xcb accounts login a_codex")
-        );
+        assert!(joined(account.added_message()).ends_with("xcb accounts login a_codex"));
     }
 
     #[test]
@@ -3632,8 +3689,8 @@ mod tests {
             id: Id::new("a_fedcba9876543210fedcba9876543210").unwrap(),
             ..first.clone()
         };
-        let first_output = PublicAccount::from(&first).added_message();
-        let second_output = PublicAccount::from(&second).added_message();
+        let first_output = joined(PublicAccount::from(&first).added_message());
+        let second_output = joined(PublicAccount::from(&second).added_message());
         assert!(
             first_output
                 .contains("Added claude/a_01234567 (claude) · a_0123456789abcdef0123456789abcdef")

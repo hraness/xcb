@@ -719,10 +719,14 @@ impl Store {
             .find(|account| &account.id == id)
             .ok_or(Error::Unavailable("account not found"))
     }
+    /// Resolve what a person typed: an exact id, name or legacy label, else
+    /// a unique id prefix. The accounts table shortens ids with a trailing
+    /// `…`, so a pasted cell resolves too.
     pub fn resolve_account(&self, value: &str) -> Result<Account> {
-        let matches: Vec<_> = self
-            .accounts()?
-            .into_iter()
+        let accounts = self.accounts()?;
+        let shown = xcb_core::display_text(value, 64);
+        let exact: Vec<&Account> = accounts
+            .iter()
             .filter(|account| {
                 account.id.as_str() == value
                     || account.name() == value
@@ -730,12 +734,48 @@ impl Store {
                     || account.label == value
             })
             .collect();
-        if matches.len() != 1 {
-            return Err(Error::Unavailable(
-                "account not found or name is ambiguous; use its id",
-            ));
+        match exact.as_slice() {
+            [only] => return Ok((*only).clone()),
+            [] => {}
+            several => {
+                return Err(Error::guided(
+                    format!(
+                        "\"{shown}\" names {} accounts. Use the account id instead.",
+                        several.len()
+                    ),
+                    "xcb accounts --json",
+                ));
+            }
         }
-        Ok(matches.into_iter().next().expect("one account"))
+        let prefix = value.trim_end_matches('…');
+        let matches: Vec<&Account> = if prefix.is_empty() {
+            Vec::new()
+        } else {
+            accounts
+                .iter()
+                .filter(|account| account.id.as_str().starts_with(prefix))
+                .collect()
+        };
+        match matches.as_slice() {
+            [only] => Ok((*only).clone()),
+            [] => Err(Error::guided(
+                format!("No account matches \"{shown}\"."),
+                "xcb accounts",
+            )),
+            several => Err(Error::guided(
+                format!(
+                    "\"{shown}\" matches {} accounts: {}. Type more of the id.",
+                    several.len(),
+                    several
+                        .iter()
+                        .take(4)
+                        .map(|account| account.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                "xcb accounts",
+            )),
+        }
     }
     /// Record provider-observed identity: email and, when reported, the plan.
     /// Only fresh observations are written; a `None` email never clears a

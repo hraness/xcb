@@ -414,8 +414,13 @@ pub fn discover(provider: Provider, explicit: Option<&Path>) -> Result<PathBuf> 
             return Ok(path);
         }
     }
-    Err(Error::Unavailable(
-        "provider binary not found; specify its XCB provider path",
+    let command = provider.as_str();
+    Err(Error::guided(
+        format!(
+            "xcb can't find `{command}` on your PATH. Install it, or set XCB_{} to its absolute path.",
+            command.to_uppercase()
+        ),
+        format!("xcb doctor --provider {command}"),
     ))
 }
 
@@ -449,6 +454,13 @@ impl Pin {
             return Err(Error::Unavailable("runtime changed; run xcb doctor again"));
         }
         Ok(())
+    }
+    /// Whether this state root has pinned `provider` yet (`xcb doctor` or a
+    /// first sign-in does). A missing pin is a first-run state, not an error.
+    pub fn recorded(root: &Path, provider: Provider) -> bool {
+        root.join("providers")
+            .join(format!("{provider}.json"))
+            .is_file()
     }
     pub fn load(root: &Path, provider: Provider) -> Result<Self> {
         let mut pin: Self = serde_json::from_slice(&private::read(

@@ -63,7 +63,8 @@ impl Diagnostic {
             | Error::CodexRpc { .. }
             | Error::DevinRpc { .. }
             | Error::DevinModelChoices { .. }
-            | Error::Message(_) => error.to_string(),
+            | Error::Message(_)
+            | Error::Guided { .. } => error.to_string(),
             Error::Core(_) => "invalid host input or local record".into(),
             Error::Io(_) => "local I/O failed".into(),
             Error::LaunchNotStarted(_) => "provider process could not start".into(),
