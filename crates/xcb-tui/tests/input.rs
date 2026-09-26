@@ -1055,6 +1055,8 @@ fn single_letter_aliases_dispatch_the_full_command() {
         route_reason: None,
         settle: None,
         workspace: "/project".into(),
+        binding: None,
+        hold_until_ms: None,
         updated_at_ms: 1,
     }];
     app.composer.set_text("/t");
@@ -1206,6 +1208,8 @@ fn task_inspect_opens_a_scrollable_modal_with_the_full_route() {
         route_reason: Some("learned workspace preference for devin".into()),
         settle: None,
         workspace: "/project".into(),
+        binding: None,
+        hold_until_ms: None,
         updated_at_ms: display_now_ms_minus(60_000),
     }];
     app.composer.set_text("/tasks");
@@ -1467,6 +1471,7 @@ fn managed_fixture(state: xcb_core::session::State) -> App {
     app.view.backlog = vec![BacklogRow {
         id: Id::new("task_one").unwrap(),
         conversation: Id::new("conversation_one").unwrap(),
+        workspace: String::new(),
         title: "First task".into(),
         prompt: "Original task".into(),
         summary: "Current question".into(),
@@ -1856,6 +1861,7 @@ fn transcript_pages_are_context_bound_and_clear_display_preserves_messages() {
         messages: view.messages.clone(),
         first_sequence: Some(50),
         has_older: true,
+        workspaces: Default::default(),
     });
     app.apply(Update::View(Box::new(view)));
     app.handle(
@@ -1883,6 +1889,7 @@ fn transcript_pages_are_context_bound_and_clear_display_preserves_messages() {
         messages: vec![text_message("old", "older needle")],
         first_sequence: Some(1),
         has_older: false,
+        workspaces: Default::default(),
     };
     app.apply(Update::TranscriptPage {
         request: Id::new("unrelated").unwrap(),

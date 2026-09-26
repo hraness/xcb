@@ -347,13 +347,13 @@ impl App {
                             ],
                             scroll: 0,
                         }),
-                    PickAction::Project(id) => self
+                    PickAction::Project(workspace) => self
                         .view
                         .projects
                         .iter()
-                        .find(|row| &row.conversation == id)
+                        .find(|row| &row.workspace == workspace)
                         .map(|row| Modal::Inspect {
-                            title: format!("Project {}", row.conversation),
+                            title: format!("Project {} · {}", row.name, row.workspace),
                             lines: vec![
                                 row.goal.clone(),
                                 row.status.clone(),
@@ -510,6 +510,7 @@ impl App {
                     prompt: text.clone(),
                     deferred: false,
                     priority: 5,
+                    workspace: None,
                 },
                 context,
                 None,
@@ -1311,13 +1312,13 @@ impl LivePicker {
             Self::Projects { all } => view
                 .projects
                 .iter()
-                .filter(|row| *all || view.conversation.as_ref() == Some(&row.conversation))
+                .filter(|row| *all || crate::open_workspace(view) == Some(row.workspace.as_str()))
                 .map(|row| PickItem {
                     label: format!(
                         "{} · {} · {} tasks · {}",
-                        row.goal, row.status, row.remaining_tasks, row.conversation
+                        row.goal, row.status, row.remaining_tasks, row.name
                     ),
-                    action: PickAction::Project(row.conversation.clone()),
+                    action: PickAction::Project(row.workspace.clone()),
                 })
                 .collect(),
             Self::Conversations => std::iter::once(PickItem {

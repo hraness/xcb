@@ -515,6 +515,7 @@ async fn ui_recovery_and_pages_keep_identity_when_context_switches_under_backpre
             prompt: "Save this queued draft".into(),
             deferred: true,
             priority: 0,
+            workspace: None,
         }))
         .unwrap();
     commands
@@ -672,12 +673,14 @@ async fn ui_navigation_burst_rejects_stale_submission_and_queue_contexts() {
             prompt: "Keep this queued draft in its original conversation".into(),
             deferred: true,
             priority: 0,
+            workspace: None,
         }))
         .unwrap();
     commands
         .send(Intent::HabitatAt {
             conversation: f.conversation.clone(),
             command: HabitatCommand::ConfigureProject {
+                workspace: f.workspace.to_str().unwrap().into(),
                 expected_revision: None,
                 goal: "Never authorize the newly selected project".into(),
                 max_tasks: 5,
@@ -692,6 +695,7 @@ async fn ui_navigation_burst_rejects_stale_submission_and_queue_contexts() {
             command: HabitatCommand::Schedule {
                 prompt: "Never schedule the other conversation".into(),
                 interval_ms: 60_000,
+                workspace: None,
             },
         })
         .unwrap();

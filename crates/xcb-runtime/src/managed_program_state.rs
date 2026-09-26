@@ -195,7 +195,7 @@ pub(super) fn require_grant(
     now: u64,
     budget: bool,
 ) -> Result<ProjectPolicy> {
-    let policy = project::policy_from(db, conversation)?.ok_or(Error::Conflict(
+    let policy = workspace::policy_for_conversation(db, conversation)?.ok_or(Error::Conflict(
         "project authority is required for managed programs",
     ))?;
     if !policy.enabled
@@ -420,15 +420,13 @@ impl ManagedStore {
     ) -> Result<ManagedTask> {
         habitat::validate_prompt(&title)?;
         program.verify()?;
-        let chat = self
-            .conversation(conversation)?
-            .ok_or(Error::Unavailable("conversation not found"))?;
+        let workspace = self.conversation_workspace(conversation)?;
         self.create_habitat_task(
             conversation,
             operation,
             title,
             vec![],
-            Path::new(&chat.workspace),
+            Path::new(&workspace),
             habitat::CreateOptions {
                 program: Some(&program),
                 ..Default::default()
@@ -576,7 +574,7 @@ impl ManagedStore {
             deferred: false, priority: parent.priority, attention: routing_question.then_some(State::NeedsAnswer), backlog_prompt: None,
             project_proposal: None, routing_question, program: None, program_generation: None, program_receipt: None, program_waiting: false,
             program_child: Some(ProgramChild { parent: parent.id.clone(), call: index, request_digest: call.digest.clone(), generation: policy.generation.clone(), required_provider: policy.required_provider }), daemon_child: None,
-            schedule: None, detail: if routing_question { "This program request conflicts with the project provider requirement. Reply to this child with revised work for the required provider, or cancel it." } else { "managed program child; waiting for an eligible worker" }.into(),
+            schedule: None, binding: None, hold_until_ms: None, moved_from: None, detail: if routing_question { "This program request conflicts with the project provider requirement. Reply to this child with revised work for the required provider, or cancel it." } else { "managed program child; waiting for an eligible worker" }.into(),
             settle: None, acted: None, inbox_continuation: false, attempts: 0, max_attempts: MAX_TASK_ATTEMPTS, message_count_before: 0,
             cancel_requested: false, last_output: None, policy_digest: parent.policy_digest.clone(), last_receipt: "sha256:pending".into(), revision: 1, created_at_ms: now, updated_at_ms: now,
         };

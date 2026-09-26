@@ -258,17 +258,38 @@ pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Res
             vec![row]
         }
     };
+    // Grants are keyed by directory; `conversation` names the latest
+    // project view over it, or null.
+    let views: Vec<Option<Id>> = rows
+        .iter()
+        .map(|row| {
+            store
+                .latest_conversation_for_workspace(Path::new(&row.workspace))
+                .ok()
+                .flatten()
+                .map(|conversation| conversation.id)
+        })
+        .collect();
     if json {
+        let rows = rows
+            .iter()
+            .zip(&views)
+            .map(|(row, view)| {
+                let mut value = serde_json::to_value(row)?;
+                value["conversation"] = serde_json::to_value(view)?;
+                Ok(value)
+            })
+            .collect::<Result<Vec<_>>>()?;
         crate::print_json(rows)?;
     } else if rows.is_empty() {
         println!(
             "No project grants. Use xcb projects configure <conversation> <goal> --tasks N --hours N."
         );
     } else {
-        for row in rows {
+        for (row, view) in rows.into_iter().zip(views) {
             println!(
                 "{} · {} · {}/{} tasks used · expires {} · rev {}\n  {}",
-                row.conversation,
+                view.map_or_else(|| row.workspace.clone(), |id| id.to_string()),
                 row.status(),
                 row.admitted_tasks,
                 row.max_tasks,

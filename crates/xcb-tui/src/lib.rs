@@ -348,11 +348,15 @@ pub enum PickAction {
     Backlog(Id),
     Inbox(Id),
     Schedule(Id),
-    Project(Id),
+    /// A project grant, by its workspace.
+    Project(String),
     Program(Id),
     Text(String),
     EditPane,
-    CancelTask { id: Id, revision: u64 },
+    CancelTask {
+        id: Id,
+        revision: u64,
+    },
     Recovery(usize),
 }
 #[derive(Clone)]
@@ -609,6 +613,19 @@ fn fingerprint(view: &View) -> u64 {
     fingerprint_at(view, display_now_ms())
 }
 
+/// The open project view's directory; `None` in the thread or before a
+/// conversation is open.
+pub(crate) fn open_workspace(view: &View) -> Option<&str> {
+    let id = view.conversation.as_ref()?;
+    view.conversations
+        .iter()
+        .find(|row| &row.id == id && !row.is_thread() && !row.workspace.is_empty())
+        .map(|row| row.workspace.as_str())
+}
+
+const NAME_THE_PROJECT: &str =
+    "In the thread, name the project: open its project view, or use xcb projects configure <dir>.";
+
 fn fingerprint_at(view: &View, now: u64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -729,7 +746,7 @@ fn fingerprint_at(view: &View, now: u64) -> u64 {
         schedule.next_due_ms.hash(&mut hasher);
     }
     for project in &view.projects {
-        project.conversation.as_str().hash(&mut hasher);
+        project.workspace.hash(&mut hasher);
         project.revision.hash(&mut hasher);
         project.status.hash(&mut hasher);
     }
@@ -1670,18 +1687,24 @@ impl App {
             }
             "/project" if arguments.is_empty() || arguments == "all" => {
                 let all = arguments == "all";
+                let open = open_workspace(&self.view);
                 self.picker("Project grants · goal / budget / status", self.view.projects.iter()
-                    .filter(|project| all || self.view.conversation.as_ref() == Some(&project.conversation))
+                    .filter(|project| all || open == Some(project.workspace.as_str()))
                     .map(|project| PickItem {
-                        label: format!("{} · {} · {} tasks left · {}", xcb_core::display_text(&project.goal, 52), project.status, project.remaining_tasks, project.conversation),
-                        action: PickAction::Project(project.conversation.clone()),
+                        label: format!("{} · {} · {} tasks left · {}", xcb_core::display_text(&project.goal, 52), project.status, project.remaining_tasks, project.name),
+                        action: PickAction::Project(project.workspace.clone()),
                     }).collect());
             }
             "/project" if matches!(action, "pause" | "resume") => {
+                // A conversation id still names its project view's directory.
+                let named = self.view.conversations.iter()
+                    .find(|row| row.id.as_str() == tail && !row.workspace.is_empty())
+                    .map(|row| row.workspace.as_str());
+                let open = open_workspace(&self.view);
                 if let Some(project) = self.view.projects.iter().find(|project| if tail.is_empty() {
-                    self.view.conversation.as_ref() == Some(&project.conversation)
-                } else { project.conversation.as_str() == tail }) {
-                    self.send_habitat(output, Intent::Habitat(HabitatCommand::ProjectEnabled { conversation: project.conversation.clone(), expected_revision: project.revision, enabled: action == "resume" }), command, arguments);
+                    open == Some(project.workspace.as_str())
+                } else { project.workspace == tail || project.name == tail || named == Some(project.workspace.as_str()) }) {
+                    self.send_habitat(output, Intent::Habitat(HabitatCommand::ProjectEnabled { workspace: project.workspace.clone(), expected_revision: project.revision, enabled: action == "resume" }), command, arguments);
                 } else { self.notice = "No matching project grant. /project all lists grants.".into(); }
             }
             "/project" if action == "grant" => {
@@ -1692,8 +1715,13 @@ impl App {
                 if let (Some(max_tasks), Some(hours)) = (tasks, hours)
                     && (1..=100).contains(&max_tasks) && (1..=720).contains(&hours) && !goal.is_empty() {
                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-                    let current = self.view.projects.iter().find(|p| self.view.conversation.as_ref() == Some(&p.conversation));
+                    let Some(workspace) = open_workspace(&self.view).map(str::to_owned) else {
+                        self.notice = NAME_THE_PROJECT.into();
+                        return;
+                    };
+                    let current = self.view.projects.iter().find(|p| p.workspace == workspace);
                     self.send_habitat(output, Intent::Habitat(HabitatCommand::ConfigureProject {
+                        workspace: workspace.clone(),
                         expected_revision: current.map(|p| p.revision), goal: goal.into(), max_tasks,
                         expires_at_ms: now.saturating_add(hours * 3_600_000), required_provider: current.and_then(|p| p.required_provider),
                     }), command, arguments);
@@ -1701,7 +1729,11 @@ impl App {
             }
             "/project" => self.notice = "Use /project [all], /project grant <tasks> <hours> <goal>, or /project pause|resume [conversation].".into(),
             "/memory" if action == "search" && !tail.is_empty() => {
-                self.send_habitat(output, Intent::Habitat(HabitatCommand::MemorySearch { query: tail.into() }), command, arguments);
+                let Some(workspace) = open_workspace(&self.view).map(str::to_owned) else {
+                    self.notice = NAME_THE_PROJECT.into();
+                    return;
+                };
+                self.send_habitat(output, Intent::Habitat(HabitatCommand::MemorySearch { workspace, query: tail.into() }), command, arguments);
             }
             "/memory" => self.notice = "Use /memory search <query>. Bind a vault first with xcb memory configure.".into(),
             "/backlog" if action == "complete" => {
@@ -1735,7 +1767,7 @@ impl App {
                     self.notice = "Open a conversation before adding work.".into(); return;
                 };
                 let id = self.inbox_event_id(command, arguments);
-                self.send_habitat(output, Intent::Habitat(HabitatCommand::EnqueueIn { conversation, id, prompt: tail.into(), deferred: true, priority: 5 }), command, arguments);
+                self.send_habitat(output, Intent::Habitat(HabitatCommand::EnqueueIn { conversation, id, prompt: tail.into(), deferred: true, priority: 5, workspace: None }), command, arguments);
             }
             "/backlog" if action == "run" => {
                 if let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == tail) {
@@ -1785,7 +1817,7 @@ impl App {
                 let (seconds, prompt) = tail.split_once(' ').unwrap_or((tail, ""));
                 if let Ok(seconds) = seconds.parse::<u64>()
                     && (60..=31_536_000).contains(&seconds) && !prompt.trim().is_empty() {
-                    self.send_habitat(output, Intent::Habitat(HabitatCommand::Schedule { prompt: prompt.trim().into(), interval_ms: seconds * 1000 }), command, arguments);
+                    self.send_habitat(output, Intent::Habitat(HabitatCommand::Schedule { prompt: prompt.trim().into(), interval_ms: seconds * 1000, workspace: None }), command, arguments);
                 } else { self.notice = "Use /schedule every <seconds> <prompt>; interval must be 60 seconds to 365 days.".into(); }
             }
             "/schedule" if matches!(action, "pause" | "resume") => {
@@ -2747,16 +2779,17 @@ impl App {
                         self.program_inspect = Some(id);
                     }
                 }
-                PickAction::Project(id) => {
-                    if let Some(project) = self.view.projects.iter().find(|p| p.conversation == id)
+                PickAction::Project(workspace) => {
+                    if let Some(project) =
+                        self.view.projects.iter().find(|p| p.workspace == workspace)
                     {
                         self.modal = Some(Modal::Inspect {
-                            title: format!("Project {} · {}", project.conversation, project.status),
+                            title: format!("Project {} · {}", project.name, project.status),
                             lines: vec![project.goal.clone(), String::new(),
                                 format!("{} tasks remaining · revision {}", project.remaining_tasks, project.revision),
                                 format!("Grant expires {}", due_label(project.expires_at_ms)),
                                 format!("Required provider: {}", project.required_provider.map_or("automatic".into(), |p| p.to_string())),
-                                String::new(), format!("/project {} {}", if project.enabled { "pause" } else { "resume" }, project.conversation),
+                                String::new(), format!("/project {} {}", if project.enabled { "pause" } else { "resume" }, project.workspace),
                                 "Pause stops automatic dispatch; running work settles. Resume does not renew the grant.".into()],
                             scroll: 0,
                         });
@@ -3047,6 +3080,13 @@ mod habitat_surface_tests {
         let conversation = Id::new("project_a").unwrap();
         let mut app = App::default();
         app.view.conversation = Some(conversation.clone());
+        app.view.conversations.push(xcb_core::ui::ConversationRow {
+            id: conversation.clone(),
+            title: "project_a".into(),
+            workspace: "/work/project_a".into(),
+            messages: 0,
+            updated_at_ms: 0,
+        });
         app.view
             .extensions
             .push(("algal supervisor".into(), "enabled".into()));
@@ -3054,6 +3094,7 @@ mod habitat_surface_tests {
             BacklogRow {
                 id: Id::new("task_a").unwrap(),
                 conversation,
+                workspace: "/work/project_a".into(),
                 title: "Queued review".into(),
                 prompt: "Review the changes".into(),
                 summary: "Prior evidence".into(),
@@ -3067,6 +3108,7 @@ mod habitat_surface_tests {
             BacklogRow {
                 id: Id::new("task_b").unwrap(),
                 conversation: Id::new("project_b").unwrap(),
+                workspace: "/work/project_b".into(),
                 title: "Publish".into(),
                 prompt: "Publish changes".into(),
                 summary: "Review deployment approval".into(),
@@ -3326,7 +3368,7 @@ mod habitat_surface_tests {
         }
         app.slash("/schedule every 3600 follow project", &tx);
         assert!(
-            matches!(rx.try_recv(), Ok(Intent::HabitatAt { command: HabitatCommand::Schedule { interval_ms: 3_600_000, prompt }, .. }) if prompt == "follow project")
+            matches!(rx.try_recv(), Ok(Intent::HabitatAt { command: HabitatCommand::Schedule { interval_ms: 3_600_000, prompt, .. }, .. }) if prompt == "follow project")
         );
     }
 
@@ -3352,14 +3394,15 @@ mod habitat_surface_tests {
         let (tx, rx) = sync_channel(8);
         let mut app = app();
         app.view.projects.push(xcb_core::ui::ProjectRow {
-            conversation: app.view.conversation.clone().unwrap(),
+            workspace: "/work/project_a".into(),
+            name: "project_a".into(),
             goal: "Existing goal".into(),
             enabled: true,
             remaining_tasks: 3,
             expires_at_ms: u64::MAX,
             required_provider: Some(xcb_core::Provider::Codex),
             revision: 17,
-            status: "following project".into(),
+            status: "active".into(),
         });
         for input in [
             "/project grant 0 24 goal",
@@ -3397,7 +3440,7 @@ mod habitat_surface_tests {
         );
         app.slash("/memory search parser decisions", &tx);
         assert!(
-            matches!(rx.try_recv(), Ok(Intent::HabitatAt { conversation, command: HabitatCommand::MemorySearch { query } }) if query == "parser decisions" && conversation.as_str() == "project_a")
+            matches!(rx.try_recv(), Ok(Intent::HabitatAt { conversation, command: HabitatCommand::MemorySearch { query, workspace } }) if query == "parser decisions" && conversation.as_str() == "project_a" && workspace == "/work/project_a")
         );
     }
 }

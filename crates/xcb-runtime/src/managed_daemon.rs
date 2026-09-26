@@ -672,9 +672,7 @@ impl ManagedStore {
     ) -> Result<DaemonStatus> {
         let name = daemon_name(name)?;
         daemon.verify()?;
-        let chat = self
-            .conversation(conversation)?
-            .ok_or(Error::Unavailable("conversation not found"))?;
+        let workspace = self.conversation_workspace(conversation)?;
         let db = self.write_db()?;
         {
             let count: i64 =
@@ -716,7 +714,7 @@ impl ManagedStore {
         let meta = DaemonMeta {
             process: name.to_owned(),
             conversation: conversation.clone(),
-            workspace: chat.workspace.clone(),
+            workspace,
             manifest_digest: daemon.manifest_digest.clone(),
             args_digest: canonical_digest(&args, 250_000)?,
             max_generations: daemon.max_generations,
@@ -1192,7 +1190,7 @@ impl ManagedStore {
             deferred: false, priority: 0, attention: routing_question.then_some(State::NeedsAnswer), backlog_prompt: None,
             project_proposal: None, routing_question, program: None, program_generation: None, program_receipt: None, program_waiting: false,
             program_child: None, daemon_child: Some(DaemonChild { process: meta.process.clone(), request_digest: call.request_digest.clone(), generation: policy.generation.clone(), required_provider: policy.required_provider }),
-            schedule: None, detail: if routing_question { "This daemon request conflicts with the project provider requirement. Reply to this child with revised work for the required provider, or cancel it." } else { "managed daemon child; waiting for an eligible worker" }.into(),
+            schedule: None, binding: None, hold_until_ms: None, moved_from: None, detail: if routing_question { "This daemon request conflicts with the project provider requirement. Reply to this child with revised work for the required provider, or cancel it." } else { "managed daemon child; waiting for an eligible worker" }.into(),
             settle: None, acted: None, inbox_continuation: false, attempts: 0, max_attempts: MAX_TASK_ATTEMPTS, message_count_before: 0,
             cancel_requested: false, last_output: None, policy_digest, last_receipt: "sha256:pending".into(), revision: 1, created_at_ms: now, updated_at_ms: now,
         };

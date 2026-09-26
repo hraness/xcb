@@ -332,7 +332,12 @@ async fn overview_owner_exit_invalidates_once_without_a_database_write() {
         observed_at_ms: 1,
     };
     let session = store
-        .create_session(&account.id, model, Path::new(&f.conversation.workspace), 2)
+        .create_session(
+            &account.id,
+            model,
+            Path::new(f.conversation.workspace.as_deref().unwrap()),
+            2,
+        )
         .unwrap();
     let mut run = store.prepare_run(&session.id, session.revision, 3).unwrap();
     let mut child = ChildGuard(
@@ -431,7 +436,7 @@ async fn overview_global_attention_failures_and_running_survive_current_workspac
         // so another_task's creation-time clamp cannot tie these timestamps.
         conversation.updated_at_ms = f.task.updated_at_ms + index + 1;
         if index < 3 {
-            conversation.workspace = "/another/workspace".into();
+            conversation.workspace = Some("/another/workspace".into());
         }
         f.managed
             .db()
@@ -453,7 +458,7 @@ async fn overview_global_attention_failures_and_running_survive_current_workspac
             };
             let mut task = another_task(&f, state, conversation.updated_at_ms);
             task.conversation = conversation.id.clone();
-            task.workspace = conversation.workspace;
+            task.workspace = conversation.workspace.unwrap();
             if index == 0 {
                 task.attention = Some(State::NeedsAnswer);
             }
@@ -565,7 +570,7 @@ async fn managed_view_combines_direct_and_managed_sessions_without_worker_duplic
         effort: None,
         observed_at_ms: 1,
     };
-    let workspace = Path::new(&f.conversation.workspace);
+    let workspace = Path::new(f.conversation.workspace.as_deref().unwrap());
     let session = store
         .create_session(&account.id, model.clone(), workspace, 2)
         .unwrap();

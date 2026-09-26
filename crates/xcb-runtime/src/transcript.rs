@@ -66,5 +66,6 @@ pub(crate) fn page(
         messages,
         first_sequence,
         has_older,
+        workspaces: Default::default(),
     })
 }

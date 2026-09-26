@@ -262,7 +262,7 @@ async fn schema_upgrade_is_additive_and_repeat_open_keeps_grants() {
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
 }
 
 fn planner() -> crate::managed_program::AdmittedProgram {
@@ -538,7 +538,9 @@ async fn queued_schedule_stops_at_project_pause_and_expiry_changes_view_stamp() 
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .unwrap();
-    let mut policy = policy_from(&tx, &f.conversation).unwrap().unwrap();
+    let mut policy = policy_from(&tx, f.workspace.to_str().unwrap())
+        .unwrap()
+        .unwrap();
     policy.expires_at_ms = now_ms() - 1;
     write_policy(&tx, &policy).unwrap();
     tx.commit().unwrap();
@@ -578,7 +580,9 @@ async fn project_policy_bounds_and_corruption_are_isolated() {
         );
     }
     grant(&f, 1);
-    let second = f.managed.create_conversation(&f.workspace).await.unwrap();
+    // Grants are keyed by directory: the second project needs its own.
+    let other = private::directory(&f.workspace.parent().unwrap().join("work2")).unwrap();
+    let second = f.managed.create_conversation(&other).await.unwrap();
     f.managed
         .configure_project_policy(
             &second.id,
@@ -593,13 +597,13 @@ async fn project_policy_bounds_and_corruption_are_isolated() {
         .db()
         .unwrap()
         .execute(
-            "UPDATE project_policies SET payload='{bad' WHERE conversation=?1",
-            [f.conversation.as_str()],
+            "UPDATE project_policies SET payload='{bad' WHERE workspace=?1",
+            [f.workspace.to_str().unwrap()],
         )
         .unwrap();
     let policies = f.managed.project_policies().unwrap();
     assert_eq!(policies.len(), 1);
-    assert_eq!(policies[0].conversation, second.id);
+    assert_eq!(policies[0].workspace, other.to_str().unwrap());
 }
 
 #[tokio::test]
@@ -687,8 +691,8 @@ async fn oversized_policy_is_invalid_not_absent_for_scheduled_dispatch() {
         .db()
         .unwrap()
         .execute(
-            "UPDATE project_policies SET payload=?1 WHERE conversation=?2",
-            params![" ".repeat(65_537), f.conversation.as_str()],
+            "UPDATE project_policies SET payload=?1 WHERE workspace=?2",
+            params![" ".repeat(65_537), f.workspace.to_str().unwrap()],
         )
         .unwrap();
     assert!(f.managed.project_policy(&f.conversation).is_err());
@@ -736,8 +740,39 @@ async fn live_legacy_supervisor_blocks_schema_upgrade_without_mutation() {
         .unwrap()
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     assert!(reopened.conversation(&f.conversation).unwrap().is_some());
+    // The legacy-shaped tables the reset recreated are rebuilt keyed on the
+    // project directory.
+    let workspace = f.workspace.to_str().unwrap();
+    assert!(reopened.project_policy_in(workspace).unwrap().is_none());
+    assert!(reopened.memory_binding_in(workspace).unwrap().is_none());
+    let policy = reopened
+        .configure_project_policy_in(
+            &f.workspace,
+            None,
+            "Maintain the project".into(),
+            2,
+            now_ms() + 7_200_000,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        reopened
+            .project_policy_in(workspace)
+            .unwrap()
+            .unwrap()
+            .generation,
+        policy.generation
+    );
+    assert_eq!(
+        reopened
+            .project_policy(&f.conversation)
+            .unwrap()
+            .unwrap()
+            .generation,
+        policy.generation
+    );
 }
 
 #[tokio::test]

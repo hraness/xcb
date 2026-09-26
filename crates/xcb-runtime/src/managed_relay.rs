@@ -396,8 +396,8 @@ mod tests {
         // Custody rejects symlinked ancestors (/var → /private/var on
         // macOS), so the state root itself must be canonical.
         let root = root.path().canonicalize().unwrap();
-        let store = Arc::new(ManagedStore::open(&root).unwrap());
-        let workspace = root.join("ws");
+        let store = Arc::new(ManagedStore::open(&root.join("state")).unwrap());
+        let workspace = root.join("work");
         std::fs::create_dir(&workspace).unwrap();
         // A symlinked workspace is the /tmp → /private/tmp shape the bug
         // came from: the alias exists but spells differently.

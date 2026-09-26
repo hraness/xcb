@@ -2625,7 +2625,10 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let messages = counts.get(&conversation.id).copied().unwrap_or_default();
                     println!(
                         "{}  {} · {} msgs · {}",
-                        conversation.id, conversation.title, messages, conversation.workspace
+                        conversation.id,
+                        conversation.title,
+                        messages,
+                        conversation.workspace.as_deref().unwrap_or("all projects")
                     );
                 }
             }

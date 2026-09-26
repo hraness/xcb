@@ -619,6 +619,8 @@ fn global_conversation_shows_managed_tasks_instead_of_provider_chrome() {
         route_reason: None,
         settle: None,
         workspace: "/project".into(),
+        binding: None,
+        hold_until_ms: None,
         updated_at_ms: 1,
     }];
     app.view.pane = Pane::focus();
@@ -657,6 +659,8 @@ fn managed_task(
         route_reason: None,
         settle: None,
         workspace: "/project".into(),
+        binding: None,
+        hold_until_ms: None,
         updated_at_ms,
     }
 }

@@ -63,6 +63,17 @@ pub use program_state::{ProgramChild, ProgramStatus};
 #[path = "managed_daemon.rs"]
 mod daemon;
 pub use daemon::{AdmittedDaemon, DaemonChild, DaemonStatus, MAX_DAEMON_GENERATIONS, daemon_name};
+#[path = "managed_workspace.rs"]
+mod workspace;
+pub use workspace::{
+    Intake, IntakeCues, MigrationConflict, Origin, UpgradeReport, WorkspaceStatus,
+    validate_workspace_root,
+};
+pub use xcb_core::ui::GLOBAL_THREAD_ID;
+
+#[cfg(test)]
+#[path = "managed_workspace_tests.rs"]
+mod workspace_tests;
 
 #[cfg(test)]
 #[path = "managed_mailbox_tests.rs"]
@@ -143,21 +154,37 @@ pub struct ManagedConversation {
     pub version: u32,
     pub id: Id,
     pub title: String,
-    pub workspace: String,
+    /// The project view's directory; `None` only for the global thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
 impl ManagedConversation {
     fn validate(&self) -> Result<()> {
         if self.version != 1
-            || !Path::new(&self.workspace).is_absolute()
+            || (self.id.as_str() == GLOBAL_THREAD_ID) != self.workspace.is_none()
+            || self
+                .workspace
+                .as_deref()
+                .is_some_and(|workspace| !Path::new(workspace).is_absolute())
             || self.updated_at_ms < self.created_at_ms
         {
             return Err(xcb_core::Error::Invalid("managed conversation").into());
         }
         label(&self.title, 160)?;
-        bounded_text(&self.workspace, 4096)?;
+        if let Some(workspace) = &self.workspace {
+            bounded_text(workspace, 4096)?;
+        }
         Ok(())
+    }
+    /// The machine-global thread, which spans every project directory.
+    pub fn is_thread(&self) -> bool {
+        self.workspace.is_none()
+    }
+    /// The project view's directory; `None` for the thread.
+    pub fn workspace_path(&self) -> Option<&Path> {
+        self.workspace.as_deref().map(Path::new)
     }
 }
 
@@ -238,6 +265,17 @@ pub struct ManagedTask {
     pub daemon_child: Option<DaemonChild>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Id>,
+    /// Why a thread task runs in `workspace`; `None` for tasks bound by
+    /// their project view (and every task written before 0.9.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<crate::workspace_infer::WorkspaceBinding>,
+    /// A doubtful binding is held until this instant before first dispatch.
+    /// Not identity: expiry and release clear it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_until_ms: Option<u64>,
+    /// The unstarted thread task this one replaced in another directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_from: Option<Id>,
     pub detail: String,
     /// How the last settled worker turn ended, as categorized by the settle
     /// reflex (`done`, `stopped_short`, `question`, `blocked`, ...).
@@ -275,6 +313,8 @@ impl ManagedTask {
             && self.program_child == other.program_child
             && self.daemon_child == other.daemon_child
             && self.schedule == other.schedule
+            && self.binding == other.binding
+            && self.moved_from == other.moved_from
             && self
                 .project_proposal
                 .as_ref()
@@ -385,6 +425,9 @@ impl ManagedTask {
         if let Some(output) = &self.last_output {
             bounded_text(output, xcb_core::MAX_TEXT_BYTES)?;
         }
+        if let Some(binding) = &self.binding {
+            binding.validate()?;
+        }
         Ok(())
     }
 }
@@ -456,6 +499,20 @@ pub struct ManagedStore {
     active_scans: std::sync::atomic::AtomicU64,
     /// Diagnostics: additive schema migrations this handle executed.
     mailbox_migrations: std::sync::atomic::AtomicU64,
+    /// Per-path day stamps for the supervisor's registry upkeep: when a
+    /// repo identity was last read and when an invalid entry last noticed.
+    workspace_checks: Mutex<BTreeMap<String, u64>>,
+}
+
+/// A validated task record and its receipt, ready for
+/// `ManagedStore::create_habitat_task_tx`.
+struct PreparedTask {
+    task: ManagedTask,
+    receipt: String,
+    receipt_json: String,
+    user: Message,
+    ack: Message,
+    schedule_requirement: Option<Provider>,
 }
 
 /// See `ManagedStore::view_stamp`.
@@ -468,6 +525,7 @@ struct ViewStamp {
     schedules: (i64, i64),
     projects: (i64, i64, i64),
     inbox: (i64, i64),
+    workspaces: (i64, i64, i64),
     config: Option<std::time::SystemTime>,
     fault: Option<std::time::SystemTime>,
     progress: Option<std::time::SystemTime>,
@@ -590,7 +648,32 @@ fn stamp_retention(root: &Path) {
     }
 }
 
+#[cfg(test)]
 fn managed_migration_guard(root: &Path) -> Result<private::ExclusiveLock> {
+    managed_migration_guard_until(root, Instant::now(), || Ok(false))?
+        .ok_or(Error::Conflict("managed state upgrade guard was not taken"))
+}
+
+/// Take the upgrade guard, polling for up to `MIGRATION_GUARD_WAIT`. Returns
+/// `None` when `migrated` reports that a peer finished the upgrade while this
+/// caller waited: that peer may now hold the supervisor lock for its whole
+/// life, and a migrated store needs no guard.
+fn managed_migration_guard_wait(
+    root: &Path,
+    migrated: impl FnMut() -> Result<bool>,
+) -> Result<Option<private::ExclusiveLock>> {
+    managed_migration_guard_until(
+        root,
+        Instant::now() + workspace::MIGRATION_GUARD_WAIT,
+        migrated,
+    )
+}
+
+fn managed_migration_guard_until(
+    root: &Path,
+    deadline: Instant,
+    mut migrated: impl FnMut() -> Result<bool>,
+) -> Result<Option<private::ExclusiveLock>> {
     let path = root.join("supervisor.lock");
     let file = OpenOptions::new()
         .read(true)
@@ -602,17 +685,34 @@ fn managed_migration_guard(root: &Path) -> Result<private::ExclusiveLock> {
         .open(&path)?;
     private::check_file(&file, 4096)?;
     private::same_file(&path, &file)?;
-    match file.try_lock() {
-        Ok(()) => Ok(private::ExclusiveLock::held(file)),
-        Err(std::fs::TryLockError::WouldBlock) => Err(Error::Conflict(
-            "managed state upgrade waits for the running supervisor to stop; let active work settle, pause schedules with the existing xcb, then restart xcb",
-        )),
-        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(private::ExclusiveLock::held(file))),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if migrated()? {
+                    return Ok(None);
+                }
+                if Instant::now() >= deadline {
+                    return Err(Error::Conflict(
+                        "managed state upgrade waits for the running supervisor to stop; let active work settle, pause schedules with the existing xcb, then restart xcb",
+                    ));
+                }
+                std::thread::sleep(workspace::MIGRATION_GUARD_POLL);
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
     }
 }
 
 impl ManagedStore {
     pub fn open(root: &Path) -> Result<Self> {
+        Self::open_with(root, true)
+    }
+
+    /// `guarded` is false only for a private scratch copy (`migrate_copy`):
+    /// no live writer can share it, so it takes no upgrade guard and needs
+    /// no pre-upgrade backup.
+    fn open_with(root: &Path, guarded: bool) -> Result<Self> {
         let root = private::directory(&root.join("managed"))?;
         let path = root.join("managed.sqlite");
         let mut oversized = false;
@@ -640,8 +740,9 @@ impl ManagedStore {
             connection.pragma_update(None, "journal_mode", "WAL")?;
         }
         connection.pragma_update(None, "synchronous", "FULL")?;
-        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 6 {
+        let mut version: u32 =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > workspace::SCHEMA_VERSION {
             return Err(Error::Unavailable(
                 "managed state was written by a newer xcb",
             ));
@@ -649,8 +750,19 @@ impl ManagedStore {
         // A prior supervisor owns the old writer contract until all its work
         // settles. Never advance the schema underneath that admitted writer.
         // The daemon itself opens/migrates before taking its dispatch lock.
-        let _migration_guard = if version < 6 {
-            Some(managed_migration_guard(&root)?)
+        // A peer upgrading the same store makes this caller wait (bounded),
+        // then proceed once the store reads as migrated.
+        let _migration_guard = if guarded && version < workspace::SCHEMA_VERSION {
+            let guard = managed_migration_guard_wait(&root, || {
+                let current: u32 =
+                    connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+                Ok(current >= workspace::SCHEMA_VERSION)
+            })?;
+            version = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if guard.is_some() && (1..workspace::SCHEMA_VERSION).contains(&version) {
+                workspace::backup_before_upgrade(&connection, &root, version);
+            }
+            guard
         } else {
             None
         };
@@ -706,6 +818,7 @@ impl ManagedStore {
         inbox::migrate(&mut connection)?;
         program_state::migrate(&mut connection)?;
         daemon::migrate(&mut connection)?;
+        workspace::migrate_v7(&mut connection, now_ms())?;
         let mut store = Self {
             root,
             connection: Mutex::new(connection),
@@ -713,6 +826,7 @@ impl ManagedStore {
             read_only: false,
             active_scans: std::sync::atomic::AtomicU64::new(0),
             mailbox_migrations: std::sync::atomic::AtomicU64::new(mailbox_migrations),
+            workspace_checks: Mutex::new(BTreeMap::new()),
         };
         if oversized || retention_due(store.root()) {
             match store.retain() {
@@ -836,8 +950,13 @@ impl ManagedStore {
                     [RETENTION_BATCH],
                 )? as u64;
                 removed += tx.execute(
-                    "DELETE FROM messages WHERE rowid IN (SELECT rowid FROM (SELECT rowid, ROW_NUMBER() OVER (PARTITION BY conversation ORDER BY sequence DESC) AS rn FROM messages) WHERE rn>?1 LIMIT ?2)",
-                    params![RETENTION_CONVERSATION_MESSAGES, RETENTION_BATCH],
+                    "DELETE FROM messages WHERE rowid IN (SELECT rowid FROM (SELECT rowid, conversation, ROW_NUMBER() OVER (PARTITION BY conversation ORDER BY sequence DESC) AS rn FROM messages) WHERE rn>CASE WHEN conversation=?3 THEN ?4 ELSE ?1 END LIMIT ?2)",
+                    params![
+                        RETENTION_CONVERSATION_MESSAGES,
+                        RETENTION_BATCH,
+                        GLOBAL_THREAD_ID,
+                        workspace::RETENTION_GLOBAL_MESSAGES
+                    ],
                 )? as u64;
                 tx.commit()?;
             }
@@ -854,6 +973,8 @@ impl ManagedStore {
             row.get::<_, i64>(0)
         });
         let _ = db.execute_batch("PRAGMA incremental_vacuum(4096)");
+        drop(db);
+        workspace::prune_upgrade_backups(&self.root, now_ms());
         Ok(removed_total)
     }
     /// See `active_scans`.
@@ -867,11 +988,7 @@ impl ManagedStore {
     }
 
     pub async fn create_conversation(&self, workspace: &Path) -> Result<ManagedConversation> {
-        let workspace = fs::canonicalize(workspace)?;
-        if !workspace.is_dir() {
-            return Err(Error::Unavailable("managed workspace is not a directory"));
-        }
-        let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
+        let workspace = self.validate_workspace(workspace)?;
         let now = now_ms();
         let id = new_id("c");
         let project = Path::new(&workspace)
@@ -882,7 +999,7 @@ impl ManagedStore {
             version: 1,
             id: id.clone(),
             title: format!("{project} · {}", &id.as_str()[..10.min(id.as_str().len())]),
-            workspace,
+            workspace: Some(workspace),
             created_at_ms: now,
             updated_at_ms: now,
         };
@@ -890,8 +1007,12 @@ impl ManagedStore {
         let (_, receipt, receipt_json) = Self::algal_receipt(&conversation).await?;
         let mut db = self.write_db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let count: i64 =
-            tx.query_row("SELECT count(*) FROM conversations", [], |row| row.get(0))?;
+        // The thread is exempt from the project-view bound.
+        let count: i64 = tx.query_row(
+            "SELECT count(*) FROM conversations WHERE id<>?1",
+            [GLOBAL_THREAD_ID],
+            |row| row.get(0),
+        )?;
         if count >= MAX_CONVERSATIONS {
             return Err(xcb_core::Error::Limit("managed conversations").into());
         }
@@ -943,9 +1064,9 @@ impl ManagedStore {
         let row: Option<(String, i64)> = db
             .query_row(
                 "SELECT payload,updated_at FROM conversations \
-                 WHERE json_extract(payload,'$.workspace')=?1 \
+                 WHERE json_extract(payload,'$.workspace')=?1 AND id<>?2 \
                  ORDER BY updated_at DESC,id LIMIT 1",
-                [workspace],
+                params![workspace, GLOBAL_THREAD_ID],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -1158,6 +1279,11 @@ impl ManagedStore {
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
+        let workspaces = db.query_row(
+            "SELECT count(*),COALESCE(max(last_used),0),COALESCE(sum(hidden),0) FROM workspaces",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
         drop(db);
         let modified = |path: PathBuf| fs::metadata(path).and_then(|meta| meta.modified()).ok();
         let progress = modified(self.root.join(PROGRESS_FILE));
@@ -1170,6 +1296,7 @@ impl ManagedStore {
             schedules,
             projects,
             inbox,
+            workspaces,
             config: modified(state_root.join("config.json")),
             fault: modified(self.root.join(SUPERVISOR_FAULT_FILE)),
             progress,
@@ -2190,6 +2317,27 @@ impl ManagedStore {
         workspace: &Path,
         options: habitat::CreateOptions<'_>,
     ) -> Result<ManagedTask> {
+        let prepared = self
+            .prepare_habitat_task(conversation, id, text, attachments, workspace, &options)
+            .await?;
+        let mut db = self.write_db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let task = Self::create_habitat_task_tx(&tx, &prepared, &options)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    /// Everything a task creation needs outside a transaction: validation,
+    /// the project lookups that shape the record, and its ALGAL receipt.
+    async fn prepare_habitat_task(
+        &self,
+        conversation: &Id,
+        id: Id,
+        text: String,
+        attachments: Vec<Attachment>,
+        workspace: &Path,
+        options: &habitat::CreateOptions<'_>,
+    ) -> Result<PreparedTask> {
         bounded_text(&text, xcb_core::MAX_TEXT_BYTES)?;
         if options.priority > 9 {
             return Err(xcb_core::Error::Invalid("backlog priority").into());
@@ -2197,10 +2345,35 @@ impl ManagedStore {
         if attachments.len() > 8 {
             return Err(xcb_core::Error::Limit("attachments").into());
         }
+        let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
+        let current = self
+            .conversation(conversation)?
+            .ok_or(Error::Unavailable("managed conversation not found"))?;
+        match &current.workspace {
+            Some(bound) => {
+                if *bound != workspace {
+                    return Err(Error::Conflict("managed conversation workspace changed"));
+                }
+                if !Path::new(&workspace).is_dir() {
+                    return Err(Error::Unavailable(
+                        "managed conversation workspace is unavailable",
+                    ));
+                }
+                self.validate_workspace(Path::new(&workspace))?;
+            }
+            None => {
+                if self.validate_workspace(Path::new(&workspace))? != workspace {
+                    return Err(Error::Conflict("workspace is not canonical"));
+                }
+                if options.binding.is_none() {
+                    return Err(Error::Conflict(workspace::THREAD_SPANS));
+                }
+            }
+        }
         let (mut provider_preference, mut provider_required) =
-            self.initial_route_preferences(workspace, &text)?;
+            self.initial_route_preferences(Path::new(&workspace), &text)?;
         let schedule_requirement = if options.occurrence.is_some() && options.program.is_none() {
-            self.project_policy(conversation)?
+            self.project_policy_in(&workspace)?
                 .and_then(|policy| policy.required_provider)
         } else {
             None
@@ -2210,18 +2383,6 @@ impl ManagedStore {
         if let Some(required) = schedule_requirement {
             provider_preference = Some(required);
             provider_required = true;
-        }
-        let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
-        let current = self
-            .conversation(conversation)?
-            .ok_or(Error::Unavailable("managed conversation not found"))?;
-        if current.workspace != workspace {
-            return Err(Error::Conflict("managed conversation workspace changed"));
-        }
-        if !Path::new(&workspace).is_dir() {
-            return Err(Error::Unavailable(
-                "managed conversation workspace is unavailable",
-            ));
         }
         let task_id = Id::new(format!(
             "t_{}",
@@ -2246,6 +2407,13 @@ impl ManagedStore {
             .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?
             .digest()
             .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?;
+        let program_generation = if options.program.is_some() {
+            self.project_policy_in(&workspace)?
+                .filter(|p| p.enabled && p.expires_at_ms > now)
+                .map(|p| p.generation)
+        } else {
+            None
+        };
         let mut task = ManagedTask {
             version: 1,
             id: task_id.clone(),
@@ -2287,18 +2455,15 @@ impl ManagedStore {
                 .and_then(|worker| worker.proposal.clone())
                 .or_else(|| options.proposal.clone()),
             program: options.program.cloned(),
-            program_generation: if options.program.is_some() {
-                self.project_policy(conversation)?
-                    .filter(|p| p.enabled && p.expires_at_ms > now)
-                    .map(|p| p.generation)
-            } else {
-                None
-            },
+            program_generation,
             program_receipt: None,
             program_waiting: false,
             program_child: None,
             daemon_child: None,
             schedule: options.occurrence.map(|o| o.schedule_id().clone()),
+            binding: options.binding.clone(),
+            hold_until_ms: options.hold_until_ms,
+            moved_from: options.moved_from.clone(),
             detail: if routing_question {
                 "This scheduled prompt requests a different provider from the project requirement. Reply with a revised task for the required provider, or cancel this occurrence."
             } else if options.deferred {
@@ -2344,6 +2509,21 @@ impl ManagedStore {
                     "Saved **{}** in the backlog. Release it when ready.",
                     task.title
                 )
+            } else if let Some(binding) = &task.binding {
+                format!(
+                    "Started **{}** in `{}` · {}{}",
+                    task.title,
+                    self.workspace_name(&task.workspace)?,
+                    binding.reason,
+                    if task.hold_until_ms.is_some() {
+                        format!(
+                            " · starts in {}s · /workspace to move",
+                            crate::workspace_infer::WORKSPACE_HOLD_MS / 1000
+                        )
+                    } else {
+                        " · /workspace to move".into()
+                    }
+                )
             } else {
                 format!(
                     "Started **{}**. I’ll keep it moving in the background and bring back results or a specific question.",
@@ -2353,32 +2533,49 @@ impl ManagedStore {
             Some(&task.id),
             task.revision,
         );
-        let mut db = self.write_db()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Ok(PreparedTask {
+            task,
+            receipt,
+            receipt_json,
+            user,
+            ack,
+            schedule_requirement,
+        })
+    }
+
+    /// Publish a prepared task inside the caller's transaction. It only
+    /// re-checks and writes; it never opens a transaction of its own.
+    fn create_habitat_task_tx(
+        tx: &Transaction<'_>,
+        prepared: &PreparedTask,
+        options: &habitat::CreateOptions<'_>,
+    ) -> Result<ManagedTask> {
+        let task = &prepared.task;
+        let conversation = &task.conversation;
         if let Some(mutation) = options.worker {
-            mutation.check(&tx)?;
-            if let Some(saved) = mutation.replay(&tx)? {
+            mutation.check(tx)?;
+            if let Some(saved) = mutation.replay(tx)? {
                 return Ok(saved);
             }
         }
         if let Some(action) = options.ui
-            && let Some(saved) = action.replay(&tx)?
+            && let Some(saved) = action.replay(tx)?
         {
             return Ok(saved);
         }
         if let Some(occurrence) = options.occurrence {
-            occurrence.check(&tx)?;
+            occurrence.check(tx)?;
             if options.program.is_none()
-                && project::policy_from(&tx, conversation)?
+                && project::policy_from(tx, &task.workspace)?
                     .and_then(|policy| policy.required_provider)
-                    != schedule_requirement
+                    != prepared.schedule_requirement
             {
                 return Err(Error::Conflict("project provider requirement changed"));
             }
         }
         if let Some(parent) = options.program_parent {
             let current =
-                task_from(&tx, &parent.id)?.ok_or(Error::Conflict("program parent missing"))?;
+                task_from(tx, &parent.id)?.ok_or(Error::Conflict("program parent missing"))?;
             if current.revision != parent.revision
                 || current.state != TaskState::Running
                 || current.cancel_requested
@@ -2388,7 +2585,7 @@ impl ManagedStore {
                 return Err(Error::Conflict("program parent changed"));
             }
         }
-        if let Some(saved) = task_from(&tx, &task.id)? {
+        if let Some(saved) = task_from(tx, &task.id)? {
             if saved.goal != task.goal
                 || saved.conversation != task.conversation
                 || saved.source_message != task.source_message
@@ -2398,7 +2595,7 @@ impl ManagedStore {
             }
             return Ok(saved);
         }
-        program_state::check_creation(&tx, &task)?;
+        program_state::check_creation(tx, task)?;
         let count: i64 = tx.query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))?;
         let active: i64 = tx.query_row(
             "SELECT count(*) FROM tasks WHERE state IN ('queued','running','needs_input')",
@@ -2411,24 +2608,29 @@ impl ManagedStore {
         if active >= MAX_NONTERMINAL_TASKS {
             return Err(xcb_core::Error::Limit("active managed tasks").into());
         }
-        Self::append_message_tx(&tx, &user, conversation, Some(&task.id))?;
-        tx.execute("INSERT INTO tasks(id,operation,source_message,conversation,state,revision,updated_at,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![task.id.as_str(), task.operation.as_str(), task.source_message.as_str(), conversation.as_str(), task.state.as_str(), sql(task.revision)?, sql(task.updated_at_ms)?, serde_json::to_string(&task)?])?;
+        Self::append_message_tx(tx, &prepared.user, conversation, Some(&task.id))?;
+        tx.execute("INSERT INTO tasks(id,operation,source_message,conversation,state,revision,updated_at,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![task.id.as_str(), task.operation.as_str(), task.source_message.as_str(), conversation.as_str(), task.state.as_str(), sql(task.revision)?, sql(task.updated_at_ms)?, serde_json::to_string(task)?])?;
         tx.execute(
             "INSERT INTO receipts(digest,task,revision,payload) VALUES(?1,?2,?3,?4)",
-            params![receipt, task.id.as_str(), sql(task.revision)?, receipt_json],
+            params![
+                prepared.receipt,
+                task.id.as_str(),
+                sql(task.revision)?,
+                prepared.receipt_json
+            ],
         )?;
-        Self::append_message_tx(&tx, &ack, conversation, Some(&task.id))?;
+        Self::append_message_tx(tx, &prepared.ack, conversation, Some(&task.id))?;
         if let Some(mutation) = options.worker {
-            mutation.record(&tx, &task)?;
+            mutation.record(tx, task)?;
         }
         if let Some(occurrence) = options.occurrence {
-            occurrence.record(&tx, &task)?;
+            occurrence.record(tx, task)?;
         }
         if let Some(action) = options.ui {
-            action.record(&tx, &task)?;
+            action.record(tx, task)?;
         }
-        tx.commit()?;
-        Ok(task)
+        workspace::touch_workspace(tx, &task.workspace, task.created_at_ms)?;
+        Ok(task.clone())
     }
 
     fn record_pair(&self, conversation: &Id, id: Id, text: String, answer: String) -> Result<()> {
@@ -2732,8 +2934,10 @@ impl ManagedStore {
         let current = self
             .conversation(conversation)?
             .ok_or(Error::Unavailable("managed conversation not found"))?;
-        if current.workspace != workspace.to_string_lossy() {
-            return Err(Error::Conflict("managed conversation workspace changed"));
+        match current.workspace.as_deref() {
+            Some(bound) if bound == workspace.to_string_lossy() => (),
+            Some(_) => return Err(Error::Conflict("managed conversation workspace changed")),
+            None => return Err(Error::Conflict(workspace::THREAD_SPANS)),
         }
         let trimmed = text.trim();
         if attachments.is_empty() && offer_question(trimmed) {
@@ -4927,6 +5131,12 @@ impl Supervisor {
             self.managed.tick_projects(now_ms()).await?;
             self.managed.tick_schedules(now_ms()).await?;
         }
+        if let Err(error) = self.managed.tick_workspace_identity(now_ms()) {
+            record_supervisor_fault(
+                self.managed.root(),
+                &format!("project directory upkeep failed: {}", fault_text(&error)),
+            );
+        }
         let mut tasks = self.managed.active_tasks(128)?;
         tasks.sort_by_key(|task| {
             (
@@ -5238,11 +5448,11 @@ impl Supervisor {
             && task.context_carried
             && message_count > task.message_count_before;
         let mut prompt = worker_prompt(&prompt_task, &preferences, &[], carried);
-        append_context(&mut prompt, &managed.project_context(&task.conversation)?);
+        append_context(&mut prompt, &managed.project_context_in(&task.workspace)?);
         if !carried {
             append_context(
                 &mut prompt,
-                &managed.working_memory_context(&task.conversation, Some(&task.id))?,
+                &managed.working_memory_context_in(&task.workspace, Some(&task.id))?,
             );
         }
         if bounded_text(&prompt, xcb_core::MAX_TEXT_BYTES).is_err() {
@@ -5555,8 +5765,14 @@ fn managed_view(
     };
     view.conversation = Some(conversation.clone());
     let message_counts = managed.message_counts()?;
-    view.conversations = managed
-        .conversations(64)?
+    let mut conversations = managed.conversations(64)?;
+    // The thread is pinned first whenever it exists, independent of the
+    // recency window, so it never falls off the list.
+    conversations.retain(|conversation| !conversation.is_thread());
+    if let Some(thread) = managed.conversation(&Id::new(GLOBAL_THREAD_ID)?)? {
+        conversations.insert(0, thread);
+    }
+    view.conversations = conversations
         .into_iter()
         .map(|conversation| ConversationRow {
             messages: message_counts
@@ -5565,7 +5781,7 @@ fn managed_view(
                 .unwrap_or_default(),
             id: conversation.id,
             title: conversation.title,
-            workspace: conversation.workspace,
+            workspace: conversation.workspace.unwrap_or_default(),
             updated_at_ms: conversation.updated_at_ms,
         })
         .collect();
@@ -5643,6 +5859,8 @@ fn managed_view(
                 route_reason: task.route_reason.clone(),
                 settle: task.settle.clone(),
                 workspace: task.workspace.clone(),
+                binding: task.binding.as_ref().map(|binding| binding.reason.clone()),
+                hold_until_ms: task.hold_until_ms,
                 updated_at_ms: task.updated_at_ms,
             }
         })
@@ -5671,6 +5889,17 @@ fn managed_view(
         .schedules(None)?
         .into_iter()
         .map(|schedule| xcb_core::ui::ScheduleRow {
+            workspace: schedule
+                .workspace
+                .clone()
+                .or_else(|| {
+                    managed
+                        .conversation(&schedule.conversation)
+                        .ok()
+                        .flatten()
+                        .and_then(|conversation| conversation.workspace)
+                })
+                .unwrap_or_default(),
             id: schedule.id,
             conversation: schedule.conversation,
             prompt: schedule.prompt,
@@ -5744,7 +5973,7 @@ pub async fn serve_ui(
     let selected = managed
         .conversation(&conversation)?
         .ok_or(Error::Unavailable("managed conversation not found"))?;
-    let mut workspace = PathBuf::from(selected.workspace);
+    let mut workspace = PathBuf::from(selected.workspace.unwrap_or_default());
     if store.accounts()?.is_empty() {
         output
             .try_send(Update::Notice(
@@ -6004,10 +6233,16 @@ pub async fn serve_ui(
                     break;
                 }
                 Intent::Refresh => (),
+                Intent::Focus(_)
+                | Intent::MoveTask { .. }
+                | Intent::ReleaseHold { .. }
+                | Intent::AddWorkspace { .. } => {
+                    let _ = output.try_send(Update::Notice("not available yet".into()));
+                }
                 Intent::Conversation(id) => match managed.conversation(&id)? {
                     Some(selected) => {
                         conversation = selected.id;
-                        workspace = PathBuf::from(selected.workspace);
+                        workspace = PathBuf::from(selected.workspace.unwrap_or_default());
                     }
                     None => {
                         output
@@ -6139,8 +6374,12 @@ mod tests {
     fn root() -> TempDir {
         tempfile::tempdir().unwrap()
     }
+    /// The project directory: a sibling of the state root, never inside it.
     fn workspace(root: &TempDir) -> PathBuf {
-        root.path().canonicalize().unwrap()
+        private::directory(&root.path().canonicalize().unwrap().join("work")).unwrap()
+    }
+    fn state_dir(root: &TempDir) -> PathBuf {
+        root.path().canonicalize().unwrap().join("state")
     }
     fn message(name: &str) -> Id {
         Id::new(name).unwrap()
@@ -6180,7 +6419,7 @@ mod tests {
     async fn user_input_renews_continuation_budget_and_receipts_replay() {
         let root = root();
         let workspace = workspace(&root);
-        let managed = ManagedStore::open(&workspace).unwrap();
+        let managed = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&managed, &workspace).await;
         let task = managed
             .create_task(
@@ -6329,7 +6568,7 @@ mod tests {
     async fn duplicate_client_message_creates_one_task_and_one_user_turn() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&store, &workspace).await;
         store
             .submit(
@@ -6494,7 +6733,7 @@ mod tests {
     async fn concurrent_conversations_isolate_transcripts_and_share_the_task_swarm() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let first = conversation(&store, &workspace).await;
         let second = conversation(&store, &workspace).await;
         let (first_result, second_result) = tokio::join!(
@@ -6751,7 +6990,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         let count: i64 = migrated
             .db()
             .unwrap()
@@ -6766,7 +7005,7 @@ mod tests {
     async fn one_pending_question_captures_the_next_conversational_reply() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&store, &workspace).await;
         let task = store
             .create_task(
@@ -6804,7 +7043,7 @@ mod tests {
     async fn bare_answer_in_another_conversation_never_reaches_a_waiting_worker() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let owner = conversation(&store, &workspace).await;
         let observer = conversation(&store, &workspace).await;
         let task = store
@@ -6853,7 +7092,7 @@ mod tests {
     async fn ambiguous_answer_is_never_broadcast_to_multiple_waiting_tasks() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&store, &workspace).await;
         for (message_id, text) in [("m_first", "first task"), ("m_second", "second task")] {
             let task = store
@@ -6889,7 +7128,7 @@ mod tests {
     async fn bare_cancellation_is_scoped_to_its_conversation() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let first = conversation(&store, &workspace).await;
         let second = conversation(&store, &workspace).await;
         let first_task = store
@@ -6942,7 +7181,7 @@ mod tests {
     async fn cancelling_queued_work_settles_without_claiming_a_worker_was_stopped() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&store, &workspace).await;
         let task = store
             .create_task(
@@ -6975,7 +7214,7 @@ mod tests {
     async fn startup_requeues_only_a_provably_unadmitted_dispatch_gap() {
         let root = root();
         let workspace = workspace(&root);
-        let state = private::directory(&workspace.join("state")).unwrap();
+        let state = private::directory(&state_dir(&root)).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -7239,7 +7478,7 @@ mod tests {
     fn learned_routes_require_repeated_success_and_reverse_after_failures() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         {
             let db = store.db().unwrap();
             db.execute(
@@ -7267,7 +7506,7 @@ mod tests {
     async fn learned_provider_is_soft_but_an_explicit_provider_request_is_required() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         store
             .db()
             .unwrap()
@@ -7403,7 +7642,7 @@ mod tests {
     async fn preference_is_scoped_and_injected_without_becoming_a_task() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&store, &workspace).await;
         store
             .submit(
@@ -7480,6 +7719,9 @@ mod tests {
             program_child: None,
             daemon_child: None,
             schedule: None,
+            binding: None,
+            hold_until_ms: None,
+            moved_from: None,
             detail: "x".into(),
             settle: None,
             acted: None,
@@ -7567,7 +7809,7 @@ mod tests {
     async fn replacement_session_drops_carried_prompt_context() {
         let root = root();
         let workspace = workspace(&root);
-        let managed = ManagedStore::open(&workspace).unwrap();
+        let managed = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&managed, &workspace).await;
         let task = managed
             .create_task(&chat, message("m_x"), "work".into(), vec![], &workspace)
@@ -7724,7 +7966,7 @@ mod tests {
     async fn startup_reconcile_continues_past_a_conflicting_task() {
         let root = root();
         let workspace = workspace(&root);
-        let state = private::directory(&workspace.join("state")).unwrap();
+        let state = private::directory(&state_dir(&root)).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -7985,7 +8227,7 @@ mod tests {
     async fn unresolvable_judge_keeps_the_deterministic_verdict() {
         let root = root();
         let workspace = workspace(&root);
-        let state = private::directory(&workspace.join("state")).unwrap();
+        let state = private::directory(&state_dir(&root)).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let mut config = Config::default();
@@ -8027,7 +8269,7 @@ mod tests {
     async fn undecodable_task_rows_are_skipped_counted_and_surfaced() {
         let root = root();
         let workspace = workspace(&root);
-        let managed = ManagedStore::open(&workspace).unwrap();
+        let managed = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&managed, &workspace).await;
         managed
             .create_task(&chat, message("m_good"), "good".into(), vec![], &workspace)
@@ -8103,7 +8345,7 @@ mod tests {
     async fn unknown_route_stat_providers_do_not_block_intake() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         {
             let db = store.db().unwrap();
             db.execute(

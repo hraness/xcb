@@ -1195,6 +1195,8 @@ mod tests {
             route_reason: None,
             settle: None,
             workspace: "/project".into(),
+            binding: None,
+            hold_until_ms: None,
             updated_at_ms: 1,
         });
         let now = crate::display_now_ms();

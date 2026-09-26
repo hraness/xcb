@@ -108,11 +108,12 @@ impl ManagedStore {
             if conversation.id.as_str() != id || conversation.validate().is_err() {
                 continue;
             }
+            let thread = conversation.is_thread();
             let mut row = AgentRow {
                 context: TranscriptContext::Conversation(conversation.id.clone()),
                 task: None,
                 title: conversation.title,
-                workspace: conversation.workspace,
+                workspace: conversation.workspace.unwrap_or_default(),
                 model: None,
                 state: State::Idle,
                 activity: "idle".into(),
@@ -125,7 +126,7 @@ impl ManagedStore {
                     task.validate()?;
                     if task.id.as_str() != task_id
                         || task.conversation != conversation.id
-                        || task.workspace != row.workspace
+                        || (!thread && task.workspace != row.workspace)
                     {
                         return Err(Error::Conflict("overview task identity mismatch"));
                     }

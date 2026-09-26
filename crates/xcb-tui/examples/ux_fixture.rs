@@ -83,6 +83,7 @@ fn fixture() -> View {
         view.backlog.push(BacklogRow {
             id: id(name),
             conversation: conversation.clone(),
+            workspace: String::new(),
             title: title.into(),
             prompt: format!("Synthetic work: {title}"),
             summary: if state == State::NeedsAnswer {
@@ -109,6 +110,8 @@ fn fixture() -> View {
             route_reason: Some("Acceptance fixture".into()),
             settle: None,
             workspace: "/tmp/xcb-fixture".into(),
+            binding: None,
+            hold_until_ms: None,
             updated_at_ms: now_ms(),
         });
     }
@@ -131,6 +134,7 @@ fn fixture() -> View {
         messages: view.messages.clone(),
         first_sequence: Some(10),
         has_older: true,
+        workspaces: Default::default(),
     });
     view
 }
@@ -227,7 +231,7 @@ fn main() -> io::Result<()> {
                 Intent::TranscriptPage {
                     request, context, ..
                 } => {
-                    let _ = updates.send(Update::TranscriptPage { request, page: TranscriptPage { context, messages: vec![message("fixture-older", Role::Assistant, "Earlier conversation: the history needle is here.\nThis page is fetched through the normal UI channel.")], first_sequence: Some(1), has_older: false } });
+                    let _ = updates.send(Update::TranscriptPage { request, page: TranscriptPage { context, messages: vec![message("fixture-older", Role::Assistant, "Earlier conversation: the history needle is here.\nThis page is fetched through the normal UI channel.")], first_sequence: Some(1), has_older: false, workspaces: Default::default() } });
                     continue;
                 }
                 Intent::Habitat(HabitatCommand::Steer { task, event, text }) => {
@@ -290,6 +294,7 @@ fn main() -> io::Result<()> {
                         prompt,
                         deferred,
                         priority,
+                        ..
                     }
                     | HabitatCommand::EnqueueIn {
                         id: task,
@@ -302,6 +307,7 @@ fn main() -> io::Result<()> {
                     view.backlog.push(BacklogRow {
                         id: task.clone(),
                         conversation: context.clone(),
+                        workspace: String::new(),
                         title: prompt.chars().take(60).collect(),
                         prompt: prompt.clone(),
                         summary: "Waiting in the synthetic queue".into(),
