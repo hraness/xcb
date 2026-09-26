@@ -93,6 +93,5 @@ describe("xcb blog", () => {
       expect(feed).not.toContain(`<id>https://xcb.sh${blogPostPath(entry)}</id>`);
       expect(llms).not.toContain(blogPostPath(entry));
     }
-    expect(quarantined.length).toBeGreaterThan(0);
   });
 });

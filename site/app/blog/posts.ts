@@ -233,11 +233,11 @@ export const blogPosts: readonly BlogPost[] = [
       { title: "ALGAL README: organisms, declared limits, records that explain a run without calling the model", href: algalAt("1bc117d", "README.md"), checkedOn },
     ],
     admission: {
-      lifecycle: "quarantined",
+      lifecycle: "indexable",
       readerJob: "Decide whether to let xcb's reflexes continue stopped turns and answer go-ahead requests for you, and know what stops them from acting on a risky turn.",
       nonObviousAnswer: "Each reflex is an effect-free ALGAL program with zero model calls, so every past decision can be recomputed from its recorded program fingerprint and params version; in auto mode a head acts only after at least 30 firings on your own newest 1,500 labeled turns clear a 99% lower bound of 0.75 (continue) or 0.85 (yes), about one turn in ten stays with you, and the risk veto lives in xcb, outside any program you can swap in.",
       originalContribution: "Certification constants, program budgets, and the veto list read from xcb source at 6437bcb.",
-      hostFit: "Right host and shape, but the relation runtime:xcb:algal:replays-task-history-with is not registered in @hraness/design-kit/portfolio v0.17.0, so the post stays quarantined until it is.",
+      hostFit: "The registered runtime:xcb:algal:replays-task-history-with relation carries the detail sentence this post explains, on the consumer's host.",
       nearestUrls: [
         { url: "/docs/reflexes", distinction: "The reference documents every rule; the post explains why the program and its params are separate." },
         { url: "/reflexes", distinction: "The use-case page sells the outcome; the post shows the certification rule and its limits." },
@@ -246,7 +246,7 @@ export const blogPosts: readonly BlogPost[] = [
         "Labels from turns xcb answered itself train a head but cannot certify it, because they would only confirm its own choices.",
         "The risk veto lives in xcb rather than in the replaceable program, so a custom reflex program cannot remove it.",
       ],
-      scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 0, voiceIntegrity: 2, maintenanceValue: 1 },
+      scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
       reassessOn: "2026-11-05",
       harmIfWrong: "A reader could let reflexes answer go-ahead requests on the belief that a certificate guarantees a correct call.",
       refreshTriggers: [
@@ -278,11 +278,11 @@ export const blogPosts: readonly BlogPost[] = [
       { title: "Wordcell agent memory: search modes and opt-in Git history", href: wordcell("docs/agent-memory.md"), checkedOn },
     ],
     admission: {
-      lifecycle: "quarantined",
+      lifecycle: "indexable",
       readerJob: "Decide whether to let xcb agents search a Markdown notes vault, and learn how to bind it, what workers can do with it, and how a note gets saved back.",
       nonObviousAnswer: "Nothing from the vault reaches a worker's prompt unless the worker calls xcb_memory_search, which runs Wordcell's exact mode against a hash-pinned binary and vault identity; workers have no write tool, and a save is a separate xcb memory promote step whose note name is a hash, so a retry cannot duplicate it.",
       originalContribution: "Pinning, the cleared environment, the dash-query refusal, hashed note names, and exit-code behavior read from wordcell.rs, habitat.rs, broker.rs, and managed_project.rs.",
-      hostFit: "Right host and shape, but the relation runtime:xcb:kb:searches-project-notes-with is not registered in @hraness/design-kit/portfolio v0.17.0, so the post stays quarantined until it is.",
+      hostFit: "The registered runtime:xcb:kb:searches-project-notes-with relation carries the detail sentence this post explains, on the consumer's host.",
       nearestUrls: [
         { url: "https://github.com/hraness/xcb/blob/main/docs/project-agents.md", distinction: "The project-agent reference lists the commands; the post explains what a worker can and cannot do with the vault." },
       ],
