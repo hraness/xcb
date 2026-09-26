@@ -1,6 +1,7 @@
-//! Conversation-scoped backlog, host-owned timers and bounded working memory.
+//! Workspace-scoped backlog, host-owned timers and bounded working memory.
 //! No provider scheduling or process retry authority is introduced here.
 use super::*;
+use crate::workspace_infer::{BindingConfidence, BindingOrigin, BindingSource, WorkspaceBinding};
 
 const MAX_SCHEDULES: i64 = 128;
 const MIN_INTERVAL_MS: u64 = 60_000;
@@ -67,6 +68,58 @@ pub(super) fn validate_prompt(prompt: &str) -> Result<()> {
         return Err(xcb_core::Error::Invalid("empty backlog prompt").into());
     }
     Ok(())
+}
+
+/// The binding a thread child inherits from the task, program, daemon or
+/// schedule that created it. `reason` names the parent, so a replay through
+/// `same_identity` stays exact. Tasks in a project view carry none.
+pub(super) fn inherited_binding(
+    conversation: &Id,
+    origin: BindingOrigin,
+    reason: String,
+) -> Option<WorkspaceBinding> {
+    (conversation.as_str() == GLOBAL_THREAD_ID).then_some(WorkspaceBinding {
+        source: BindingSource::Inherited,
+        confidence: BindingConfidence::High,
+        origin,
+        reason,
+        alternatives: vec![],
+    })
+}
+
+/// The binding of a thread task whose directory the owner named: a CLI
+/// scope or `--workspace`, or the TUI authority ladder.
+pub(super) fn explicit_binding(
+    conversation: &Id,
+    origin: BindingOrigin,
+) -> Option<WorkspaceBinding> {
+    (conversation.as_str() == GLOBAL_THREAD_ID).then(|| WorkspaceBinding {
+        source: BindingSource::Explicit,
+        confidence: BindingConfidence::High,
+        origin,
+        reason: "named explicitly".into(),
+        alternatives: vec![],
+    })
+}
+
+/// A schedule's directory: its own in the thread, else its project view's.
+fn schedule_workspace(db: &Connection, schedule: &HabitatSchedule) -> Result<String> {
+    if let Some(workspace) = &schedule.workspace {
+        return Ok(workspace.clone());
+    }
+    let payload: String = db
+        .query_row(
+            "SELECT payload FROM conversations WHERE id=?1",
+            [schedule.conversation.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(Error::Unavailable("scheduled conversation not found"))?;
+    let conversation: ManagedConversation = decode(&payload)?;
+    conversation.validate()?;
+    conversation.workspace.ok_or(Error::Conflict(
+        "schedule has no project directory; the thread needs one",
+    ))
 }
 
 pub(super) fn migrate(connection: &mut Connection) -> Result<()> {
@@ -157,22 +210,17 @@ impl Occurrence {
         {
             return Err(Error::Conflict("schedule changed before dispatch"));
         }
-        if workspace::policy_for_conversation(tx, &current.conversation)?
-            .is_some_and(|p| !p.enabled)
-        {
+        let workspace = schedule_workspace(tx, &current)?;
+        if project::policy_from(tx, &workspace)?.is_some_and(|p| !p.enabled) {
             return Err(Error::Conflict("project is paused"));
         }
         // Block on all outstanding work in this project, including an uncertain
         // terminal record. A timer must never infer that uncertainty settled.
-        let mut query = tx.prepare("SELECT payload FROM tasks WHERE conversation=?1 AND state IN ('queued','running','needs_input','uncertain')")?;
-        for row in query.query_map([current.conversation.as_str()], |row| {
-            row.get::<_, String>(0)
-        })? {
-            let task: ManagedTask = decode(&row?)?;
-            task.validate()?;
-            if !task.deferred {
-                return Err(Error::Conflict("schedule waits for existing project work"));
-            }
+        if project::outstanding_in(tx, &workspace, None)?
+            .iter()
+            .any(|task| !task.deferred)
+        {
+            return Err(Error::Conflict("schedule waits for existing project work"));
         }
         Ok(())
     }
@@ -197,6 +245,10 @@ impl Occurrence {
 pub(super) struct WorkerMutation {
     pub(super) source: ManagedTask,
     pub(super) proposal: Option<ProjectProposal>,
+    /// `xcb_backlog_add` saves the task it created, in the source's
+    /// conversation; update and complete save a target from any conversation
+    /// over the source's workspace.
+    adds: bool,
     session: Id,
     call: Id,
     input: String,
@@ -289,6 +341,7 @@ impl WorkerMutation {
         Ok(Self {
             source: source.clone(),
             proposal: None,
+            adds: name == "xcb_backlog_add",
             session: session.clone(),
             call: Id::new(format!(
                 "hc_{}",
@@ -342,8 +395,10 @@ impl WorkerMutation {
             }
             let saved: ManagedTask = decode(&response)?;
             saved.validate()?;
-            if saved.conversation != self.source.conversation {
-                return Err(Error::Conflict("habitat result conversation mismatch"));
+            if saved.workspace != self.source.workspace
+                || (self.adds && saved.conversation != self.source.conversation)
+            {
+                return Err(Error::Conflict("habitat result project mismatch"));
             }
             Ok(saved)
         })
@@ -372,7 +427,7 @@ impl WorkerMutation {
 }
 
 impl ManagedStore {
-    fn habitat_list_task(&self, db: &Connection, id: &str) -> Option<ManagedTask> {
+    pub(super) fn habitat_list_task(&self, db: &Connection, id: &str) -> Option<ManagedTask> {
         match Id::new(id.to_owned())
             .map_err(Error::from)
             .and_then(|id| task_from(db, &id))
@@ -503,9 +558,16 @@ impl ManagedStore {
                 priority,
                 workspace,
             } => {
-                self.check_view_workspace(conversation, workspace.as_deref())?;
                 let task = self
-                    .enqueue_backlog(conversation, id, prompt, deferred, priority)
+                    .enqueue_backlog_at(
+                        conversation,
+                        workspace.as_deref().map(Path::new),
+                        BindingOrigin::Tui,
+                        id,
+                        prompt,
+                        deferred,
+                        priority,
+                    )
                     .await?;
                 Ok(format!("{} · {}", task.id, task.habitat_status()))
             }
@@ -520,9 +582,16 @@ impl ManagedStore {
                 if &expected != conversation {
                     return Err(Error::Conflict("conversation changed before queueing work"));
                 }
-                self.check_view_workspace(conversation, workspace.as_deref())?;
                 let task = self
-                    .enqueue_backlog(&expected, id, prompt, deferred, priority)
+                    .enqueue_backlog_at(
+                        &expected,
+                        workspace.as_deref().map(Path::new),
+                        BindingOrigin::Tui,
+                        id,
+                        prompt,
+                        deferred,
+                        priority,
+                    )
                     .await?;
                 Ok(format!("{} · {}", task.id, task.habitat_status()))
             }
@@ -559,12 +628,17 @@ impl ManagedStore {
                 interval_ms,
                 workspace,
             } => {
-                self.check_view_workspace(conversation, workspace.as_deref())?;
                 let due = now_ms()
                     .checked_add(interval_ms)
                     .ok_or(xcb_core::Error::Limit("schedule clock"))?;
                 let schedule = self
-                    .create_schedule(conversation, prompt, interval_ms, due)
+                    .create_schedule_at(
+                        conversation,
+                        workspace.as_deref().map(Path::new),
+                        prompt,
+                        interval_ms,
+                        due,
+                    )
                     .await?;
                 Ok(format!(
                     "Schedule {} enabled; first wake in {} seconds",
@@ -656,17 +730,36 @@ impl ManagedStore {
         Ok(tasks)
     }
 
-    /// A carried `workspace` must match the view it is submitted to; the
-    /// thread's entry paths are wired separately.
-    fn check_view_workspace(&self, conversation: &Id, workspace: Option<&str>) -> Result<()> {
-        if let Some(workspace) = workspace
-            && self.conversation_workspace(conversation)? != workspace
-        {
-            return Err(Error::Conflict("workspace changed before queueing work"));
+    /// The directory an entry-created task, daemon or schedule runs in. A
+    /// project view accepts no directory or its own. The thread requires
+    /// one that the caller already resolved: it must validate to exactly
+    /// the given canonical string and is never snapped.
+    pub(super) fn entry_workspace(
+        &self,
+        conversation: &Id,
+        workspace: Option<&Path>,
+    ) -> Result<String> {
+        if conversation.as_str() != GLOBAL_THREAD_ID {
+            let bound = self.conversation_workspace(conversation)?;
+            if let Some(path) = workspace
+                && path != Path::new(&bound)
+                && self.validate_workspace(path)? != bound
+            {
+                return Err(Error::Conflict(
+                    "workspace differs from the project view's directory",
+                ));
+            }
+            return Ok(bound);
         }
-        Ok(())
+        let path = workspace.ok_or(Error::Conflict(workspace::THREAD_SPANS))?;
+        let canonical = self.validate_workspace(path)?;
+        if path.to_str() != Some(canonical.as_str()) {
+            return Err(Error::Conflict("workspace is not canonical"));
+        }
+        Ok(canonical)
     }
 
+    /// Shim: queue work in a project view's directory.
     pub async fn enqueue_backlog(
         &self,
         conversation: &Id,
@@ -675,20 +768,49 @@ impl ManagedStore {
         deferred: bool,
         priority: u8,
     ) -> Result<ManagedTask> {
+        self.enqueue_backlog_at(
+            conversation,
+            None,
+            BindingOrigin::Cli,
+            submission,
+            prompt,
+            deferred,
+            priority,
+        )
+        .await
+    }
+
+    /// Queue work in `workspace` (see [`Self::entry_workspace`]). A thread
+    /// task records `origin` in its explicit binding.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enqueue_backlog_at(
+        &self,
+        conversation: &Id,
+        workspace: Option<&Path>,
+        origin: BindingOrigin,
+        submission: Id,
+        prompt: String,
+        deferred: bool,
+        priority: u8,
+    ) -> Result<ManagedTask> {
         validate_prompt(&prompt)?;
-        let workspace = self.conversation_workspace(conversation)?;
+        let workspace = self.entry_workspace(conversation, workspace)?;
+        let binding = explicit_binding(conversation, origin);
+        if binding.is_some() {
+            self.global_thread().await?;
+        }
         let task = Id::new(format!(
             "t_{}",
             digest(format!(
                 "xcb-task-v1\0{conversation}\0{submission}\0{workspace}"
             ))
         ))?;
-        let action = UiMutation::new(
-            &submission,
-            &task,
-            json!({"action":"enqueue","conversation":conversation,"prompt":prompt,
-                   "deferred":deferred,"priority":priority}),
-        )?;
+        let mut input = json!({"action":"enqueue","conversation":conversation,"prompt":prompt,
+                   "deferred":deferred,"priority":priority});
+        if binding.is_some() {
+            input["workspace"] = json!(workspace);
+        }
+        let action = UiMutation::new(&submission, &task, input)?;
         if let Some(saved) = action.replay(&*self.db()?)? {
             return Ok(saved);
         }
@@ -702,6 +824,7 @@ impl ManagedStore {
                 deferred,
                 priority,
                 ui: Some(&action),
+                binding,
                 ..CreateOptions::default()
             },
         )
@@ -744,9 +867,9 @@ impl ManagedStore {
                 "only the current deferred, unstarted backlog task can be edited",
             ));
         }
-        if mutation.is_some_and(|m| task.conversation != m.source.conversation) {
+        if mutation.is_some_and(|m| task.workspace != m.source.workspace) {
             return Err(Error::Conflict(
-                "backlog edit is outside the worker conversation",
+                "backlog edit is outside the worker's project",
             ));
         }
         let mut next = task.clone();
@@ -948,6 +1071,7 @@ impl ManagedStore {
         Ok(schedules)
     }
 
+    /// Shim: a schedule in a project view's directory.
     pub async fn create_schedule(
         &self,
         conversation: &Id,
@@ -955,10 +1079,32 @@ impl ManagedStore {
         interval_ms: u64,
         first_due_ms: u64,
     ) -> Result<HabitatSchedule> {
-        self.create_schedule_inner(conversation, prompt, None, interval_ms, first_due_ms)
+        self.create_schedule_at(conversation, None, prompt, interval_ms, first_due_ms)
             .await
     }
 
+    /// A recurring prompt in `workspace` (see [`Self::entry_workspace`]).
+    /// The directory is fixed now and never inferred at fire time.
+    pub async fn create_schedule_at(
+        &self,
+        conversation: &Id,
+        workspace: Option<&Path>,
+        prompt: String,
+        interval_ms: u64,
+        first_due_ms: u64,
+    ) -> Result<HabitatSchedule> {
+        self.create_schedule_inner(
+            conversation,
+            workspace,
+            prompt,
+            None,
+            interval_ms,
+            first_due_ms,
+        )
+        .await
+    }
+
+    /// Shim: a program schedule in a project view's directory.
     pub async fn create_program_schedule(
         &self,
         conversation: &Id,
@@ -967,12 +1113,36 @@ impl ManagedStore {
         interval_ms: u64,
         first_due_ms: u64,
     ) -> Result<HabitatSchedule> {
+        self.create_program_schedule_at(
+            conversation,
+            None,
+            prompt,
+            program,
+            interval_ms,
+            first_due_ms,
+        )
+        .await
+    }
+
+    /// A program schedule in `workspace`; managed agent calls need that
+    /// directory's grant now and again at each occurrence.
+    pub async fn create_program_schedule_at(
+        &self,
+        conversation: &Id,
+        workspace: Option<&Path>,
+        prompt: String,
+        program: crate::managed_program::AdmittedProgram,
+        interval_ms: u64,
+        first_due_ms: u64,
+    ) -> Result<HabitatSchedule> {
         program.verify()?;
         if program.managed_calls > 0 {
-            program_state::require_grant(&*self.db()?, conversation, None, now_ms(), true)?;
+            let workspace = self.entry_workspace(conversation, workspace)?;
+            program_state::require_grant(&*self.db()?, &workspace, None, now_ms(), true)?;
         }
         self.create_schedule_inner(
             conversation,
+            workspace,
             prompt,
             Some(program),
             interval_ms,
@@ -984,17 +1154,22 @@ impl ManagedStore {
     async fn create_schedule_inner(
         &self,
         conversation: &Id,
+        workspace: Option<&Path>,
         prompt: String,
         program: Option<crate::managed_program::AdmittedProgram>,
         interval_ms: u64,
         first_due_ms: u64,
     ) -> Result<HabitatSchedule> {
-        self.conversation_workspace(conversation)?;
+        let workspace = self.entry_workspace(conversation, workspace)?;
+        let thread = conversation.as_str() == GLOBAL_THREAD_ID;
+        if thread {
+            self.global_thread().await?;
+        }
         let now = now_ms();
         let schedule = HabitatSchedule {
             id: new_id("schedule"),
             conversation: conversation.clone(),
-            workspace: None,
+            workspace: thread.then_some(workspace),
             prompt,
             program,
             interval_ms,
@@ -1087,20 +1262,22 @@ impl ManagedStore {
             let current = self
                 .conversation(&occurrence.schedule.conversation)?
                 .ok_or(Error::Unavailable("scheduled conversation not found"))?;
-            let Some(workspace) = occurrence
-                .schedule
-                .workspace
-                .clone()
-                .or_else(|| current.workspace.clone())
-            else {
-                record_supervisor_fault(
-                    self.root(),
-                    &format!(
-                        "schedule {} has no project directory; the occurrence was skipped",
-                        occurrence.schedule.id
-                    ),
-                );
-                continue;
+            // The directory was fixed when the schedule was created; an
+            // occurrence never infers one.
+            let resolved = schedule_workspace(&*self.db()?, &occurrence.schedule);
+            let workspace = match resolved {
+                Ok(workspace) => workspace,
+                Err(error) => {
+                    record_supervisor_fault(
+                        self.root(),
+                        &format!(
+                            "schedule {} has no project directory ({}); the occurrence was skipped",
+                            occurrence.schedule.id,
+                            fault_text(&error)
+                        ),
+                    );
+                    continue;
+                }
             };
             let submission = Id::new(format!(
                 "m_{}",
@@ -1119,6 +1296,11 @@ impl ManagedStore {
                     CreateOptions {
                         occurrence: Some(&occurrence),
                         program: occurrence.schedule.program.as_ref(),
+                        binding: inherited_binding(
+                            &current.id,
+                            BindingOrigin::Schedule,
+                            format!("schedule {}", occurrence.schedule.id),
+                        ),
                         ..CreateOptions::default()
                     },
                 )
@@ -1152,28 +1334,23 @@ impl ManagedStore {
         }))
     }
 
+    /// Shim: working memory of a project view's directory.
     pub fn working_memory(&self, conversation: &Id, limit: usize) -> Result<Vec<WorkMemory>> {
-        self.working_memory_where("conversation", conversation.as_str(), limit)
+        self.working_memory_in(&self.conversation_workspace(conversation)?, limit)
     }
 
-    /// Working memory of every task bound to one workspace.
+    /// Working memory of every task bound to one workspace, from any
+    /// conversation over it.
     pub fn working_memory_in(&self, workspace: &str, limit: usize) -> Result<Vec<WorkMemory>> {
-        self.working_memory_where("workspace", workspace, limit)
-    }
-
-    fn working_memory_where(
-        &self,
-        column: &'static str,
-        key: &str,
-        limit: usize,
-    ) -> Result<Vec<WorkMemory>> {
         if !(1..=32).contains(&limit) {
             return Err(xcb_core::Error::Invalid("working memory limit").into());
         }
         let db = self.db()?;
-        let mut query = db.prepare(&format!("SELECT id FROM tasks WHERE {column}=?1 AND state IN ('completed','failed','cancelled','uncertain','needs_input') ORDER BY updated_at DESC,id LIMIT ?2"))?;
+        let mut query = db.prepare("SELECT id FROM tasks WHERE workspace=?1 AND state IN ('completed','failed','cancelled','uncertain','needs_input') ORDER BY updated_at DESC,id LIMIT ?2")?;
         let ids = query
-            .query_map(params![key, limit as i64], |row| row.get::<_, String>(0))?
+            .query_map(params![workspace, limit as i64], |row| {
+                row.get::<_, String>(0)
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut rows = Vec::new();
         for id in ids {
@@ -1228,7 +1405,7 @@ impl ManagedStore {
             Err(e) => return (Err(e), EffectState::None),
         };
         if name == "xcb_backlog_add" && source.program_child.is_none() {
-            mutation.proposal = match self.project_policy(&source.conversation) {
+            mutation.proposal = match self.project_policy_in(&source.workspace) {
                 Ok(Some(policy)) if policy.enabled && policy.expires_at_ms > now_ms() => {
                     Some(ProjectProposal {
                         parent: source.id.clone(),
@@ -1265,7 +1442,7 @@ impl ManagedStore {
             }
             let result = match serde_json::from_value::<Search>(input.clone()) {
                 Ok(args) => {
-                    self.search_memory(&source.conversation, &args.query, args.limit)
+                    self.search_memory_in(&source.workspace, &args.query, args.limit)
                         .await
                 }
                 Err(error) => Err(error.into()),
@@ -1283,9 +1460,9 @@ impl ManagedStore {
                 let task = self
                     .task(&args.task_id)?
                     .ok_or(Error::Unavailable("backlog task not found"))?;
-                if task.conversation != source.conversation {
+                if task.workspace != source.workspace {
                     return Err(Error::Conflict(
-                        "backlog read is outside the worker conversation",
+                        "backlog read is outside the worker's project",
                     ));
                 }
                 let mut row = compact_task(&task);
@@ -1314,11 +1491,11 @@ impl ManagedStore {
                         return Err(xcb_core::Error::Invalid("backlog limit").into());
                     }
                     Ok(
-                        json!({"conversation":source.conversation,"tasks":self.backlog(Some(&source.conversation),page.limit)?.iter().map(compact_task).collect::<Vec<_>>()}),
+                        json!({"conversation":source.conversation,"workspace":source.workspace,"tasks":self.backlog_in(&source.workspace,page.limit)?.iter().map(compact_task).collect::<Vec<_>>()}),
                     )
                 } else {
                     Ok(
-                        json!({"conversation":source.conversation,"memory":self.working_memory(&source.conversation,page.limit)?}),
+                        json!({"conversation":source.conversation,"workspace":source.workspace,"memory":self.working_memory_in(&source.workspace,page.limit)?}),
                     )
                 }
             })();
@@ -1360,6 +1537,11 @@ impl ManagedStore {
                             deferred: true,
                             priority: args.priority,
                             worker: Some(&mutation),
+                            binding: inherited_binding(
+                                &source.conversation,
+                                BindingOrigin::Worker,
+                                format!("from {}", source.id),
+                            ),
                             ..CreateOptions::default()
                         },
                     )
@@ -1405,7 +1587,7 @@ impl ManagedStore {
 }
 
 fn compact_task(task: &ManagedTask) -> Value {
-    json!({"id":task.id,"conversation":task.conversation,"title":task.title,"status":task.habitat_status(),"state":task.habitat_ui_state(),"deferred":task.deferred,"priority":task.priority,"revision":task.revision,"summary":xcb_core::display_text(task.work_summary(),512)})
+    json!({"id":task.id,"conversation":task.conversation,"workspace":task.workspace,"title":task.title,"status":task.habitat_status(),"state":task.habitat_ui_state(),"deferred":task.deferred,"priority":task.priority,"revision":task.revision,"summary":xcb_core::display_text(task.work_summary(),512)})
 }
 
 pub(super) fn backlog_row(task: &ManagedTask) -> xcb_core::ui::BacklogRow {

@@ -247,6 +247,9 @@ enum Commands {
         /// Filter by persistent conversation; otherwise show all conversations.
         #[arg(long)]
         conversation: Option<Id>,
+        /// Filter by exact project directory, across every conversation over it.
+        #[arg(long, conflicts_with = "conversation")]
+        workspace: Option<PathBuf>,
     },
     /// Queue guidance for a task's next safe turn without interrupting its worker.
     Steer {
@@ -2469,7 +2472,17 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         Some(Commands::Backlog {
             command,
             conversation,
-        }) => habitat::backlog(store.root(), command, conversation.as_ref(), cli.json).await,
+            workspace,
+        }) => {
+            habitat::backlog(
+                store.root(),
+                command,
+                conversation.as_ref(),
+                workspace.as_deref(),
+                cli.json,
+            )
+            .await
+        }
         Some(Commands::Steer { task, text, id }) => {
             habitat::steer(store.root(), &task, id, text, cli.json)
         }

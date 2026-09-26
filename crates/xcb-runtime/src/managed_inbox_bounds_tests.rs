@@ -173,7 +173,13 @@ async fn watches_reject_other_projects_and_immediately_report_an_already_complet
     let f = fixture().await;
     let target = enqueue(&f, "Target", true).await;
     let source = enqueue(&f, "Source", true).await;
-    let other_conversation = f.managed.create_conversation(&f.workspace).await.unwrap();
+    // Another directory is another project.
+    let other_workspace = private::directory(&f.workspace.parent().unwrap().join("other")).unwrap();
+    let other_conversation = f
+        .managed
+        .create_conversation(&other_workspace)
+        .await
+        .unwrap();
     let other = f
         .managed
         .enqueue_backlog(
@@ -217,6 +223,37 @@ async fn watches_reject_other_projects_and_immediately_report_an_already_complet
     assert_eq!(rows[0].status, "held");
     assert!(rows[0].text.contains("Source already checked"));
     assert!(rows[0].receipt.is_none());
+}
+
+#[tokio::test]
+async fn watch_allowed_across_conversations_in_same_workspace() {
+    let f = fixture().await;
+    let target = enqueue(&f, "Target", true).await;
+    let twin = f.managed.create_conversation(&f.workspace).await.unwrap();
+    let source = f
+        .managed
+        .enqueue_backlog(&twin.id, new_id("m"), "Twin source".into(), true, 5)
+        .await
+        .unwrap();
+    let id = new_id("w");
+    let watch = f
+        .managed
+        .watch_task(&target.id, &source.id, id.clone())
+        .unwrap();
+    assert_eq!(watch.conversation, target.conversation);
+    assert_eq!(
+        f.managed.watch_task(&target.id, &source.id, id).unwrap(),
+        watch
+    );
+    // The source's report reaches the target across conversations.
+    f.managed
+        .complete_backlog(&source.id, source.revision, "Twin checked".into())
+        .await
+        .unwrap();
+    let rows = inbox(&f, &target);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(Some(&rows[0].id), watch.event.as_ref());
+    assert!(rows[0].text.contains("Twin checked"));
 }
 
 #[tokio::test]

@@ -22,6 +22,44 @@ async fn fixture() -> Fixture {
         workspace,
     }
 }
+/// A sibling project directory beside the fixture's workspace.
+fn second(f: &Fixture) -> PathBuf {
+    private::directory(&f.workspace.parent().unwrap().join("other")).unwrap()
+}
+fn explicit(path: &Path) -> IntakeCues {
+    IntakeCues {
+        origin: Origin::Cli,
+        explicit: Some(path.to_owned()),
+        target: None,
+        focus: None,
+        launch_hint: None,
+        infer_only: false,
+    }
+}
+/// A task in the global thread, bound explicitly to `workspace`.
+async fn in_thread(f: &Fixture, workspace: &Path, prompt: &str) -> ManagedTask {
+    match f
+        .managed
+        .submit_to_thread(new_id("m"), prompt.into(), vec![], explicit(workspace))
+        .await
+        .unwrap()
+    {
+        Intake::Accepted { task, .. } => task,
+        Intake::Ask { reason, .. } => panic!("thread asked: {reason}"),
+    }
+}
+async fn worker_call(
+    f: &Fixture,
+    source: &ManagedTask,
+    call: &str,
+    name: &str,
+    args: &Value,
+) -> Result<Value> {
+    f.managed
+        .habitat_worker_call(source, source.session.as_ref().unwrap(), call, name, args)
+        .await
+        .0
+}
 async fn enqueue(f: &Fixture, prompt: &str, deferred: bool) -> ManagedTask {
     f.managed
         .enqueue_backlog(&f.conversation, new_id("m"), prompt.into(), deferred, 5)
@@ -219,15 +257,36 @@ async fn completed_backlog_is_audited_and_worker_cannot_close_another_project() 
         f.managed.verify_task(&done.id).await.unwrap()["revisions"],
         2
     );
-    let other = f.managed.create_conversation(&f.workspace).await.unwrap();
+    let parent = state(&f, &enqueue(&f, "worker", false).await, TaskState::Running).await;
+    let complete = |task: &ManagedTask| json!({"taskId":task.id,"expectedRevision":task.revision,"summary":"claim"});
+    // Another directory is another project, whatever the conversation.
+    let other = f.managed.create_conversation(&second(&f)).await.unwrap();
     let other_task = f
         .managed
         .enqueue_backlog(&other.id, new_id("m"), "other project".into(), true, 5)
         .await
         .unwrap();
-    let parent = state(&f, &enqueue(&f, "worker", false).await, TaskState::Running).await;
-    let (result,_)=f.managed.habitat_worker_call(&parent,parent.session.as_ref().unwrap(),"cross","xcb_backlog_complete",&json!({"taskId":other_task.id,"expectedRevision":other_task.revision,"summary":"claim"})).await;
-    assert!(result.is_err());
+    let args = complete(&other_task);
+    assert!(
+        worker_call(&f, &parent, "cross", "xcb_backlog_complete", &args)
+            .await
+            .is_err()
+    );
+    // A second conversation over the same directory is the same project.
+    let twin = f.managed.create_conversation(&f.workspace).await.unwrap();
+    let twin_task = f
+        .managed
+        .enqueue_backlog(&twin.id, new_id("m"), "same project".into(), true, 5)
+        .await
+        .unwrap();
+    let args = complete(&twin_task);
+    worker_call(&f, &parent, "same", "xcb_backlog_complete", &args)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.managed.task(&twin_task.id).unwrap().unwrap().state,
+        TaskState::Completed
+    );
 }
 #[tokio::test]
 async fn uncertainty_cannot_be_cleared_by_absence_of_a_process_alone() {
@@ -880,4 +939,336 @@ async fn active_settle_continuation_defers_project_proposal_until_parent_finishe
             .admitted_tasks,
         1
     );
+}
+
+fn grant_in(f: &Fixture, workspace: &Path, max: u32) -> ProjectPolicy {
+    f.managed
+        .configure_project_policy_in(
+            workspace,
+            None,
+            "Maintain this directory".into(),
+            max,
+            now_ms() + 7_200_000,
+            None,
+        )
+        .unwrap()
+}
+fn text(path: &Path) -> &str {
+    path.to_str().unwrap()
+}
+
+#[tokio::test]
+async fn grant_for_workspace_a_never_admits_backlog_or_children_in_b_from_thread() {
+    let f = fixture().await;
+    let (a, b) = (f.workspace.clone(), second(&f));
+    grant_in(&f, &a, 4);
+    // Both parents live in the one thread; only A holds a grant.
+    let parent_b = state(
+        &f,
+        &in_thread(&f, &b, "Work in B").await,
+        TaskState::Running,
+    )
+    .await;
+    let child_b = worker_call(
+        &f,
+        &parent_b,
+        "b",
+        "xcb_backlog_add",
+        &json!({"prompt":"Follow up in B"}),
+    )
+    .await
+    .unwrap();
+    let child_b = f
+        .managed
+        .task(&Id::new(child_b["id"].as_str().unwrap()).unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(child_b.workspace, text(&b));
+    assert!(child_b.project_proposal.is_none());
+    let thread = f.managed.global_thread().await.unwrap().id;
+    let user_b = f
+        .managed
+        .enqueue_backlog_at(
+            &thread,
+            Some(&b),
+            BindingOrigin::Cli,
+            new_id("m"),
+            "User idea in B".into(),
+            true,
+            5,
+        )
+        .await
+        .unwrap();
+    let parent_a = state(
+        &f,
+        &in_thread(&f, &a, "Work in A").await,
+        TaskState::Running,
+    )
+    .await;
+    let child_a = worker_call(
+        &f,
+        &parent_a,
+        "a",
+        "xcb_backlog_add",
+        &json!({"prompt":"Follow up in A"}),
+    )
+    .await
+    .unwrap();
+    let child_a = Id::new(child_a["id"].as_str().unwrap()).unwrap();
+    // B's running work neither blocks nor borrows A's grant.
+    state(&f, &parent_a, TaskState::Completed).await;
+    f.managed.tick_projects(now_ms()).await.unwrap();
+    assert!(!f.managed.task(&child_a).unwrap().unwrap().deferred);
+    state(&f, &parent_b, TaskState::Completed).await;
+    f.managed.tick_projects(now_ms()).await.unwrap();
+    assert!(f.managed.task(&child_b.id).unwrap().unwrap().deferred);
+    assert!(f.managed.task(&user_b.id).unwrap().unwrap().deferred);
+    assert_eq!(
+        f.managed
+            .project_policy_in(text(&a))
+            .unwrap()
+            .unwrap()
+            .admitted_tasks,
+        1
+    );
+    assert!(f.managed.project_policy_in(text(&b)).unwrap().is_none());
+    // An entry-created thread task must name its directory.
+    assert!(
+        f.managed
+            .enqueue_backlog(&thread, new_id("m"), "Unscoped".into(), true, 5)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn two_conversations_over_one_workspace_share_grant_backlog_working_memory_and_binding() {
+    let f = fixture().await;
+    let twin = f
+        .managed
+        .create_conversation(&f.workspace)
+        .await
+        .unwrap()
+        .id;
+    let policy = grant(&f, 2);
+    assert_eq!(
+        f.managed.project_policy(&twin).unwrap().unwrap().generation,
+        policy.generation
+    );
+    let first = enqueue(&f, "Held in the first view", true).await;
+    let second_view = f
+        .managed
+        .enqueue_backlog(
+            &twin,
+            new_id("m"),
+            "Held in the second view".into(),
+            true,
+            5,
+        )
+        .await
+        .unwrap();
+    let shared: Vec<Id> = f
+        .managed
+        .backlog_in(text(&f.workspace), 64)
+        .unwrap()
+        .into_iter()
+        .map(|task| task.id)
+        .collect();
+    assert!(shared.contains(&first.id) && shared.contains(&second_view.id));
+    // Work finished in one view is working memory for the other.
+    f.managed
+        .complete_backlog(&first.id, first.revision, "Checked parser".into())
+        .await
+        .unwrap();
+    assert!(
+        f.managed
+            .working_memory(&twin, 8)
+            .unwrap()
+            .iter()
+            .any(|row| row.task == first.id)
+    );
+    // A worker in the second view proposes under the directory's grant, and
+    // the grant admits it once the directory's other work is done.
+    let parent = state(
+        &f,
+        &f.managed
+            .enqueue_backlog(&twin, new_id("m"), "Work".into(), false, 5)
+            .await
+            .unwrap(),
+        TaskState::Running,
+    )
+    .await;
+    let proposal = propose(&f, &parent, "twin", "Follow-up").await;
+    assert_eq!(
+        proposal.project_proposal.as_ref().unwrap().generation,
+        policy.generation
+    );
+    state(&f, &parent, TaskState::Completed).await;
+    f.managed
+        .complete_backlog(&second_view.id, second_view.revision, "Done".into())
+        .await
+        .unwrap();
+    f.managed.tick_projects(now_ms()).await.unwrap();
+    assert!(!f.managed.task(&proposal.id).unwrap().unwrap().deferred);
+    assert_eq!(
+        f.managed
+            .project_policy(&f.conversation)
+            .unwrap()
+            .unwrap()
+            .admitted_tasks,
+        1
+    );
+    // One Wordcell binding serves both views.
+    let (_tools, config) = wordcell_fixture(&f);
+    let binding = f
+        .managed
+        .bind_memory(&f.conversation, None, config)
+        .unwrap();
+    assert_eq!(
+        f.managed.memory_binding(&twin).unwrap().unwrap().revision,
+        binding.revision
+    );
+}
+
+#[tokio::test]
+async fn grant_on_parent_does_not_cover_explicit_subdirectory() {
+    let f = fixture().await;
+    grant_in(&f, &f.workspace, 4);
+    let sub = private::directory(&f.workspace.join("sub")).unwrap();
+    let parent = state(
+        &f,
+        &in_thread(&f, &sub, "Work in sub").await,
+        TaskState::Running,
+    )
+    .await;
+    assert_eq!(parent.workspace, text(&sub));
+    let child = worker_call(
+        &f,
+        &parent,
+        "sub",
+        "xcb_backlog_add",
+        &json!({"prompt":"Follow up in sub"}),
+    )
+    .await
+    .unwrap();
+    let child = f
+        .managed
+        .task(&Id::new(child["id"].as_str().unwrap()).unwrap())
+        .unwrap()
+        .unwrap();
+    assert!(child.project_proposal.is_none());
+    state(&f, &parent, TaskState::Completed).await;
+    f.managed.tick_projects(now_ms()).await.unwrap();
+    assert!(f.managed.task(&child.id).unwrap().unwrap().deferred);
+    assert!(f.managed.project_policy_in(text(&sub)).unwrap().is_none());
+    assert_eq!(
+        f.managed
+            .project_policy_in(text(&f.workspace))
+            .unwrap()
+            .unwrap()
+            .admitted_tasks,
+        0
+    );
+}
+
+/// A trusted fake Wordcell CLI that answers exact search and note creation.
+fn wordcell_fixture(f: &Fixture) -> (PathBuf, crate::wordcell::WordcellConfig) {
+    use std::os::unix::fs::PermissionsExt;
+    let tools = private::directory(&f.workspace.parent().unwrap().join("tools")).unwrap();
+    let vault = private::directory(&tools.join("vault")).unwrap();
+    let executable = tools.join("wordcell");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\nif [ \"$1\" = search ]; then printf '{\"results\":[]}'; exit 0; fi\ntest \"$1\" = note && test \"$2\" = create || exit 2\nprintf '{\"changed\":true,\"path\":\"%s.md\",\"revision\":\"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}' \"$3\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = crate::wordcell::WordcellConfig::admit(&executable, &vault).unwrap();
+    (tools, config)
+}
+
+#[tokio::test]
+async fn wordcell_bind_search_promote_are_workspace_keyed_and_promotion_digest_keeps_conversation_provenance()
+ {
+    let f = fixture().await;
+    let (a, b) = (f.workspace.clone(), second(&f));
+    let (_tools, config) = wordcell_fixture(&f);
+    let binding = f.managed.bind_memory_in(&a, None, config).unwrap();
+    assert_eq!(binding.workspace, text(&a));
+    assert_eq!(
+        f.managed
+            .search_memory_in(text(&a), "parser", 4)
+            .await
+            .unwrap(),
+        json!({"results":[]})
+    );
+    // The view over A searches the same binding; B has none.
+    assert!(
+        f.managed
+            .search_memory(&f.conversation, "parser", 4)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        f.managed.search_memory_in(text(&b), "parser", 4).await,
+        Err(Error::Unavailable(
+            "project Wordcell memory is not configured"
+        ))
+    ));
+    // A thread task in A promotes into A's binding, and its promotion keeps
+    // the thread as conversation provenance in the request digest.
+    let task = in_thread(&f, &a, "Decide the parser API").await;
+    let note = "Keep the parser API stable.";
+    let receipt = f.managed.promote_memory(&task.id, note).await.unwrap();
+    assert_eq!(receipt.status, crate::wordcell::PromotionStatus::Completed);
+    let promotion = crate::wordcell::Promotion {
+        task_id: task.id.to_string(),
+        conversation_id: GLOBAL_THREAD_ID.into(),
+        summary: note.into(),
+    };
+    assert_eq!(
+        receipt.request_digest,
+        digest(
+            serde_json::to_vec(&json!({
+                "contract":"xcb.wordcell-promotion.v1",
+                "config":binding.config,
+                "promotion":promotion
+            }))
+            .unwrap()
+        )
+    );
+    let other = in_thread(&f, &b, "Work in B").await;
+    assert!(f.managed.promote_memory(&other.id, note).await.is_err());
+}
+
+#[tokio::test]
+async fn projects_row_status_paused_by_upgrade() {
+    let f = fixture().await;
+    let policy = grant(&f, 2);
+    let paused = f
+        .managed
+        .set_project_policy_enabled_in(&policy.workspace, policy.revision, false)
+        .unwrap();
+    let row = |f: &Fixture| f.managed.project_rows().unwrap().pop().unwrap();
+    assert_eq!(row(&f).status, "paused");
+    assert_eq!(row(&f).name, "work");
+    f.managed
+        .db()
+        .unwrap()
+        .execute(
+            "INSERT INTO project_migration_conflicts(id,kind,workspace,conversation,disposition,stranded_tasks,payload,created_at,resolved_at) VALUES('pmc_test','grant',?1,'c_legacy','winner_paused',0,'{}',?2,NULL)",
+            params![policy.workspace, sql(now_ms()).unwrap()],
+        )
+        .unwrap();
+    assert_eq!(row(&f).status, "paused by upgrade");
+    assert_eq!(
+        f.managed.project_status(&paused).unwrap(),
+        "paused by upgrade"
+    );
+    // Resuming deliberately resolves the upgrade conflict.
+    f.managed
+        .set_project_policy_enabled_in(&policy.workspace, paused.revision, true)
+        .unwrap();
+    assert_eq!(row(&f).status, "active");
+    assert!(f.managed.migration_conflicts(true).unwrap().is_empty());
 }

@@ -5,6 +5,7 @@ use crate::managed_program::{
     AdmittedProgram, MAX_CHECKPOINT_BYTES, MAX_MANAGED_CALLS, MAX_PROMPT_BYTES, MAX_SUMMARY_BYTES,
     ProgramCall, ProgramCallResult, ProgramSlice, ProgramSliceOutcome,
 };
+use crate::workspace_infer::BindingOrigin;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -188,14 +189,16 @@ fn check_previous(tx: &Connection, parent: &Id, previous: &Option<Execution>) ->
     }
     Ok(())
 }
+/// The current grant for `workspace`: enabled, unexpired, of `generation`
+/// when given, and with budget left when `budget` is set.
 pub(super) fn require_grant(
     db: &Connection,
-    conversation: &Id,
+    workspace: &str,
     generation: Option<&Id>,
     now: u64,
     budget: bool,
 ) -> Result<ProjectPolicy> {
-    let policy = workspace::policy_for_conversation(db, conversation)?.ok_or(Error::Conflict(
+    let policy = project::policy_from(db, workspace)?.ok_or(Error::Conflict(
         "project authority is required for managed programs",
     ))?;
     if !policy.enabled
@@ -218,7 +221,7 @@ pub(super) fn check_creation(tx: &Connection, task: &ManagedTask) -> Result<()> 
         let generation = task.program_generation.as_ref().ok_or(Error::Conflict(
             "project authority is required for managed programs",
         ))?;
-        require_grant(tx, &task.conversation, Some(generation), now_ms(), true)?;
+        require_grant(tx, &task.workspace, Some(generation), now_ms(), true)?;
         no_other_work(tx, task)?;
     }
     Ok(())
@@ -229,12 +232,12 @@ pub(super) fn check_dispatch(db: &Connection, task: &ManagedTask, now: u64) -> R
             .program_generation
             .as_ref()
             .ok_or(Error::Conflict("project authority is missing"))?;
-        require_grant(db, &task.conversation, Some(generation), now, false)?;
+        require_grant(db, &task.workspace, Some(generation), now, false)?;
         if task.program_waiting {
             return Err(Error::Conflict("program waits for its linked child"));
         }
         if task.detail == "project authority task budget is exhausted" {
-            require_grant(db, &task.conversation, Some(generation), now, true)?;
+            require_grant(db, &task.workspace, Some(generation), now, true)?;
         }
         if task.detail == "program waits for other project work to settle" {
             no_other_work(db, task)?;
@@ -244,7 +247,7 @@ pub(super) fn check_dispatch(db: &Connection, task: &ManagedTask, now: u64) -> R
         daemon::check_child_dispatch(db, task, link, now)?;
     }
     if let Some(link) = &task.program_child {
-        let policy = require_grant(db, &task.conversation, Some(&link.generation), now, false)?;
+        let policy = require_grant(db, &task.workspace, Some(&link.generation), now, false)?;
         let parent =
             task_from(db, &link.parent)?.ok_or(Error::Conflict("program parent is missing"))?;
         let execution = read_execution(db, &parent.id)?
@@ -268,10 +271,11 @@ pub(super) fn check_dispatch(db: &Connection, task: &ManagedTask, now: u64) -> R
     }
     Ok(())
 }
+/// No other undeferred work is outstanding in the program's workspace.
 fn no_other_work(db: &Connection, parent: &ManagedTask) -> Result<()> {
-    let mut query = db.prepare("SELECT id,payload FROM tasks WHERE conversation=?1 AND id<>?2 AND state IN ('queued','running','needs_input','uncertain')")?;
+    let mut query = db.prepare("SELECT id,payload FROM tasks WHERE workspace=?1 AND id<>?2 AND state IN ('queued','running','needs_input','uncertain')")?;
     for row in query.query_map(
-        params![parent.conversation.as_str(), parent.id.as_str()],
+        params![parent.workspace.as_str(), parent.id.as_str()],
         |row| row.get::<_, String>(1),
     )? {
         let task: ManagedTask = decode(&row?)?;
@@ -313,7 +317,7 @@ pub(super) fn transition(
             }
             let policy = require_grant(
                 tx,
-                &expected.conversation,
+                &expected.workspace,
                 expected.program_generation.as_ref(),
                 now_ms(),
                 true,
@@ -382,7 +386,7 @@ pub(super) fn transition(
             }
             require_grant(
                 tx,
-                &expected.conversation,
+                &expected.workspace,
                 expected.program_generation.as_ref(),
                 now_ms(),
                 false,
@@ -411,6 +415,7 @@ pub(super) fn retain_task(tx: &Transaction<'_>, id: &str) -> Result<()> {
 }
 
 impl ManagedStore {
+    /// Shim: run a program in a project view's directory.
     pub async fn enqueue_program(
         &self,
         conversation: &Id,
@@ -418,9 +423,34 @@ impl ManagedStore {
         title: String,
         program: AdmittedProgram,
     ) -> Result<ManagedTask> {
+        self.enqueue_program_at(
+            conversation,
+            None,
+            BindingOrigin::Cli,
+            operation,
+            title,
+            program,
+        )
+        .await
+    }
+    /// Run a program in `workspace` (see `entry_workspace`). A thread task
+    /// records `origin` in its explicit binding.
+    pub async fn enqueue_program_at(
+        &self,
+        conversation: &Id,
+        workspace: Option<&Path>,
+        origin: BindingOrigin,
+        operation: Id,
+        title: String,
+        program: AdmittedProgram,
+    ) -> Result<ManagedTask> {
         habitat::validate_prompt(&title)?;
         program.verify()?;
-        let workspace = self.conversation_workspace(conversation)?;
+        let workspace = self.entry_workspace(conversation, workspace)?;
+        let binding = habitat::explicit_binding(conversation, origin);
+        if binding.is_some() {
+            self.global_thread().await?;
+        }
         self.create_habitat_task(
             conversation,
             operation,
@@ -429,6 +459,7 @@ impl ManagedStore {
             Path::new(&workspace),
             habitat::CreateOptions {
                 program: Some(&program),
+                binding,
                 ..Default::default()
             },
         )
@@ -574,7 +605,7 @@ impl ManagedStore {
             deferred: false, priority: parent.priority, attention: routing_question.then_some(State::NeedsAnswer), backlog_prompt: None,
             project_proposal: None, routing_question, program: None, program_generation: None, program_receipt: None, program_waiting: false,
             program_child: Some(ProgramChild { parent: parent.id.clone(), call: index, request_digest: call.digest.clone(), generation: policy.generation.clone(), required_provider: policy.required_provider }), daemon_child: None,
-            schedule: None, binding: None, hold_until_ms: None, moved_from: None, detail: if routing_question { "This program request conflicts with the project provider requirement. Reply to this child with revised work for the required provider, or cancel it." } else { "managed program child; waiting for an eligible worker" }.into(),
+            schedule: None, binding: habitat::inherited_binding(&parent.conversation, BindingOrigin::Program, format!("from {}", parent.id)), hold_until_ms: None, moved_from: None, detail: if routing_question { "This program request conflicts with the project provider requirement. Reply to this child with revised work for the required provider, or cancel it." } else { "managed program child; waiting for an eligible worker" }.into(),
             settle: None, acted: None, inbox_continuation: false, attempts: 0, max_attempts: MAX_TASK_ATTEMPTS, message_count_before: 0,
             cancel_requested: false, last_output: None, policy_digest: parent.policy_digest.clone(), last_receipt: "sha256:pending".into(), revision: 1, created_at_ms: now, updated_at_ms: now,
         };
@@ -723,7 +754,7 @@ impl ManagedStore {
                     let db = self.db()?;
                     require_grant(
                         &db,
-                        &task.conversation,
+                        &task.workspace,
                         task.program_generation.as_ref(),
                         now_ms(),
                         true,
@@ -953,7 +984,7 @@ impl ManagedStore {
         }
         require_grant(
             &*self.db()?,
-            &parent.conversation,
+            &parent.workspace,
             parent.program_generation.as_ref(),
             now_ms(),
             false,

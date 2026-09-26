@@ -331,7 +331,6 @@ fn complete_watch(
 ) -> Result<()> {
     let target = task_from(tx, &watch.task)?.ok_or(Error::Unavailable("inbox target not found"))?;
     if source.id != watch.source
-        || target.conversation != source.conversation
         || target.workspace != source.workspace
         || watch.conversation != target.conversation
     {
@@ -434,10 +433,9 @@ impl ManagedStore {
             || target.cancel_requested
             || target.program.is_some()
             || target.workspace != source.workspace
-            || target.conversation != source.conversation
         {
             return Err(Error::Conflict(
-                "watch requires different tasks in the same project and an open provider target",
+                "watch requires different tasks in the same workspace and an open provider target",
             ));
         }
         let count: i64 = tx.query_row("SELECT count(*) FROM inbox_watches", [], |r| r.get(0))?;

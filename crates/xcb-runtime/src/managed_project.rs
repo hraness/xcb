@@ -1,6 +1,9 @@
 //! Explicit, bounded authority for project agents. A goal is guidance, never a
-//! semantic proof that an arbitrary proposed task is in scope.
+//! semantic proof that an arbitrary proposed task is in scope. A project is
+//! a canonical workspace directory: every grant, admission and Wordcell
+//! binding is keyed on `task.workspace`, never on a conversation.
 use super::*;
+use crate::workspace_infer::BindingOrigin;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,25 +88,7 @@ pub(super) fn write_policy(tx: &Transaction<'_>, policy: &ProjectPolicy) -> Resu
     tx.execute("INSERT INTO project_policies(workspace,revision,payload) VALUES(?1,?2,?3) ON CONFLICT(workspace) DO UPDATE SET revision=excluded.revision,payload=excluded.payload", params![policy.workspace,sql(policy.revision)?,serde_json::to_string(policy)?])?;
     Ok(())
 }
-fn no_outstanding(db: &Connection, conversation: &Id, excluded: Option<&Id>) -> Result<bool> {
-    let mut query = db.prepare("SELECT id,payload FROM tasks WHERE conversation=?1 AND state IN ('queued','running','needs_input','uncertain')")?;
-    for row in query.query_map([conversation.as_str()], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })? {
-        let (id, payload) = row?;
-        if excluded.is_some_and(|except| except.as_str() == id) {
-            continue;
-        }
-        let task: ManagedTask = decode(&payload)?;
-        task.validate()?;
-        if !task.deferred {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
 /// Nonterminal tasks bound to `workspace`, other than `exclude`.
-#[allow(dead_code)] // The project re-key moves the authority checks onto it.
 pub(super) fn outstanding_in(
     db: &Connection,
     workspace: &str,
@@ -123,6 +108,25 @@ pub(super) fn outstanding_in(
         tasks.push(task);
     }
     Ok(tasks)
+}
+/// No undeferred nonterminal work is bound to `workspace`, other than `excluded`.
+fn no_outstanding_in(db: &Connection, workspace: &str, excluded: Option<&Id>) -> Result<bool> {
+    Ok(outstanding_in(db, workspace, excluded)?
+        .iter()
+        .all(|task| task.deferred))
+}
+/// Deferred, unadmitted proposals of one grant generation in `workspace`,
+/// the only candidates a grant may release.
+fn proposals_in(db: &Connection, workspace: &str, generation: &Id) -> Result<Vec<Id>> {
+    let mut query = db.prepare("SELECT id FROM tasks WHERE workspace=?1 AND state='queued' AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.deferred')=1 AND json_extract(payload,'$.project_proposal.generation')=?2 ELSE 0 END ORDER BY updated_at,id LIMIT 256")?;
+    let ids = query
+        .query_map(params![workspace, generation.as_str()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ids.into_iter()
+        .map(|id| Id::new(id).map_err(Error::from))
+        .collect()
 }
 pub(super) fn check_dispatch(db: &Connection, task: &ManagedTask, now: u64) -> Result<()> {
     program_state::check_dispatch(db, task, now)?;
@@ -169,8 +173,9 @@ impl ProjectAdmission {
         let parent = task_from(tx, &proposal.parent)?
             .ok_or(Error::Conflict("proposal parent is unavailable"))?;
         if parent.conversation != task.conversation
+            || parent.workspace != task.workspace
             || parent.state != TaskState::Completed
-            || !no_outstanding(tx, &task.conversation, Some(&task.id))?
+            || !no_outstanding_in(tx, &task.workspace, Some(&task.id))?
         {
             return Err(Error::Conflict("project waits for conclusive completion"));
         }
@@ -191,7 +196,7 @@ impl ProjectAdmission {
 impl ManagedStore {
     /// Shim: the grant for a project view's workspace.
     pub fn project_policy(&self, conversation: &Id) -> Result<Option<ProjectPolicy>> {
-        self.project_policy_in(&self.conversation_workspace(conversation)?)
+        workspace::policy_for_conversation(&*self.db()?, conversation)
     }
     pub fn project_policy_in(&self, workspace: &str) -> Result<Option<ProjectPolicy>> {
         let db = self.db()?;
@@ -319,23 +324,28 @@ impl ManagedStore {
         }
         Ok(policies)
     }
+    /// A grant's status for `xcb projects` and the TUI: `active`, `paused`,
+    /// `paused by upgrade` (an open upgrade conflict paused it), `expired` or
+    /// `spent`.
+    pub fn project_status(&self, policy: &ProjectPolicy) -> Result<&'static str> {
+        Ok(if !policy.enabled {
+            if workspace::open_conflict(&*self.db()?, &policy.workspace, "grant")? {
+                "paused by upgrade"
+            } else {
+                "paused"
+            }
+        } else if policy.expires_at_ms <= now_ms() {
+            "expired"
+        } else if policy.admitted_tasks >= policy.max_tasks {
+            "spent"
+        } else {
+            "active"
+        })
+    }
     pub(super) fn project_rows(&self) -> Result<Vec<xcb_core::ui::ProjectRow>> {
-        let now = now_ms();
         let mut rows = Vec::new();
         for p in self.project_policies()? {
-            let status = if !p.enabled {
-                if workspace::open_conflict(&*self.db()?, &p.workspace, "grant")? {
-                    "paused by upgrade"
-                } else {
-                    "paused"
-                }
-            } else if p.expires_at_ms <= now {
-                "expired"
-            } else if p.admitted_tasks >= p.max_tasks {
-                "spent"
-            } else {
-                "active"
-            };
+            let status = self.project_status(&p)?;
             rows.push(xcb_core::ui::ProjectRow {
                 name: self.workspace_name(&p.workspace)?,
                 status: status.into(),
@@ -385,18 +395,21 @@ impl ManagedStore {
             .into_iter()
             .filter(|p| p.enabled && p.expires_at_ms > now && p.admitted_tasks < p.max_tasks)
         {
-            let mut candidates = self
-                .backlog_in(&policy.workspace, 256)?
-                .into_iter()
-                .filter(|t| {
-                    t.workspace == policy.workspace
-                        && t.deferred
-                        && !t.cancel_requested
-                        && t.project_proposal
-                            .as_ref()
-                            .is_some_and(|p| p.generation == policy.generation)
-                })
-                .collect::<Vec<_>>();
+            let mut candidates = {
+                let db = self.db()?;
+                proposals_in(&db, &policy.workspace, &policy.generation)?
+                    .iter()
+                    .filter_map(|id| self.habitat_list_task(&db, id.as_str()))
+                    .filter(|t| {
+                        t.workspace == policy.workspace
+                            && t.deferred
+                            && !t.cancel_requested
+                            && t.project_proposal
+                                .as_ref()
+                                .is_some_and(|p| p.generation == policy.generation)
+                    })
+                    .collect::<Vec<_>>()
+            };
             candidates
                 .sort_by_key(|t| (std::cmp::Reverse(t.priority), t.created_at_ms, t.id.clone()));
             for task in candidates {
@@ -486,7 +499,7 @@ impl ManagedStore {
             || task.state != TaskState::Queued
             || task.session.is_some()
             || task.cancel_requested
-            || mutation.is_some_and(|m| m.source.conversation != task.conversation)
+            || mutation.is_some_and(|m| m.source.workspace != task.workspace)
         {
             return Err(Error::Conflict(
                 "only current deferred work can be completed",
@@ -740,9 +753,11 @@ impl ManagedStore {
         let (_cancel, cancelled) = watch::channel(false);
         binding.config.search(query, limit, cancelled).await
     }
+    /// Promote a note into the Wordcell binding of the task's workspace. The
+    /// promotion keeps the task's conversation as provenance, which is hashed
+    /// into its request digest.
     pub async fn promote_memory(
         &self,
-        conversation: &Id,
         task_id: &Id,
         note: &str,
     ) -> Result<crate::wordcell::PromotionReceipt> {
@@ -750,17 +765,14 @@ impl ManagedStore {
         let task = self
             .task(task_id)?
             .ok_or(Error::Unavailable("memory source task not found"))?;
-        if &task.conversation != conversation {
-            return Err(Error::Conflict("memory source belongs to another project"));
-        }
         let binding = self
-            .memory_binding(conversation)?
+            .memory_binding_in(&task.workspace)?
             .ok_or(Error::Unavailable(
                 "project Wordcell memory is not configured",
             ))?;
         let promotion = crate::wordcell::Promotion {
             task_id: task.id.to_string(),
-            conversation_id: conversation.to_string(),
+            conversation_id: task.conversation.to_string(),
             summary: note.to_owned(),
         };
         let custody = private::directory(&self.root.join("memory-promotions"))?;
@@ -811,6 +823,11 @@ impl ManagedStore {
                     priority: 5,
                     program_parent: Some(&task),
                     proposal,
+                    binding: habitat::inherited_binding(
+                        &task.conversation,
+                        BindingOrigin::Program,
+                        format!("from {}", task.id),
+                    ),
                     ..Default::default()
                 },
             )
