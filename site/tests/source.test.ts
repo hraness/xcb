@@ -92,7 +92,7 @@ describe("xcb site source contract", () => {
     // The preset declares its serif on each preset element, so the sans
     // override must be declared there too, not only on :root.
     expect(globals).toMatch(/:root,\s*\[data-hraness-marketing-preset="editorial"\]\s*\{\s*--hraness-marketing-display-font: var\(--font-text\);/u);
-    expect(globals).toContain(".xcb-interface-grid h3 { margin: 0 0 .5rem; font-family: var(--hraness-type-h3-font); font-size: var(--hraness-type-h3-size);");
+    expect(globals).toContain(".xcb-interface-grid h3, .xcb-download-platforms h3 { margin: 0 0 .5rem; font-family: var(--hraness-type-h3-font); font-size: var(--hraness-type-h3-size);");
     for (const level of ["h1", "h2", "h3"]) expect(docs).toContain(`font-size: var(--hraness-type-${level}-size)`);
     expect(compare).toContain("font-size: var(--hraness-type-h3-size)");
     for (const css of [globals, docs, compare]) expect(css).not.toMatch(/\bh[1-4][^{]*\{[^}]*font: 500 1\.05rem/u);
