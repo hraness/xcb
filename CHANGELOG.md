@@ -10,7 +10,7 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.8.14 - 2026-09-26
 
 The first run is shorter and every error says what to do next.
 
@@ -37,8 +37,8 @@ The first run is shorter and every error says what to do next.
   `~/Library/Logs/xcb/<label>.log`, and `xcb service` shows that path.
   When the service's latest run ended with macOS refusing access,
   `xcb service` names the Files & Folders setting to turn on for
-  Documents, Desktop or Downloads. A service installed by an earlier version keeps
-  working; reinstall it to turn on the log.
+  Documents, Desktop or Downloads. A service installed by an earlier
+  version keeps working; reinstall it to turn on the log.
 - The terminal UI honors `NO_COLOR`, and with no accounts it says to
   `/quit` and run `xcb setup claude`.
 
