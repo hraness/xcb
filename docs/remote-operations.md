@@ -101,7 +101,8 @@ Loop contract for a driving agent:
 1. `dispatch` returns `command` (public id) immediately.
 2. `remote status <id> --wait` blocks until the lifecycle closes —
    exit `0` only on `applied`; `failed`, `ambiguous`, `cancelled` and
-   `expired` all exit `1` with `resultCode` and decrypted `result`.
+   `expired` all exit `1` with `resultCode` and decrypted `result`;
+   an unknown id or an exhausted wait exits `2`.
 3. `attention --remote` lists open attention items; `remote answer`
    responds; `remote steer`/`cancel` drive the task by id.
 4. `remote abort` withdraws a command while still `pending`.
