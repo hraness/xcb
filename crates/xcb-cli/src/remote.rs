@@ -377,18 +377,21 @@ async fn wait_for_wrap(
     }
 }
 
+/// The lane touches an unchanged projection at least every
+/// `PROJECTION_TOUCH_MS`, so a projection that survives twice that long
+/// means the lane stopped writing — presence alone cannot see a wedged
+/// publish path.
+const PROJECTION_STALE_MS: u64 = xcb_runtime::cloud::PROJECTION_TOUCH_MS * 2;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// `xcb fleet` — every enrolled device plus its published projections.
 pub async fn fleet(state_root: &Path, json_out: bool) -> Result<i32> {
-    /// A projection older than this is stale: the daemon publishes on a
-    /// 30s cadence when contents change, so several missed intervals mean
-    /// the device stopped writing, not just that nothing changed.
-    const PROJECTION_STALE_MS: u64 = 120_000;
-    fn now_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    }
     let mut controller = open_controller(state_root).await?;
     let devices = controller.fleet().await?;
     let projections = controller.projections().await.unwrap_or_default();
@@ -497,6 +500,7 @@ pub async fn attention_remote(state_root: &Path, json_out: bool) -> Result<i32> 
     let mut controller = open_controller(state_root).await?;
     let projections = controller.projections().await?;
     if json_out {
+        let now = now_ms();
         let rows: Vec<Value> = projections
             .iter()
             .map(|row| {
@@ -505,6 +509,7 @@ pub async fn attention_remote(state_root: &Path, json_out: bool) -> Result<i32> 
                     "scope": row.scope,
                     "revision": row.revision,
                     "updatedAt": row.updated_at,
+                    "stale": now.saturating_sub(row.updated_at as u64) > PROJECTION_STALE_MS,
                     "projection": serde_json::from_slice::<Value>(&row.plaintext)
                         .unwrap_or(Value::Null),
                 })

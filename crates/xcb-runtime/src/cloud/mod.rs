@@ -6,6 +6,12 @@
 //! material lives only in `custody`; `client` is the only module that talks
 //! to the network.
 
+/// An unchanged fleet projection is still republished at least this
+/// often, so a projection's `updated_at` tracks whether the lane can
+/// write rather than whether anything changed. Readers treat a
+/// projection older than roughly twice this as stale.
+pub const PROJECTION_TOUCH_MS: u64 = 600_000;
+
 pub mod canonical;
 pub mod client;
 pub mod commands;

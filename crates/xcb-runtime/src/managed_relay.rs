@@ -33,6 +33,10 @@ const BOOT_RETRY: Duration = Duration::from_secs(15);
 const BOOT_RETRY_MAX: Duration = Duration::from_secs(300);
 /// Fleet projection publish cadence when nothing changed sooner.
 const PROJECTION_INTERVAL: Duration = Duration::from_secs(30);
+/// Unchanged projections still republish on this bound so `updated_at`
+/// proves the lane can write; shared with readers via
+/// `cloud::PROJECTION_TOUCH_MS`.
+const PROJECTION_TOUCH: Duration = Duration::from_millis(crate::cloud::PROJECTION_TOUCH_MS);
 /// Nonterminal task rows a fleet projection carries at most.
 const PROJECTION_TASK_ROWS: usize = 64;
 /// Single-field character bound inside a projection body.
@@ -55,8 +59,11 @@ pub struct RelayHost {
     /// Last published fleet revision — the CAS pin for the next write.
     fleet_revision: u64,
     /// Digest of the last published plaintext; unchanged projections are
-    /// not re-posted.
+    /// not re-posted until the touch bound expires.
     fleet_fingerprint: Option<String>,
+    /// When the last projection write landed; an unchanged body is
+    /// republished once `PROJECTION_TOUCH` elapses.
+    projection_written: Instant,
 }
 
 impl RelayHost {
@@ -71,6 +78,7 @@ impl RelayHost {
             projection_next: Instant::now() + PROJECTION_INTERVAL,
             fleet_revision: 0,
             fleet_fingerprint: None,
+            projection_written: Instant::now(),
         }
     }
 
@@ -161,7 +169,9 @@ impl RelayHost {
         match fleet_projection(managed) {
             Ok(plaintext) => {
                 let fingerprint = digest(&plaintext);
-                if self.fleet_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+                if self.fleet_fingerprint.as_deref() == Some(fingerprint.as_str())
+                    && self.projection_written.elapsed() < PROJECTION_TOUCH
+                {
                     self.projection_due = false;
                     self.projection_next = Instant::now() + PROJECTION_INTERVAL;
                     return;
@@ -187,6 +197,7 @@ impl RelayHost {
                     Ok(revision) => {
                         self.fleet_revision = revision;
                         self.fleet_fingerprint = Some(fingerprint);
+                        self.projection_written = Instant::now();
                         self.projection_due = false;
                         self.projection_next = Instant::now() + PROJECTION_INTERVAL;
                     }

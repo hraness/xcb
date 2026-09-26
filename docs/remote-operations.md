@@ -108,9 +108,12 @@ Loop contract for a driving agent:
 4. `remote abort` withdraws a command while still `pending`.
 5. `remote ack` acknowledges a terminal command for retention.
 
-`fleet --json` reports each projection's `updatedAt` and a `stale` flag
-once it is older than four publish cadences (120s) — treat stale
-projections as "unknown, not empty".
+`fleet --json` and `attention --remote --json` report each projection's
+`updatedAt` and a `stale` flag. A lane republishes the projection
+whenever contents change and touches it at least every ten minutes
+otherwise, so `stale` (older than twenty minutes) means the lane stopped
+writing — treat the body as "unknown, not empty" and check presence and
+supervisor faults.
 
 Commands are idempotent: retrying a dispatch with the same idempotency
 key replays the in-flight command rather than double-executing.
