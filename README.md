@@ -48,7 +48,7 @@ for setup, supported boundaries, and current limits.
 | --- | --- | --- |
 | Claude | Installed coding workflow verified on macOS ARM64 with the tested account; Linux remains an execution candidate after sign-in, binary admission, and confinement checks | Execution candidate, subject to its own admission and confinement checks |
 | Codex | Native app-server on macOS for exact build **0.156.1**; credential-free boundary and tool-manifest checks passed; authenticated coding acceptance was recorded on the previous admitted build and has not been rerun on this one | Discovery only; managed task execution gated on host qualification |
-| Devin | Native ACP candidate on macOS for exact builds **3000.11.1** and **3000.10.31**; both passed credential-free boundary checks; model availability is checked against the connected account's fresh catalog at launch | ACP implementation exists; task execution disabled pending exact-runtime qualification |
+| Devin | Native ACP candidate on macOS for exact builds **3000.11.3**, **3000.11.1** and **3000.10.31**; all passed credential-free boundary checks; model availability is checked against the connected account's fresh catalog at launch | ACP implementation exists; task execution disabled pending exact-runtime qualification |
 
 A successful `doctor` or a visible model does not prove a working coding session.
 The current Devin CLI can be authenticated and can return its model catalog, but
@@ -291,8 +291,8 @@ process has joined.
 
 ### Connect Devin on macOS
 
-Use the exact admitted **3000.11.1** build; **3000.10.31** remains admitted.
-Both passed credential-free native boundary checks; authenticated coding
+Use the exact admitted **3000.11.3** build; **3000.11.1** and **3000.10.31**
+remain admitted. All passed credential-free native boundary checks; authenticated coding
 acceptance requires separate evidence for the account, model, and build.
 Model availability is checked against the connected account's fresh catalog at
 launch. xcb preserves an unknown quota reset as unknown. Sign in through the

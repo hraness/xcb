@@ -704,7 +704,7 @@ def self_test():
             # The historical, credential-free fixture is parser input only. Its
             # timestamp is preserved; this test cannot renew or qualify it.
             source = Path(__file__).resolve().parent.parent
-            raw = read_file(source / "qualification/devin-native-3000.11.1-macos-arm64.json", MAX_LOG)
+            raw = read_file(source / "qualification/devin-native-3000.11.3-macos-arm64.json", MAX_LOG)
             value = decode(raw)
             context = {"provider": "devin", "provider_version": value["runtime_version"],
                        "provider_sha256": value["provider_sha256"], "runtime_sha256": value["helper_sha256"],

@@ -2,7 +2,7 @@
 
 xcb is in development. Native Claude, Codex, and Devin adapters remain subject
 to exact-binary admission and per-run boundary verification. The native Codex
-0.156.1 and Devin 3000.11.1/3000.10.31 candidates currently require
+0.156.1 and Devin 3000.11.3/3000.11.1/3000.10.31 candidates currently require
 macOS. Live acceptance is account/model/build specific and separate from
 credential-free boundary proof. Devin checks model availability against the
 connected account's fresh catalog at launch. The TypeScript compatibility CLI's
