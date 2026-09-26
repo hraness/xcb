@@ -25,7 +25,7 @@ use xcb_core::{
 pub const MAX_INPUT_BYTES: usize = 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 256 * 1024;
 pub const MIN_TIMEOUT_MS: u64 = 1_000;
-pub const MAX_TIMEOUT_MS: u64 = 120_000;
+pub const MAX_TIMEOUT_MS: u64 = 300_000;
 const MAX_CAPABILITY_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CAPABILITY_ACCOUNTS: usize = 128;
 const MAX_CAPABILITY_MODELS: usize = 1024;

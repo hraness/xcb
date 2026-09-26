@@ -34,7 +34,7 @@ fn request_is_closed_bounded_and_requires_explicit_selection() {
         ("model", json!("")),
         ("prompt", json!("")),
         ("timeoutMs", json!(999)),
-        ("timeoutMs", json!(120001)),
+        ("timeoutMs", json!(300001)),
         ("maxOutputBytes", json!(0)),
         ("maxOutputBytes", json!(262145)),
     ] {
