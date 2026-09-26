@@ -952,6 +952,42 @@ fn doctor_line(style: ux::Style, provider: Provider, version: &str, native: bool
     )
 }
 
+/// `xcb service` status: what starts at login, whether the supervisor runs,
+/// where it logs, and a Files & Folders denial found in that log.
+fn service_text(status: &xcb_runtime::habitat_service::Status, style: ux::Style) -> String {
+    let mut out = String::new();
+    let login = match (status.installed, status.registered) {
+        (true, true) => format!("{} Starts at login", style.sym(ux::Symbol::Ok)),
+        (true, false) => format!(
+            "{} Installed, but macOS hasn't loaded it",
+            style.sym(ux::Symbol::Warn)
+        ),
+        (false, _) => format!("{} Doesn't start at login", style.sym(ux::Symbol::Off)),
+    };
+    let supervisor = if status.supervisor_running {
+        format!("{} supervisor running", style.sym(ux::Symbol::On))
+    } else {
+        format!("{} supervisor idle", style.sym(ux::Symbol::Off))
+    };
+    out.push_str(&format!("{login} · {supervisor}\n"));
+    if let Some(service) = &status.service {
+        out.push_str(&format!("File: {}\n", service.manifest.display()));
+    }
+    match &status.log {
+        Some(log) => {
+            out.push_str(&format!("Log: {}\n", log.display()));
+            if let Some(denial) = xcb_runtime::habitat_service::current_denial(log) {
+                out.push_str(&ux::files_and_folders_denial(denial.folder, style));
+            }
+        }
+        None if status.installed => {
+            out.push_str("Log: off (this service was installed before xcb kept a log)\n")
+        }
+        None => {}
+    }
+    out
+}
+
 /// The provider's product name, for sentences.
 fn provider_name(provider: Provider) -> &'static str {
     match provider {
@@ -2524,6 +2560,14 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             let status = match command {
                 Some(ServiceCommand::Install) => {
+                    let loaded = xcb_runtime::habitat_service::status(store.root(), &home)
+                        .is_ok_and(|status| status.registered);
+                    if cfg!(target_os = "macos") && !loaded {
+                        ux::login_item_notice(
+                            "It resumes your conversations' background work after you log in.",
+                            "xcb service uninstall",
+                        );
+                    }
                     xcb_runtime::habitat_service::install(store.root(), &executable, &home)?
                 }
                 Some(ServiceCommand::Uninstall) => {
@@ -2534,26 +2578,13 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             if cli.json {
                 print_json(status)?;
             } else {
-                println!(
-                    "Habitat startup: {} · login registration: {} · supervisor: {}",
-                    if status.installed {
-                        "installed"
-                    } else {
-                        "absent"
-                    },
-                    if status.registered {
-                        "loaded"
-                    } else {
-                        "unloaded"
-                    },
-                    if status.supervisor_running {
-                        "running"
-                    } else {
-                        "idle"
-                    }
-                );
-                if let Some(service) = status.service {
-                    println!("{}", service.manifest.display());
+                print!("{}", service_text(&status, ux::Style::stdout()));
+                if !status.installed {
+                    ux::next("xcb service install");
+                } else if status.log.is_none() {
+                    ux::next("xcb service uninstall, then xcb service install (turns on the log)");
+                } else if !status.registered {
+                    ux::next("xcb service install");
                 }
             }
             Ok(0)
@@ -2935,6 +2966,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     }
                 }
                 UpdateCommand::Enable { policy } => {
+                    if cfg!(target_os = "macos") {
+                        ux::login_item_notice(
+                            "It checks once a day for a verified xcb release.",
+                            "xcb update disable",
+                        );
+                    }
                     xcb_runtime::update::configure_scheduler(&std::env::current_exe()?, true)?;
                     let state = xcb_runtime::update::set_policy(store.root(), policy)?;
                     if cli.json {
@@ -3339,6 +3376,79 @@ mod help_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn service_status_names_the_log_and_a_denied_folder() {
+        use xcb_runtime::habitat_service::{Service, Status};
+        let dir = std::env::temp_dir().join(format!("xcb-service-text-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("habitat.log");
+        std::fs::write(
+            &log,
+            "xcb: local I/O failed: Operation not permitted (os error 1)\n",
+        )
+        .unwrap();
+        let env = |name: &str| (name == "LANG").then(|| "en_US.UTF-8".to_owned());
+        let style = super::ux::Style::detect(&env, false);
+        let service = Service {
+            version: 1,
+            label: "dev.hraness.xcb.habitat.x".into(),
+            state: dir.clone(),
+            executable: "/bin/xcb".into(),
+            home: dir.clone(),
+            manifest: "/Users/me/Library/LaunchAgents/dev.hraness.xcb.habitat.x.plist".into(),
+            coordination_root: None,
+        };
+        let text = super::service_text(
+            &Status {
+                installed: true,
+                registered: true,
+                supervisor_running: false,
+                service: Some(service),
+                log: Some(log.clone()),
+            },
+            style,
+        );
+        assert_eq!(
+            text,
+            format!(
+                "✓ Starts at login · ○ supervisor idle\n\
+                 File: /Users/me/Library/LaunchAgents/dev.hraness.xcb.habitat.x.plist\n\
+                 Log: {}\n\
+                 ✗ xcb can't open a project folder: macOS access is off for xcb.\n  \
+                 Turn on xcb for Documents, Desktop or Downloads in System Settings › Privacy & Security › Files & Folders.\n\
+                 → open 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders'\n",
+                log.display()
+            )
+        );
+        let legacy = super::service_text(
+            &Status {
+                installed: true,
+                registered: false,
+                supervisor_running: true,
+                service: None,
+                log: None,
+            },
+            style,
+        );
+        assert_eq!(
+            legacy,
+            "⚠ Installed, but macOS hasn't loaded it · ● supervisor running\n\
+             Log: off (this service was installed before xcb kept a log)\n"
+        );
+        let absent = super::service_text(
+            &Status {
+                installed: false,
+                registered: false,
+                supervisor_running: false,
+                service: None,
+                log: None,
+            },
+            style,
+        );
+        assert_eq!(absent, "○ Doesn't start at login · ○ supervisor idle\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn project_memory_and_program_commands_require_explicit_scope() {
         use clap::Parser;

@@ -119,8 +119,6 @@ impl Style {
     }
 }
 
-/// Print the one `Next:` hint for a human reader. Agents get the next step
-/// from `--json` output, and a quiet reader gets nothing.
 /// Set while one command runs another's steps (`xcb setup`), so only the
 /// outer command names the next step.
 static QUIET_NEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -136,6 +134,63 @@ pub fn hold_next() -> impl Drop {
     Held(QUIET_NEXT.swap(true, std::sync::atomic::Ordering::Relaxed))
 }
 
+const LOGIN_ITEMS_PATH: &str = "System Settings › General › Login Items & Extensions";
+const FILES_AND_FOLDERS_PATH: &str = "System Settings › Privacy & Security › Files & Folders";
+pub const FILES_AND_FOLDERS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
+
+/// The SPEC `LOGIN_ITEM` notice, said before xcb registers a LaunchAgent.
+/// Login items only notify, so there is no Enter confirm.
+///
+/// TODO(df-0.8): use hraness-cli-kit `permissions::render_pre_prompt`.
+pub fn login_item_text(why: &str, off: &str, ascii: bool) -> String {
+    format!(
+        "{} macOS will show a notice that xcb can open at login.\n   {why} Turn it off any time in {LOGIN_ITEMS_PATH}, or run {off}.\n",
+        if ascii { "NOTE" } else { "🔐" }
+    )
+}
+
+pub fn login_item_notice(why: &str, off: &str) {
+    match audience() {
+        Audience::Human => eprint!(
+            "{}",
+            login_item_text(why, off, Style::stderr().sym(Symbol::Ok) == "OK")
+        ),
+        Audience::Agent => eprintln!(
+            "{}",
+            serde_json::json!({
+                "type": "permission-notice",
+                "product": "xcb",
+                "kind": "login-item",
+                "message": format!("macOS will show a notice that xcb can open at login. {why} Turn it off any time in {LOGIN_ITEMS_PATH}, or run {off}."),
+            })
+        ),
+        Audience::Quiet => {}
+    }
+}
+
+/// The SPEC CLI recovery block for a protected folder macOS kept from the
+/// launchd-run supervisor. `folder` is named when the log line says which.
+pub fn files_and_folders_denial(folder: Option<&str>, style: Style) -> String {
+    let (what, turn_on) = match folder {
+        Some(folder) => (
+            format!("open files in ~/{folder}"),
+            format!("under {folder}"),
+        ),
+        None => (
+            "open a project folder".to_owned(),
+            "for Documents, Desktop or Downloads".to_owned(),
+        ),
+    };
+    format!(
+        "{} xcb can't {what}: macOS access is off for xcb.\n  Turn on xcb {turn_on} in {FILES_AND_FOLDERS_PATH}.\n{} open '{FILES_AND_FOLDERS_URL}'\n",
+        style.sym(Symbol::Fail),
+        style.sym(Symbol::Next)
+    )
+}
+
+/// Print the one `Next:` hint for a human reader. Agents get the next step
+/// from `--json` output, and a quiet reader gets nothing.
 pub fn next(command: &str) {
     if audience() == Audience::Human && !QUIET_NEXT.load(std::sync::atomic::Ordering::Relaxed) {
         eprintln!("Next: {command}");
@@ -424,6 +479,34 @@ mod root_help_tests {
             super::ROOT_HELP
                 .lines()
                 .all(|line| line.chars().count() <= 80)
+        );
+    }
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+
+    #[test]
+    fn login_item_notice_follows_the_template() {
+        assert_eq!(
+            login_item_text(
+                "It checks once a day for a verified xcb release.",
+                "xcb update disable",
+                false
+            ),
+            "🔐 macOS will show a notice that xcb can open at login.\n   It checks once a day for a verified xcb release. Turn it off any time in System Settings › General › Login Items & Extensions, or run xcb update disable.\n"
+        );
+        assert!(login_item_text("x", "y", true).starts_with("NOTE macOS"));
+    }
+
+    #[test]
+    fn denial_block_names_the_folder_the_pane_and_the_link() {
+        let env = |name: &str| (name == "LANG").then(|| "en_US.UTF-8".to_owned());
+        let plain = Style::detect(&env, false);
+        assert_eq!(
+            files_and_folders_denial(Some("Documents"), plain),
+            "✗ xcb can't open files in ~/Documents: macOS access is off for xcb.\n  Turn on xcb under Documents in System Settings › Privacy & Security › Files & Folders.\n→ open 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders'\n"
         );
     }
 }

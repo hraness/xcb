@@ -913,8 +913,11 @@ fn empty_managed_state_guides_account_setup() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(contents.contains("no provider accounts"));
-    assert!(contents.contains("xcb accounts add <provider>"));
+    assert!(contents.contains("No accounts yet"), "{contents}");
+    assert!(
+        contents.contains("/quit, then run xcb setup claude"),
+        "{contents}"
+    );
 }
 
 #[test]
@@ -1654,4 +1657,45 @@ fn one_row_history_preview_shows_the_match_instead_of_preceding_context() {
         .draw(|frame| render::draw(frame, &mut app, 0))
         .unwrap();
     assert!(buffer_text(&terminal).contains("NEEDLE"));
+}
+
+#[test]
+fn no_color_keeps_text_and_modifiers_but_drops_colors() {
+    use ratatui::style::{Color, Modifier};
+    assert!(render::no_color(
+        &|name| (name == "NO_COLOR").then(|| "1".into())
+    ));
+    assert!(!render::no_color(
+        &|name| (name == "NO_COLOR").then(|| "".into())
+    ));
+    assert!(!render::no_color(&|_| None));
+    let mut app = app();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let mut buffer = terminal.backend().buffer().clone();
+    let before: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+    let bold = buffer
+        .content
+        .iter()
+        .filter(|cell| cell.modifier.contains(Modifier::BOLD))
+        .count();
+    render::strip_colors(&mut buffer);
+    let after: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+    assert_eq!(before, after);
+    assert!(
+        buffer
+            .content
+            .iter()
+            .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset)
+    );
+    assert_eq!(
+        buffer
+            .content
+            .iter()
+            .filter(|cell| cell.modifier.contains(Modifier::BOLD))
+            .count(),
+        bold
+    );
 }
