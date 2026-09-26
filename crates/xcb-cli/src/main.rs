@@ -938,7 +938,10 @@ async fn ensure_pin(root: &std::path::Path, provider: Provider) -> Result<Pin> {
         return Pin::load(root, provider);
     }
     let name = provider_name(provider);
-    eprintln!("→ Checking {name} first (the same check as xcb doctor --provider {provider}).");
+    eprintln!(
+        "{} Checking {name} first (the same check as xcb doctor --provider {provider}).",
+        ux::Style::stderr().sym(ux::Symbol::Next)
+    );
     let home = private::directory(&root.join("metadata-home"))?;
     private::directory(&home.join("tmp"))?;
     let mut pin = process::inspect(provider, None, &home)
@@ -1443,7 +1446,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     match account.provider {
                         Provider::Claude => {
                             eprintln!(
-                                "→ Opening your browser to sign in to Claude for xcb. xcb keeps the token in its own state folder, never in your keychain."
+                                "{} Opening your browser to sign in to Claude for xcb. xcb keeps the token in its own state folder, never in your keychain.",
+                                ux::Style::stderr().sym(ux::Symbol::Next)
                             );
                             let (cancel, receiver) = tokio::sync::watch::channel(false);
                             let mut interrupt = tokio::signal::unix::signal(
@@ -1463,7 +1467,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         }
                         Provider::Codex => {
                             eprintln!(
-                                "→ Codex will print a sign-in page and a code. Open the page and enter the code to connect this account to xcb."
+                                "{} Codex will print a sign-in page and a code. Open the page and enter the code to connect this account to xcb.",
+                                ux::Style::stderr().sym(ux::Symbol::Next)
                             );
                             runner::login_codex(&store, &account.id, &pin).await?
                         }
@@ -1531,7 +1536,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 Some(AccountCommand::Refresh { account }) => {
                     let account = store.resolve_account(&account)?;
                     require_account_credentials(&store, &account)?;
-                    let pin = Pin::load(store.root(), account.provider)?;
+                    let pin = ensure_pin(store.root(), account.provider).await?;
                     if !runner::provider_admitted(store.root(), &pin) {
                         return Err(Error::Unavailable(
                             "native account metadata querying for this runtime is not yet qualified",
@@ -1825,7 +1830,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 }) => {
                     let account =
                         catalog_account(&store, provider, account.as_deref(), from_native)?;
-                    let pin = Pin::load(store.root(), provider)?;
+                    let pin = ensure_pin(store.root(), provider).await?;
                     if !runner::provider_admitted(store.root(), &pin) {
                         return Err(Error::Unavailable(
                             "native catalog discovery for this runtime is not yet qualified",
@@ -3111,10 +3116,16 @@ async fn main() {
     ux::restore_sigpipe();
     let cli = Cli::parse();
     let json = cli.json;
+    // Internal helpers speak a protocol on stdout; their errors stay on
+    // stderr whoever runs them.
+    let protocol = matches!(
+        cli.command,
+        Some(Commands::ManagedDaemon | Commands::BrokerStdio | Commands::EgressForward { .. })
+    );
     let code = match dispatch(cli).await {
         Ok(code) => code,
         Err(error) => {
-            ux::report_error(&error, json);
+            ux::report_error(&error, json, protocol);
             1
         }
     };

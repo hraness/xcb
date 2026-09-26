@@ -208,9 +208,10 @@ pub fn render_json(error: &Error) -> serde_json::Value {
 }
 
 /// Report a failed command. `--json` or an agent reader gets the error
-/// object on stdout; everyone else gets the human lines on stderr.
-pub fn report_error(error: &Error, json: bool) {
-    if json || audience() == Audience::Agent {
+/// object on stdout; everyone else, and every internal protocol helper whose
+/// stdout belongs to its peer, gets the human lines on stderr.
+pub fn report_error(error: &Error, json: bool, protocol: bool) {
+    if !protocol && (json || audience() == Audience::Agent) {
         let mut stdout = std::io::stdout().lock();
         let _ = writeln!(stdout, "{}", render_json(error));
         return;

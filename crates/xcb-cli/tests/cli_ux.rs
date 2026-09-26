@@ -179,6 +179,11 @@ fn a_shortened_id_from_the_table_resolves_and_login_checks_the_provider_first() 
          → xcb doctor --provider claude\n"
     );
     assert!(!Path::new(&sandbox.state().join("providers/claude.json")).exists());
+    let dumb = sandbox.run(&["accounts", "login", &id], &[("TERM", "dumb")]);
+    assert!(
+        text(&dumb.stderr).starts_with("-> Checking Claude Code first"),
+        "{dumb:?}"
+    );
 }
 
 #[test]
