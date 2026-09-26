@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   assertNativeAssetBytes,
+  assertReleaseBody,
   assertReleaseAssetBytes,
   nativeAssetFilePairs,
   parseGitHubRelease,
@@ -12,9 +13,11 @@ import {
   releasePackageForName,
   releaseVersionForCurrentAdmission,
   rootReleasePackage,
+  splitReleaseBody,
 } from "./release-distribution-policy";
 
 const version = "0.8.1";
+const notes = "Summary of the release.\n\n## Changes\n\n- One change.";
 const tarball = new TextEncoder().encode("exact package bytes");
 const tarballDigest = createHash("sha256").update(tarball).digest("hex");
 const checksum = new TextEncoder().encode(`${tarballDigest}  ${releaseArchiveName(version)}\n`);
@@ -75,9 +78,9 @@ function release(overrides: Readonly<Record<string, unknown>> = {}) {
       },
     ],
     draft: false,
-    body: `Automated public release of @hraness/xcb@${version} from v${version}.`,
+    body: `${notes}\n\n<!-- Automated public release of @hraness/xcb@${version} from v${version}. -->`,
     immutable: true,
-    name: `XCB v${version}`,
+    name: `xcb v${version}`,
     prerelease: false,
     tag_name: `v${version}`,
     ...overrides,
@@ -211,7 +214,7 @@ describe("public release distribution policy", () => {
   });
 
   test("requires two exact immutable GitHub artifacts and their bytes", () => {
-    const parsed = parseGitHubRelease(release(), version);
+    const parsed = parseGitHubRelease(release(), version, notes);
     expect(parsed.natives).toHaveLength(0);
     expect(() => assertReleaseAssetBytes(
       parsed,
@@ -219,13 +222,39 @@ describe("public release distribution policy", () => {
       checksum,
       (bytes) => createHash("sha256").update(bytes).digest("hex"),
     )).not.toThrow();
-    expect(() => parseGitHubRelease(release({ assets: [] }), version)).toThrow("two exact release artifacts");
+    expect(() => parseGitHubRelease(release({ assets: [] }), version, notes)).toThrow("two exact release artifacts");
+  });
+
+  test("binds the title, trailing identity record, and notes above it", () => {
+    const identity = `<!-- Automated public release of @hraness/xcb@${version} from v${version}. -->`;
+    expect(splitReleaseBody(release().body)).toEqual({ identity, notes });
+    expect(() => parseGitHubRelease(release({ name: `XCB v${version}` }), version, notes)).toThrow();
+    for (const body of [
+      `Automated public release of @hraness/xcb@${version} from v${version}.`,
+      `${notes}\n\n${identity}\n`,
+      `${notes}\n${identity}`,
+      `${identity}\n\n${notes}`,
+      `${notes}\n\n<!-- Automated public release of @hraness/xcb@0.8.2 from v0.8.2. -->`,
+      `${notes}\n\n${identity.replace(" -->", " --> extra -->")}`,
+    ]) {
+      expect(() => parseGitHubRelease(release({ body }), version, notes)).toThrow();
+    }
+    // A hand edit to the notes is detected even when the identity is intact.
+    expect(() => parseGitHubRelease(
+      release({ body: `${notes} (edited)\n\n${identity}` }),
+      version,
+      notes,
+    )).toThrow("notes do not match");
+    // The last opener is the identity: an opener quoted in the notes cannot shadow it.
+    const quoted = `${notes}\n\n${identity}`;
+    expect(splitReleaseBody(`${quoted}\n\n${identity}`)).toEqual({ identity, notes: quoted });
+    expect(() => assertReleaseBody(`${notes}\n\n${identity}`, notes, identity)).not.toThrow();
   });
 
   test("admits native archive/checksum pairs bound to the exact release version", () => {
     const parsed = parseGitHubRelease(release({
       assets: [...release().assets, ...nativePair("xcb-0.8.1-linux-x86_64"), ...nativePair("xcb-0.8.1-darwin-aarch64")],
-    }), version);
+    }), version, notes);
     expect(parsed.natives).toHaveLength(2);
     expect(parsed.natives[0]?.archive.name).toBe("xcb-0.8.1-linux-x86_64.tar.gz");
     expect(parsed.natives[1]?.archive.name).toBe("xcb-0.8.1-darwin-aarch64.tar.gz");
@@ -258,23 +287,23 @@ describe("public release distribution policy", () => {
     ]) {
       expect(() => parseGitHubRelease(release({
         assets: [...compatAssets, ...assets],
-      }), version)).toThrow();
+      }), version, notes)).toThrow();
     }
     expect(() => parseGitHubRelease(release({
       assets: [...compatAssets, pair[0], nativePair("xcb-0.8.1-darwin-aarch64")[0]],
-    }), version)).toThrow("adjacent archive or checksum");
+    }), version, notes)).toThrow("adjacent archive or checksum");
     expect(() => parseGitHubRelease(release({
       assets: [...compatAssets, ...foreignVersion],
-    }), version)).toThrow("xcb-0.8.1-<os>-<arch>");
+    }), version, notes)).toThrow("xcb-0.8.1-<os>-<arch>");
     // Odd asset counts and counts beyond the native bound fail before parsing.
     expect(() => parseGitHubRelease(release({
       assets: [...compatAssets, pair[0], pair[1], nativePair("xcb-0.8.1-darwin-aarch64")[0]],
-    }), version)).toThrow("complete native pairs");
+    }), version, notes)).toThrow("complete native pairs");
     const unbounded = Array.from({ length: 17 }, (_, index) =>
       nativePair(`xcb-0.8.1-os${index}-x86_64`)).flat();
     expect(() => parseGitHubRelease(release({
       assets: [...compatAssets, ...unbounded],
-    }), version)).toThrow("complete native pairs");
+    }), version, notes)).toThrow("complete native pairs");
   });
 
   test("native file pairing validates the exact asset name set", () => {
@@ -302,7 +331,7 @@ describe("public release distribution policy", () => {
   test("native byte assertion binds digest, size, and checksum text", () => {
     const pair = parseGitHubRelease(release({
       assets: [...release().assets, ...nativePair("xcb-0.8.1-linux-x86_64")],
-    }), version).natives[0]!;
+    }), version, notes).natives[0]!;
     const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
     expect(() => assertNativeAssetBytes(
       pair, nativeArchiveBytes, nativeChecksumBytes, sha256,
