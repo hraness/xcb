@@ -43,6 +43,14 @@ is one env triple — no code change — when real email delivery is wanted.
 
 ## Enrolling a laptop
 
+Install the verified release binary on the laptop first — from a repo
+checkout:
+
+```sh
+XCB_VERSION=0.8.10 sh scripts/install-native.sh
+# installs ~/.local/bin/xcb after checksum and provenance checks
+```
+
 On the laptop, from the repo (or an installed `xcb`):
 
 ```sh
