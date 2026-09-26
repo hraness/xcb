@@ -10,6 +10,19 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+The first run is shorter and every error says what to do next.
+
+- `xcb accounts login` and `xcb accounts refresh` check the provider
+  themselves the first time, so the `Next:` step after `xcb accounts add`
+  works without a separate `xcb doctor` run. Account commands accept the shortened id the accounts
+  table shows, and say whether no account or several accounts matched.
+- Errors print as one sentence with the next command to run
+  (`✗ No account matches "x".` then `→ xcb accounts`). With `--json`, or
+  when an agent runs xcb, errors are a JSON object on stdout. Symbols fall
+  back to ASCII when `TERM=dumb` or the locale isn't UTF-8.
+
 ## 0.8.13 - 2026-09-26
 
 Pinned Claude and Codex builds keep working when the provider updates itself,
@@ -34,14 +47,6 @@ accepts shorter identifiers and longer generate requests.
   unambiguous prefix, including over the remote command channel.
   `xcb tasks list` lists tasks, and `xcb doctor` reports whether this machine
   is linked to the relay.
-- `xcb accounts login` checks the provider itself the first time, so the
-  `Next:` step after `xcb accounts add` works without a separate
-  `xcb doctor` run. Account commands accept the shortened id the accounts
-  table shows, and say whether no account or several accounts matched.
-- Errors print as one sentence with the next command to run
-  (`✗ No account matches "x".` then `→ xcb accounts`). With `--json`, or
-  when an agent runs xcb, errors are a JSON object on stdout. Symbols fall
-  back to ASCII when `TERM=dumb` or the locale isn't UTF-8.
 - `xcb generate` accepts a `timeoutMs` of up to 300000 (five minutes), up
   from 120000.
 
