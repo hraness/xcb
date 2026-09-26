@@ -62,7 +62,7 @@ account.
     "maxInputBytes": 1048576,
     "maxOutputBytes": 262144,
     "minTimeoutMs": 1000,
-    "maxTimeoutMs": 120000
+    "maxTimeoutMs": 300000
   },
   "accounts": []
 }
@@ -93,7 +93,7 @@ to stdin, close stdin and read its bounded stdout:
 
 Use `xcb --json generate`. All six fields are required and additional fields
 are rejected. The entire input is limited to 1 MiB, including JSON framing.
-`timeoutMs` is 1,000–120,000 and `maxOutputBytes` is 1–262,144. Prompts must be
+`timeoutMs` is 1,000–300,000 and `maxOutputBytes` is 1–262,144. Prompts must be
 nonempty UTF-8 without NUL. Account selection and the full observed model key
 are exact; no implicit default or fallback is used.
 
