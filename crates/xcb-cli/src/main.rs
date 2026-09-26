@@ -1208,6 +1208,29 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         _ => {}
     }
     let store = Arc::new(Store::open(&root)?);
+    // Interactive launches keep the pinned provider build current: adopt a
+    // newly discovered binary only when it is an admitted build, so an
+    // auto-update can never strand a task on the pin check.
+    if matches!(
+        &cli.command,
+        None | Some(Commands::Chat { .. })
+            | Some(Commands::Resume { .. })
+            | Some(Commands::Run { .. })
+    ) {
+        let home = root.join("metadata-home");
+        for provider in Provider::ALL {
+            let report = process::refresh_provider(&root, provider, None, &home).await;
+            match (report.outcome, report.detail) {
+                (process::RefreshOutcome::Adopted, _) => {
+                    eprintln!("xcb: {provider}: adopted the updated build");
+                }
+                (process::RefreshOutcome::Rejected, Some(detail)) => {
+                    eprintln!("xcb: {provider}: {detail}");
+                }
+                _ => {}
+            }
+        }
+    }
     let (mut config, _) = Config::load(store.root())?;
     match cli.command {
         Some(
@@ -1516,7 +1539,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 provider.map_or_else(|| Provider::ALL.to_vec(), |provider| vec![provider])
             {
                 match process::inspect(provider, executable.as_deref(), &home).await {
-                    Ok(pin) => {
+                    Ok(mut pin) => {
                         pin.save(&root)?;
                         let native = runner::provider_admitted(&pin);
                         let detail = if native && provider == Provider::Devin {

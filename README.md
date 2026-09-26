@@ -139,14 +139,14 @@ Linux x86_64 (`linux-x86_64`). The updater installs only a verified
 `xcb-<version>-<platform>.tar.gz` asset with its matching checksum for the
 running host; on any other host, or when no such release exists yet, it fails
 closed and leaves the installed binary alone. After any replacement, restart
-open terminals and rerun `xcb doctor`; provider and application qualification
-is bound to the exact installed executable bytes.
+open terminals; provider pins rebind to the new host build automatically while
+their pinned provider bytes are unchanged.
 
 Managed supervisors record their exact executable identity. When that binary
 is replaced, a current supervisor stops starting new turns, retains custody of
 its active workers until they settle, then exits. Queued tasks and tasks waiting
-for input remain saved. Wait for that exit, restart the terminal, refresh provider
-pins with `xcb doctor`, and reopen the control conversation to continue.
+for input remain saved. Wait for that exit, restart the terminal, and reopen
+the control conversation to continue; provider pins rebind automatically.
 A different running build produces an explicit supervisor-version error.
 Legacy supervisors without an identity record need their exact process verified
 and stopped after active workers settle; a saved PID or a deleted lock file is
@@ -252,10 +252,13 @@ sessions keep their existing binding. Begin a managed task with `Use Claude`,
 
 If discovery finds the wrong binary, use
 `xcb doctor --provider claude --executable /absolute/path/to/claude`.
-The pin binds executable bytes and version. After upgrading xcb, restart open
-xcb terminals and rerun `doctor`. A process started from the old binary cannot
-adopt the replacement binary's pin, and older clients refuse new run records
-whose credential-custody format they do not understand.
+The pin binds a private copy of the executable bytes plus version, so a
+provider auto-update cannot move the pinned install: xcb adopts an updated
+build automatically only when it is an admitted version and keeps routing the
+pinned build otherwise. After upgrading xcb, restart open xcb terminals; the
+pins rebind to the new host build on next use. A process started from the old
+binary cannot adopt the replacement binary's pin, and older clients refuse
+new run records whose credential-custody format they do not understand.
 An account, metadata pin, or model listing cannot activate an unqualified adapter.
 
 ### Connect Codex on macOS
@@ -318,8 +321,9 @@ For either provider, `xcb run` automatically selects an eligible model. An
 optional explicit default for direct interactive sessions can be set with a
 full matching key from `xcb models` using `xcb models default <key>`. Select the account with
 `xcb accounts default <account>` for new direct sessions, or pass
-`--account <account> --model <key>` to `xcb run`. Rerun `doctor` after a provider
-upgrade; a new version is not automatically admitted.
+`--account <account> --model <key>` to `xcb run`. A provider upgrade is not
+automatically admitted; xcb keeps routing the pinned qualified build until an
+xcb release qualifies the new artifact.
 
 ### Isolated tests, builds, and Git
 
