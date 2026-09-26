@@ -131,8 +131,15 @@ impl RelayLane {
     /// Boot the lane: connect, authenticate, register presence.
     pub async fn boot(keys: LaneKeys) -> Result<Self> {
         let mut client = RelayClient::connect(&keys.deployment_url).await?;
-        client.authenticate(&keys.session.token).await;
-        let connection_id = uuid::Uuid::now_v7().to_string();
+        let mut session = keys.session;
+        // Refresh before attaching: an expired token stalls the socket's
+        // reconnect loop and starves the presence call below.
+        link::refresh_if_due(&mut client, &keys.state_root, &mut session).await?;
+        client.authenticate(&session.token).await;
+        // One custody owns one presence row: a stable connection id means
+        // a reboot patches the same row rather than accumulating stale
+        // entries faster than the retention sweep collects them.
+        let connection_id = format!("xcb-{}", keys.device.device);
         let fingerprint = format!("xcb-boot-{}", keys.boot_generation);
         let mut lane = Self {
             client,
@@ -140,7 +147,7 @@ impl RelayLane {
             account_key: keys.account_key,
             key_version: keys.key_version,
             authority: AuthorityTuple::boot(keys.boot_generation),
-            session: keys.session,
+            session,
             state_root: keys.state_root,
             peers: BTreeMap::new(),
             connection_id,
@@ -412,7 +419,7 @@ impl RelayLane {
     /// A handler error settles `failed` rather than poisoning the lane.
     pub async fn pump<H>(&mut self, handler: &mut H) -> Result<usize>
     where
-        H: FnMut(&OpenedCommand) -> Result<CommandOutcome>,
+        H: AsyncFnMut(&OpenedCommand) -> Result<CommandOutcome>,
     {
         self.keepalive(now_ms()).await?;
         let mut settled = 0;
@@ -429,7 +436,7 @@ impl RelayLane {
             };
             self.mark_effect_started(&command, &authority).await?;
             let (opened, outcome) = match self.open_payload(&command) {
-                Ok(opened) => match handler(&opened) {
+                Ok(opened) => match handler(&opened).await {
                     Ok(outcome) => (opened, outcome),
                     Err(_) => (
                         opened_clone(&command),
@@ -489,6 +496,28 @@ impl RelayLane {
             .and_then(Value::as_f64)
             .map(|revision| revision as u64)
             .ok_or(protocol("publish missing revision"))
+    }
+
+    /// Current relay-side revision for `scope` (0 when absent) — resyncs
+    /// the local CAS pin after a restart or a losing write race.
+    pub async fn projection_revision(&mut self, scope: &str) -> Result<u64> {
+        let row = self
+            .client
+            .query(
+                "relayProjections:get",
+                vec![
+                    ("deviceId", json!(self.device.device)),
+                    ("scope", json!(scope)),
+                ],
+            )
+            .await?;
+        if row.is_null() {
+            return Ok(0);
+        }
+        row.get("revision")
+            .and_then(Value::as_f64)
+            .map(|revision| revision as u64)
+            .ok_or(protocol("projection revision shape"))
     }
 }
 

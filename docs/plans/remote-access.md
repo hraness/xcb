@@ -88,6 +88,22 @@ crate for transport; wire compatibility is the contract, not shared code.
   pending commands expire in place. Projections carry a `seenAt`
   timestamp; controllers surface staleness rather than silently reusing
   old state.
+- **Link resumption.** An auth session binds exactly one device.
+  `xcb link` persists the device identity before enrolling, so a retried
+  link reuses it: an `active` row means enrollment already completed, a
+  `pending` row resumes binding, an absent row registers fresh, and a
+  session already bound to an unknown local device is a conflict — an
+  orphaned active device bound to a dead session is revoked and a fresh
+  identity enrolls, since device ids never rebind. `relay.json` and
+  `account.json` mark a completed link; `device.json` alone marks a
+  resumable one. Stored sessions refresh before any new OTP is
+  requested, including while waiting on an account-key wrap.
+- **Supervisor lane.** A linked machine's managed supervisor hosts the
+  relay lane: it polls device-addressed commands on a fixed cadence even
+  with no local task in flight, keeps the process resident instead of
+  idle-exiting, and disconnects presence on shutdown. Boot failures are
+  bounded supervisor faults; a revoked device is auth-fatal and stops
+  the lane rather than retrying forever.
 
 ## Failure semantics
 
@@ -135,14 +151,14 @@ xcb remote revoke <device>         # retire a lost or retired device
 
 ## Acceptance and progress
 
-- [ ] Contract frozen.
-- [ ] `hraness/relay` foundation green: auth subjects, device registry,
+- [x] Contract frozen.
+- [x] `hraness/relay` foundation green: auth subjects, device registry,
       invites, fenced command lifecycle, envelope round-trips, retention.
-- [ ] xcb Convex deployment serves the instantiated schema; local
+- [x] xcb Convex deployment serves the instantiated schema; local
       backend dev loop works without credentials.
-- [ ] `xcb link` enrolls daemon and controller devices; revocation
+- [x] `xcb link` enrolls daemon and controller devices; revocation
       retires a device end to end.
-- [ ] A controller can observe the fleet and dispatch a task that lands
+- [x] A controller can observe the fleet and dispatch a task that lands
       as an ordinary managed task under the remote project's grant.
-- [ ] No plaintext task content is observable in the relay database.
+- [x] No plaintext task content is observable in the relay database.
 - [ ] Live two-machine acceptance recorded.

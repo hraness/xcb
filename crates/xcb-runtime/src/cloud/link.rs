@@ -144,6 +144,10 @@ pub async fn refresh_if_due(
     if !session.due_for_refresh(now_ms()) {
         return Ok(());
     }
+    // An expired token stalls the sync worker — the server rejects it and
+    // the socket reconnects forever, which also starves action calls. Drop
+    // the dead token before refreshing so the sign-in action flows.
+    client.clear_auth().await;
     let fresh = refresh_session(client, session).await?;
     custody::store_session(state_root, &fresh)?;
     client.authenticate(&fresh.token).await;
