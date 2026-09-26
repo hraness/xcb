@@ -11,9 +11,10 @@ input from you.
 
 Commands below take `<dir|name>`: a directory path (anything containing `/`,
 or `.` and `..`), a registered project name from `xcb workspaces`, or a
-directory relative to the current one. A conversation ID from `xcb
-conversations` still works and names that project view's directory; the
-thread's ID does not, because the thread spans projects.
+directory relative to the current one. A project view's conversation ID from
+`xcb conversations`, the form earlier releases used, is accepted as another
+name for that view's directory; the thread's ID is refused, because the thread
+spans projects.
 
 ## Work, questions and approvals
 
@@ -35,7 +36,8 @@ that directory. The TUI provides `/backlog`, `/backlog all`, `/attention`,
 `/reply <id> <answer>`, `/backlog add`, `/backlog edit`, `/backlog run`,
 `/backlog complete`, and `/backlog reconcile`. In the thread, `/backlog` narrows
 to the focused project, and `/backlog add` uses the focused project or the
-selected task's directory; with neither it asks which project and saves nothing. Open a row for its complete prompt, summary, status and ID.
+selected task's directory; with neither it asks which project and saves
+nothing. Open a row for its complete prompt, summary, status and ID.
 Mutations carry the displayed revision; a stale view cannot overwrite newer work.
 
 The attention inbox spans agents and distinguishes questions, approvals, required
