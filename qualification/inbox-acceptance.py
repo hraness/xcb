@@ -272,7 +272,9 @@ def main():
     try:
         start_daemon()
         terminal("create-conversation", ["chat", "--new"], [(b"\x04", .3)])
-        conversations = value("conversations")
+        # The thread row (`isThread`) is listed first when something created
+        # it; this check is about the one project view `chat --new` made.
+        conversations = [row for row in value("conversations") if not row.get("isThread")]
         check("one isolated conversation", len(conversations) == 1)
         conversation = conversations[0]["id"]
         # Keep the exact daemon alive during PTY checks. The first occurrence

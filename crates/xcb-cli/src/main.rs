@@ -3,6 +3,7 @@ mod habitat;
 mod remote;
 mod route;
 mod ux;
+mod workspaces;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::json;
@@ -43,7 +44,8 @@ struct Cli {
     /// Emit machine-readable JSON where a command supports it.
     #[arg(long, global = true)]
     json: bool,
-    /// Workspace the command applies to (run, chat, models route).
+    /// Project hint for the thread; the exact directory for run, chat --new
+    /// and models route.
     #[arg(long, global = true, default_value = ".")]
     cwd: PathBuf,
     #[command(subcommand)]
@@ -61,12 +63,12 @@ enum Commands {
         #[arg(long, default_value = "Subscription")]
         plan: String,
     },
-    /// Open the control conversation for this directory; workers continue after detach.
+    /// Open your thread; workers continue after detach.
     Chat {
-        /// Reopen this control conversation instead of the latest one for the directory.
+        /// Reopen this conversation or project view instead of the thread.
         #[arg(long, conflicts_with = "new")]
         resume: Option<Id>,
-        /// Start a new control conversation even if one exists for this directory.
+        /// Start a new project view for this directory.
         #[arg(long)]
         new: bool,
     },
@@ -180,7 +182,7 @@ enum Commands {
     Dispatch {
         /// Target daemon device id from `xcb fleet`.
         device: String,
-        /// Workspace name on the target.
+        /// Workspace: absolute path on the target, a known project name, or @infer.
         workspace: String,
         /// Task text; piped stdin is used when omitted.
         #[arg(short = 'p', long)]
@@ -211,8 +213,13 @@ enum Commands {
         #[command(subcommand)]
         command: Option<TaskCommand>,
     },
-    /// List persistent managed control conversations.
+    /// List the thread and project views.
     Conversations,
+    /// List, add, hide and explain the project directories the thread picks from.
+    Workspaces {
+        #[command(subcommand)]
+        command: Option<workspaces::WorkspaceCommand>,
+    },
     /// Read a page of saved conversation history, oldest message first.
     History {
         /// Conversation id, or session id when --direct is set.
@@ -262,7 +269,7 @@ enum Commands {
     Watch {
         /// Task that will receive the report at an authorized turn boundary.
         target: Id,
-        /// Task to observe in the same conversation and workspace.
+        /// Task to observe in the same workspace.
         source: Id,
         /// Stable subscription identity for an idempotent retry.
         #[arg(long)]
@@ -346,6 +353,10 @@ enum Commands {
         /// requires --provider.
         #[arg(long)]
         executable: Option<PathBuf>,
+        /// Preview the 0.9 project upgrade on a private copy of the managed
+        /// state; nothing is changed.
+        #[arg(long, conflicts_with_all = ["provider", "executable"])]
+        upgrade_plan: bool,
     },
     /// Print the effective configuration as JSON.
     Config,
@@ -1221,6 +1232,14 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         )
         .await;
     }
+    // The upgrade preview reads the managed store only through a private
+    // copy, so it opens no store here and works beside an old supervisor.
+    if let Some(Commands::Doctor {
+        upgrade_plan: true, ..
+    }) = &cli.command
+    {
+        return workspaces::upgrade_plan(&root, cli.json);
+    }
     // Remote-fleet commands live entirely in cloud custody and the relay;
     // they never open the managed store.
     match &cli.command {
@@ -1698,6 +1717,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         Some(Commands::Doctor {
             provider,
             executable,
+            upgrade_plan: _,
         }) => {
             if executable.is_some() && provider.is_none() {
                 return Err(Error::Unavailable("--executable requires --provider"));
@@ -2014,6 +2034,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 Some(ModelCommand::Route { task, provider }) => {
                     let workspace = cli.cwd.canonicalize()?;
                     let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
+                    let placement = route_workspace_preview(&managed, &workspace, &task)?;
                     let (preference, required) =
                         managed.initial_route_preferences(&workspace, &task)?;
                     let (preferred_provider, required_provider) =
@@ -2035,7 +2056,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     )
                     .await?;
                     if cli.json {
-                        print_json(decision)?;
+                        // Additive: the route record keeps every key.
+                        let mut value = serde_json::to_value(&decision)?;
+                        if let (Some(object), Some((path, source))) =
+                            (value.as_object_mut(), placement_parts(&placement))
+                        {
+                            object.insert("workspace".into(), json!(path));
+                            object.insert("workspaceSource".into(), json!(source));
+                        }
+                        print_json(value)?;
                     } else {
                         println!(
                             "{} · {}  {}",
@@ -2043,6 +2072,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             decision.account,
                             xcb_core::display_text(&decision.reason, 4096)
                         );
+                        println!("{}", placement_line(&placement));
                     }
                     return Ok(0);
                 }
@@ -2614,25 +2644,29 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         }
         Some(Commands::Conversations) => {
             let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
-            let conversations = managed.conversations(256)?;
+            let conversations = listed_conversations(&managed)?;
             if cli.json {
-                print_json(conversations)?;
+                print_json(conversation_rows(&conversations)?)?;
             } else if conversations.is_empty() {
                 println!("No managed conversations.");
             } else {
                 let counts = managed.message_counts()?;
                 for conversation in conversations {
                     let messages = counts.get(&conversation.id).copied().unwrap_or_default();
+                    let scope = match &conversation.workspace {
+                        None => "thread (all projects)".to_owned(),
+                        Some(workspace) => format!("project view · {workspace}"),
+                    };
                     println!(
-                        "{}  {} · {} msgs · {}",
-                        conversation.id,
-                        conversation.title,
-                        messages,
-                        conversation.workspace.as_deref().unwrap_or("all projects")
+                        "{}  {} · {} msgs · {scope}",
+                        conversation.id, conversation.title, messages,
                     );
                 }
             }
             Ok(0)
+        }
+        Some(Commands::Workspaces { command }) => {
+            workspaces::dispatch(store.root(), &cli.cwd, command, cli.json)
         }
         Some(Commands::Tasks { command }) => {
             let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
@@ -3209,6 +3243,139 @@ fn preview_provider_preferences(
     Ok((preferred, required))
 }
 
+/// The conversation `xcb` / `xcb chat` opens, and the thread's launch hint.
+/// Plain launches open the thread from any directory; `--resume` reopens a
+/// view or the thread; `--new` always starts a new project view for `cwd`,
+/// even when one exists, and never opens the thread.
+async fn chat_conversation(
+    managed: &xcb_runtime::managed::ManagedStore,
+    cwd: &std::path::Path,
+    resume: Option<Id>,
+    new: bool,
+) -> Result<(xcb_runtime::managed::ManagedConversation, Option<String>)> {
+    let conversation = match resume {
+        Some(id) => managed
+            .conversation(&managed.resolve_conversation(&id)?)?
+            .ok_or(Error::Unavailable("managed conversation not found"))?,
+        None if new => return Ok((managed.create_conversation(cwd).await?, None)),
+        None => managed.global_thread().await?,
+    };
+    let hint = if conversation.workspace.is_none() {
+        launch_hint(managed, cwd, true)
+    } else {
+        None
+    };
+    Ok((conversation, hint))
+}
+
+/// The launch directory's project root as a hint for the thread: snapped,
+/// valid and not a container. With `admit`, a new root is admitted as
+/// `launch` (refused for containers); without it (a read-only preview) a new
+/// root counts when admitting it would succeed. Anything else, such as
+/// launching from `~` or `~/Documents`, silently gives no hint.
+fn launch_hint(
+    managed: &xcb_runtime::managed::ManagedStore,
+    cwd: &std::path::Path,
+    admit: bool,
+) -> Option<String> {
+    let root = managed.snap_root(cwd).ok()?;
+    let known = managed.known_workspaces(4096).ok()?;
+    if let Some(entry) = known.iter().find(|entry| entry.path == root) {
+        return (!entry.container).then_some(root);
+    }
+    if admit {
+        return managed
+            .admit_workspace(std::path::Path::new(&root), "launch", None)
+            .ok();
+    }
+    let path = std::path::Path::new(&root);
+    let holds_others = known
+        .iter()
+        .any(|entry| std::path::Path::new(&entry.path).starts_with(path));
+    (!holds_others || path.join(".git").exists()).then_some(root)
+}
+
+/// Where `xcb models route` would run the prompt in the thread. Read-only:
+/// a fresh message id replays nothing, and resolving never creates the
+/// thread row or admits the launch directory.
+fn route_workspace_preview(
+    managed: &xcb_runtime::managed::ManagedStore,
+    cwd: &std::path::Path,
+    task: &str,
+) -> Result<xcb_runtime::workspace_infer::Resolution> {
+    use xcb_runtime::managed::{GLOBAL_THREAD_ID, IntakeCues, Origin};
+    managed.resolve_intake(
+        &Id::new(GLOBAL_THREAD_ID)?,
+        &xcb_runtime::new_id("m_preview"),
+        task,
+        &IntakeCues {
+            origin: Origin::Cli,
+            explicit: None,
+            target: None,
+            focus: None,
+            launch_hint: launch_hint(managed, cwd, false),
+            infer_only: false,
+        },
+    )
+}
+
+fn placement_parts(
+    placement: &xcb_runtime::workspace_infer::Resolution,
+) -> Option<(&str, &'static str)> {
+    match placement {
+        xcb_runtime::workspace_infer::Resolution::Bound {
+            workspace, binding, ..
+        } => Some((workspace.as_str(), binding.source.as_str())),
+        xcb_runtime::workspace_infer::Resolution::Ask { .. } => None,
+    }
+}
+
+fn placement_line(placement: &xcb_runtime::workspace_infer::Resolution) -> String {
+    match placement_parts(placement) {
+        Some((path, source)) => format!(
+            "Workspace: {} ({source})",
+            xcb_core::display_text(path, 4096)
+        ),
+        None => "Workspace: xcb would ask which project".to_owned(),
+    }
+}
+
+/// `xcb conversations`: the thread first when its row exists (listing never
+/// creates it), then project views, most recent first.
+fn listed_conversations(
+    managed: &xcb_runtime::managed::ManagedStore,
+) -> Result<Vec<xcb_runtime::managed::ManagedConversation>> {
+    let mut views = managed.conversations(256)?;
+    let thread = views
+        .iter()
+        .position(|conversation| conversation.workspace.is_none())
+        .map(|index| views.remove(index));
+    let thread = match thread {
+        Some(thread) => Some(thread),
+        None => managed.conversation(&Id::new(xcb_runtime::managed::GLOBAL_THREAD_ID)?)?,
+    };
+    Ok(thread.into_iter().chain(views).collect())
+}
+
+/// `xcb conversations --json` rows: every row gains `isThread`; the thread's
+/// `workspace` is an explicit null, and view rows keep every existing key.
+fn conversation_rows(
+    conversations: &[xcb_runtime::managed::ManagedConversation],
+) -> Result<Vec<serde_json::Value>> {
+    conversations
+        .iter()
+        .map(|conversation| {
+            let mut row = serde_json::to_value(conversation)?;
+            if let Some(object) = row.as_object_mut() {
+                let thread = conversation.workspace.is_none();
+                object.insert("isThread".into(), json!(thread));
+                object.entry("workspace").or_insert(serde_json::Value::Null);
+            }
+            Ok(row)
+        })
+        .collect()
+}
+
 async fn managed_chat(
     store: Arc<Store>,
     cwd: PathBuf,
@@ -3227,18 +3394,9 @@ async fn managed_chat(
         ));
     }
     let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
-    let conversation = match resume {
-        Some(id) => managed
-            .conversation(&managed.resolve_conversation(&id)?)?
-            .ok_or(Error::Unavailable("managed conversation not found"))?,
-        // The ambient launch reopens this directory's live thread; `/new` or
-        // `--new` is the explicit way to start a parallel conversation.
-        None if !new => match managed.latest_conversation_for_workspace(&cwd)? {
-            Some(conversation) => conversation,
-            None => managed.create_conversation(&cwd).await?,
-        },
-        None => managed.create_conversation(&cwd).await?,
-    };
+    // The surfaces lane adds a `launch_hint` parameter to `serve_ui`; the
+    // hint is passed there once both lanes are integrated.
+    let (conversation, _launch_hint) = chat_conversation(&managed, &cwd, resume, new).await?;
     let executable = std::env::current_exe()?;
     let (updates, display) = sync_channel(256);
     let (commands, input) = sync_channel(32);
@@ -3317,6 +3475,198 @@ fn automatic_route_notice(reason: &str) -> &'static str {
         "Usage limits block a higher-ranked model; using the best eligible route."
     } else {
         "Automatically selected an admitted route."
+    }
+}
+
+#[cfg(test)]
+mod thread_entry_tests {
+    use super::*;
+    use std::path::Path;
+    use xcb_runtime::managed::{GLOBAL_THREAD_ID, ManagedStore};
+
+    /// A private scratch base: `state` for the store, sibling directories for
+    /// workspaces, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let base = std::env::temp_dir().canonicalize().unwrap().join(format!(
+                "xcb-cli-entry-{name}-{}-{}",
+                std::process::id(),
+                now_ms()
+            ));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            Self(base)
+        }
+        fn store(&self) -> ManagedStore {
+            ManagedStore::open(&self.0.join("state")).unwrap()
+        }
+        fn dir(&self, name: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            path.canonicalize().unwrap()
+        }
+        fn repo(&self, name: &str) -> PathBuf {
+            let path = self.dir(name);
+            std::fs::create_dir_all(path.join(".git")).unwrap();
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn text(path: &Path) -> &str {
+        path.to_str().unwrap()
+    }
+
+    #[tokio::test]
+    async fn bare_selection_opens_the_thread_with_a_launch_hint() {
+        let scratch = Scratch::new("bare");
+        let managed = scratch.store();
+        let repo = scratch.repo("repo");
+        let nested = scratch.dir("repo/src/deep");
+        let (conversation, hint) = chat_conversation(&managed, &nested, None, false)
+            .await
+            .unwrap();
+        assert_eq!(conversation.id.as_str(), GLOBAL_THREAD_ID);
+        assert!(conversation.workspace.is_none());
+        assert_eq!(hint.as_deref(), Some(text(&repo)), "the hint snaps");
+        let entry = managed
+            .all_workspaces()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.path == text(&repo))
+            .unwrap();
+        assert_eq!(entry.admitted_by, "launch");
+        // The thread row is shared, never duplicated.
+        let (again, _) = chat_conversation(&managed, &repo, None, false)
+            .await
+            .unwrap();
+        assert_eq!(again.id, conversation.id);
+        assert_eq!(managed.conversations(16).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn launching_from_a_container_gives_no_hint() {
+        let scratch = Scratch::new("container");
+        let managed = scratch.store();
+        let documents = scratch.dir("documents");
+        let project = scratch.dir("documents/project");
+        managed.admit_workspace(&project, "command", None).unwrap();
+        let (conversation, hint) = chat_conversation(&managed, &documents, None, false)
+            .await
+            .unwrap();
+        assert_eq!(conversation.id.as_str(), GLOBAL_THREAD_ID);
+        assert_eq!(hint, None);
+        assert!(
+            managed
+                .all_workspaces()
+                .unwrap()
+                .iter()
+                .all(|entry| entry.path != text(&documents)),
+            "a container is never admitted by launch"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_always_creates_a_new_project_view() {
+        let scratch = Scratch::new("new");
+        let managed = scratch.store();
+        let work = scratch.dir("work");
+        let existing = managed.create_conversation(&work).await.unwrap();
+        let (first, hint) = chat_conversation(&managed, &work, None, true)
+            .await
+            .unwrap();
+        let (second, _) = chat_conversation(&managed, &work, None, true)
+            .await
+            .unwrap();
+        assert_eq!(hint, None);
+        for view in [&first, &second] {
+            assert_ne!(view.id.as_str(), GLOBAL_THREAD_ID);
+            assert_ne!(view.id, existing.id);
+            assert_eq!(view.workspace.as_deref(), Some(text(&work)));
+        }
+        assert_ne!(first.id, second.id);
+        assert!(
+            managed
+                .conversation(&Id::new(GLOBAL_THREAD_ID).unwrap())
+                .unwrap()
+                .is_none(),
+            "--new never opens the thread"
+        );
+        let (resumed, _) = chat_conversation(&managed, &work, Some(existing.id.clone()), false)
+            .await
+            .unwrap();
+        assert_eq!(resumed.id, existing.id);
+    }
+
+    #[tokio::test]
+    async fn conversations_json_marks_thread_with_null_workspace() {
+        let scratch = Scratch::new("listing");
+        let managed = scratch.store();
+        let work = scratch.dir("work");
+        let view = managed.create_conversation(&work).await.unwrap();
+        let before = conversation_rows(&listed_conversations(&managed).unwrap()).unwrap();
+        assert_eq!(before.len(), 1);
+        assert!(
+            managed
+                .conversation(&Id::new(GLOBAL_THREAD_ID).unwrap())
+                .unwrap()
+                .is_none(),
+            "listing never creates the thread"
+        );
+        let original = serde_json::to_value(&view).unwrap();
+        managed.global_thread().await.unwrap();
+        let rows = conversation_rows(&listed_conversations(&managed).unwrap()).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["id"], json!(GLOBAL_THREAD_ID));
+        assert_eq!(rows[0]["isThread"], json!(true));
+        assert!(rows[0].as_object().unwrap().contains_key("workspace"));
+        assert_eq!(rows[0]["workspace"], serde_json::Value::Null);
+        assert_eq!(rows[1]["isThread"], json!(false));
+        for (key, value) in original.as_object().unwrap() {
+            if key != "updated_at_ms" {
+                assert_eq!(&rows[1][key], value, "{key}");
+            }
+        }
+        assert_eq!(rows[1]["workspace"], json!(text(&work)));
+    }
+
+    #[tokio::test]
+    async fn models_route_preview_writes_nothing() {
+        let scratch = Scratch::new("preview");
+        let managed = scratch.store();
+        let known = scratch.repo("known");
+        managed.admit_workspace(&known, "command", None).unwrap();
+        let fresh = scratch.repo("fresh");
+        let registry = managed.all_workspaces().unwrap();
+        let placement = route_workspace_preview(&managed, &fresh, "fix the tests").unwrap();
+        assert_eq!(
+            placement_line(&placement),
+            format!("Workspace: {} (launch)", text(&fresh))
+        );
+        assert_eq!(managed.all_workspaces().unwrap(), registry);
+        assert!(managed.tasks(16).unwrap().is_empty());
+        assert!(managed.message_counts().unwrap().is_empty());
+        assert!(
+            managed
+                .conversation(&Id::new(GLOBAL_THREAD_ID).unwrap())
+                .unwrap()
+                .is_none(),
+            "the preview never creates the thread"
+        );
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let placement = route_workspace_preview(&managed, &home, "fix the tests").unwrap();
+        assert_ne!(
+            placement_parts(&placement).map(|(_, source)| source),
+            Some("launch"),
+            "home gives no launch hint"
+        );
     }
 }
 
@@ -4262,6 +4612,81 @@ mod tests {
                 yes: true,
                 launch_artifacts: true
             })
+        ));
+    }
+
+    #[test]
+    fn workspaces_and_upgrade_plan_commands_parse() {
+        use super::workspaces::WorkspaceCommand;
+        let cli = Cli::try_parse_from(["xcb", "workspaces"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Workspaces { command: None })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "workspaces", "list", "--json"]).unwrap();
+        assert!(cli.json);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Workspaces {
+                command: Some(WorkspaceCommand::List)
+            })
+        ));
+        let cli =
+            Cli::try_parse_from(["xcb", "workspaces", "add", "../repo", "--name", "xcb"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Workspaces { command: Some(WorkspaceCommand::Add { dir, name: Some(name) }) })
+                if dir == std::path::Path::new("../repo") && name == "xcb"
+        ));
+        for (verb, expected) in [("hide", "old"), ("show", "old")] {
+            let cli = Cli::try_parse_from(["xcb", "workspaces", verb, expected]).unwrap();
+            assert!(matches!(
+                cli.command,
+                Some(Commands::Workspaces {
+                    command: Some(WorkspaceCommand::Hide { scope } | WorkspaceCommand::Show { scope })
+                }) if scope == expected
+            ));
+        }
+        let cli = Cli::try_parse_from(["xcb", "workspaces", "why", "t_example"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Workspaces { command: Some(WorkspaceCommand::Why { task }) })
+                if task.as_str() == "t_example"
+        ));
+        let cli = Cli::try_parse_from(["xcb", "workspaces", "conflicts", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Workspaces {
+                command: Some(WorkspaceCommand::Conflicts)
+            })
+        ));
+        assert!(Cli::try_parse_from(["xcb", "workspaces", "hide"]).is_err());
+        assert!(Cli::try_parse_from(["xcb", "workspaces", "why"]).is_err());
+        let cli = Cli::try_parse_from(["xcb", "doctor", "--upgrade-plan"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Doctor {
+                upgrade_plan: true,
+                provider: None,
+                executable: None
+            })
+        ));
+        assert!(
+            Cli::try_parse_from(["xcb", "doctor", "--upgrade-plan", "--provider", "claude"])
+                .is_err()
+        );
+        let cli = Cli::try_parse_from(["xcb", "doctor"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Doctor {
+                upgrade_plan: false,
+                ..
+            })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "dispatch", "d_1", "@infer", "-p", "x"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Dispatch { workspace, .. }) if workspace == "@infer"
         ));
     }
 
