@@ -165,13 +165,13 @@ Which binding each creator writes:
 | TUI `Schedule`/`Enqueue`/`EnqueueIn` in the thread | thread | `explicit` or `focus` or `target`/high per the authority ladder, origin `tui` |
 | Worker `xcb_backlog_add` from a thread task | thread | `inherited`/high, origin `worker`, reason `from t_…` |
 | Program child, `finish_program` follow-up | thread | `inherited`/high, origin `program`, reason `from t_…` |
-| Daemon child | thread | `inherited`/high, origin `daemon`, reason `from t_…` |
+| Daemon child | thread | `inherited`/high, origin `daemon`, reason `from daemon <process name>` |
 | Schedule occurrence | thread | `inherited`/high, origin `schedule`, reason `schedule s_…` |
 | `move_task` recreation | thread | `moved`/high, origin copied from the old binding |
 
 - `None` means a legacy or view-bound task. Every thread task carries `Some`.
-- The inherited reasons are deterministic (they name the parent id), so child
-  replay through `same_identity` stays exact.
+- The inherited reasons are deterministic (they name the parent id, or the
+  daemon's process name), so child replay through `same_identity` stays exact.
 - Update the struct literals at `managed.rs` `create_habitat_task`,
   `managed_program_state.rs` (the child), `managed_daemon.rs` (the child) and
   the test helper `bare_task`.
@@ -367,7 +367,9 @@ Where it is called:
   directory arguments.
 - Again in `Supervisor::launch` before `new_session`. There, a result that
   differs from `task.workspace` fails the task with "workspace moved or was
-  replaced since it was bound".
+  replaced since it was bound". This includes a legacy pre-v7 task whose stored
+  workspace was never canonical (for example a symlinked or `~`-relative
+  path).
 
 This tightens today's behavior. A legacy view rooted at `$HOME` (or at a hidden
 directory under it) can no longer start new tasks. Test fixtures that open the
@@ -575,6 +577,8 @@ pub async fn release_hold(&self, task: &Id, expected_revision: u64) -> Result<Ma
     copied) and no hold.
   - A started task returns `Conflict("task already started in {name}; its
     effects stay there — cancel it and send the prompt again")`.
+  - A move to the task's current workspace is a no-op that returns the task
+    unchanged.
 
 ### Serialization with many workspaces
 
@@ -709,11 +713,13 @@ covered by a grant on `/repo`.
   the session-local `focus`.
 - **On Enter:**
   - In a view: `submit_new`, as today.
-  - In the thread: `submit_to_thread` with target = the composer-target task's
-    workspace, plus the focus and hint.
+  - In the thread: `submit_to_thread` with the focus and hint and no target.
+    Enter with a composer target guides that task and creates none, so the
+    TUI never reaches rung 2; the `target` cue stays for API callers.
   - On `Ask`: send `SubmitRejected` (the draft is kept) and then
     `ProjectPicker`. Picking sends `Focus(Some(ws))` (preceded by
-    `AddWorkspace` for a `new` candidate) and resubmits the draft.
+    `AddWorkspace` for a `new` candidate) and resubmits the draft. Esc closes
+    the picker and keeps the draft.
   - On bind: send `WorkspaceBound`.
 - **`Schedule`, `Enqueue` and `EnqueueIn`** in the thread (deferred or not) get
   their `workspace` from the **authority ladder**, exactly like `/project`: an
@@ -1005,3 +1011,32 @@ goes beyond or differs from the critic's wording:
 - **`xcb conversations` never creates the thread**, so the acceptance count at
   ~267-269 changes only if something else created it; entry still owns that
   hunk and filters on `isThread`.
+
+## Delivered differences
+
+The integrated branch matches this spec except for these points, which the
+body above now states:
+
+- **Daemon child reason.** A daemon child's inherited binding reads
+  `from daemon <process name>`, not `from t_…`; a daemon child has no parent
+  task id to name.
+- **Continuation reason.** A rung 6 binding's reason reads
+  ``continuing in `<name>` ``. The other reasons are `named directory`
+  (explicit), `addressed task` (target), ``path in `<name>` `` (prompt path),
+  ``named `<word>` `` (name mention, plus `, most recent checkout` for a low
+  worktree pick), `focus`, `launch dir` and `most recent project`, with the
+  suffix `(overrides focus <name>)` when a path or name beats the focus.
+- **No TUI target cue.** `serve_ui` passes `IntakeCues.target = None` for
+  thread submissions; guidance to a selected task is a steer, not a new task.
+- **`move_task` to the same workspace** is a no-op, not a Conflict.
+- **Picker Esc keeps the draft**, like every other picker; nothing is written.
+- **Launch revalidation of legacy tasks.** A pre-v7 task whose stored
+  workspace is not the validator's canonical string fails at launch with
+  "workspace moved or was replaced since it was bound" instead of running.
+- **Launch admission of containers.** A `launch` admission whose root would be
+  a container fails with "workspace is not allowed: it holds other projects",
+  and bare `xcb` then opens the thread with no hint.
+- **Relay name misses** list up to eight known project names.
+- **Test gap.** No `kernel::workspace_lease` unit test uses nested paths; the
+  overlap rule is covered at the supervisor tick and `workspace_busy` level and
+  by the cross-cutting e2e test in `managed_global_thread_e2e_tests.rs`.

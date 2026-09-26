@@ -1,5 +1,7 @@
 # Resumable managed ALGAL programs
 
+> Superseded in part by [global-thread.md](global-thread.md): projects are workspace-keyed.
+
 ## Outcome and scope
 
 Extend the persistent project-agent habitat with bounded ALGAL controllers that

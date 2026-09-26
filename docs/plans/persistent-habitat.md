@@ -1,5 +1,7 @@
 # Persistent project agents and automatic routing
 
+> Superseded in part by [global-thread.md](global-thread.md): projects are workspace-keyed.
+
 ## Outcome
 
 A project agent is an existing managed conversation bound to a workspace. Its

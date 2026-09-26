@@ -1,5 +1,7 @@
 # Durable agent inbox — 0.5.0
 
+> Superseded in part by [global-thread.md](global-thread.md): projects are workspace-keyed.
+
 This increment applies the host event lifecycle from the Unreal Agent assessment
 without changing provider protocols. A managed task remains the unit of work and
 authority. The host records guidance and notifications, then includes an exact,

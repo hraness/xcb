@@ -1,5 +1,7 @@
 # Effectful ALGAL daemons
 
+> Superseded in part by [global-thread.md](global-thread.md): projects are workspace-keyed.
+
 ## Outcome and scope
 
 Extend the managed habitat with named, durable ALGAL processes
