@@ -27,19 +27,20 @@ Deployment env (`npx convex env set <KEY> <value>` with
   device sessions. Rotate by replacing both.
 - `XCB_RELAY_BOOTSTRAP` — one-shot first-owner invite. Inert once a
   subject is verified; set a fresh value only when rebuilding a fleet.
-- `XCB_RELAY_EMAIL` — `log` (default), `resend`, or `webhook`.
-  `resend` needs `XCB_RESEND_API_KEY` and `XCB_RESEND_FROM`; `webhook`
-  needs `XCB_OTP_WEBHOOK_URL` and `XCB_OTP_WEBHOOK_TOKEN`.
+- `XCB_RELAY_EMAIL` — `log`, `sendgrid`, `resend`, or `webhook`.
+  `sendgrid` needs `XCB_SENDGRID_API_KEY` and `XCB_SENDGRID_FROM`
+  (a verified sender on the account); `resend` needs
+  `XCB_RESEND_API_KEY` and `XCB_RESEND_FROM`; `webhook` needs
+  `XCB_OTP_WEBHOOK_URL` and `XCB_OTP_WEBHOOK_TOKEN`.
 
-OTP delivery currently uses `log`: the sign-in code is printed to the
+OTP delivery uses `sendgrid`: sign-in codes arrive by email from the
+verified sender, no `convex logs` tail needed. `log` remains the
+fallback if the key or sender lapses — the code is then printed to the
 function log and read from an authenticated Convex session:
 
 ```sh
 CONVEX_DEPLOYMENT=prod:terrific-rook-891 npx convex logs
 ```
-
-A `convex logs` tail is needed once per `xcb link`. Switching to Resend
-is one env triple — no code change — when real email delivery is wanted.
 
 ## Enrolling a laptop
 
