@@ -504,6 +504,7 @@ pub async fn attention_remote(state_root: &Path, json_out: bool) -> Result<i32> 
                     "device": row.device,
                     "scope": row.scope,
                     "revision": row.revision,
+                    "updatedAt": row.updated_at,
                     "projection": serde_json::from_slice::<Value>(&row.plaintext)
                         .unwrap_or(Value::Null),
                 })
@@ -658,15 +659,36 @@ pub async fn remote(state_root: &Path, command: &RemoteCommand, json_out: bool) 
 /// `xcb remote status` — read one posted command. With `--wait`, poll
 /// until it settles (bounded); the exit code mirrors the outcome so an
 /// agent can branch on it: `applied` is 0, every other terminal state 1,
-/// and a still-running command without `--wait` is informational 0.
+/// an unknown id or an exhausted `--wait` is 2, and a still-running
+/// command without `--wait` is informational 0.
 async fn status(state_root: &Path, public_id: &str, wait: bool, json_out: bool) -> Result<i32> {
     const POLL: Duration = Duration::from_secs(2);
     const WAIT_MAX: Duration = Duration::from_secs(10 * 60);
     let mut controller = open_controller(state_root).await?;
     let deadline = Instant::now() + WAIT_MAX;
+    let mut waited_out = false;
     let row = loop {
-        let row = controller.command(public_id).await?;
-        if !wait || row.state.is_terminal() || Instant::now() >= deadline {
+        let row = match controller.command(public_id).await {
+            Ok(row) => row,
+            // `get` is subject-scoped: a foreign or mistyped id rejects the
+            // same way — either way it is not this fleet's command.
+            Err(Error::Protocol("relay unknown-command")) => {
+                print_json_or(
+                    json_out,
+                    || {
+                        println!("{public_id} · unknown command");
+                    },
+                    json!({ "version": 1, "command": public_id, "error": "unknown command" }),
+                )?;
+                return Ok(2);
+            }
+            Err(error) => return Err(error),
+        };
+        if !wait || row.state.is_terminal() {
+            break row;
+        }
+        if Instant::now() >= deadline {
+            waited_out = true;
             break row;
         }
         tokio::time::sleep(POLL).await;
@@ -705,13 +727,13 @@ async fn status(state_root: &Path, public_id: &str, wait: bool, json_out: bool) 
             "result": result_text,
         }),
     )?;
-    Ok(
-        if row.state.is_terminal() && row.state != wire::CommandState::Applied {
-            1
-        } else {
-            0
-        },
-    )
+    Ok(if waited_out {
+        2
+    } else if row.state.is_terminal() && row.state != wire::CommandState::Applied {
+        1
+    } else {
+        0
+    })
 }
 
 fn print_json_or(json_out: bool, text: impl FnOnce(), value: Value) -> Result<i32> {
