@@ -148,6 +148,29 @@ fn setup_adds_one_account_then_stops_at_the_provider_check() {
 }
 
 #[test]
+fn setup_refuses_a_turned_off_account_and_names_the_fix() {
+    let sandbox = Sandbox::new("setup-off");
+    let id = sandbox.add_claude();
+    assert!(
+        sandbox
+            .run(&["accounts", "disable", &id], &[])
+            .status
+            .success()
+    );
+    let output = sandbox.run(&["setup", "claude"], &[]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.starts_with("✗ Your Claude Code account claude/a_"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.ends_with(&format!("is turned off.\n→ xcb accounts enable {id}\n")),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn doctor_marks_each_provider_and_names_one_next_step() {
     let sandbox = Sandbox::new("doctor");
     let output = sandbox.run(&["doctor"], &[("HRANESS_AUDIENCE", "human")]);

@@ -1622,10 +1622,23 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             let ok = ux::Style::stdout().sym(ux::Symbol::Ok);
             let name = provider_name(provider);
             // 1. One account for this provider: reuse the first, or add one.
-            let existing = store
+            let accounts: Vec<_> = store
                 .accounts()?
                 .into_iter()
-                .find(|account| account.provider == provider);
+                .filter(|account| account.provider == provider)
+                .collect();
+            if !accounts.is_empty() && accounts.iter().all(|account| !account.enabled) {
+                // Routing skips turned-off accounts; setting one up would
+                // still leave plain `xcb` without an account.
+                return Err(Error::guided(
+                    format!(
+                        "Your {name} account {} is turned off",
+                        xcb_core::display_text(&accounts[0].name(), 80)
+                    ),
+                    format!("xcb accounts enable {}", accounts[0].id),
+                ));
+            }
+            let existing = accounts.into_iter().find(|account| account.enabled);
             let account = match existing {
                 Some(account) => {
                     println!(
@@ -1649,30 +1662,35 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             // 2. Check the provider build.
             let pin = ensure_pin(store.root(), provider).await?;
             println!("{ok} {name} {} is installed", pin.version);
-            let sub = |command: AccountCommand| Cli {
-                state: Some(store.root().to_path_buf()),
-                json: false,
-                cwd: PathBuf::from("."),
-                command: Some(Commands::Accounts {
-                    command: Some(command),
-                }),
-            };
             // 3. Sign in, unless this account already has credentials.
             if !auth::has_credentials(&store, &account.id)? {
                 if provider == Provider::Devin {
                     ux::next(&PublicAccount::from(&account).added_message().1);
                     return Ok(0);
                 }
-                Box::pin(dispatch(sub(AccountCommand::Login {
-                    account: account.id.to_string(),
-                })))
+                let _held = ux::hold_next();
+                Box::pin(dispatch(Cli {
+                    state: Some(store.root().to_path_buf()),
+                    json: false,
+                    cwd: PathBuf::from("."),
+                    command: Some(Commands::Accounts {
+                        command: Some(AccountCommand::Login {
+                            account: account.id.to_string(),
+                        }),
+                    }),
+                }))
                 .await?;
             }
-            // 4. Load the account's models.
-            Box::pin(dispatch(sub(AccountCommand::Refresh {
-                account: account.id.to_string(),
-            })))
-            .await?;
+            // 4. Load the account's models (what `accounts refresh` does).
+            require_account_credentials(&store, &account)?;
+            if !runner::provider_admitted(store.root(), &pin) {
+                return Err(Error::Unavailable(
+                    "native account metadata querying for this runtime is not yet qualified",
+                ));
+            }
+            let models = runner::probe(&store, &pin, Some(&account.id)).await?;
+            store.set_models(provider, &models)?;
+            println!("{ok} Loaded {} models", models.len());
             println!("{ok} {name} is set up.");
             ux::next("xcb");
             Ok(0)

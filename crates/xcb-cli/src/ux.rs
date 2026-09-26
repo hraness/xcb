@@ -121,8 +121,23 @@ impl Style {
 
 /// Print the one `Next:` hint for a human reader. Agents get the next step
 /// from `--json` output, and a quiet reader gets nothing.
+/// Set while one command runs another's steps (`xcb setup`), so only the
+/// outer command names the next step.
+static QUIET_NEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Hold back `Next:` hints until the returned guard drops.
+pub fn hold_next() -> impl Drop {
+    struct Held(bool);
+    impl Drop for Held {
+        fn drop(&mut self) {
+            QUIET_NEXT.store(self.0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    Held(QUIET_NEXT.swap(true, std::sync::atomic::Ordering::Relaxed))
+}
+
 pub fn next(command: &str) {
-    if audience() == Audience::Human {
+    if audience() == Audience::Human && !QUIET_NEXT.load(std::sync::atomic::Ordering::Relaxed) {
         eprintln!("Next: {command}");
     }
 }
