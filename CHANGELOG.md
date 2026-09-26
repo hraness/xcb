@@ -18,6 +18,14 @@ The first run is shorter and every error says what to do next.
   themselves the first time, so the `Next:` step after `xcb accounts add`
   works without a separate `xcb doctor` run. Account commands accept the shortened id the accounts
   table shows, and say whether no account or several accounts matched.
+- `xcb setup <provider>` adds an account (or reuses one), checks the
+  provider, signs in, and loads models, printing ✓ for each step.
+- `xcb --help` groups commands under Start here, Accounts and models,
+  Conversations and tasks, Other machines, and Setup and maintenance.
+  Internal and machine-only commands are no longer listed.
+- `xcb doctor` marks each provider ✓ ready, ⚠ found but not runnable, or
+  ✗ missing, and ends with one next step. `xcb sessions` says when there
+  are none.
 - Errors print as one sentence with the next command to run
   (`✗ No account matches "x".` then `→ xcb accounts`). With `--json`, or
   when an agent runs xcb, errors are a JSON object on stdout. Symbols fall

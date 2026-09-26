@@ -121,8 +121,23 @@ impl Style {
 
 /// Print the one `Next:` hint for a human reader. Agents get the next step
 /// from `--json` output, and a quiet reader gets nothing.
+/// Set while one command runs another's steps (`xcb setup`), so only the
+/// outer command names the next step.
+static QUIET_NEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Hold back `Next:` hints until the returned guard drops.
+pub fn hold_next() -> impl Drop {
+    struct Held(bool);
+    impl Drop for Held {
+        fn drop(&mut self) {
+            QUIET_NEXT.store(self.0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    Held(QUIET_NEXT.swap(true, std::sync::atomic::Ordering::Relaxed))
+}
+
 pub fn next(command: &str) {
-    if audience() == Audience::Human {
+    if audience() == Audience::Human && !QUIET_NEXT.load(std::sync::atomic::Ordering::Relaxed) {
         eprintln!("Next: {command}");
     }
 }
@@ -330,6 +345,85 @@ mod tests {
         assert_eq!(
             render_json(&guided).to_string(),
             r#"{"ok":false,"error":{"code":"unavailable","message":"No account matches \"zz\".","next":"xcb accounts"}}"#
+        );
+    }
+}
+
+/// `xcb --help`: commands grouped by what the reader is doing. Hidden
+/// internal and machine-only commands are left out. A unit test checks that
+/// every visible command is listed.
+pub const ROOT_HELP: &str = "\
+xcb routes coding tasks across the Claude, Codex, and Devin subscriptions
+you already pay for. Plain `xcb` opens a conversation in the terminal UI.
+
+Usage: xcb [command] [options]
+
+Start here
+  setup          Add an account, check the provider and sign in, in one step
+  chat           Open the conversation for this folder
+  run            Run one task here and print the result
+  doctor         Check providers, accounts and unfinished runs
+
+Accounts and models
+  accounts       List accounts; add, sign in and manage them
+  models         List models; refresh catalogs and set the default
+  offers         Show public plan offers (not checked against your account)
+  reflex         Inspect and teach how xcb picks models and sorts turns
+
+Conversations and tasks
+  conversations  List your conversations
+  history        Read a conversation's saved messages
+  rename         Rename a conversation
+  tasks          Inspect tasks and their messages
+  backlog        Manage a conversation's work queue
+  steer          Queue guidance for a task's next turn
+  watch          Send a task's completion report to another task
+  inbox          See guidance and reports and whether they arrived
+  attention      Show questions and approvals waiting on you
+  schedules      Manage recurring wake-ups
+  daemons        Manage always-on project agents (ALGAL daemons)
+  projects       Set how much a project may do on its own
+  memory         Save notes to a project's local Wordcell vault
+  sessions       List direct provider sessions
+  resume         Reopen a direct provider session
+
+Other machines
+  link           Link this machine to your xcb fleet
+  fleet          List your linked devices
+  dispatch       Start a task on another device
+  send           Send text to an agent on another device
+  remote         Steer, cancel or answer work on another device
+
+Setup and maintenance
+  service        Start xcb's background supervisor at login (macOS)
+  update         Check for updates and set the update policy
+  upgrade        Install the latest verified release
+  panes          List, check and install terminal panes
+  plugins        Turn extensions on or off
+  hooks          Run your own programs on lifecycle events
+  judge          Set up the optional routing judge
+  config         Print the effective configuration as JSON
+  recover        Inspect or clean up unfinished runs
+  command        Inspect or archive offline command jobs
+  generate       Generate text for an app (no tools, no hooks)
+  completions    Print shell completions
+
+Options
+  --state <dir>  State folder (default: $XCB_STATE or ~/.local/share/xcb)
+  --json         Machine-readable output where a command supports it
+  --cwd <dir>    Workspace for run, chat and models route (default: .)
+  -h, --help     Show help; xcb <command> --help shows a command's help
+  -V, --version  Show the version
+";
+
+#[cfg(test)]
+mod root_help_tests {
+    #[test]
+    fn root_help_fits_the_terminal() {
+        assert!(
+            super::ROOT_HELP
+                .lines()
+                .all(|line| line.chars().count() <= 80)
         );
     }
 }

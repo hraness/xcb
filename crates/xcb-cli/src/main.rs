@@ -33,7 +33,7 @@ use xcb_runtime::{
     name = "xcb",
     version,
     about = "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for",
-    after_help = "Plain `xcb` opens a persistent managed conversation in the terminal UI.\n\nFirst run:\n  xcb accounts add <provider>\n  xcb accounts login <account>\n  xcb accounts refresh <account>\n  xcb"
+    override_help = ux::ROOT_HELP
 )]
 struct Cli {
     /// State root for accounts, sessions, and tasks (default:
@@ -52,6 +52,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Add an account, check the provider, sign in and load its models, in
+    /// one command.
+    Setup {
+        /// Provider to set up: claude, codex, or devin.
+        provider: Provider,
+        /// Plan label for a new account; a display label only.
+        #[arg(long, default_value = "Subscription")]
+        plan: String,
+    },
     /// Open the control conversation for this directory; workers continue after detach.
     Chat {
         /// Reopen this control conversation instead of the latest one for the directory.
@@ -68,6 +77,7 @@ enum Commands {
         capabilities: bool,
     },
     /// Read bounded private failure metadata for one exact application request.
+    #[command(hide = true)]
     ApplicationDiagnostic {
         /// Account that ran the request.
         #[arg(long)]
@@ -77,6 +87,7 @@ enum Commands {
         request: Id,
     },
     /// Run a fixed application qualification challenge using private gate evidence.
+    #[command(hide = true)]
     QualifyApplication {
         /// Account the qualification runs under.
         #[arg(long)]
@@ -111,6 +122,7 @@ enum Commands {
     },
     /// Select one eligible account/model route and run a single bounded turn.
     /// Machine contract: requires --json and a closed request on stdin.
+    #[command(hide = true)]
     Route,
     /// Reopen a direct provider session in the terminal UI.
     Resume {
@@ -921,6 +933,25 @@ impl PublicAccount<'_> {
     }
 }
 
+/// One provider line in `xcb doctor`.
+fn doctor_line(style: ux::Style, provider: Provider, version: &str, native: bool) -> String {
+    if !native {
+        return format!(
+            "{} {provider} {version}: found, but xcb can't run this build yet",
+            style.sym(ux::Symbol::Warn)
+        );
+    }
+    let detail = if provider == Provider::Devin {
+        "ready · after importing credentials, xcb accounts refresh <account> loads its models"
+    } else {
+        "ready"
+    };
+    format!(
+        "{} {provider} {version}: {detail}",
+        style.sym(ux::Symbol::Ok)
+    )
+}
+
 /// The provider's product name, for sentences.
 fn provider_name(provider: Provider) -> &'static str {
     match provider {
@@ -1581,6 +1612,89 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Some(Commands::Setup { provider, plan }) => {
+            if cli.json {
+                return Err(Error::guided(
+                    "xcb setup is interactive, so it has no --json output",
+                    format!("xcb --json accounts add {provider}"),
+                ));
+            }
+            let ok = ux::Style::stdout().sym(ux::Symbol::Ok);
+            let name = provider_name(provider);
+            // 1. One account for this provider: reuse the first, or add one.
+            let accounts: Vec<_> = store
+                .accounts()?
+                .into_iter()
+                .filter(|account| account.provider == provider)
+                .collect();
+            if !accounts.is_empty() && accounts.iter().all(|account| !account.enabled) {
+                // Routing skips turned-off accounts; setting one up would
+                // still leave plain `xcb` without an account.
+                return Err(Error::guided(
+                    format!(
+                        "Your {name} account {} is turned off",
+                        xcb_core::display_text(&accounts[0].name(), 80)
+                    ),
+                    format!("xcb accounts enable {}", accounts[0].id),
+                ));
+            }
+            let existing = accounts.into_iter().find(|account| account.enabled);
+            let account = match existing {
+                Some(account) => {
+                    println!(
+                        "{ok} Using {} ({provider}) · {}",
+                        xcb_core::display_text(&account.name(), 80),
+                        account.id
+                    );
+                    account
+                }
+                None => {
+                    let account = store.add_account(provider, &plan, now_ms(), None)?;
+                    let (mut config, revision) = Config::load(store.root())?;
+                    if config.default_account.is_none() {
+                        config.default_account = Some(account.id.clone());
+                        config.save(store.root(), revision.as_deref())?;
+                    }
+                    println!("{ok} {}", PublicAccount::from(&account).added_message().0);
+                    account
+                }
+            };
+            // 2. Check the provider build.
+            let pin = ensure_pin(store.root(), provider).await?;
+            println!("{ok} {name} {} is installed", pin.version);
+            // 3. Sign in, unless this account already has credentials.
+            if !auth::has_credentials(&store, &account.id)? {
+                if provider == Provider::Devin {
+                    ux::next(&PublicAccount::from(&account).added_message().1);
+                    return Ok(0);
+                }
+                let _held = ux::hold_next();
+                Box::pin(dispatch(Cli {
+                    state: Some(store.root().to_path_buf()),
+                    json: false,
+                    cwd: PathBuf::from("."),
+                    command: Some(Commands::Accounts {
+                        command: Some(AccountCommand::Login {
+                            account: account.id.to_string(),
+                        }),
+                    }),
+                }))
+                .await?;
+            }
+            // 4. Load the account's models (what `accounts refresh` does).
+            require_account_credentials(&store, &account)?;
+            if !runner::provider_admitted(store.root(), &pin) {
+                return Err(Error::Unavailable(
+                    "native account metadata querying for this runtime is not yet qualified",
+                ));
+            }
+            let models = runner::probe(&store, &pin, Some(&account.id)).await?;
+            store.set_models(provider, &models)?;
+            println!("{ok} Loaded {} models", models.len());
+            println!("{ok} {name} is set up.");
+            ux::next("xcb");
+            Ok(0)
+        }
         Some(Commands::Doctor {
             provider,
             executable,
@@ -1592,6 +1706,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             private::directory(&home.join("tmp"))?;
             let mut found = 0;
             let mut reports = vec![];
+            let style = ux::Style::stdout();
+            let mut ready: Option<Provider> = None;
+            let mut missing: Vec<Provider> = vec![];
             for provider in
                 provider.map_or_else(|| Provider::ALL.to_vec(), |provider| vec![provider])
             {
@@ -1608,7 +1725,10 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         };
                         reports.push(json!({"provider":provider,"version":pin.version,"sha256":pin.sha256,"nativeCandidate":native,"detail":detail}));
                         if !cli.json {
-                            println!("{provider}: {} · {detail}", pin.version);
+                            println!("{}", doctor_line(style, provider, &pin.version, native));
+                        }
+                        if native {
+                            ready.get_or_insert(provider);
                         }
                         found += 1;
                         // Devin catalog discovery requires explicit account-owned
@@ -1616,7 +1736,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         if native && provider != Provider::Devin {
                             match runner::probe(&store, &pin, None).await {
                                 Ok(models) => store.set_models(provider, &models)?,
-                                Err(error) => eprintln!("xcb: metadata probe: {error}"),
+                                Err(error) => eprintln!(
+                                    "{} xcb couldn't list {} models: {}",
+                                    ux::Style::stderr().sym(ux::Symbol::Warn),
+                                    provider_name(provider),
+                                    ux::sentence(&error)
+                                ),
                             }
                         }
                     }
@@ -1630,15 +1755,27 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             };
                             reports.push(json!({"provider":provider,"version":pin.version,"sha256":pin.sha256,"nativeCandidate":native,"storedPin":true,"detail":detail}));
                             if !cli.json {
-                                println!("{provider}: {} · {detail}", pin.version);
+                                println!(
+                                    "{} (last checked build; {name} didn't answer now)",
+                                    doctor_line(style, provider, &pin.version, native),
+                                    name = provider_name(provider)
+                                );
+                            }
+                            if native {
+                                ready.get_or_insert(provider);
                             }
                             found += 1;
                         }
                         Err(_) => {
                             reports.push(json!({"provider":provider,"error":error.to_string()}));
                             if !cli.json {
-                                println!("{provider}: {error}");
+                                println!(
+                                    "{} {provider}: {}",
+                                    style.sym(ux::Symbol::Fail),
+                                    ux::sentence(&error)
+                                );
                             }
+                            missing.push(provider);
                         }
                     },
                 }
@@ -1724,7 +1861,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             } else {
                 match remote_status.get("linked").and_then(|v| v.as_bool()) {
                     Some(true) => println!(
-                        "remote: linked · device {} · relay {}{}",
+                        "{} remote: linked · device {} · relay {}{}",
+                        style.sym(ux::Symbol::On),
                         remote_status["device"].as_str().unwrap_or("?"),
                         remote_status["relay"].as_str().unwrap_or("?"),
                         if remote_status["admitted"].as_bool().unwrap_or(false) {
@@ -1733,7 +1871,10 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             " · awaiting admit"
                         },
                     ),
-                    _ => println!("remote: not linked — run `xcb link`"),
+                    _ => println!(
+                        "{} remote: not linked (xcb link connects this machine)",
+                        style.sym(ux::Symbol::Off)
+                    ),
                 }
                 let catalog_age = match catalog_status.age_secs {
                     Some(secs) if secs < 120 => format!("refreshed {secs}s ago"),
@@ -1742,7 +1883,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     None => "not fetched yet".to_owned(),
                 };
                 println!(
-                    "catalog: {} reviewed builds{} · {catalog_age}",
+                    "{} catalog: {} reviewed builds{} · {catalog_age}",
+                    style.sym(ux::Symbol::On),
                     catalog_status.builds,
                     if catalog_status.denied > 0 {
                         format!(" · {} denied", catalog_status.denied)
@@ -1752,7 +1894,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 );
                 for pending in &pending_admissions {
                     println!(
-                        "{}: {} awaiting catalog admission",
+                        "{} {}: {} is waiting for review before xcb runs it",
+                        style.sym(ux::Symbol::Warn),
                         pending["provider"].as_str().unwrap_or("provider"),
                         pending["version"].as_str().unwrap_or("discovered build"),
                     );
@@ -1781,7 +1924,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     println!("sandbox: {detail}{userns} · {qual}");
                 }
                 println!(
-                    "judge: {} · key {judge_key_name} · {judge_endpoint}",
+                    "{} judge: {} · key {judge_key_name} · {judge_endpoint}",
+                    if config.extensions.judge.enabled {
+                        style.sym(ux::Symbol::On)
+                    } else {
+                        style.sym(ux::Symbol::Off)
+                    },
                     if config.extensions.judge.enabled {
                         "enabled"
                     } else {
@@ -1790,7 +1938,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 );
                 if sweep.reclaimed > 0 {
                     println!(
-                        "launch artifacts: reclaimed {} settled {} ({})",
+                        "{} launch folders: removed {} finished {} ({})",
+                        style.sym(ux::Symbol::Ok),
                         sweep.reclaimed,
                         if sweep.reclaimed == 1 {
                             "directory"
@@ -1802,7 +1951,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 }
                 if !sweep.unprovable.is_empty() {
                     println!(
-                        "launch artifacts: {} {} ({}) retained without independent settlement evidence.",
+                        "{} launch folders: kept {} {} ({}) because xcb can't yet prove their runs finished.",
+                        style.sym(ux::Symbol::Warn),
                         sweep.unprovable.len(),
                         if sweep.unprovable.len() == 1 {
                             "directory"
@@ -1811,12 +1961,34 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         },
                         human_bytes(sweep.unprovable_bytes),
                     );
+                    println!("  Inspect the recorded runs with xcb recover before removing them.");
+                }
+                let unsettled = store.unsettled_runs()?;
+                for run in &unsettled {
                     println!(
-                        "  Parent exit or --yes cannot release custody; inspect the recorded run before recovery."
+                        "{} run {} hasn't finished cleanly; xcb keeps its account until it does",
+                        style.sym(ux::Symbol::Warn),
+                        run.id
                     );
                 }
-                for run in store.unsettled_runs()? {
-                    println!("Unsettled run {} · custody retained", run.id);
+                // One next step, in order of what blocks the first task.
+                if let Some(provider) =
+                    ready.filter(|_| store.accounts().is_ok_and(|a| a.is_empty()))
+                {
+                    ux::next(&format!("xcb setup {provider}"));
+                } else if !unsettled.is_empty() {
+                    ux::next("xcb recover");
+                } else if found == 0 {
+                    // Suggest the most common provider first.
+                    let suggested = [Provider::Claude, Provider::Codex, Provider::Devin]
+                        .into_iter()
+                        .find(|provider| missing.contains(provider));
+                    if let Some(provider) = suggested {
+                        ux::next(&format!(
+                            "install {}, or run xcb doctor --provider {provider} --executable <absolute path>",
+                            provider_name(provider)
+                        ));
+                    }
                 }
             }
             Ok(if found > 0 { 0 } else { 1 })
@@ -2208,6 +2380,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let sessions = store.sessions(64)?;
                     if cli.json {
                         print_json(sessions)?;
+                    } else if sessions.is_empty() {
+                        println!("No provider sessions yet.");
+                        ux::next("xcb");
                     } else {
                         println!(
                             "{:<34}  {:<8} {:<24} {:<15} {:<9} TITLE",
@@ -3139,6 +3314,26 @@ fn automatic_route_notice(reason: &str) -> &'static str {
         "Usage limits block a higher-ranked model; using the best eligible route."
     } else {
         "Automatically selected an admitted route."
+    }
+}
+
+#[cfg(test)]
+mod help_tests {
+    #[test]
+    fn root_help_lists_every_visible_command() {
+        use clap::CommandFactory as _;
+        for command in super::Cli::command().get_subcommands() {
+            if command.is_hide_set() || command.get_name() == "help" {
+                continue;
+            }
+            let name = command.get_name();
+            assert!(
+                super::ux::ROOT_HELP
+                    .lines()
+                    .any(|line| line.split_whitespace().next() == Some(name)),
+                "{name} is missing from xcb --help"
+            );
+        }
     }
 }
 
@@ -4093,8 +4288,7 @@ mod tests {
         }
         let cli = Cli::command();
         assert!(
-            cli.get_after_help()
-                .is_some_and(|text| text.to_string().contains("Plain `xcb`")),
+            ux::ROOT_HELP.contains("Plain `xcb`"),
             "xcb --help must explain what plain `xcb` does"
         );
         for arg in cli.get_arguments() {
