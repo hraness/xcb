@@ -286,7 +286,9 @@ pub fn capabilities(store: &Store) -> Result<Capabilities> {
     for account in store.accounts()? {
         let connected = auth::has_credentials(store, &account.id).unwrap_or(false);
         let pin = Pin::load(store.root(), account.provider).ok();
-        let runtime_admitted = pin.as_ref().is_some_and(runner::provider_admitted);
+        let runtime_admitted = pin
+            .as_ref()
+            .is_some_and(|pin| runner::provider_admitted(store.root(), pin));
         let qualified = pin
             .as_ref()
             .filter(|_| runtime_admitted)
@@ -394,7 +396,7 @@ pub fn qualification_context(
     let pin = Pin::load(store.root(), account.provider)?;
     pin.verify()?;
     if !account.enabled
-        || !runner::provider_admitted(&pin)
+        || !runner::provider_admitted(store.root(), &pin)
         || !store.models()?.iter().any(|choice| {
             choice.provider == account.provider && choice.key() == model && fresh(choice, now_ms())
         })
@@ -457,7 +459,7 @@ pub async fn generate(
         .ok_or_else(|| failure(FailureCode::Unavailable))?;
     let pin =
         Pin::load(store.root(), account.provider).map_err(|_| failure(FailureCode::Unavailable))?;
-    if !runner::provider_admitted(&pin) {
+    if !runner::provider_admitted(store.root(), &pin) {
         return Err(failure(FailureCode::Unavailable));
     }
     let proof = admission(&store, &pin, &request.account, &observed)
@@ -595,7 +597,7 @@ pub async fn qualify_with_expected_generation(
         .ok_or_else(|| fail(FailureCode::Unavailable))?;
     let pin =
         Pin::load(store.root(), account.provider).map_err(|_| fail(FailureCode::Unavailable))?;
-    if !runner::provider_admitted(&pin) {
+    if !runner::provider_admitted(store.root(), &pin) {
         return Err(fail(FailureCode::Unavailable));
     }
     let policy = policy_digest();

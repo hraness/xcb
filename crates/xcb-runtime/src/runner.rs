@@ -1107,19 +1107,25 @@ async fn probe_devin(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<V
 }
 
 /// Artifact/runtime admission only; each launch still checks configuration,
-/// model/tool authority, fresh authentication, and OS confinement.
-pub fn provider_admitted(pin: &Pin) -> bool {
+/// model/tool authority, fresh authentication, and OS confinement. The baked
+/// constants are the floor; the reviewed-builds catalog admits newer pairs
+/// and can deny any digest outright.
+pub fn provider_admitted(root: &Path, pin: &Pin) -> bool {
+    if crate::catalog::denied(root, &pin.sha256) {
+        return false;
+    }
+    let listed = || crate::catalog::admitted(root, pin.provider, &pin.version, &pin.sha256);
     match pin.provider {
         Provider::Claude => claude::version_admitted(&pin.version) && sandbox::available(),
         Provider::Codex => {
             cfg!(target_os = "macos")
                 && sandbox::available()
-                && crate::codex::runtime_admitted(pin).is_ok()
+                && (crate::codex::runtime_admitted(pin).is_ok() || listed())
         }
         Provider::Devin => {
             cfg!(target_os = "macos")
                 && sandbox::available()
-                && crate::devin::runtime_admitted(pin).is_ok()
+                && (crate::devin::runtime_admitted(pin).is_ok() || listed())
         }
     }
 }

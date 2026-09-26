@@ -71,6 +71,15 @@
 - Admit a provider only after the host proves the exact runtime, effective tool
   inventory, configuration isolation and read/write confinement. Unqualified
   adapters remain disabled.
+- Exact-artifact admission has two sources: constants baked into a release and
+  `qualified-builds.json` at the repository root. The Codex catalog workflow
+  qualifies npm-published darwin-arm64 builds through
+  `qualification/codex-inventory.py` and opens an auto-merging catalog pull
+  request. To qualify a build by hand, run the inventory with
+  `--expect-version`/`--expect-sha256`, then append the reviewed pair with a
+  `qualifiedBy` naming the evidence source. Never append a pair whose
+  inventory failed, and never relax the schema-digest check: a wire-protocol
+  change ships through an xcb release instead.
 - Keep broker inputs closed and bounded; applications own filesystem custody
   and messaging authorization.
 - Preserve exclusive account custody after uncertain provider failures.

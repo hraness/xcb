@@ -11,6 +11,8 @@ parser.add_argument('--executable', required=True, type=pathlib.Path)
 parser.add_argument('--output', required=True, type=pathlib.Path)
 parser.add_argument('--inventory', type=pathlib.Path, help='write the inventory record here (default: OUTPUT/inventory.json)')
 parser.add_argument('--wire-trace', type=pathlib.Path, help='also record one permitted-callback turn, normalized for the Rust replay fixture')
+parser.add_argument('--expect-version', help='candidate version to verify instead of the baked config.rs VERSION (requires --expect-sha256)')
+parser.add_argument('--expect-sha256', help='candidate binary digest to verify instead of the baked BINARY_SHA256 (requires --expect-version)')
 args = parser.parse_args()
 assert sys.platform == 'darwin', 'This fixture requires macOS Seatbelt'
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -19,7 +21,10 @@ BIN = args.executable.resolve(strict=True)
 sha = lambda b: hashlib.sha256(b).hexdigest()
 config_source = (REPO/'crates/xcb-runtime/src/codex/config.rs').read_text()
 const = lambda name: re.search(r'pub const '+name+r': &str = "([^"]+)"', config_source).group(1)
-VERSION, EXPECTED = const('VERSION'), const('BINARY_SHA256')
+assert (args.expect_version is not None) == (args.expect_sha256 is not None), \
+    '--expect-version and --expect-sha256 go together'
+BAKED_VERSION, BAKED_SHA256 = const('VERSION'), const('BINARY_SHA256')
+VERSION, EXPECTED = args.expect_version or BAKED_VERSION, args.expect_sha256 or BAKED_SHA256
 strings = lambda block: [json.loads(x) for x in re.findall(r'"(?:[^"\\]|\\.)*"', block)]
 array = lambda head: strings(config_source.split(head, 1)[1].split('];', 1)[0])
 QUALIFIED = array('pub const QUALIFIED_MODELS: &[&str] = &[')
@@ -279,6 +284,7 @@ for model in QUALIFIED:
 inventory = {
     'schema': 'xcb.codex-scripted-inventory.v1', 'observedDate': datetime.date.today().isoformat(), 'platform': 'macos-arm64',
     'version': VERSION, 'binarySha256': EXPECTED, 'harnessSha256': sha(pathlib.Path(__file__).read_bytes()),
+    'candidate': VERSION != BAKED_VERSION or EXPECTED != BAKED_SHA256, 'bakedVersion': BAKED_VERSION, 'bakedBinarySha256': BAKED_SHA256,
     'schemaSha256': SCHEMA, 'schemaCommand': 'codex ' + ' '.join(SCHEMA_COMMAND) + ' DIR',
     'schemaDigestAlgorithm': 'sha256(sorted relative schema path + NUL + raw generated JSON bytes + NUL)',
     'authentication': 'none; fresh empty CODEX_HOME',
