@@ -81,6 +81,10 @@ mod workspace_tests;
 mod global_thread_tests;
 
 #[cfg(test)]
+#[path = "managed_global_thread_e2e_tests.rs"]
+mod global_thread_e2e_tests;
+
+#[cfg(test)]
 #[path = "managed_mailbox_tests.rs"]
 mod mailbox_integrity_tests;
 
