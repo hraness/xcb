@@ -83,8 +83,8 @@ device that no longer exists locally fails closed rather than rebinding.
 Every verb is scriptable: `--json` prints one JSON object on stdout,
 diagnostics stay on stderr, and the only interactive step in the whole
 surface is the `xcb link` code prompt. A controller agent holds a
-`--state` directory with cloud custody (`~/.xcb` on a linked machine, or
-a dedicated root) and runs:
+`--state` directory with cloud custody (the default state root —
+`~/.local/share/xcb` here — or a dedicated root) and runs:
 
 ```sh
 xcb --state <root> fleet --json            # devices, presence, projection staleness
@@ -144,4 +144,8 @@ any time from any enrolled device:
   device; it minted the account key)
 - `/Users/benguo/xcb-prod-b` — device `513c79af…`
 
-The real custody lives at `~/.xcb` (device `f07e6b26…`, label `HRA2`).
+The real custody lives at `~/.local/share/xcb` (device `f07e6b26…`,
+label `HRA2`). HRA2 runs the supervised daily-driver setup: release
+binary at `~/.local/bin/xcb`, LaunchAgent
+`dev.hraness.xcb.habitat.6fb2ab5e88dce28b9cd3667b` installed via
+`xcb service install`, online on the production relay.
