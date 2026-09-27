@@ -81,24 +81,17 @@ describe("xcb site source contract", () => {
   });
 
   test("sets headings in the sans text face from the shared level tokens", async () => {
-    const [globals, docs, compare, home, field] = await Promise.all([
+    const [globals, docs, compare, calm] = await Promise.all([
       read("app/globals.css"),
       read("app/docs/docs.css"),
       read("app/compare/compare.css"),
-      read("app/page.tsx"),
-      read("app/hero-field.tsx"),
+      read("app/calm.css"),
     ]);
     expect(globals).toContain('@import "@hraness/design-kit/typography.css"');
-    // The preset declares its serif on each preset element, so the sans
-    // override must be declared there too, not only on :root.
-    expect(globals).toMatch(/:root,\s*\[data-hraness-marketing-preset="editorial"\]\s*\{\s*--hraness-marketing-display-font: var\(--font-text\);/u);
-    expect(globals).toContain(".xcb-interface-grid h3, .xcb-download-platforms h3 { margin: 0 0 .5rem; font-family: var(--hraness-type-h3-font); font-size: var(--hraness-type-h3-size);");
     for (const level of ["h1", "h2", "h3"]) expect(docs).toContain(`font-size: var(--hraness-type-${level}-size)`);
-    expect(compare).toContain("font-size: var(--hraness-type-h3-size)");
-    for (const css of [globals, docs, compare]) expect(css).not.toMatch(/\bh[1-4][^{]*\{[^}]*font: 500 1\.05rem/u);
-    // The hero field is decorative (aria-hidden), so its note titles are not headings.
-    expect(field).not.toContain("<h3");
-    expect(home).not.toContain("relationship:");
+    for (const level of ["h1", "h2", "h3"]) expect(calm).toContain(`font-size: var(--hraness-type-${level}-size)`);
+    for (const css of [globals, docs, compare, calm]) expect(css).not.toMatch(/\bh[1-4][^{]*\{[^}]*font: 500 1\.05rem/u);
+    expect(calm).toContain('[data-hraness-marketing-preset="minimal"]');
   });
 
   test("keeps the sitemap and robots on the canonical origin", async () => {
@@ -109,17 +102,35 @@ describe("xcb site source contract", () => {
   });
 
   test("keeps the llms.txt map and docs social metadata on the canonical origin", async () => {
-    const [{ GET }, docs] = await Promise.all([import("../app/llms.txt/route"), read("app/docs/page.tsx")]);
+    const [{ GET }, docs, { docsTopics }, { providerStatus, supportedBuilds }] = await Promise.all([
+      import("../app/llms.txt/route"),
+      read("app/docs/page.tsx"),
+      import("../app/docs/topics"),
+      import("../app/docs/provider-status"),
+    ]);
     const llms = await GET().text();
     expect(llms).toContain("https://xcb.sh/");
     expect(llms).toContain("https://xcb.sh/docs");
     expect(llms).toContain("https://xcb.sh/README.md");
     expect(llms).not.toContain("http://");
-    if (publishedRelease === null) expect(llms).toContain("No native xcb binary");
-    else {
-      expect(llms).toContain(`v${publishedRelease.version}`);
+    // The canonical one-line description leads, verbatim.
+    expect(llms.split("\n")[2]).toBe("> xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.");
+    // Every current docs page is listed, and repository links follow main, not an old tag.
+    for (const topic of docsTopics) expect(llms).toContain(`(https://xcb.sh/docs/${topic.slug})`);
+    expect(llms).not.toMatch(/github\.com\/hraness\/xcb\/blob\/v\d/u);
+    // The only xcb version named is the published release: no changelog narrative.
+    const versions = new Set([...llms.matchAll(/\bv(\d+\.\d+\.\d+)\b/gu)].map((match) => match[1]));
+    if (publishedRelease === null) {
+      expect(llms).toContain("No native xcb binary");
+      expect(versions.size).toBe(0);
+    } else {
       expect(llms).toContain(publicationMarkdown(publishedRelease));
+      expect([...versions]).toEqual([publishedRelease.version]);
     }
+    for (const fact of ["xcb --json route", "dryRun", "createSubscriptionRouter", "not on npm", supportedBuilds.claudeMinimum, ...supportedBuilds.codex, ...supportedBuilds.devin, "does not run self-modifying routing policies"]) {
+      expect(llms).toContain(fact);
+    }
+    for (const status of Object.values(providerStatus)) expect(llms.split(status).length - 1).toBe(1);
     expect(docs).toContain('siteName: "xcb"');
     expect(docs).toContain('card: "summary_large_image"');
   });
@@ -172,7 +183,7 @@ test("publication metadata fails closed without an exact xcb artifact and verifi
   expect(parsePublishedRelease(fixture)).toEqual(valid);
 });
 
-test("publication Markdown includes only verified native and compatibility artifacts", async () => {
+test("publication Markdown names the verified release without offering a browser download", async () => {
   const release = parsePublishedRelease(JSON.parse(await read("tests/fixtures/published-release.json")));
   if (release === null) throw new Error("published fixture required");
   expect(publicationMarkdown(null)).toBe("");
@@ -180,16 +191,11 @@ test("publication Markdown includes only verified native and compatibility artif
   expect(markdown).toContain(`**v${release.version}**`);
   expect(markdown).toContain(release.verificationRun);
   for (const asset of release.native) {
-    expect(markdown).toContain(asset.url);
-    expect(markdown).toContain(asset.sha256Url);
+    expect(markdown).not.toContain(asset.url);
+    expect(markdown).not.toContain(asset.sha256Url);
   }
-  expect(markdown).toContain(release.archiveUrl!);
-  expect(markdown).not.toContain("npm");
-  expect(publicationMarkdown({ ...release, archiveUrl: null })).not.toContain(release.archiveUrl!);
-  const compatibilityOnly = publicationMarkdown({ ...release, native: [] });
-  expect(compatibilityOnly).toContain(release.archiveUrl!);
-  expect(compatibilityOnly).not.toContain("SHA-256");
-  expect(compatibilityOnly).not.toContain("darwin-aarch64");
+  expect(markdown).not.toContain(release.archiveUrl!);
+  expect(markdown).not.toContain(".tar.gz");
 });
 
 

@@ -1,13 +1,14 @@
 # TypeScript compatibility reference
 
-This is the retained library and compatibility CLI reference. For the native
-Rust application, start with the [README](../README.md). Code snippets using
-application-owned ports illustrate host integration; they do not qualify a
-provider or establish a live production boundary. Devin and Codex task execution
-remain disabled in the TypeScript standalone CLI. The native Rust Codex and Devin
-candidates, credential imports, and supervised Codex sign-in are separate paths;
-see the [native setup](../README.md#connect-codex-on-macos). Native admission does
-not qualify these compatibility adapters.
+This is the reference for the TypeScript package, `@hraness/xcb`, and its
+`xcb-compat` CLI. For the native `xcb` command, start with the
+[README](../README.md); for a first embedding example, see the
+[SDK quickstart](sdk.md). Code snippets using application-owned ports show host
+integration; they don't approve a provider or prove a production sandbox. Devin
+and Codex task execution stay disabled in the `xcb-compat` CLI. The native Codex
+and Devin support, credential imports, and supervised Codex sign-in are separate;
+see [accounts and models](https://xcb.sh/docs/providers). Native support doesn't
+approve these compatibility adapters.
 
 ## TypeScript compatibility
 
@@ -22,15 +23,15 @@ The retained application package provides:
 
 `src/index.ts` exports the complete current interface. `createPublicWeb()` provides bounded public HTTPS GETs with address pinning, redirect checks, no ambient authentication, a 15-second deadline, and a 256 KiB maximum text response. Run `bun test` from the repository root.
 
+The package ships as the `hraness-xcb-<version>.tgz` archive on each
+[GitHub release](https://github.com/hraness/xcb/releases), not on npm. Install
+it with `npm install <archive URL>` or `bun add <archive URL>`, as shown in the
+[SDK quickstart](sdk.md#install). Releases tagged `v0.3.0` and earlier are
+AgentMixer and keep that package name.
+
 ## Build from source
 
-This reference describes the TypeScript compatibility source, whose CLI differs
-from the native Rust CLI in the [quick start](../README.md). Check the
-[release assets](https://github.com/hraness/xcb/releases) for a verified
-`hraness-xcb-<version>.tgz` package archive before installing one; releases
-tagged `v0.3.0` and earlier are AgentMixer and retain that package identity.
-
-With Bun 1.3.14, run from the repository root:
+Run this from the repository root with Bun 1.3.14:
 
 ```sh
 bun install --frozen-lockfile
@@ -61,11 +62,9 @@ pinning is an admission invariant, not a portability gap. The repository gate
 packs the tarball, scans its contents, verifies the manifest contract and
 dependency completeness, installs it into an isolated consumer, and executes
 the public entry — including an account-lease custody round trip — under both
-runtimes. The planned release pipeline uses the repository's
-`v<version>` tag channel: an immutable GitHub Release tarball is the
-canonical artifact and `@hraness/xcb` on npm is an exact-byte mirror
-to be published with OIDC provenance. See [publishing](publishing.md) for the release
-contract.
+runtimes. Each `v<version>` GitHub release carries the package archive. An
+npm mirror is planned but not published; see [publishing](publishing.md) for the
+release process.
 
 ## Command-line interface
 
@@ -304,7 +303,9 @@ provider or establish account availability.
 
 `createSubscriptionRouter()` is the packaged entry point for the same path: it
 bundles the account lease store and qualified task adapters into one object so
-a host does not rewire `Xcb` internals.
+a host does not rewire `Xcb` internals. The host names the account and model
+for each task; the router doesn't choose them. The [SDK quickstart](sdk.md) has
+a complete example that runs with a stand-in adapter.
 
 ```ts
 import { openAccountDatabase, SqliteAccountLeases, createSubscriptionRouter } from "@hraness/xcb";
@@ -355,7 +356,7 @@ tool is exposed. Unknown tool names receive a denied result; unexpected response
 capabilities fail the run. Classification sends an empty tool array.
 
 This adapter admits its code-enforced execution profile after checking the pinned
-Anthropic SDK 0.125.0 and verifying the compiled runtime's exact bytes. The
+Anthropic SDK 0.127.0 and verifying the compiled runtime's exact bytes. The
 24-hour runtime qualification describes that local authority boundary; it does
 not attest live account availability or messaging delivery. Recreate an expired
 adapter and refresh model availability before continuing. Native fixture receipts

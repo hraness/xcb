@@ -1,223 +1,120 @@
 # Remote operations
 
-How the xcb fleet runs day to day: enrollment, controller use (human or
-agent), recovery, and the deployment record. The contract lives in
-`docs/plans/remote-access.md`; this file is the runbook.
+`xcb link` joins machines into a fleet, so you, or an agent acting for you, can
+see their work and start tasks on them from any linked machine with the same
+CLI. There is no web interface: you enroll with an emailed code in the
+terminal, and task content crosses the relay end-to-end encrypted.
 
-## Deployment record
+The fleet needs a relay: a [Convex](https://convex.dev) deployment of this
+repository's `convex/` backend that you run. `xcb link --relay <url>` or
+`XCB_RELAY_URL` points xcb at it. [Relay deployment](relay-deployment.md) lists
+the settings a relay needs.
 
-| Item | Value |
-| --- | --- |
-| Project | `cclrte:xcb` (Convex team `cclrte`) |
-| Production deployment | `prod:terrific-rook-891` |
-| Relay URL | `https://terrific-rook-891.convex.cloud` |
-| Site/auth URL | `https://terrific-rook-891.convex.site` |
-| Dev deployment | `dev:neat-seal-397` |
+## Enroll a machine
 
-Deploy code changes from the repo root:
+Install xcb on the machine, then link it:
 
 ```sh
-CONVEX_DEPLOYMENT=dev:neat-seal-397 npx convex deploy
-```
-
-Deployment env (`npx convex env set <KEY> <value>` with
-`CONVEX_DEPLOYMENT=prod:terrific-rook-891`):
-
-- `JWT_PRIVATE_KEY`, `JWKS` — the RS256 pair that mints and verifies
-  device sessions. Rotate by replacing both together, always with
-  `npx convex env set JWT_PRIVATE_KEY --from-file <pem>` (a multi-line
-  value passed inline is stored mangled and breaks minting). After a
-  rotation, devices holding the old session recover automatically: the
-  first authenticated call under the dead token fails, one forced
-  refresh mints a fresh session, and the call retries — bound roughly
-  a request timeout plus a refresh.
-- `XCB_RELAY_BOOTSTRAP` — one-shot first-owner invite. Inert once a
-  subject is verified; set a fresh value only when rebuilding a fleet.
-- `XCB_RELAY_EMAIL` — `log`, `sendgrid`, `resend`, or `webhook`.
-  `sendgrid` needs `XCB_SENDGRID_API_KEY` and `XCB_SENDGRID_FROM`
-  (a verified sender on the account); `resend` needs
-  `XCB_RESEND_API_KEY` and `XCB_RESEND_FROM`; `webhook` needs
-  `XCB_OTP_WEBHOOK_URL` and `XCB_OTP_WEBHOOK_TOKEN`.
-
-OTP delivery uses `sendgrid`: sign-in codes arrive by email from the
-verified sender, no `convex logs` tail needed. `log` remains the
-fallback if the key or sender lapses — the code is then printed to the
-function log and read from an authenticated Convex session:
-
-```sh
-CONVEX_DEPLOYMENT=prod:terrific-rook-891 npx convex logs
-```
-
-## Enrolling a laptop
-
-Install the verified release binary on the laptop first — from a repo
-checkout:
-
-```sh
-XCB_VERSION=0.8.10 sh scripts/install-native.sh
-# installs ~/.local/bin/xcb after checksum and provenance checks
-```
-
-On the laptop, from the repo (or an installed `xcb`):
-
-```sh
-xcb link --relay https://terrific-rook-891.convex.cloud \
+xcb link --relay https://<your-deployment>.convex.cloud \
   --email <owner email> --label <machine name>
-# read the OTP from `npx convex logs` on the prod deployment
-xcb link --relay https://terrific-rook-891.convex.cloud \
+# The 8-digit code arrives by email; finish with --code:
+xcb link --relay https://<your-deployment>.convex.cloud \
   --email <owner email> --code <8-digit code> --label <machine name>
 ```
 
-The first link of the day prints a device id ending with `waiting for an
-enrolled device to run xcb remote admit <device>` whenever another
-device already holds the account key. Admit from any enrolled machine:
+When another enrolled device already holds the fleet's key, the new device
+waits for approval and prints its ID. Approve it from any enrolled machine:
 
 ```sh
 xcb remote admit <device>
 ```
 
-Then keep the supervisor resident — it serves remote commands and
-publishes the fleet projection. On macOS the repo's own LaunchAgent does
-this for the exact state root (see `docs/habitat-service.md`):
+Then keep the background supervisor running, because it serves remote commands
+and publishes the machine's status. On macOS, `xcb service install` starts it at
+login for this state folder (see [login startup](habitat-service.md)). Running
+`xcb link` again on a linked machine changes nothing, and a retried enrollment
+reuses the saved device identity.
+
+## Drive the fleet
 
 ```sh
-xcb service plan      # inspect the declaration
-xcb service install   # register; restarts a minute after exit
-xcb service status
+xcb fleet                                          # devices, presence, and how fresh each status is
+xcb attention --remote                             # questions and approvals across machines
+xcb dispatch <device> <workspace> -p "<task>"      # start a task on another machine
+xcb remote status <command-id> --wait              # wait for a command to finish
+xcb remote steer|cancel|answer <device> <task>     # drive a remote task
+xcb remote abort|ack <command-id>                  # withdraw or acknowledge a command
+xcb remote admit|revoke <device>                   # approve or retire a device
 ```
 
-A bare `xcb managed-daemon` foregrounds the same supervisor for a
-one-off run.
+IDs may be typed as unambiguous prefixes, such as `xcb remote cancel 513c t_a65b`.
+`<workspace>` is one of:
 
-A `xcb link` rerun on an already-linked machine is a no-op. Retried
-enrollment reuses the persisted device identity; a session bound to a
-device that no longer exists locally fails closed rather than rebinding.
+- an absolute path on the target machine, used exactly as given;
+- a project name that matches exactly one project registered there (see
+  `xcb workspaces` on that machine); send names only to devices whose
+  `capabilities` include `workspace-names`;
+- `@infer`, which lets the device pick from a registered path or unique project
+  name in the prompt, or a “continue” of the last remote task within six hours.
+  It never falls back to a recent folder. Send it only to devices whose
+  `capabilities` include `infer`.
 
-## Controller contract (agents: Grok or otherwise)
+The home folder, `/`, hidden folders in your home, `~/Library`, xcb's own
+folders, and system folders are refused. A dispatch lands in the target
+machine's thread and returns the task ID, the folder, and how it was chosen:
+`{"conversation":"c_global","dispatched":true,"task":"t_…","workspace":"/abs","workspaceSource":"explicit"}`.
 
-An agent drives the fleet through its own controller-class device and a
-dedicated state root — never by sharing a daemon's custody (two writers
-on one `session.json` race refresh-token rotation). Setup on whatever
-machine the agent invokes from, or a dedicated root here:
+## Agents as controllers
+
+An agent drives the fleet through its own controller device and its own state
+folder. Don't share a workspace machine's state folder with an agent: two
+writers on one session file race each other's token refresh.
 
 ```sh
-XCB_VERSION=0.8.11 sh scripts/install-native.sh
-xcb --state ~/.local/share/xcb-grok link --controller \
-  --relay https://terrific-rook-891.convex.cloud \
-  --email <owner email> --label grok
-# the code arrives by email; complete with --code <8 digits>
-xcb remote admit <device-id>      # from any enrolled device
+xcb --state ~/.local/share/xcb-agent link --controller \
+  --relay https://<your-deployment>.convex.cloud --email <owner email> --label agent
+xcb remote admit <device-id>      # from any enrolled machine
 ```
 
-Then point the agent at `xcb --state ~/.local/share/xcb-grok --json
-<verb>`. A controller device cannot be dispatched to — it only reads
-fleet state and posts commands.
+Point the agent at `xcb --state ~/.local/share/xcb-agent --json <command>`. A
+controller device reads fleet status and posts commands; nothing can be
+dispatched to it. Every command prints one JSON object on stdout with `--json`,
+diagnostics go to stderr, and the only interactive step is the `xcb link` code
+prompt.
 
-Every verb is scriptable: `--json` prints one JSON object on stdout,
-diagnostics stay on stderr, and the only interactive step in the whole
-surface is the `xcb link` code prompt. A controller agent holds a
-`--state` directory with cloud custody (the default state root —
-`~/.local/share/xcb` here — or a dedicated root) and runs:
+A driving agent's loop:
 
-```sh
-xcb --state <root> fleet --json            # devices, presence, projection staleness
-xcb --state <root> attention --remote --json
-xcb --state <root> dispatch <device> <workspace> -p "<task>" --json
-xcb --state <root> remote status <command-id> --wait --json
-xcb --state <root> remote steer|cancel|answer|refresh …
-xcb --state <root> remote abort|ack <command-id>
-xcb --state <root> remote admit|revoke <device>
-```
+1. `dispatch` returns the command ID at once.
+2. `remote status <id> --wait` blocks until the command finishes. It exits `0`
+   only when the command was `applied`; `failed`, `ambiguous`, `cancelled`, and
+   `expired` exit `1` with `resultCode` and the decrypted `result`; an unknown
+   ID or an exhausted wait exits `2`.
+3. `attention --remote` lists open questions and approvals; `remote answer`
+   responds, and `remote steer` or `remote cancel` drive a task by ID.
+4. `remote abort` withdraws a command that is still `pending`.
+5. `remote ack` acknowledges a finished command so it can be cleaned up.
 
-Loop contract for a driving agent:
+`fleet --json` and `attention --remote --json` report each machine's
+`updatedAt` and a `stale` flag. A machine republishes its status whenever it
+changes and at least every ten minutes, so `stale` (older than twenty minutes)
+means it stopped publishing: treat the status as unknown, not empty.
 
-1. `dispatch` returns `command` (public id) immediately.
-2. `remote status <id> --wait` blocks until the lifecycle closes —
-   exit `0` only on `applied`; `failed`, `ambiguous`, `cancelled` and
-   `expired` all exit `1` with `resultCode` and decrypted `result`;
-   an unknown id or an exhausted wait exits `2`.
-3. `attention --remote` lists open attention items; `remote answer`
-   responds; `remote steer`/`cancel` drive the task by id.
-4. `remote abort` withdraws a command while still `pending`.
-5. `remote ack` acknowledges a terminal command for retention.
-
-`fleet --json` and `attention --remote --json` report each projection's
-`updatedAt` and a `stale` flag. A lane republishes the projection
-whenever contents change and touches it at least every ten minutes
-otherwise, so `stale` (older than twenty minutes) means the lane stopped
-writing — treat the body as "unknown, not empty" and check presence and
-supervisor faults.
-
-Commands are idempotent: retrying a dispatch with the same idempotency
-key replays the in-flight command rather than double-executing.
-`ambiguous` means the effect may have begun before the executor lost
-track of it — reconcile against the remote machine, never blindly retry.
+Commands are idempotent: retrying a dispatch with the same idempotency key
+returns the command already in flight instead of running it twice. `ambiguous`
+means the work may have started before the machine lost track of it; check the
+target machine before retrying.
 
 ## Recovery
 
-- **Lost or retired laptop**: `xcb remote revoke <device>` from any
-  remaining device. The id never rebinds; in-flight commands settle or
-  expire under the new auth epoch and the device's lane is auth-fatal
-  within one poll.
-- **Expired session**: refreshed automatically before every call;
-  custody persists the new session. A laptop offline past the refresh
-  window re-auths cleanly on its next boot — no manual step.
-- **Daemon crash or restart**: the supervisor reboots the lane under a
-  bumped boot generation; stale claimants are fenced by authority and
-  close honestly (`failed`/`ambiguous`). Reboots back off to 5 minutes
-  on consecutive failures.
-- **Relay unreachable**: every call is bounded at 30s; the lane retries
-  on the backoff cadence and presence re-arms on reconnect.
-- **Revoked custody**: `xcb link` re-enrolls a fresh device identity;
-  the old id stays retired.
-
-## Scratch roots on this machine
-
-Two surrogate state roots exist for prod testing and can be revoked at
-any time from any enrolled device:
-
-- `/Users/benguo/xcb-prod-a` — device `832a7d26…` (the first owner
-  device; it minted the account key)
-- `/Users/benguo/xcb-prod-b` — device `513c79af…`
-
-The real custody lives at `~/.local/share/xcb` (device `f07e6b26…`,
-label `HRA2`). HRA2 runs the supervised daily-driver setup: release
-binary at `~/.local/bin/xcb`, LaunchAgent
-`dev.hraness.xcb.habitat.6fb2ab5e88dce28b9cd3667b` installed via
-`xcb service install`, online on the production relay.
-
-## 0.9.0 notes
-
-Devices running 0.9.0 add to the controller contract above; nothing listed
-there changes. The `task_dispatch` keys stay `kind`, `prompt`, and `workspace`.
-
-- **Dispatch lands in the device's thread.** The result's `conversation` is
-  `c_global`, the device's thread, not a per-directory conversation. The result
-  gains `task`, `workspace` (the directory the task runs in), and
-  `workspaceSource` (`explicit`, `mention`, or `continuation`):
-  `{"conversation":"c_global","dispatched":true,"task":"t_…","workspace":"/abs","workspaceSource":"explicit"}`.
-- **An absolute path binds exactly.** `/repo/sub` stays `/repo/sub`; it is not
-  moved to the repository root. The device registers the directory.
-- **A relative value is a project name.** It must match exactly one project
-  registered on that device (`xcb workspaces` there); zero or several matches
-  fail and list the known names. It is never resolved against the daemon's
-  working directory. A 0.8 device resolves a relative value against its
-  daemon's working directory instead, so send names only to devices whose
-  `capabilities` include `workspace-names`.
-- **`@infer` is opt-in.** With `workspace` set to `@infer`, the device picks
-  the project only from a registered path in the prompt, a project name that
-  matches exactly one directory, or an explicit continuation (“continue”,
-  “keep going”) of the last task dispatched remotely within six hours. It never falls back to a recent
-  or launch directory; anything else fails with `workspace ambiguous: <names>`.
-  Send `@infer` only to devices whose `capabilities` include `infer`; a 0.8
-  device fails it.
-- **Refused directories.** `/`, the home directory and its parents, every
-  hidden directory under home and everything inside one, `~/Library`, the xcb
-  state and coordination directories, and system directories fail the dispatch.
-- **Fleet projection.** The body gains `xcb` (the device's package version)
-  and `capabilities` (`["thread", "workspace-names", "infer"]`); `version`
-  keeps its meaning. Each task row gains `workspaceSource`, which is
-  `explicit` for tasks created in a project view.
-- **Conversation listing.** Every `xcb conversations --json` row gains
-  `isThread`. The thread's row has `"workspace": null`; project view rows keep
-  their directory. Listing never creates the thread.
+- **Lost or retired machine:** run `xcb remote revoke <device>` from any other
+  enrolled machine. The ID is retired for good; commands in flight finish or
+  expire, and the revoked machine loses access on its next poll.
+- **Expired session:** xcb refreshes it before each call. A machine that was
+  offline past the refresh window signs in again on its next start.
+- **Supervisor crash or restart:** the supervisor restarts its relay link, and
+  commands left from before close as `failed` or `ambiguous`. Restarts back off
+  up to five minutes after repeated failures.
+- **Relay unreachable:** every call gives up after 30 seconds and retries on
+  the same backoff; presence returns when the relay does.
+- **Revoked device:** `xcb link` enrolls a fresh device identity; the old ID
+  stays retired.

@@ -8,19 +8,20 @@ import { readmeWithPublication } from "./sync-readme.ts";
 
 const repository = join(import.meta.dir, "..", "..");
 
-test("adds verified links to both site README formats without changing generic source guidance", async () => {
+test("adds the verified release line to both site README formats without download links", async () => {
   const source = await readFile(join(repository, "README.md"), "utf8");
   const release = parsePublishedRelease(JSON.parse(await readFile(join(repository, "site/tests/fixtures/published-release.json"), "utf8")));
   if (release === null) throw new Error("published fixture required");
   expect(readmeWithPublication(source, null)).toBe(source);
   const published = readmeWithPublication(source, release);
   expect(published.indexOf("Latest verified release:")).toBeGreaterThan(published.indexOf("### Install a verified release"));
-  expect(published.indexOf("Latest verified release:")).toBeLessThan(published.indexOf("On a supported platform"));
-  const urls = [release.verificationRun, release.archiveUrl!, ...release.native.flatMap((asset) => [asset.url, asset.sha256Url])];
-  for (const url of urls) {
-    expect(renderReadmeHtml(published)).toContain(`href="${url}"`);
-    expect(renderReadmeMarkdown(published)).toContain(url);
-    expect(source).not.toContain(url);
+  expect(published.indexOf("Latest verified release:")).toBeLessThan(published.indexOf("curl -fsSL https://xcb.sh/install.sh | sh"));
+  expect(renderReadmeHtml(published)).toContain(`href="${release.verificationRun}"`);
+  expect(renderReadmeMarkdown(published)).toContain(release.verificationRun);
+  // xcb installs with one command; the site offers no archive downloads.
+  for (const url of [release.archiveUrl!, ...release.native.flatMap((asset) => [asset.url, asset.sha256Url])]) {
+    expect(renderReadmeHtml(published)).not.toContain(url);
+    expect(renderReadmeMarkdown(published)).not.toContain(url);
   }
   expect(() => readmeWithPublication("# No installation heading", release)).toThrow("exactly one");
   expect(() => readmeWithPublication(`${source}\n### Install a verified release\n`, release)).toThrow("exactly one");
@@ -29,10 +30,10 @@ test("adds verified links to both site README formats without changing generic s
 test("renders the repository README with stable heading fragments and repository-rooted relative links", async () => {
   const source = await readFile(join(repository, "README.md"), "utf8");
   const html = renderReadmeHtml(source);
-  expect(html).toContain('<h2 id="standalone-package">Standalone package</h2>');
-  expect(html).toContain('<h2 id="readiness">Readiness</h2>');
+  expect(html).toContain('<h3 id="install-a-verified-release">Install a verified release</h3>');
+  expect(html).toContain('id="limits"');
   expect(html).toContain('href="https://github.com/hraness/xcb/blob/main/docs/compatibility.md"');
-  expect(html).toContain('href="https://github.com/hraness/xcb/blob/main/MANAGED-CODEX.md"');
+  expect(html).toContain('href="https://github.com/hraness/xcb/blob/main/docs/route.md"');
   expect(html).not.toContain("<script");
 });
 
@@ -42,8 +43,12 @@ test("extracts the landing block between the shared Hraness markers", async () =
   expect(source.indexOf(LANDING_END)).toBeGreaterThan(source.indexOf(LANDING_START));
   const landing = readmeLanding(source);
   expect(landing.title).toBe("xcb");
-  expect(landing.lead).toContain("Claude, Codex, and Devin");
-  expect(landing.markdown).toContain("customizable panes");
+  // The canonical one-line description leads the README.
+  expect(landing.lead.startsWith("xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.")).toBe(true);
+  // The README never types the current version; the site inserts the verified release.
+  const { version } = JSON.parse(await readFile(join(repository, "package.json"), "utf8")) as { version: string };
+  expect(source).not.toContain(version);
+  expect(source).toContain("https://github.com/hraness/xcb/releases/latest");
 });
 
 test("serves the README as markdown with repository-rooted relative links", async () => {
@@ -51,9 +56,9 @@ test("serves the README as markdown with repository-rooted relative links", asyn
   const markdown = renderReadmeMarkdown(source);
   expect(markdown).toContain("# xcb");
   expect(markdown).not.toContain("hraness:xcb-landing");
-  expect(markdown).toContain("[Compatibility reference](https://github.com/hraness/xcb/blob/main/docs/compatibility.md)");
-  expect(markdown).toContain("[MIT](https://github.com/hraness/xcb/blob/main/LICENSE)");
-  expect(markdown).toContain("[Project site](https://xcb.sh)");
+  expect(markdown).toContain("](https://github.com/hraness/xcb/blob/main/docs/compatibility.md)");
+  expect(markdown).toContain("](https://github.com/hraness/xcb/blob/main/LICENSE)");
+  expect(markdown).toContain("](https://xcb.sh)");
   expect(() => renderReadmeMarkdown("[x](javascript:alert(1))")).toThrow();
   expect(() => renderReadmeMarkdown("[x](//evil.example)")).toThrow();
 });

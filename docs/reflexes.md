@@ -1,15 +1,9 @@
 # Reflexes: learned routing and turn categorization
 
-Auto-certification ships in v0.6.0. This release defaults `settle` and `confirm`
-to `auto`; each head observes until local evidence certifies it. Earlier v0.5.0
-binaries default both to `observe`, require explicit `active` settings for them
-to act, and do not accept `auto`. See the [v0.5.0 reflex reference](https://github.com/hraness/xcb/blob/v0.5.0/docs/reflexes.md)
-when using those binaries.
+A reflex is a small decision xcb makes many times a day and learns from how
+you respond to it. xcb ships two:
 
-A reflex is a small decision the harness makes many times a day, and that it
-can learn from how you respond to it. xcb ships two:
-
-| Reflex | Decides | Heads | v0.6.0 default |
+| Reflex | Decides | Heads | Default |
 | --- | --- | --- | --- |
 | `route` | Frontier or standard model tier for a new task | `judged` (with judge evidence), `plain` (prompt shape and keyword cues only) | `active` |
 | `settle` | How a settled worker turn ended: `done`, `stopped_short`, `confirm`, `question`, `needs_action`, `needs_approval`, `blocked`, `interrupted`, `uncertain`, ... | `unfinished`, `confirm` | `auto` |
@@ -69,9 +63,9 @@ Generation 0 of each reflex reproduces the behavior xcb had before reflexes:
   thresholds `unfinished` is right four times in five and `confirm` two times
   in three, and they catch about 30% and 20% of the real cases.
 
-Route's generation 0 is behavior-identical to xcb before reflexes. In v0.6.0,
-settle defaults to `auto`, so its fitted prior categorizes and
-learns from the first turn but acts only once your replies certify it.
+Route's generation 0 is behavior-identical to xcb before reflexes. Settle
+defaults to `auto`, so its fitted prior categorizes and learns from the first
+turn but acts only once your replies certify it.
 
 ## How it learns
 
@@ -143,7 +137,7 @@ it became active), the open trial's progress and its certificate.
 
 ### Auto: acting once certified
 
-`auto`, the v0.6.0 default for settle and confirm, observes until your own
+`auto`, the default for settle and confirm, observes until your own
 replies show that a head is precise enough to act for you, then acts, and goes
 back to observing if it gets worse. After every training pass (in the
 background, so labeling never waits for the replay), after `xcb reflex train`
@@ -275,8 +269,7 @@ reports without storing anything. Only the derived features are stored.
 
 ## Configuration
 
-The v0.6.0 defaults in `config.json` `extensions.reflexes` (v0.5.0
-uses `observe` for both `settle` and `confirm`):
+The defaults in `config.json` `extensions.reflexes`:
 
 ```json
 { "route": "active", "settle": "auto", "confirm": "auto", "learn": true }
