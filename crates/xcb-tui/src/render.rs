@@ -235,6 +235,15 @@ fn message_lines(
     previous: Option<&MessageProvenance>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
+    // A thread message bound to a project carries a dim chip naming it.
+    if matches!(message.role, Role::User | Role::Assistant)
+        && let Some(workspace) = app.message_workspace(&message.id)
+    {
+        lines.push(Line::from(Span::styled(
+            format!("⌂ {}", clean(&crate::workspace_name(&app.view, workspace))),
+            muted(),
+        )));
+    }
     match message.role {
         Role::User => render_user_turn(&mut lines, &message.text, message.attachments.len()),
         // Reasoning always precedes the response it produced and shares the
@@ -300,6 +309,9 @@ fn message_key(app: &App, message: &Message, previous: Option<&MessageProvenance
     }
     app.show_thinking.hash(&mut hasher);
     app.show_activity.hash(&mut hasher);
+    if matches!(message.role, Role::User | Role::Assistant) {
+        app.message_workspace(&message.id).hash(&mut hasher);
+    }
     hasher.finish()
 }
 
@@ -397,6 +409,11 @@ impl RenderCache {
         for (text, attachments) in app.pending_echoes() {
             text.hash(&mut hasher);
             attachments.hash(&mut hasher);
+        }
+        for (task, seconds) in app.held_tasks(crate::display_now_ms()) {
+            task.id.as_str().hash(&mut hasher);
+            task.workspace.hash(&mut hasher);
+            seconds.hash(&mut hasher);
         }
         let key = hasher.finish();
         if key != self.tail_key {
@@ -532,6 +549,20 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         })
     {
         project = title;
+    }
+    // The thread spans projects: it names its focus or counts live work.
+    if app.view.session.is_none() && crate::in_thread(&app.view) {
+        project = match &app.view.focus {
+            Some(focus) => format!("→ {}", crate::workspace_name(&app.view, focus)),
+            None => format!(
+                "all projects · {} active",
+                app.view
+                    .tasks
+                    .iter()
+                    .filter(|task| task.state == State::Working || task.state.attention())
+                    .count()
+            ),
+        };
     }
     // Header stays quiet until throughput is actually measured.
     let rate = match (app.view.tokens_per_second, app.view.share_percent) {
@@ -787,13 +818,17 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     .or_else(|| lowest.map(|p| format!(" · quota {}%", p.round() as u32)))
                     .unwrap_or_default();
                 format!(
-                    "{running} running{} · {waiting} needs you (/attention) · {} chats{}{}{}",
+                    "{running} running{} · {waiting} needs you (/attention) · {}{}{}{}",
                     if queued > 0 {
                         format!(" · {queued} queued")
                     } else {
                         String::new()
                     },
-                    app.view.conversations.len(),
+                    if crate::in_thread(&app.view) {
+                        format!("{} projects", app.view.workspaces.len())
+                    } else {
+                        format!("{} chats", app.view.conversations.len())
+                    },
                     routed
                         .map(|route| format!(" · {route}"))
                         .unwrap_or_default(),
@@ -1439,6 +1474,16 @@ fn tail_lines(app: &App) -> Vec<Line<'static>> {
     // is live; stale activity stays hidden behind F4's detail.
     // `activity` only lists the current run's calls, so count this
     // turn's settled cells.
+    // A held thread task waits visibly before its first dispatch.
+    for (task, seconds) in app.held_tasks(crate::display_now_ms()) {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "→ {} · starts in {seconds}s · /workspace go",
+                clean(&crate::workspace_name(&app.view, &task.workspace))
+            ),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
     if matches!(app.view.state, State::Working) || app.view.remote_active {
         let messages = &app.view.messages;
         let turn_start = messages

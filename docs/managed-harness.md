@@ -1,9 +1,73 @@
 # Managed harness
 
 Native xcb separates a user's control conversations from provider worker
-sessions. Each terminal has its own transcript and draft. Conversations share
-durable tasks; each task retains its originating conversation, workspace,
-original goal, explicit follow-ups, worker history, and transition receipts.
+sessions. Plain `xcb` opens the thread: one conversation per machine whose tasks
+can run in any of your project directories. `xcb chat --new` opens a project
+view, a conversation whose tasks all run in one directory. Each terminal has its
+own transcript and draft. Conversations share durable tasks; each task retains
+its originating conversation, workspace, original goal, explicit follow-ups,
+worker history, and transition receipts. A task's workspace never changes after
+it is created.
+
+## Choosing a task's directory
+
+In a project view every task runs in the view's directory. In the thread, xcb
+binds each prompt to a directory when the task is created and records why. The
+first rule that applies wins:
+
+1. A directory given explicitly: a remote dispatch path or name, or
+   `--workspace` on the CLI.
+2. A path in the prompt, such as `cd /repo`, `in ~/src/app`, `@/repo`, or a
+   file path whose directory is used. Paths inside a repository bind to the
+   repository root, or to a worktree or nested repository inside it.
+3. A project name in the prompt, matched as a whole word against registered
+   names and repository names (at least three characters; common words such as
+   `site`, `docs`, `app`, `api`, and `test` are ignored).
+4. The project you focused with `/workspace`.
+5. The project of your last thread task when it changed within six hours and
+   the prompt reads as a continuation: “continue”, “keep going”, a request to
+   resume, or a prompt of 12 words or fewer that names no project.
+6. The directory you launched xcb from (or `--cwd`), snapped to its repository
+   root, unless it holds other projects.
+7. The most recent thread task within six hours, else the most recently used
+   project within 30 days.
+
+The reply names the directory and the reason, for example
+“Started Fix the parser in `app` · named `app` · /workspace to move”, and the
+task row, `xcb workspaces why <task>`, and the task's local record keep the
+source, confidence, reason, and any alternatives.
+
+xcb asks instead of guessing, saves nothing, and keeps your draft when a prompt
+names a directory it has not registered (the picker offers it as “new”, and
+picking it registers it), when a name or several paths match more than one
+project, and when no rule applies. Schedules and backlog items created in the
+thread never use rules 2 to 7: they need a project you named, the focused
+project, or the selected task's directory, because they can run later without
+you. The same holds for `/project` and `/memory`.
+
+A low-confidence choice (rule 7, or a name whose repository has several
+checkouts when none is focused or the launch directory) and a prompt path or
+name that differs from the focused project wait 8 seconds before they start.
+The task shows `→ app · starts in 6s · /workspace go`; use
+`/workspace <name|path>` to move it or `/workspace go` to start it now. Moving
+cancels the unstarted task and creates it again in the new directory. A task
+that has started, and a task created by a grant, schedule, program, daemon, or
+worker, cannot move; cancel it instead. Remote and CLI tasks never wait.
+
+Only you register a directory: `xcb workspaces add`, `/workspace add`, picking a
+“new” picker entry, a remote dispatch or CLI `--workspace` path, a grant, or a
+memory binding. Launching the thread from a directory registers it (or its
+repository root) unless it looks like a directory of projects: it holds
+registered projects or repositories, or it sits directly in your home, such as
+`~/Documents`. `/workspace add <dir>` registers that exact directory. Text in a prompt or a
+worker's output never registers one. xcb refuses
+`/`, your home directory and its parents, every hidden directory in your home
+(`~/.ssh`, `~/.config`, …) and everything inside one, `~/Library`, xcb's own
+state directories, and system directories such as `/usr`, `/etc`, `/System`,
+`/tmp`, and `/var`. A directory that holds other registered projects and is not
+itself a repository, such as `~/Documents`, is never chosen automatically;
+register it with `xcb workspaces add` to focus it or name it explicitly. Before each launch xcb
+checks the directory again and fails the task if it moved or was replaced.
 
 ## Responsibilities
 
@@ -70,9 +134,13 @@ Diagnostics explain failures; they do not authorize retries or release custody.
 
 One detached supervisor owns a state root. Native execution also enforces
 account custody and workspace exclusion, including direct sessions and other
-terminals. Independent workspaces can run concurrently. Tasks in the same
-workspace execute serially; a worker must not wait synchronously for a queued
-peer that cannot acquire that workspace.
+terminals. Independent workspaces can run concurrently, including tasks for
+different projects in one thread. Tasks in the same workspace execute serially,
+and so do a workspace and a directory inside it, such as `/repo` and
+`/repo/site`. A worker must not wait synchronously for a queued peer that cannot
+acquire that workspace. Each worker is confined to its task's workspace
+exactly as in a project view; the thread does not widen what a worker can read
+or write.
 
 A per-task dispatch or settlement fault is isolated to that task, recorded
 as a bounded detail, and retried with backoff; it does not stop the other
@@ -83,7 +151,8 @@ readers skip a corrupt row rather than fail the page; single-row reads and
 transitions stay strict, and skipped task rows are counted for the view.
 
 Cancellation belongs to the originating conversation unless the user names a
-task. Closing a terminal detaches. Active managed worker sessions are protected
+task. In the thread, a bare cancel with several candidates asks which task,
+labelled with each task's project. Closing a terminal detaches. Active managed worker sessions are protected
 from session removal/pruning. A replacement supervisor binary drains settled
 workers before retiring; clients reject an incompatible or unidentified owner
 instead of silently reusing it or signalling an unverified PID.

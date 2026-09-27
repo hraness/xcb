@@ -32,13 +32,28 @@ pub(crate) fn page(
         TranscriptContext::Conversation(id) => ("conversation", id),
         TranscriptContext::Session(id) => ("session", id),
     };
-    let mut query = db.prepare(&format!(
-        "SELECT sequence,payload FROM messages WHERE {column}=?1 AND (?2 IS NULL OR sequence<?2) ORDER BY sequence DESC LIMIT ?3"
-    ))?;
+    // Managed conversations attribute messages to tasks; the task's
+    // workspace labels the message in the thread. Direct sessions have no
+    // task column.
+    let sql = match &context {
+        TranscriptContext::Conversation(_) => {
+            "SELECT m.sequence,m.payload,t.workspace FROM messages m LEFT JOIN tasks t ON t.id=m.task WHERE m.conversation=?1 AND (?2 IS NULL OR m.sequence<?2) ORDER BY m.sequence DESC LIMIT ?3".to_owned()
+        }
+        TranscriptContext::Session(_) => format!(
+            "SELECT sequence,payload,NULL FROM messages WHERE {column}=?1 AND (?2 IS NULL OR sequence<?2) ORDER BY sequence DESC LIMIT ?3"
+        ),
+    };
+    let mut query = db.prepare(&sql)?;
     let rows = query.query_map(params![id.as_str(), before, (limit + 1) as i64], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<String>>(2)?,
+        ))
     })?;
     let mut messages = Vec::with_capacity(limit);
+    let mut sequences = Vec::with_capacity(limit);
+    let mut workspaces = std::collections::BTreeMap::new();
     let mut first_sequence = None;
     let mut bytes = 0usize;
     let mut has_older = false;
@@ -48,23 +63,30 @@ pub(crate) fn page(
             has_older = true;
             break;
         }
-        let (sequence, payload) = row?;
+        let (sequence, payload, workspace) = row?;
         bytes += payload.len();
         if bytes > 8 * 1024 * 1024 {
             return Err(xcb_core::Error::Limit("transcript page").into());
         }
         let message: Message = serde_json::from_str(&payload)?;
         message.validate()?;
-        first_sequence = Some(
-            u64::try_from(sequence).map_err(|_| Error::Conflict("invalid transcript sequence"))?,
-        );
+        let sequence =
+            u64::try_from(sequence).map_err(|_| Error::Conflict("invalid transcript sequence"))?;
+        first_sequence = Some(sequence);
+        if let Some(workspace) = workspace {
+            workspaces.insert(sequence, workspace);
+        }
+        sequences.push(sequence);
         messages.push(message);
     }
     messages.reverse();
+    sequences.reverse();
     Ok(TranscriptPage {
         context,
         messages,
         first_sequence,
         has_older,
+        workspaces,
+        sequences,
     })
 }

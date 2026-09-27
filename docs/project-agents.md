@@ -1,16 +1,26 @@
 # Persistent project agents
 
-A managed conversation is a persistent project agent. Reopen its conversation ID
-for the same workspace, backlog, work history, and goal. Each task routes to an
-eligible model automatically; large prompts prefer known frontier quality, and
-observed usage limits produce a warning when they force a lower-ranked route.
-Model selection normally needs no input from you.
+A project is a workspace directory. Its backlog, work history, autonomy grant,
+schedules, working memory, and Wordcell binding belong to that directory. Your
+thread (plain `xcb`) and every project view over the directory (`xcb chat
+--new`) share them, so the same goal and history follow the project whichever
+conversation you use. Each task routes to an eligible model automatically; large
+prompts prefer known frontier quality, and observed usage limits produce a
+warning when they force a lower-ranked route. Model selection normally needs no
+input from you.
+
+Commands below take `<dir|name>`: a directory path (anything containing `/`,
+or `.` and `..`), a registered project name from `xcb workspaces`, or a
+directory relative to the current one. A project view's conversation ID from
+`xcb conversations`, the form earlier releases used, is accepted as another
+name for that view's directory; the thread's ID is refused, because the thread
+spans projects.
 
 ## Work, questions and approvals
 
 ```sh
-xcb backlog --conversation <conversation-id>
-xcb backlog add <conversation-id> "Review the next milestone" --priority 7
+xcb backlog --workspace <dir>
+xcb backlog add <dir|name> "Review the next milestone" --priority 7
 xcb backlog edit <task-id> "Review authentication" --revision 1
 xcb backlog release <task-id> --revision 2
 xcb backlog complete <deferred-task-id> "Already covered by the passing parser tests" --revision 1
@@ -19,9 +29,15 @@ xcb backlog reply <task-id> "Use the existing project conventions"
 xcb backlog reconcile <uncertain-task-id> --revision 4
 ```
 
-The TUI provides `/backlog`, `/backlog all`, `/attention`, `/reply <id> <answer>`,
-`/backlog add`, `/backlog edit`, `/backlog run`, `/backlog complete`, and
-`/backlog reconcile`. Open a row for its complete prompt, summary, status and ID.
+`xcb backlog --workspace <dir>` lists work in that directory from every
+conversation; `--conversation <conversation-id>` filters by one
+conversation. `backlog add <dir|name>` saves the item in your thread, bound to
+that directory. The TUI provides `/backlog`, `/backlog all`, `/attention`,
+`/reply <id> <answer>`, `/backlog add`, `/backlog edit`, `/backlog run`,
+`/backlog complete`, and `/backlog reconcile`. In the thread, `/backlog` narrows
+to the focused project, and `/backlog add` uses the focused project or the
+selected task's directory; with neither it asks which project and saves
+nothing. Open a row for its complete prompt, summary, status and ID.
 Mutations carry the displayed revision; a stale view cannot overwrite newer work.
 
 The attention inbox spans agents and distinguishes questions, approvals, required
@@ -73,7 +89,8 @@ or approval through its existing attention flow; steering cannot substitute for
 that response.
 
 A watch requests the source task's terminal report for the target task in the
-same project and workspace. Its stable identity prevents duplicate reports when
+same workspace, whichever conversation each task belongs to. A watch across two
+different workspaces is refused. Its stable identity prevents duplicate reports when
 registration or settlement is replayed. A waiting inbox entry reserves the report
 until its source settles conclusively. A report arriving after the target closes
 remains visible history and does not reopen the task. Explicit guidance and
@@ -97,23 +114,42 @@ supervisor custody; provider adapters and their qualification remain unchanged.
 ## Bounded autonomy
 
 ```sh
-xcb projects configure <conversation-id> "Maintain and improve the parser" --tasks 10 --hours 24
+xcb projects configure <dir|name> "Maintain and improve the parser" --tasks 10 --hours 24
 xcb projects --json
-xcb projects pause <conversation-id> --revision 1
-xcb projects resume <conversation-id> --revision 2
+xcb projects pause <dir|name> --revision 1
+xcb projects resume <dir|name> --revision 2
 ```
 
 In the TUI, use `/project grant 10 24 Maintain and improve the parser`, `/project`,
-`/project all`, `/project pause`, and `/project resume`. CLI replacement grants
+`/project all`, `/project pause`, and `/project resume`. Each takes an optional
+project before its arguments: `/project grant [dir|name] <tasks> <hours> <goal>`.
+After `grant`, a first word that is a whole number is `<tasks>`; write a
+directory named only with digits as a path, such as `./2026`. Without a project
+the command uses the project view's directory, then the thread's focus, then the
+selected task's directory. It never guesses: in the thread with none of these it
+says `name the project: /project grant <name|dir> …`.
+
+`xcb projects` lists one row per directory with its name and status: `active`,
+`paused`, `paused by upgrade`, `expired`, or `spent`. `--json` rows carry
+`workspace`, `name`, and `status`, and `conversation` names the latest project
+view over that directory, or is null. CLI replacement grants
 require the current revision. A grant contains a user-authored goal, an expiry
 from one hour to 30 days, and a budget of 1–100 automatic follow-up tasks. An
 optional CLI `--provider` is a hard constraint inherited by automatic work.
 Configuring a grant does not invent an initial task: submit the first prompt,
 release a backlog item, or add a schedule to begin the project work.
 
+A grant authorizes automatic work in its own directory only. It covers every
+task bound there, from the thread, a project view, or a remote dispatch, and no
+task in any other directory, even one in the same thread. An explicit binding to
+a subdirectory such as `/repo/sub` is a different project from `/repo`; prompts
+that mention a path inside a repository bind to the repository root, so the
+root's grant applies to them.
+
 Workers propose deferred follow-ups with `xcb_backlog_add`. xcb admits one only
 when its parent completed conclusively, the proposal belongs to the current
-grant, no project work or attention remains, and the budget and expiry allow it.
+grant, no project work or attention remains in that directory, and the budget
+and expiry allow it. The follow-up inherits its parent's directory.
 Admission and budget consumption are atomic. User-added deferred items still
 require release. Agents cannot expand their own grants or create schedules.
 The goal guides reasoning; xcb enforces project boundaries, provenance, budgets,
@@ -129,13 +165,18 @@ ordinary per-task attempt/time limits; pause them separately when ending them.
 ## Schedules and startup
 
 ```sh
-xcb schedules add <conversation-id> "Inspect the project and report the next useful step" --every 3600
+xcb schedules add <dir|name> "Inspect the project and report the next useful step" --every 3600
 xcb schedules pause <schedule-id> --revision 1
 xcb schedules resume <schedule-id> --revision 2
 ```
 
 Use `/schedule`, `/schedule all`, `/schedule every 3600 <prompt>`, and
-`/schedule pause|resume <id>` in the TUI. The host owns the clock; no provider-native
+`/schedule pause|resume <id>` in the TUI. A schedule is fixed to one directory
+when you create it and never picks one when it fires. In the thread that
+directory is the focused project or the selected task's directory; with neither,
+xcb asks which project and saves nothing. From the CLI, `<dir|name>` puts the
+schedule in your thread for that directory; a conversation ID keeps it in that
+project view, and the thread's ID needs `--workspace <dir>`. The host owns the clock; no provider-native
 scheduler is involved. Downtime coalesces missed intervals into one occurrence.
 Durable occurrence identities prevent duplicate enqueue, and outstanding work,
 questions or uncertainty block overlapping project occurrences.
@@ -149,7 +190,7 @@ powered off. Persistent work is a sequence of accountable bounded tasks.
 ## ALGAL programs
 
 ```sh
-xcb schedules program <conversation-id> examples/project-planner.algal.json --inputs examples/project-planner-inputs.json --every 3600
+xcb schedules program <dir|name> examples/project-planner.algal.json --inputs examples/project-planner-inputs.json --every 3600
 ```
 
 Registration validates and pins the full manifest, typed input values and their
@@ -171,9 +212,9 @@ planners only. Explicitly enable managed calls with `--managed-calls`, bounded
 from 1 to 8 calls per run:
 
 ```sh
-xcb backlog program <conversation-id> examples/project-controller.algal.json --managed-calls 2 --title "Inspect and advance the project"
+xcb backlog program <dir|name> examples/project-controller.algal.json --managed-calls 2 --title "Inspect and advance the project"
 xcb backlog program-status <parent-or-child-id> --json
-xcb schedules program <conversation-id> examples/project-controller.algal.json --managed-calls 2 --every 3600
+xcb schedules program <dir|name> examples/project-controller.algal.json --managed-calls 2 --every 3600
 ```
 
 The example inspects the project, then supplies that report to a second worker.
@@ -209,22 +250,24 @@ extend the existing supervisor; they do not require another daemon.
 
 ## Working memory and Wordcell
 
-`xcb backlog memory <conversation-id>` and worker `xcb_memory_recent` return a
-bounded newest-first set of task summaries with IDs and statuses. Fresh workers
+`xcb backlog memory <dir|name>` and worker `xcb_memory_recent` return a
+bounded newest-first set of task summaries with IDs and statuses from every
+conversation over that directory, and never from another directory. Fresh workers
 receive a small recent working set. This is historical context, not proof that a
 file, dependency, account or service is unchanged. Terminal history has a bounded
 30-day retention window; unresolved work and proposal/schedule dependencies remain
 protected. Keep durable decisions in the external project vault.
 
 ```sh
-xcb memory configure <conversation-id> --vault /absolute/project/vault --wordcell /absolute/bin/wordcell
-xcb memory status <conversation-id>
-xcb memory search <conversation-id> "parser decision"
+xcb memory configure <dir|name> --vault /absolute/project/vault --wordcell /absolute/bin/wordcell
+xcb memory status <dir|name>
+xcb memory search <dir|name> "parser decision"
 xcb memory promote <task-id> --body-file decision.md
 ```
 
-The host explicitly binds a canonical local Wordcell vault and pins the executable
-and interpreter. Replacing either requires rebinding with the current revision.
+The host explicitly binds a canonical local Wordcell vault to one project
+directory and pins the executable and interpreter. `memory promote` writes to
+the vault bound to the source task's directory. Replacing either requires rebinding with the current revision.
 Workers use `xcb_memory_search`, and the TUI supports `/memory search <query>`.
 Search uses Wordcell's exact local mode with bounded results, no history or graph
 expansion. Retrieved records remain cited, untrusted context.
@@ -240,9 +283,52 @@ future agents can distinguish a past report from current evidence.
 ## Collaboration
 
 `xcb_swarm_status`, `xcb_message_list`, and `xcb_message_send` provide durable
-coordination between active tasks in the same workspace. Backlog tools are scoped
-to the owning project. Messages do not expand authority or expose other workspaces.
+coordination between active tasks in the same workspace. Backlog and memory tools
+are scoped to the worker task's own directory. Messages do not expand authority or expose other workspaces.
 Inter-agent messages enter the target's durable inbox and share its bounded
 delivery batches. Use an explicit watch when a task needs another task's terminal
 report. Never wait synchronously for another task blocked on the same workspace
 lock.
+
+## Upgrading to 0.9
+
+xcb 0.9 moves grants and Wordcell bindings from conversations to directories.
+The first 0.9 command that opens your state upgrades it once, after saving a
+copy as `managed/managed.pre-v7.<time>.sqlite` in the state root when there is
+room. That copy is the only way back: 0.8 refuses upgraded state, so rolling
+back means stopping the supervisor, restoring the copy, and reinstalling 0.8.13,
+which loses activity recorded after the upgrade.
+
+1. Run `xcb doctor --upgrade-plan` with the new binary. It upgrades a private
+   copy and lists what would move, pause, or unbind; your state is not changed.
+2. Let running work finish, then quit every xcb terminal on the machine before
+   installing. While a 0.8 supervisor is still running, 0.9 waits up to 20
+   seconds for it to exit and then refuses to open your state.
+3. After installing, run `xcb workspaces conflicts`, then `xcb projects`.
+4. Resume each grant listed as `paused by upgrade` with `xcb projects resume
+   <dir> --revision <n>` once you have checked its goal and budget.
+5. Run `xcb memory status <dir>` for each project with a Wordcell vault, and
+   `xcb memory configure <dir>` where it reports conflicting bindings.
+6. Hide directories you no longer use with `xcb workspaces hide <dir|name>`.
+
+How the upgrade treats existing settings:
+
+- A grant that was the only grant for its directory moves to that directory
+  unchanged, with its goal, budget, expiry, provider, and use so far. It now
+  covers every conversation over that directory, including remote dispatches
+  and thread tasks bound there, not only the conversation it was created in.
+- When several conversations over one directory had grants, one is kept: the
+  only active one, otherwise the grant of the most recently used conversation.
+  If two or more were active, the kept grant is paused (`paused by upgrade`)
+  until you resume it. The others are recorded as superseded, and their queued
+  automatic work waits in `xcb attention`. Budgets and goals are never added
+  together.
+- Identical Wordcell bindings for one directory merge. Different bindings bind
+  nothing, and searches fail with `conflicting Wordcell bindings from upgrade;
+  run xcb memory configure <dir>` until you choose one.
+- Rows that cannot be read, or whose conversation had no usable directory, are
+  dropped and listed by `xcb workspaces conflicts`.
+- Configuring or resuming a grant, or binding memory, for a directory closes
+  its open conflicts. A notice in the terminal stays up while any remain.
+- A project view rooted at your home directory or a hidden directory inside it
+  can no longer start tasks; use a project directory instead.

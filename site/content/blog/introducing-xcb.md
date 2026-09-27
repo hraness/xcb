@@ -43,7 +43,7 @@ The continuation reflexes start out observing. Since v0.6.0 they default to `aut
 
 xcb uses ALGAL to record managed task transitions and to run the small planning programs behind scheduled work. Evaluating one of those programs uses no provider, subprocess, or network. A controller that needs a worker suspends at that request, xcb saves the checkpoint, and the worker starts only through the same project permissions as any other task. `xcb schedules program --managed-calls 2` lets a controller request up to two worker tasks; the limit is eight. `xcb tasks verify <task-id>` replays the task's local record offline. It checks that record against the current one. It cannot confirm what a provider claimed or what happened outside your machine. [Replayable task history](/blog/replayable-task-history) explains the method, and [How xcb uses ALGAL](/blog/how-xcb-uses-algal) shows where it runs.
 
-Workers can also search a Wordcell vault once you bind it to their conversation with `xcb memory configure <conversation-id>`. Results come back cited, and saving a note to the vault is always a separate step. See [How xcb uses Wordcell](/blog/how-xcb-uses-wordcell).
+Workers can also search a Wordcell vault once you bind it to their project directory with `xcb memory configure <dir>`. Results come back cited, and saving a note to the vault is always a separate step. See [How xcb uses Wordcell](/blog/how-xcb-uses-wordcell).
 
 ## Where xcb is going
 

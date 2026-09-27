@@ -185,3 +185,39 @@ label `HRA2`). HRA2 runs the supervised daily-driver setup: release
 binary at `~/.local/bin/xcb`, LaunchAgent
 `dev.hraness.xcb.habitat.6fb2ab5e88dce28b9cd3667b` installed via
 `xcb service install`, online on the production relay.
+
+## 0.9.0 notes
+
+Devices running 0.9.0 add to the controller contract above; nothing listed
+there changes. The `task_dispatch` keys stay `kind`, `prompt`, and `workspace`.
+
+- **Dispatch lands in the device's thread.** The result's `conversation` is
+  `c_global`, the device's thread, not a per-directory conversation. The result
+  gains `task`, `workspace` (the directory the task runs in), and
+  `workspaceSource` (`explicit`, `mention`, or `continuation`):
+  `{"conversation":"c_global","dispatched":true,"task":"t_…","workspace":"/abs","workspaceSource":"explicit"}`.
+- **An absolute path binds exactly.** `/repo/sub` stays `/repo/sub`; it is not
+  moved to the repository root. The device registers the directory.
+- **A relative value is a project name.** It must match exactly one project
+  registered on that device (`xcb workspaces` there); zero or several matches
+  fail and list the known names. It is never resolved against the daemon's
+  working directory. A 0.8 device resolves a relative value against its
+  daemon's working directory instead, so send names only to devices whose
+  `capabilities` include `workspace-names`.
+- **`@infer` is opt-in.** With `workspace` set to `@infer`, the device picks
+  the project only from a registered path in the prompt, a project name that
+  matches exactly one directory, or an explicit continuation (“continue”,
+  “keep going”) of the last task dispatched remotely within six hours. It never falls back to a recent
+  or launch directory; anything else fails with `workspace ambiguous: <names>`.
+  Send `@infer` only to devices whose `capabilities` include `infer`; a 0.8
+  device fails it.
+- **Refused directories.** `/`, the home directory and its parents, every
+  hidden directory under home and everything inside one, `~/Library`, the xcb
+  state and coordination directories, and system directories fail the dispatch.
+- **Fleet projection.** The body gains `xcb` (the device's package version)
+  and `capabilities` (`["thread", "workspace-names", "infer"]`); `version`
+  keeps its meaning. Each task row gains `workspaceSource`, which is
+  `explicit` for tasks created in a project view.
+- **Conversation listing.** Every `xcb conversations --json` row gains
+  `isThread`. The thread's row has `"workspace": null`; project view rows keep
+  their directory. Listing never creates the thread.

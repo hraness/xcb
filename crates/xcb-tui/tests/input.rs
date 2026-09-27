@@ -1,6 +1,7 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use std::sync::mpsc::sync_channel;
 use xcb_core::session::Attachment;
+use xcb_core::ui::{GLOBAL_THREAD_ID, HabitatCommand, Intent, Update, WorkspaceRow};
 use xcb_tui::{
     App, Modal,
     composer::{Composer, ComposerAction},
@@ -1055,6 +1056,9 @@ fn single_letter_aliases_dispatch_the_full_command() {
         route_reason: None,
         settle: None,
         workspace: "/project".into(),
+        binding: None,
+        hold_until_ms: None,
+        moved_from: None,
         updated_at_ms: 1,
     }];
     app.composer.set_text("/t");
@@ -1165,28 +1169,40 @@ fn managed_session_picker_switches_control_conversations() {
 #[test]
 fn managed_session_picker_offers_a_new_conversation() {
     let (tx, rx) = sync_channel(4);
-    let mut app = App::default();
-    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
-    app.view.conversations = vec![xcb_core::ui::ConversationRow {
-        id: xcb_core::Id::new("c_first").unwrap(),
-        title: "First".into(),
-        workspace: "/one".into(),
-        messages: 3,
-        updated_at_ms: 2,
-    }];
+    let mut app = thread_app();
+    app.composer.set_text("/s");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    // Without a focus or launch directory there is nothing to open a view on.
+    match &app.modal {
+        Some(Modal::Picker { items, .. }) => {
+            assert!(items[0].label.starts_with("Thread · all projects"));
+            assert!(
+                items[1]
+                    .label
+                    .starts_with("project view · one · First · 3 msgs")
+            );
+            assert!(
+                !items
+                    .iter()
+                    .any(|item| item.label.contains("new project view"))
+            );
+        }
+        _ => panic!("conversation picker"),
+    }
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    app.view.focus = Some("/one".into());
     app.composer.set_text("/s");
     picker_key(&mut app, &tx, KeyCode::Enter);
     match &app.modal {
         Some(Modal::Picker { items, .. }) => {
-            assert_eq!(items[0].label, "＋ new conversation");
-            assert!(items[1].label.contains("First · 3 msgs"));
+            assert_eq!(items[0].label, "＋ new project view · one");
         }
         _ => panic!("conversation picker"),
     }
     picker_key(&mut app, &tx, KeyCode::Enter);
     assert!(matches!(
         rx.try_recv(),
-        Ok(xcb_core::ui::Intent::NewSession)
+        Ok(Intent::NewProjectView { workspace }) if workspace == "/one"
     ));
 }
 
@@ -1206,6 +1222,9 @@ fn task_inspect_opens_a_scrollable_modal_with_the_full_route() {
         route_reason: Some("learned workspace preference for devin".into()),
         settle: None,
         workspace: "/project".into(),
+        binding: None,
+        hold_until_ms: None,
+        moved_from: None,
         updated_at_ms: display_now_ms_minus(60_000),
     }];
     app.composer.set_text("/tasks");
@@ -1467,6 +1486,7 @@ fn managed_fixture(state: xcb_core::session::State) -> App {
     app.view.backlog = vec![BacklogRow {
         id: Id::new("task_one").unwrap(),
         conversation: Id::new("conversation_one").unwrap(),
+        workspace: String::new(),
         title: "First task".into(),
         prompt: "Original task".into(),
         summary: "Current question".into(),
@@ -1856,6 +1876,8 @@ fn transcript_pages_are_context_bound_and_clear_display_preserves_messages() {
         messages: view.messages.clone(),
         first_sequence: Some(50),
         has_older: true,
+        workspaces: Default::default(),
+        sequences: Vec::new(),
     });
     app.apply(Update::View(Box::new(view)));
     app.handle(
@@ -1883,6 +1905,8 @@ fn transcript_pages_are_context_bound_and_clear_display_preserves_messages() {
         messages: vec![text_message("old", "older needle")],
         first_sequence: Some(1),
         has_older: false,
+        workspaces: Default::default(),
+        sequences: Vec::new(),
     };
     app.apply(Update::TranscriptPage {
         request: Id::new("unrelated").unwrap(),
@@ -2225,4 +2249,396 @@ fn navigation_burst_cannot_retarget_submission_before_the_new_view_arrives() {
             _ => panic!("submitted input must carry the observed conversation identity"),
         }
     }
+}
+
+fn workspace_row(path: &str, name: &str) -> WorkspaceRow {
+    WorkspaceRow {
+        path: path.into(),
+        name: name.into(),
+        repo: None,
+        last_used_ms: 1,
+        active: 0,
+        container: false,
+        new: false,
+    }
+}
+
+/// A managed terminal with the thread open and two known projects.
+fn thread_app() -> App {
+    let mut app = App::default();
+    app.view.extensions = vec![("algal supervisor".into(), "on".into())];
+    app.view.conversation = Some(xcb_core::Id::new(GLOBAL_THREAD_ID).unwrap());
+    app.view.conversations = vec![
+        xcb_core::ui::ConversationRow {
+            id: xcb_core::Id::new(GLOBAL_THREAD_ID).unwrap(),
+            title: "Thread".into(),
+            workspace: String::new(),
+            messages: 5,
+            updated_at_ms: 3,
+        },
+        xcb_core::ui::ConversationRow {
+            id: xcb_core::Id::new("c_first").unwrap(),
+            title: "First".into(),
+            workspace: "/one".into(),
+            messages: 3,
+            updated_at_ms: 2,
+        },
+    ];
+    app.view.workspaces = vec![workspace_row("/one", "one"), workspace_row("/two", "two")];
+    app
+}
+
+fn thread_task(id: &str, workspace: &str, status: &str) -> xcb_core::ui::TaskRow {
+    xcb_core::ui::TaskRow {
+        id: xcb_core::Id::new(id).unwrap(),
+        revision: 3,
+        title: "Fix the parser".into(),
+        state: xcb_core::session::State::Working,
+        status: Some(status.into()),
+        detail: String::new(),
+        route: None,
+        route_reason: None,
+        settle: None,
+        workspace: workspace.into(),
+        binding: Some("named directory (high)".into()),
+        hold_until_ms: None,
+        moved_from: None,
+        updated_at_ms: 1,
+    }
+}
+
+fn drain(rx: &std::sync::mpsc::Receiver<Intent>) -> Vec<Intent> {
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+fn slash(app: &mut App, tx: &std::sync::mpsc::SyncSender<Intent>, command: &str) {
+    app.composer.set_text(command);
+    assert!(app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        tx
+    ));
+}
+
+#[test]
+fn workspace_command_moves_undispatched_task_and_focuses() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = thread_app();
+    app.view.tasks = vec![thread_task("t_new", "/one", "queued")];
+    app.apply(Update::WorkspaceBound {
+        id: xcb_core::Id::new("m_1").unwrap(),
+        task: xcb_core::Id::new("t_new").unwrap(),
+        workspace: "/one".into(),
+        label: "recent project".into(),
+    });
+    assert!(app.notice.starts_with("→ one · recent project"));
+    slash(&mut app, &tx, "/workspace two");
+    let sent = drain(&rx);
+    // One intent moves and focuses, so its one notice reports both.
+    assert!(matches!(
+        &sent[..],
+        [Intent::MoveTask { task, revision: 3, target, focus: true }]
+            if task.as_str() == "t_new" && target == "/two"
+    ));
+    // A dispatched task stays put; the focus still moves.
+    app.view.tasks[0].route = Some("codex/gpt · account".into());
+    slash(&mut app, &tx, "/workspace one");
+    assert!(matches!(&drain(&rx)[..], [Intent::Focus(Some(focus))] if focus == "/one"));
+    // An unknown name never reaches the runtime.
+    slash(&mut app, &tx, "/workspace nowhere");
+    assert!(drain(&rx).is_empty());
+    assert!(app.notice.contains("no known project is named `nowhere`"));
+    slash(&mut app, &tx, "/workspace move t_new two");
+    assert!(matches!(
+        &drain(&rx)[..],
+        [Intent::MoveTask { task, revision: 3, target, focus: false }] if task.as_str() == "t_new" && target == "/two"
+    ));
+}
+
+#[test]
+fn workspace_without_args_opens_picker() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = thread_app();
+    app.view.workspaces[1].active = 2;
+    app.composer.set_text("/workspace");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    match &app.modal {
+        Some(Modal::Picker { title, items, .. }) => {
+            assert_eq!(title, "Focus a project");
+            assert_eq!(items[0].label, "one · /one");
+            assert_eq!(items[1].label, "two · /two · 2 active");
+        }
+        _ => panic!("workspace picker"),
+    }
+    picker_key(&mut app, &tx, KeyCode::Down);
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    // Focusing from /workspace never sends a draft.
+    assert!(matches!(&drain(&rx)[..], [Intent::Focus(Some(focus))] if focus == "/two"));
+}
+
+#[test]
+fn workspace_add_sends_add_workspace() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = thread_app();
+    slash(&mut app, &tx, "/workspace add ~/src/new-project");
+    assert!(matches!(
+        &drain(&rx)[..],
+        [Intent::AddWorkspace { path }] if path == "~/src/new-project"
+    ));
+    slash(&mut app, &tx, "/workspace clear");
+    slash(&mut app, &tx, "/workspace all");
+    assert!(matches!(
+        &drain(&rx)[..],
+        [Intent::Focus(None), Intent::Focus(None)]
+    ));
+    let mut held = thread_task("t_held", "/one", "queued");
+    held.hold_until_ms = Some(u64::MAX);
+    app.view.tasks = vec![held];
+    slash(&mut app, &tx, "/workspace go");
+    assert!(matches!(
+        &drain(&rx)[..],
+        [Intent::ReleaseHold { task, revision: 3 }] if task.as_str() == "t_held"
+    ));
+}
+
+#[test]
+fn ask_keeps_draft_and_resubmits_after_pick() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = thread_app();
+    app.composer.set_text("fix the flaky test");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let Ok(Intent::SubmitTo { id, context, .. }) = rx.try_recv() else {
+        panic!("thread submission")
+    };
+    app.apply(Update::SubmitRejected {
+        id: id.clone(),
+        context: Some(context),
+        text: "fix the flaky test".into(),
+        attachments: vec![],
+        reason: "which project?".into(),
+    });
+    assert_eq!(app.composer.text(), "fix the flaky test");
+    let mut fresh = workspace_row("/three", "three");
+    fresh.new = true;
+    app.apply(Update::ProjectPicker {
+        id,
+        candidates: vec![fresh, workspace_row("/one", "one")],
+        reason: "which project?".into(),
+        resubmit: true,
+    });
+    match &app.modal {
+        Some(Modal::Picker { title, items, .. }) => {
+            assert_eq!(title, "Which project?");
+            assert_eq!(items[0].label, "new — add · /three");
+        }
+        _ => panic!("project picker"),
+    }
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let sent = drain(&rx);
+    assert!(matches!(
+        &sent[..],
+        [
+            Intent::AddWorkspace { path },
+            Intent::Focus(Some(focus)),
+            Intent::SubmitTo { text, .. },
+        ] if path == "/three" && focus == "/three" && text == "fix the flaky test"
+    ));
+    assert!(app.composer.text().is_empty());
+    // Escape closes a second question and keeps the draft.
+    app.composer.set_text("another");
+    app.apply(Update::ProjectPicker {
+        id: xcb_core::Id::new("m_2").unwrap(),
+        candidates: vec![workspace_row("/one", "one")],
+        reason: "which project?".into(),
+        resubmit: true,
+    });
+    picker_key(&mut app, &tx, KeyCode::Esc);
+    assert!(app.modal.is_none());
+    assert_eq!(app.composer.text(), "another");
+    assert!(drain(&rx).is_empty());
+}
+
+#[test]
+fn backlog_add_picker_reruns_the_command_never_a_live_submit() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = thread_app();
+    slash(&mut app, &tx, "/backlog add tidy later");
+    let Ok(Intent::Habitat(HabitatCommand::EnqueueIn {
+        id,
+        deferred: true,
+        workspace: None,
+        ..
+    })) = rx.try_recv()
+    else {
+        panic!("backlog add without a project")
+    };
+    // The runtime restores the command itself, then asks.
+    app.apply(Update::HabitatDraft {
+        context: xcb_core::Id::new(GLOBAL_THREAD_ID).unwrap(),
+        task: None,
+        operation: id.clone(),
+        text: "/backlog add tidy later".into(),
+    });
+    app.apply(Update::ProjectPicker {
+        id,
+        candidates: vec![workspace_row("/one", "one")],
+        reason: "name the project for this work; nothing was saved".into(),
+        resubmit: true,
+    });
+    assert_eq!(app.composer.text(), "/backlog add tidy later");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let sent = drain(&rx);
+    assert!(
+        matches!(
+            &sent[..],
+            [
+                Intent::Focus(Some(focus)),
+                Intent::Habitat(HabitatCommand::EnqueueIn { prompt, deferred: true, .. }),
+            ] if focus == "/one" && prompt == "tidy later"
+        ),
+        "{} intents",
+        sent.len()
+    );
+    // A Tab-queued draft is only focused; its text stays for Tab.
+    app.composer.set_text("queue this");
+    app.apply(Update::ProjectPicker {
+        id: xcb_core::Id::new("m_q").unwrap(),
+        candidates: vec![workspace_row("/one", "one")],
+        reason: "name the project for this work; nothing was saved".into(),
+        resubmit: false,
+    });
+    assert!(
+        app.notice.contains("Tab queues the draft"),
+        "{}",
+        app.notice
+    );
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(matches!(&drain(&rx)[..], [Intent::Focus(Some(focus))] if focus == "/one"));
+    assert_eq!(app.composer.text(), "queue this");
+}
+
+fn thread_card(workspace: &str) -> xcb_core::ui::AgentRow {
+    xcb_core::ui::AgentRow {
+        context: xcb_core::ui::TranscriptContext::Conversation(
+            xcb_core::Id::new(GLOBAL_THREAD_ID).unwrap(),
+        ),
+        task: None,
+        title: workspace.trim_start_matches('/').into(),
+        workspace: workspace.into(),
+        model: None,
+        state: xcb_core::session::State::Idle,
+        activity: "idle".into(),
+        response: String::new(),
+        category: None,
+        updated_at_ms: 1,
+    }
+}
+
+#[test]
+fn alt_arrows_cycle_focus_in_thread() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = thread_app();
+    app.view.agents = vec![thread_card("/one"), thread_card("/two")];
+    let alt = |app: &mut App, code| {
+        app.handle(Event::Key(KeyEvent::new(code, KeyModifiers::ALT)), &tx);
+    };
+    alt(&mut app, KeyCode::Right);
+    assert!(matches!(&drain(&rx)[..], [Intent::Focus(Some(focus))] if focus == "/one"));
+    app.view.focus = Some("/one".into());
+    alt(&mut app, KeyCode::Right);
+    assert!(matches!(&drain(&rx)[..], [Intent::Focus(Some(focus))] if focus == "/two"));
+    app.view.focus = Some("/two".into());
+    alt(&mut app, KeyCode::Right);
+    assert!(matches!(&drain(&rx)[..], [Intent::Focus(None)]));
+    app.view.focus = None;
+    alt(&mut app, KeyCode::Left);
+    assert!(matches!(&drain(&rx)[..], [Intent::Focus(Some(focus))] if focus == "/two"));
+    // In a project view the arrows still switch conversations.
+    app.view.conversation = Some(xcb_core::Id::new("c_first").unwrap());
+    alt(&mut app, KeyCode::Right);
+    assert!(
+        matches!(&drain(&rx)[..], [Intent::Conversation(id)] if id.as_str() == GLOBAL_THREAD_ID)
+    );
+}
+
+#[test]
+fn new_in_thread_creates_no_conversation() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = thread_app();
+    app.view.focus = Some("/one".into());
+    slash(&mut app, &tx, "/new");
+    // The runtime clears the focus; no NewProjectView or conversation intent.
+    assert!(matches!(&drain(&rx)[..], [Intent::NewSession]));
+}
+
+#[test]
+fn project_grant_uses_explicit_or_focus_workspace_and_errors_without_one() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = thread_app();
+    slash(&mut app, &tx, "/project grant 5 24 Maintain the parser");
+    assert!(drain(&rx).is_empty());
+    assert!(
+        app.notice
+            .contains("name the project: /project grant <name|dir>")
+    );
+    app.view.focus = Some("/one".into());
+    slash(&mut app, &tx, "/project grant 5 24 Maintain the parser");
+    assert!(matches!(
+        &drain(&rx)[..],
+        [Intent::Habitat(HabitatCommand::ConfigureProject { workspace, max_tasks: 5, .. })] if workspace == "/one"
+    ));
+    assert!(app.notice.contains("`/one`"));
+    slash(&mut app, &tx, "/project grant two 5 24 Maintain the parser");
+    assert!(matches!(
+        &drain(&rx)[..],
+        [Intent::Habitat(HabitatCommand::ConfigureProject { workspace, .. })] if workspace == "/two"
+    ));
+    // Memory search follows the same ladder, or names the project first.
+    slash(&mut app, &tx, "/memory search parser decisions");
+    slash(&mut app, &tx, "/memory two search parser decisions");
+    assert!(matches!(
+        &drain(&rx)[..],
+        [
+            Intent::Habitat(HabitatCommand::MemorySearch { workspace: first, query: q1 }),
+            Intent::Habitat(HabitatCommand::MemorySearch { workspace: second, query: q2 }),
+        ] if first == "/one" && second == "/two" && q1 == "parser decisions" && q2 == "parser decisions"
+    ));
+    // Standing work is fixed to the focus at keystroke time.
+    slash(&mut app, &tx, "/schedule every 3600 check the build");
+    assert!(matches!(
+        &drain(&rx)[..],
+        [Intent::HabitatAt { command: HabitatCommand::Schedule { workspace: Some(workspace), .. }, .. }] if workspace == "/one"
+    ));
+}
+
+#[test]
+fn project_grant_numeric_first_token_is_tasks_not_scope() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = thread_app();
+    app.view.focus = Some("/one".into());
+    let root = std::env::temp_dir().join(format!("xcb-grant-{}", std::process::id()));
+    let digits = root.join("2026");
+    std::fs::create_dir_all(&digits).unwrap();
+    let digits = std::fs::canonicalize(&digits).unwrap();
+    app.view
+        .workspaces
+        .push(workspace_row(digits.to_str().unwrap(), "2026"));
+    // `2026` is <tasks> (out of range), never the project named 2026.
+    slash(&mut app, &tx, "/project grant 2026 5 24 goal");
+    assert!(drain(&rx).is_empty());
+    assert!(app.notice.starts_with("Use /project grant [project]"));
+    slash(&mut app, &tx, "/project grant 5 24 goal");
+    assert!(matches!(
+        &drain(&rx)[..],
+        [Intent::Habitat(HabitatCommand::ConfigureProject { workspace, max_tasks: 5, .. })] if workspace == "/one"
+    ));
+    slash(
+        &mut app,
+        &tx,
+        &format!("/project grant {} 5 24 goal", digits.display()),
+    );
+    assert!(matches!(
+        &drain(&rx)[..],
+        [Intent::Habitat(HabitatCommand::ConfigureProject { workspace, .. })] if Some(workspace.as_str()) == digits.to_str()
+    ));
+    std::fs::remove_dir_all(root).unwrap();
 }

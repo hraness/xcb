@@ -449,8 +449,10 @@ pub async fn fleet(state_root: &Path, json_out: bool) -> Result<i32> {
     Ok(0)
 }
 
-/// `xcb dispatch <device> <workspace>` — enqueue a managed task on a
-/// remote machine. `prompt` rides the command payload.
+/// `xcb dispatch <device> <workspace>` — enqueue a managed task in a
+/// remote machine's thread. The workspace is an absolute path on the target,
+/// a known project name, or `@infer`; names and `@infer` need a target whose
+/// fleet `capabilities` list them. `prompt` rides the command payload.
 pub async fn dispatch(
     state_root: &Path,
     device: &str,

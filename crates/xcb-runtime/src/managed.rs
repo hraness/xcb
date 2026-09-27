@@ -4,6 +4,7 @@ use crate::{
     digest, judge, kernel, new_id, now_ms, private, reflex, routing,
     runner::{Diagnostic, Observer, Outcome, Progress},
     store::Store,
+    workspace_infer::{CONTINUE_WINDOW_MS, continue_like, workspaces_overlap},
 };
 use algal::{
     contract::Manifest, effects::Host, graph::Transports, runtime, store::Store as AlgalStore,
@@ -63,6 +64,25 @@ pub use program_state::{ProgramChild, ProgramStatus};
 #[path = "managed_daemon.rs"]
 mod daemon;
 pub use daemon::{AdmittedDaemon, DaemonChild, DaemonStatus, MAX_DAEMON_GENERATIONS, daemon_name};
+#[path = "managed_workspace.rs"]
+mod workspace;
+pub use workspace::{
+    Intake, IntakeCues, MigrationConflict, Origin, UpgradeReport, WorkspaceStatus,
+    validate_workspace_root,
+};
+pub use xcb_core::ui::GLOBAL_THREAD_ID;
+
+#[cfg(test)]
+#[path = "managed_workspace_tests.rs"]
+mod workspace_tests;
+
+#[cfg(test)]
+#[path = "managed_global_thread_tests.rs"]
+mod global_thread_tests;
+
+#[cfg(test)]
+#[path = "managed_global_thread_e2e_tests.rs"]
+mod global_thread_e2e_tests;
 
 #[cfg(test)]
 #[path = "managed_mailbox_tests.rs"]
@@ -143,21 +163,37 @@ pub struct ManagedConversation {
     pub version: u32,
     pub id: Id,
     pub title: String,
-    pub workspace: String,
+    /// The project view's directory; `None` only for the global thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
 }
 impl ManagedConversation {
     fn validate(&self) -> Result<()> {
         if self.version != 1
-            || !Path::new(&self.workspace).is_absolute()
+            || (self.id.as_str() == GLOBAL_THREAD_ID) != self.workspace.is_none()
+            || self
+                .workspace
+                .as_deref()
+                .is_some_and(|workspace| !Path::new(workspace).is_absolute())
             || self.updated_at_ms < self.created_at_ms
         {
             return Err(xcb_core::Error::Invalid("managed conversation").into());
         }
         label(&self.title, 160)?;
-        bounded_text(&self.workspace, 4096)?;
+        if let Some(workspace) = &self.workspace {
+            bounded_text(workspace, 4096)?;
+        }
         Ok(())
+    }
+    /// The machine-global thread, which spans every project directory.
+    pub fn is_thread(&self) -> bool {
+        self.workspace.is_none()
+    }
+    /// The project view's directory; `None` for the thread.
+    pub fn workspace_path(&self) -> Option<&Path> {
+        self.workspace.as_deref().map(Path::new)
     }
 }
 
@@ -238,6 +274,17 @@ pub struct ManagedTask {
     pub daemon_child: Option<DaemonChild>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Id>,
+    /// Why a thread task runs in `workspace`; `None` for tasks bound by
+    /// their project view (and every task written before 0.9.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<crate::workspace_infer::WorkspaceBinding>,
+    /// A doubtful binding is held until this instant before first dispatch.
+    /// Not identity: expiry and release clear it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_until_ms: Option<u64>,
+    /// The unstarted thread task this one replaced in another directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_from: Option<Id>,
     pub detail: String,
     /// How the last settled worker turn ended, as categorized by the settle
     /// reflex (`done`, `stopped_short`, `question`, `blocked`, ...).
@@ -275,6 +322,8 @@ impl ManagedTask {
             && self.program_child == other.program_child
             && self.daemon_child == other.daemon_child
             && self.schedule == other.schedule
+            && self.binding == other.binding
+            && self.moved_from == other.moved_from
             && self
                 .project_proposal
                 .as_ref()
@@ -385,6 +434,9 @@ impl ManagedTask {
         if let Some(output) = &self.last_output {
             bounded_text(output, xcb_core::MAX_TEXT_BYTES)?;
         }
+        if let Some(binding) = &self.binding {
+            binding.validate()?;
+        }
         Ok(())
     }
 }
@@ -456,6 +508,20 @@ pub struct ManagedStore {
     active_scans: std::sync::atomic::AtomicU64,
     /// Diagnostics: additive schema migrations this handle executed.
     mailbox_migrations: std::sync::atomic::AtomicU64,
+    /// Per-path day stamps for the supervisor's registry upkeep: when a
+    /// repo identity was last read and when an invalid entry last noticed.
+    workspace_checks: Mutex<BTreeMap<String, u64>>,
+}
+
+/// A validated task record and its receipt, ready for
+/// `ManagedStore::create_habitat_task_tx`.
+struct PreparedTask {
+    task: ManagedTask,
+    receipt: String,
+    receipt_json: String,
+    user: Message,
+    ack: Message,
+    schedule_requirement: Option<Provider>,
 }
 
 /// See `ManagedStore::view_stamp`.
@@ -468,6 +534,7 @@ struct ViewStamp {
     schedules: (i64, i64),
     projects: (i64, i64, i64),
     inbox: (i64, i64),
+    workspaces: (i64, i64, i64),
     config: Option<std::time::SystemTime>,
     fault: Option<std::time::SystemTime>,
     progress: Option<std::time::SystemTime>,
@@ -590,7 +657,32 @@ fn stamp_retention(root: &Path) {
     }
 }
 
+#[cfg(test)]
 fn managed_migration_guard(root: &Path) -> Result<private::ExclusiveLock> {
+    managed_migration_guard_until(root, Instant::now(), || Ok(false))?
+        .ok_or(Error::Conflict("managed state upgrade guard was not taken"))
+}
+
+/// Take the upgrade guard, polling for up to `MIGRATION_GUARD_WAIT`. Returns
+/// `None` when `migrated` reports that a peer finished the upgrade while this
+/// caller waited: that peer may now hold the supervisor lock for its whole
+/// life, and a migrated store needs no guard.
+fn managed_migration_guard_wait(
+    root: &Path,
+    migrated: impl FnMut() -> Result<bool>,
+) -> Result<Option<private::ExclusiveLock>> {
+    managed_migration_guard_until(
+        root,
+        Instant::now() + workspace::MIGRATION_GUARD_WAIT,
+        migrated,
+    )
+}
+
+fn managed_migration_guard_until(
+    root: &Path,
+    deadline: Instant,
+    mut migrated: impl FnMut() -> Result<bool>,
+) -> Result<Option<private::ExclusiveLock>> {
     let path = root.join("supervisor.lock");
     let file = OpenOptions::new()
         .read(true)
@@ -602,58 +694,33 @@ fn managed_migration_guard(root: &Path) -> Result<private::ExclusiveLock> {
         .open(&path)?;
     private::check_file(&file, 4096)?;
     private::same_file(&path, &file)?;
-    match file.try_lock() {
-        Ok(()) => Ok(private::ExclusiveLock::held(file)),
-        Err(std::fs::TryLockError::WouldBlock) => Err(Error::Conflict(
-            "managed state upgrade waits for the running supervisor to stop; let active work settle, pause schedules with the existing xcb, then restart xcb",
-        )),
-        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(private::ExclusiveLock::held(file))),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if migrated()? {
+                    return Ok(None);
+                }
+                if Instant::now() >= deadline {
+                    return Err(Error::Conflict(
+                        "managed state upgrade waits for the running supervisor to stop; let active work settle, pause schedules with the existing xcb, then restart xcb",
+                    ));
+                }
+                std::thread::sleep(workspace::MIGRATION_GUARD_POLL);
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
     }
 }
 
 impl ManagedStore {
     pub fn open(root: &Path) -> Result<Self> {
-        let root = private::directory(&root.join("managed"))?;
-        let path = root.join("managed.sqlite");
-        let mut oversized = false;
-        match fs::symlink_metadata(&path) {
-            Ok(meta) => {
-                // Custody-check even an oversized database so retention can
-                // run on it instead of the open failing outright.
-                private::open_file(&path, MAX_DB_OPEN_BYTES)?;
-                oversized = meta.len()
-                    + fs::metadata(path.with_extension("sqlite-wal"))
-                        .map(|wal| wal.len())
-                        .unwrap_or(0)
-                    > MAX_DB_BYTES;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                private::create(&path, &[])?
-            }
-            Err(error) => return Err(error.into()),
-        }
-        let mut connection = Connection::open(&path)?;
-        connection.busy_timeout(Duration::from_secs(15))?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            connection.pragma_update(None, "journal_mode", "WAL")?;
-        }
-        connection.pragma_update(None, "synchronous", "FULL")?;
-        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 6 {
-            return Err(Error::Unavailable(
-                "managed state was written by a newer xcb",
-            ));
-        }
-        // A prior supervisor owns the old writer contract until all its work
-        // settles. Never advance the schema underneath that admitted writer.
-        // The daemon itself opens/migrates before taking its dispatch lock.
-        let _migration_guard = if version < 6 {
-            Some(managed_migration_guard(&root)?)
-        } else {
-            None
-        };
+        Self::open_with(root, true)
+    }
+
+    /// Every schema step in order; returns how many mailbox tables it had
+    /// to add.
+    fn migrate_schema(connection: &mut Connection, version: u32) -> Result<u64> {
         // Incremental vacuum lets routine retention return freed pages to the
         // filesystem; on an existing file it only takes effect if a rebuild
         // already enabled it, so this is a no-op there.
@@ -701,11 +768,85 @@ impl ManagedStore {
                 tx.commit()?;
             }
         }
-        habitat::migrate(&mut connection)?;
-        project::migrate(&mut connection)?;
-        inbox::migrate(&mut connection)?;
-        program_state::migrate(&mut connection)?;
-        daemon::migrate(&mut connection)?;
+        habitat::migrate(connection)?;
+        project::migrate(connection)?;
+        inbox::migrate(connection)?;
+        program_state::migrate(connection)?;
+        daemon::migrate(connection)?;
+        workspace::migrate_v7(connection, now_ms())?;
+        Ok(mailbox_migrations)
+    }
+
+    /// `guarded` is false only for a private scratch copy (`migrate_copy`):
+    /// no live writer can share it, so it takes no upgrade guard and needs
+    /// no pre-upgrade backup.
+    fn open_with(root: &Path, guarded: bool) -> Result<Self> {
+        let root = private::directory(&root.join("managed"))?;
+        let path = root.join("managed.sqlite");
+        let mut oversized = false;
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                // Custody-check even an oversized database so retention can
+                // run on it instead of the open failing outright.
+                private::open_file(&path, MAX_DB_OPEN_BYTES)?;
+                oversized = meta.len()
+                    + fs::metadata(path.with_extension("sqlite-wal"))
+                        .map(|wal| wal.len())
+                        .unwrap_or(0)
+                    > MAX_DB_BYTES;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                private::create(&path, &[])?
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let mut connection = Connection::open(&path)?;
+        connection.busy_timeout(Duration::from_secs(15))?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            connection.pragma_update(None, "journal_mode", "WAL")?;
+        }
+        connection.pragma_update(None, "synchronous", "FULL")?;
+        let mut version: u32 =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > workspace::SCHEMA_VERSION {
+            return Err(Error::Unavailable(
+                "managed state was written by a newer xcb",
+            ));
+        }
+        // A prior supervisor owns the old writer contract until all its work
+        // settles. Never advance the schema underneath that admitted writer.
+        // The daemon itself opens/migrates before taking its dispatch lock.
+        // A peer upgrading the same store makes this caller wait (bounded),
+        // then proceed once the store reads as migrated.
+        let mut backup = None;
+        let _migration_guard = if guarded && version < workspace::SCHEMA_VERSION {
+            let guard = managed_migration_guard_wait(&root, || {
+                let current: u32 =
+                    connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+                Ok(current >= workspace::SCHEMA_VERSION)
+            })?;
+            version = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if guard.is_some() && (1..workspace::SCHEMA_VERSION).contains(&version) {
+                backup = workspace::backup_before_upgrade(&connection, &root, version);
+            }
+            guard
+        } else {
+            None
+        };
+        let mailbox_migrations = match Self::migrate_schema(&mut connection, version) {
+            Ok(count) => count,
+            Err(error) => {
+                // A failed upgrade leaves the store pre-v7, so its copy is
+                // not the downgrade path; the next attempt makes its own.
+                // Retries therefore never pile up copies.
+                if let Some(backup) = backup {
+                    let _ = fs::remove_file(backup);
+                }
+                return Err(error);
+            }
+        };
         let mut store = Self {
             root,
             connection: Mutex::new(connection),
@@ -713,8 +854,11 @@ impl ManagedStore {
             read_only: false,
             active_scans: std::sync::atomic::AtomicU64::new(0),
             mailbox_migrations: std::sync::atomic::AtomicU64::new(mailbox_migrations),
+            workspace_checks: Mutex::new(BTreeMap::new()),
         };
-        if oversized || retention_due(store.root()) {
+        // A private preview copy reports what the migration alone did, so
+        // retention never runs on it.
+        if guarded && (oversized || retention_due(store.root())) {
             match store.retain() {
                 Ok(_) => stamp_retention(store.root()),
                 // A failed pass still opens the store; an oversized file then
@@ -725,7 +869,7 @@ impl ManagedStore {
                 ),
             }
         }
-        if oversized && db_bytes(&path) > MAX_DB_BYTES {
+        if guarded && oversized && db_bytes(&path) > MAX_DB_BYTES {
             // Deletes alone never shrink the file: freed pages sit on the
             // freelist until a rebuild. One bounded VACUUM attempt runs here
             // so a recoverable database does not degrade permanently; it
@@ -836,8 +980,13 @@ impl ManagedStore {
                     [RETENTION_BATCH],
                 )? as u64;
                 removed += tx.execute(
-                    "DELETE FROM messages WHERE rowid IN (SELECT rowid FROM (SELECT rowid, ROW_NUMBER() OVER (PARTITION BY conversation ORDER BY sequence DESC) AS rn FROM messages) WHERE rn>?1 LIMIT ?2)",
-                    params![RETENTION_CONVERSATION_MESSAGES, RETENTION_BATCH],
+                    "DELETE FROM messages WHERE rowid IN (SELECT rowid FROM (SELECT rowid, conversation, ROW_NUMBER() OVER (PARTITION BY conversation ORDER BY sequence DESC) AS rn FROM messages) WHERE rn>CASE WHEN conversation=?3 THEN ?4 ELSE ?1 END LIMIT ?2)",
+                    params![
+                        RETENTION_CONVERSATION_MESSAGES,
+                        RETENTION_BATCH,
+                        GLOBAL_THREAD_ID,
+                        workspace::RETENTION_GLOBAL_MESSAGES
+                    ],
                 )? as u64;
                 tx.commit()?;
             }
@@ -854,6 +1003,8 @@ impl ManagedStore {
             row.get::<_, i64>(0)
         });
         let _ = db.execute_batch("PRAGMA incremental_vacuum(4096)");
+        drop(db);
+        workspace::prune_upgrade_backups(&self.root, now_ms());
         Ok(removed_total)
     }
     /// See `active_scans`.
@@ -867,11 +1018,7 @@ impl ManagedStore {
     }
 
     pub async fn create_conversation(&self, workspace: &Path) -> Result<ManagedConversation> {
-        let workspace = fs::canonicalize(workspace)?;
-        if !workspace.is_dir() {
-            return Err(Error::Unavailable("managed workspace is not a directory"));
-        }
-        let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
+        let workspace = self.validate_workspace(workspace)?;
         let now = now_ms();
         let id = new_id("c");
         let project = Path::new(&workspace)
@@ -882,7 +1029,7 @@ impl ManagedStore {
             version: 1,
             id: id.clone(),
             title: format!("{project} · {}", &id.as_str()[..10.min(id.as_str().len())]),
-            workspace,
+            workspace: Some(workspace),
             created_at_ms: now,
             updated_at_ms: now,
         };
@@ -890,8 +1037,12 @@ impl ManagedStore {
         let (_, receipt, receipt_json) = Self::algal_receipt(&conversation).await?;
         let mut db = self.write_db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let count: i64 =
-            tx.query_row("SELECT count(*) FROM conversations", [], |row| row.get(0))?;
+        // The thread is exempt from the project-view bound.
+        let count: i64 = tx.query_row(
+            "SELECT count(*) FROM conversations WHERE id<>?1",
+            [GLOBAL_THREAD_ID],
+            |row| row.get(0),
+        )?;
         if count >= MAX_CONVERSATIONS {
             return Err(xcb_core::Error::Limit("managed conversations").into());
         }
@@ -943,9 +1094,9 @@ impl ManagedStore {
         let row: Option<(String, i64)> = db
             .query_row(
                 "SELECT payload,updated_at FROM conversations \
-                 WHERE json_extract(payload,'$.workspace')=?1 \
+                 WHERE json_extract(payload,'$.workspace')=?1 AND id<>?2 \
                  ORDER BY updated_at DESC,id LIMIT 1",
-                [workspace],
+                params![workspace, GLOBAL_THREAD_ID],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -1158,6 +1309,11 @@ impl ManagedStore {
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
+        let workspaces = db.query_row(
+            "SELECT count(*),COALESCE(max(last_used),0),COALESCE(sum(hidden),0) FROM workspaces",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
         drop(db);
         let modified = |path: PathBuf| fs::metadata(path).and_then(|meta| meta.modified()).ok();
         let progress = modified(self.root.join(PROGRESS_FILE));
@@ -1170,6 +1326,7 @@ impl ManagedStore {
             schedules,
             projects,
             inbox,
+            workspaces,
             config: modified(state_root.join("config.json")),
             fault: modified(self.root.join(SUPERVISOR_FAULT_FILE)),
             progress,
@@ -2162,6 +2319,7 @@ impl ManagedStore {
         Ok(next)
     }
 
+    #[cfg(test)]
     async fn create_task(
         &self,
         conversation: &Id,
@@ -2190,6 +2348,27 @@ impl ManagedStore {
         workspace: &Path,
         options: habitat::CreateOptions<'_>,
     ) -> Result<ManagedTask> {
+        let prepared = self
+            .prepare_habitat_task(conversation, id, text, attachments, workspace, &options)
+            .await?;
+        let mut db = self.write_db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let task = Self::create_habitat_task_tx(&tx, &prepared, &options)?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    /// Everything a task creation needs outside a transaction: validation,
+    /// the project lookups that shape the record, and its ALGAL receipt.
+    async fn prepare_habitat_task(
+        &self,
+        conversation: &Id,
+        id: Id,
+        text: String,
+        attachments: Vec<Attachment>,
+        workspace: &Path,
+        options: &habitat::CreateOptions<'_>,
+    ) -> Result<PreparedTask> {
         bounded_text(&text, xcb_core::MAX_TEXT_BYTES)?;
         if options.priority > 9 {
             return Err(xcb_core::Error::Invalid("backlog priority").into());
@@ -2197,10 +2376,35 @@ impl ManagedStore {
         if attachments.len() > 8 {
             return Err(xcb_core::Error::Limit("attachments").into());
         }
+        let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
+        let current = self
+            .conversation(conversation)?
+            .ok_or(Error::Unavailable("managed conversation not found"))?;
+        match &current.workspace {
+            Some(bound) => {
+                if *bound != workspace {
+                    return Err(Error::Conflict("managed conversation workspace changed"));
+                }
+                if !Path::new(&workspace).is_dir() {
+                    return Err(Error::Unavailable(
+                        "managed conversation workspace is unavailable",
+                    ));
+                }
+                self.validate_workspace(Path::new(&workspace))?;
+            }
+            None => {
+                if self.validate_workspace(Path::new(&workspace))? != workspace {
+                    return Err(Error::Conflict("workspace is not canonical"));
+                }
+                if options.binding.is_none() {
+                    return Err(Error::Conflict(workspace::THREAD_SPANS));
+                }
+            }
+        }
         let (mut provider_preference, mut provider_required) =
-            self.initial_route_preferences(workspace, &text)?;
+            self.initial_route_preferences(Path::new(&workspace), &text)?;
         let schedule_requirement = if options.occurrence.is_some() && options.program.is_none() {
-            self.project_policy(conversation)?
+            self.project_policy_in(&workspace)?
                 .and_then(|policy| policy.required_provider)
         } else {
             None
@@ -2210,18 +2414,6 @@ impl ManagedStore {
         if let Some(required) = schedule_requirement {
             provider_preference = Some(required);
             provider_required = true;
-        }
-        let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
-        let current = self
-            .conversation(conversation)?
-            .ok_or(Error::Unavailable("managed conversation not found"))?;
-        if current.workspace != workspace {
-            return Err(Error::Conflict("managed conversation workspace changed"));
-        }
-        if !Path::new(&workspace).is_dir() {
-            return Err(Error::Unavailable(
-                "managed conversation workspace is unavailable",
-            ));
         }
         let task_id = Id::new(format!(
             "t_{}",
@@ -2246,6 +2438,13 @@ impl ManagedStore {
             .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?
             .digest()
             .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?;
+        let program_generation = if options.program.is_some() {
+            self.project_policy_in(&workspace)?
+                .filter(|p| p.enabled && p.expires_at_ms > now)
+                .map(|p| p.generation)
+        } else {
+            None
+        };
         let mut task = ManagedTask {
             version: 1,
             id: task_id.clone(),
@@ -2287,18 +2486,15 @@ impl ManagedStore {
                 .and_then(|worker| worker.proposal.clone())
                 .or_else(|| options.proposal.clone()),
             program: options.program.cloned(),
-            program_generation: if options.program.is_some() {
-                self.project_policy(conversation)?
-                    .filter(|p| p.enabled && p.expires_at_ms > now)
-                    .map(|p| p.generation)
-            } else {
-                None
-            },
+            program_generation,
             program_receipt: None,
             program_waiting: false,
             program_child: None,
             daemon_child: None,
             schedule: options.occurrence.map(|o| o.schedule_id().clone()),
+            binding: options.binding.clone(),
+            hold_until_ms: options.hold_until_ms,
+            moved_from: options.moved_from.clone(),
             detail: if routing_question {
                 "This scheduled prompt requests a different provider from the project requirement. Reply with a revised task for the required provider, or cancel this occurrence."
             } else if options.deferred {
@@ -2344,6 +2540,21 @@ impl ManagedStore {
                     "Saved **{}** in the backlog. Release it when ready.",
                     task.title
                 )
+            } else if let Some(binding) = &task.binding {
+                format!(
+                    "Started **{}** in `{}` · {}{}",
+                    task.title,
+                    self.workspace_name(&task.workspace)?,
+                    binding.reason,
+                    if task.hold_until_ms.is_some() {
+                        format!(
+                            " · starts in {}s · /workspace to move",
+                            crate::workspace_infer::WORKSPACE_HOLD_MS / 1000
+                        )
+                    } else {
+                        " · /workspace to move".into()
+                    }
+                )
             } else {
                 format!(
                     "Started **{}**. I’ll keep it moving in the background and bring back results or a specific question.",
@@ -2353,32 +2564,49 @@ impl ManagedStore {
             Some(&task.id),
             task.revision,
         );
-        let mut db = self.write_db()?;
-        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Ok(PreparedTask {
+            task,
+            receipt,
+            receipt_json,
+            user,
+            ack,
+            schedule_requirement,
+        })
+    }
+
+    /// Publish a prepared task inside the caller's transaction. It only
+    /// re-checks and writes; it never opens a transaction of its own.
+    fn create_habitat_task_tx(
+        tx: &Transaction<'_>,
+        prepared: &PreparedTask,
+        options: &habitat::CreateOptions<'_>,
+    ) -> Result<ManagedTask> {
+        let task = &prepared.task;
+        let conversation = &task.conversation;
         if let Some(mutation) = options.worker {
-            mutation.check(&tx)?;
-            if let Some(saved) = mutation.replay(&tx)? {
+            mutation.check(tx)?;
+            if let Some(saved) = mutation.replay(tx)? {
                 return Ok(saved);
             }
         }
         if let Some(action) = options.ui
-            && let Some(saved) = action.replay(&tx)?
+            && let Some(saved) = action.replay(tx)?
         {
             return Ok(saved);
         }
         if let Some(occurrence) = options.occurrence {
-            occurrence.check(&tx)?;
+            occurrence.check(tx)?;
             if options.program.is_none()
-                && project::policy_from(&tx, conversation)?
+                && project::policy_from(tx, &task.workspace)?
                     .and_then(|policy| policy.required_provider)
-                    != schedule_requirement
+                    != prepared.schedule_requirement
             {
                 return Err(Error::Conflict("project provider requirement changed"));
             }
         }
         if let Some(parent) = options.program_parent {
             let current =
-                task_from(&tx, &parent.id)?.ok_or(Error::Conflict("program parent missing"))?;
+                task_from(tx, &parent.id)?.ok_or(Error::Conflict("program parent missing"))?;
             if current.revision != parent.revision
                 || current.state != TaskState::Running
                 || current.cancel_requested
@@ -2388,7 +2616,7 @@ impl ManagedStore {
                 return Err(Error::Conflict("program parent changed"));
             }
         }
-        if let Some(saved) = task_from(&tx, &task.id)? {
+        if let Some(saved) = task_from(tx, &task.id)? {
             if saved.goal != task.goal
                 || saved.conversation != task.conversation
                 || saved.source_message != task.source_message
@@ -2398,7 +2626,7 @@ impl ManagedStore {
             }
             return Ok(saved);
         }
-        program_state::check_creation(&tx, &task)?;
+        program_state::check_creation(tx, task)?;
         let count: i64 = tx.query_row("SELECT count(*) FROM tasks", [], |row| row.get(0))?;
         let active: i64 = tx.query_row(
             "SELECT count(*) FROM tasks WHERE state IN ('queued','running','needs_input')",
@@ -2411,24 +2639,29 @@ impl ManagedStore {
         if active >= MAX_NONTERMINAL_TASKS {
             return Err(xcb_core::Error::Limit("active managed tasks").into());
         }
-        Self::append_message_tx(&tx, &user, conversation, Some(&task.id))?;
-        tx.execute("INSERT INTO tasks(id,operation,source_message,conversation,state,revision,updated_at,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![task.id.as_str(), task.operation.as_str(), task.source_message.as_str(), conversation.as_str(), task.state.as_str(), sql(task.revision)?, sql(task.updated_at_ms)?, serde_json::to_string(&task)?])?;
+        Self::append_message_tx(tx, &prepared.user, conversation, Some(&task.id))?;
+        tx.execute("INSERT INTO tasks(id,operation,source_message,conversation,state,revision,updated_at,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![task.id.as_str(), task.operation.as_str(), task.source_message.as_str(), conversation.as_str(), task.state.as_str(), sql(task.revision)?, sql(task.updated_at_ms)?, serde_json::to_string(task)?])?;
         tx.execute(
             "INSERT INTO receipts(digest,task,revision,payload) VALUES(?1,?2,?3,?4)",
-            params![receipt, task.id.as_str(), sql(task.revision)?, receipt_json],
+            params![
+                prepared.receipt,
+                task.id.as_str(),
+                sql(task.revision)?,
+                prepared.receipt_json
+            ],
         )?;
-        Self::append_message_tx(&tx, &ack, conversation, Some(&task.id))?;
+        Self::append_message_tx(tx, &prepared.ack, conversation, Some(&task.id))?;
         if let Some(mutation) = options.worker {
-            mutation.record(&tx, &task)?;
+            mutation.record(tx, task)?;
         }
         if let Some(occurrence) = options.occurrence {
-            occurrence.record(&tx, &task)?;
+            occurrence.record(tx, task)?;
         }
         if let Some(action) = options.ui {
-            action.record(&tx, &task)?;
+            action.record(tx, task)?;
         }
-        tx.commit()?;
-        Ok(task)
+        workspace::touch_workspace(tx, &task.workspace, task.created_at_ms)?;
+        Ok(task.clone())
     }
 
     fn record_pair(&self, conversation: &Id, id: Id, text: String, answer: String) -> Result<()> {
@@ -2732,9 +2965,26 @@ impl ManagedStore {
         let current = self
             .conversation(conversation)?
             .ok_or(Error::Unavailable("managed conversation not found"))?;
-        if current.workspace != workspace.to_string_lossy() {
-            return Err(Error::Conflict("managed conversation workspace changed"));
-        }
+        let scope = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
+        // The thread takes any canonical directory, named explicitly.
+        let binding = match current.workspace.as_deref() {
+            Some(bound) if bound == scope => None,
+            Some(_) => return Err(Error::Conflict("managed conversation workspace changed")),
+            None if self.validate_workspace(workspace)? == scope => {
+                Some(crate::workspace_infer::WorkspaceBinding {
+                    source: crate::workspace_infer::BindingSource::Explicit,
+                    confidence: crate::workspace_infer::BindingConfidence::High,
+                    origin: crate::workspace_infer::BindingOrigin::Cli,
+                    reason: "named directory".into(),
+                    alternatives: vec![],
+                })
+            }
+            None => return Err(Error::Conflict("workspace is not canonical")),
+        };
+        let create = habitat::CreateOptions {
+            binding,
+            ..Default::default()
+        };
         let trimmed = text.trim();
         if attachments.is_empty() && offer_question(trimmed) {
             let root = self.root.parent().ok_or(Error::PrivateState)?;
@@ -2796,7 +3046,7 @@ impl ManagedStore {
             let task = match matches.as_slice() {
                 [task] => (*task).clone(),
                 [] if !needle.is_empty() && !needle.starts_with("t_") && !needle.starts_with("task ") => {
-                    self.create_task(conversation, id, text, attachments, workspace).await?;
+                    self.create_habitat_task(conversation, id, text, attachments, workspace, create).await?;
                     return Ok(());
                 }
                 [] => return self.record_pair(conversation, id, text, "I couldn’t identify an active task to cancel. Use `/tasks`, then say `cancel <task id or title>`.".into()),
@@ -2924,7 +3174,7 @@ impl ManagedStore {
         let finished = if force_new {
             None
         } else {
-            self.recently_completed(conversation)?
+            self.recently_completed(conversation, &scope)?
         };
         if let Some(task) = &finished {
             let learn = |reflex: Reflex, labels: &[(Option<&str>, bool, f64)], source: &str| {
@@ -2986,25 +3236,28 @@ impl ManagedStore {
         } else {
             text
         };
-        self.create_task(conversation, id, text, attachments, workspace)
+        self.create_habitat_task(conversation, id, text, attachments, workspace, create)
             .await?;
         Ok(())
     }
 
-    /// The conversation's most recent task when it completed within
-    /// [`CONTINUE_WINDOW_MS`] and no other task in the conversation is active.
-    fn recently_completed(&self, conversation: &Id) -> Result<Option<ManagedTask>> {
-        if self
-            .active_tasks(128)?
-            .iter()
-            .any(|task| &task.conversation == conversation && !task.deferred)
-        {
+    /// The most recent task of this conversation in this workspace when it
+    /// completed within [`CONTINUE_WINDOW_MS`] and no other such task is
+    /// active. The thread spans workspaces, so both keys scope it.
+    fn recently_completed(
+        &self,
+        conversation: &Id,
+        workspace: &str,
+    ) -> Result<Option<ManagedTask>> {
+        if self.active_tasks(128)?.iter().any(|task| {
+            &task.conversation == conversation && task.workspace == workspace && !task.deferred
+        }) {
             return Ok(None);
         }
         Ok(self
             .backlog(Some(conversation), 256)?
             .into_iter()
-            .filter(|task| !task.deferred)
+            .filter(|task| !task.deferred && task.workspace == workspace)
             .max_by_key(|task| (task.created_at_ms, task.id.as_str().to_owned()))
             .filter(|task| {
                 task.state == TaskState::Completed
@@ -3892,40 +4145,6 @@ fn reply_like(text: &str) -> bool {
     )
 }
 
-/// A follow-up within this window of a completed task can continue it.
-const CONTINUE_WINDOW_MS: u64 = 6 * 60 * 60 * 1000;
-
-/// A short message whose whole intent is "keep going".
-fn continue_like(text: &str) -> bool {
-    let lower = text
-        .trim()
-        .trim_end_matches(['.', '!'])
-        .trim()
-        .to_ascii_lowercase();
-    let lower = lower.strip_prefix("please ").unwrap_or(&lower);
-    let lower = lower.strip_suffix(" please").unwrap_or(lower);
-    matches!(
-        lower,
-        "continue"
-            | "keep going"
-            | "go on"
-            | "go ahead"
-            | "proceed"
-            | "carry on"
-            | "finish it"
-            | "finish"
-            | "keep at it"
-            | "don't stop"
-            | "dont stop"
-            | "you stopped"
-            | "you stopped early"
-            | "continue where you left off"
-            | "continue the work"
-            | "resume"
-            | "next"
-    )
-}
-
 /// A request for a stronger (`Some(true)`) or lighter (`Some(false)`) model
 /// tier, used as route feedback for the previous task.
 fn escalation_cue(text: &str) -> Option<bool> {
@@ -4319,12 +4538,13 @@ fn judged(verdict: bool, veto_only: bool, approved: bool) -> bool {
     }
 }
 
+/// Whether an unsettled run holds this workspace or one nested with it.
 fn workspace_busy(store: &Store, workspace: &str) -> Result<bool> {
     for run in store.unsettled_runs()? {
         if let Some(session) = run.session
             && store
                 .session(&session)?
-                .is_some_and(|session| session.workspace == workspace)
+                .is_some_and(|session| workspaces_overlap(&session.workspace, workspace))
         {
             return Ok(true);
         }
@@ -4927,6 +5147,12 @@ impl Supervisor {
             self.managed.tick_projects(now_ms()).await?;
             self.managed.tick_schedules(now_ms()).await?;
         }
+        if let Err(error) = self.managed.tick_workspace_identity(now_ms()) {
+            record_supervisor_fault(
+                self.managed.root(),
+                &format!("project directory upkeep failed: {}", fault_text(&error)),
+            );
+        }
         let mut tasks = self.managed.active_tasks(128)?;
         tasks.sort_by_key(|task| {
             (
@@ -4952,21 +5178,36 @@ impl Supervisor {
                 }
             }
         }
+        let now = now_ms();
         for task in tasks.into_iter().filter(|task| {
             !draining
                 && task.state == TaskState::Queued
                 && !task.deferred
                 && !task.cancel_requested
                 && !task.program_waiting
+                // A held task waits out its hold and occupies no slot.
+                && task.hold_until_ms.is_none_or(|until| until <= now)
         }) {
             if self.active.len() >= MAX_ACTIVE {
                 break;
             }
+            let task = if task.hold_until_ms.is_some() {
+                match self.managed.expire_hold(&task).await {
+                    Ok(task) => task,
+                    Err(Error::Conflict(_)) => continue,
+                    Err(error) => {
+                        self.task_fault(&task, &error).await;
+                        continue;
+                    }
+                }
+            } else {
+                task
+            };
             if self.active.contains_key(&task.id)
                 || self
                     .active_workspaces
                     .values()
-                    .any(|workspace| workspace == &task.workspace)
+                    .any(|workspace| workspaces_overlap(workspace, &task.workspace))
                 || self
                     .launch_attempts
                     .get(&task.id)
@@ -5036,6 +5277,20 @@ impl Supervisor {
                 failed.revision,
             );
             return match managed.transition(task, failed, Some(message)).await {
+                Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
+                Err(error) => Err(error),
+            };
+        }
+        // The directory must still be the one bound: a rename or a symlink
+        // swapped in since then must not redirect the worker.
+        let replaced = match managed.validate_workspace(Path::new(&task.workspace)) {
+            Ok(canonical) if canonical == task.workspace => None,
+            Ok(_) => Some("workspace moved or was replaced since it was bound".to_owned()),
+            Err(Error::Conflict(why)) => Some(why.to_owned()),
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(reason) = replaced {
+            return match managed.fail_unstarted(task, &reason).await {
                 Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
                 Err(error) => Err(error),
             };
@@ -5238,11 +5493,11 @@ impl Supervisor {
             && task.context_carried
             && message_count > task.message_count_before;
         let mut prompt = worker_prompt(&prompt_task, &preferences, &[], carried);
-        append_context(&mut prompt, &managed.project_context(&task.conversation)?);
+        append_context(&mut prompt, &managed.project_context_in(&task.workspace)?);
         if !carried {
             append_context(
                 &mut prompt,
-                &managed.working_memory_context(&task.conversation, Some(&task.id))?,
+                &managed.working_memory_context_in(&task.workspace, Some(&task.id))?,
             );
         }
         if bounded_text(&prompt, xcb_core::MAX_TEXT_BYTES).is_err() {
@@ -5555,8 +5810,22 @@ fn managed_view(
     };
     view.conversation = Some(conversation.clone());
     let message_counts = managed.message_counts()?;
-    view.conversations = managed
-        .conversations(64)?
+    let mut conversations = managed.conversations(64)?;
+    // The thread is pinned first whenever it exists, independent of the
+    // recency window, so it never falls off the list.
+    conversations.retain(|conversation| !conversation.is_thread());
+    // The open view is pinned too: the TUI finds its directory in this
+    // list, so an old view resumed past the window keeps its authority.
+    if !conversations.iter().any(|row| &row.id == conversation)
+        && conversation.as_str() != GLOBAL_THREAD_ID
+        && let Some(open) = managed.conversation(conversation)?
+    {
+        conversations.insert(0, open);
+    }
+    if let Some(thread) = managed.conversation(&Id::new(GLOBAL_THREAD_ID)?)? {
+        conversations.insert(0, thread);
+    }
+    view.conversations = conversations
         .into_iter()
         .map(|conversation| ConversationRow {
             messages: message_counts
@@ -5565,7 +5834,7 @@ fn managed_view(
                 .unwrap_or_default(),
             id: conversation.id,
             title: conversation.title,
-            workspace: conversation.workspace,
+            workspace: conversation.workspace.unwrap_or_default(),
             updated_at_ms: conversation.updated_at_ms,
         })
         .collect();
@@ -5643,6 +5912,12 @@ fn managed_view(
                 route_reason: task.route_reason.clone(),
                 settle: task.settle.clone(),
                 workspace: task.workspace.clone(),
+                binding: task
+                    .binding
+                    .as_ref()
+                    .map(|binding| format!("{} ({})", binding.reason, binding.confidence.as_str())),
+                hold_until_ms: task.hold_until_ms,
+                moved_from: task.moved_from.clone(),
                 updated_at_ms: task.updated_at_ms,
             }
         })
@@ -5671,6 +5946,17 @@ fn managed_view(
         .schedules(None)?
         .into_iter()
         .map(|schedule| xcb_core::ui::ScheduleRow {
+            workspace: schedule
+                .workspace
+                .clone()
+                .or_else(|| {
+                    managed
+                        .conversation(&schedule.conversation)
+                        .ok()
+                        .flatten()
+                        .and_then(|conversation| conversation.workspace)
+                })
+                .unwrap_or_default(),
             id: schedule.id,
             conversation: schedule.conversation,
             prompt: schedule.prompt,
@@ -5712,14 +5998,19 @@ fn managed_view(
     } else {
         State::Idle
     };
+    view.workspaces = managed.workspace_rows(64)?;
     view.pane = xcb_core::panes::Pane::focus();
     let mut status = format!(
         "on · {} tasks · {}",
         tasks.len(),
-        workspace
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("workspace")
+        if conversation.as_str() == GLOBAL_THREAD_ID {
+            "all projects"
+        } else {
+            workspace
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("workspace")
+        }
     );
     let unreadable = managed.unreadable_tasks();
     if unreadable > 0 {
@@ -5736,15 +6027,23 @@ fn managed_view(
 pub async fn serve_ui(
     store: Arc<Store>,
     mut conversation: Id,
+    launch_hint: Option<String>,
     input: Receiver<Intent>,
     output: SyncSender<Update>,
     executable: PathBuf,
 ) -> Result<()> {
+    use xcb_core::ui::{HabitatCommand, TranscriptContext};
     let managed = Arc::new(ManagedStore::open(store.root())?);
     let selected = managed
         .conversation(&conversation)?
         .ok_or(Error::Unavailable("managed conversation not found"))?;
-    let mut workspace = PathBuf::from(selected.workspace);
+    // The open project view's directory; `None` in the thread, which binds
+    // each task's directory when the task is created.
+    let mut bound = selected.workspace;
+    let mut workspace = PathBuf::from(bound.clone().unwrap_or_default());
+    // Session-local project focus for the thread. It is never persisted and
+    // never shared with another terminal.
+    let mut focus: Option<String> = None;
     if store.accounts()?.is_empty() {
         output
             .try_send(Update::Notice(
@@ -5786,6 +6085,7 @@ pub async fn serve_ui(
                 Err(TryRecvError::Disconnected) => Intent::Quit,
             };
             handled = true;
+            let thread = conversation.as_str() == GLOBAL_THREAD_ID;
             let intent = match intent {
                 Intent::HabitatAt {
                     conversation: expected,
@@ -5804,8 +6104,7 @@ pub async fn serve_ui(
                 _ => None,
             };
             match intent {
-                Intent::Habitat(command) => {
-                    use xcb_core::ui::HabitatCommand;
+                Intent::Habitat(mut command) => {
                     if let HabitatCommand::RecallQueued {
                         id,
                         expected_revision,
@@ -5848,6 +6147,85 @@ pub async fn serve_ui(
                         } => Some((Some(id.clone()), reply.clone(), text.clone())),
                         _ => None,
                     };
+                    // A thread schedule or backlog item is standing authority,
+                    // so its directory comes from the authority ladder, never
+                    // from inference: the explicit argument, the view's
+                    // directory, then this terminal's focus (I7). The TUI has
+                    // already applied the selected-task rung at keystroke time.
+                    let mut placed = None;
+                    if thread {
+                        let slot = match &mut command {
+                            HabitatCommand::Enqueue { workspace, .. }
+                            | HabitatCommand::EnqueueIn { workspace, .. }
+                            | HabitatCommand::Schedule { workspace, .. } => Some(workspace),
+                            _ => None,
+                        };
+                        if let Some(slot) = slot {
+                            match slot
+                                .clone()
+                                .or_else(|| bound.clone())
+                                .or_else(|| focus.clone())
+                            {
+                                Some(directory) => {
+                                    *slot = Some(directory.clone());
+                                    placed = Some(directory);
+                                }
+                                None => {
+                                    let id = match &recovery {
+                                        Some((_, operation, _)) => operation.clone(),
+                                        None => new_id("m"),
+                                    };
+                                    // The composer gets back the command
+                                    // itself, so Enter after the pick redoes
+                                    // it in the picked project; a bare prompt
+                                    // would run as a live task instead.
+                                    let command_text = match &command {
+                                        HabitatCommand::EnqueueIn {
+                                            prompt,
+                                            deferred: true,
+                                            ..
+                                        } => Some(format!("/backlog add {prompt}")),
+                                        HabitatCommand::Schedule {
+                                            prompt,
+                                            interval_ms,
+                                            ..
+                                        } => Some(format!(
+                                            "/schedule every {} {prompt}",
+                                            interval_ms / 1000
+                                        )),
+                                        _ => None,
+                                    };
+                                    let resubmit = command_text.is_some();
+                                    match recovery {
+                                        Some((task, operation, text)) => {
+                                            pending_updates.push_back(Update::HabitatDraft {
+                                                context: command_context.clone(),
+                                                task,
+                                                operation,
+                                                text: command_text.unwrap_or(text),
+                                            })
+                                        }
+                                        None => {
+                                            if let Some(text) = command_text {
+                                                pending_updates.push_back(Update::Draft {
+                                                    text,
+                                                    attachments: vec![],
+                                                });
+                                            }
+                                        }
+                                    }
+                                    pending_updates.push_back(Update::ProjectPicker {
+                                        id,
+                                        candidates: managed.workspace_rows(8).unwrap_or_default(),
+                                        reason: "name the project for this work; nothing was saved"
+                                            .into(),
+                                        resubmit,
+                                    });
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     match managed.habitat_command(&conversation, command).await {
                         Ok(notice) => {
                             if let Some((task, operation, text)) = recovery {
@@ -5858,6 +6236,10 @@ pub async fn serve_ui(
                                     text,
                                 });
                             }
+                            let notice = match placed {
+                                Some(directory) => format!("{notice} · in `{directory}`"),
+                                None => notice,
+                            };
                             output.try_send(Update::Notice(notice)).ok();
                             last_ensure = Instant::now();
                             if let Err(error) = ensure_daemon(store.root(), &executable) {
@@ -5891,7 +6273,7 @@ pub async fn serve_ui(
                     title,
                 } => {
                     let result = match context {
-                        xcb_core::ui::TranscriptContext::Conversation(id) => managed
+                        TranscriptContext::Conversation(id) => managed
                             .rename_conversation(&id, &expected_title, &title)
                             .map(|_| ()),
                         _ => Err(Error::Unavailable(
@@ -5910,9 +6292,7 @@ pub async fn serve_ui(
                     request,
                 } => {
                     let result = match &context {
-                        xcb_core::ui::TranscriptContext::Conversation(id)
-                            if *id == conversation =>
-                        {
+                        TranscriptContext::Conversation(id) if *id == conversation => {
                             managed.transcript_page(id, Some(before_sequence), 256)
                         }
                         _ => Err(Error::Conflict("transcript context changed")),
@@ -5939,9 +6319,9 @@ pub async fn serve_ui(
                     attachments,
                     ..
                 } => {
+                    let context = TranscriptContext::Conversation(conversation.clone());
                     if let Some(expected) = &submit_context
-                        && expected
-                            != &xcb_core::ui::TranscriptContext::Conversation(conversation.clone())
+                        && expected != &context
                     {
                         pending_updates.push_back(Update::SubmitRejected {
                             id,
@@ -5952,23 +6332,69 @@ pub async fn serve_ui(
                         });
                         continue;
                     }
-                    match managed
-                        .submit_new(
-                            &conversation,
-                            id.clone(),
-                            text.clone(),
-                            attachments.clone(),
-                            &workspace,
-                        )
-                        .await
-                    {
-                        Ok(()) => {
-                            pending_updates.push_back(Update::Submitted {
-                                id,
-                                context: xcb_core::ui::TranscriptContext::Conversation(
-                                    conversation.clone(),
-                                ),
+                    // In the thread the harness picks the directory; a view
+                    // submits into its own directory as before.
+                    let result = if thread {
+                        let cues = IntakeCues {
+                            origin: Origin::Tui,
+                            explicit: None,
+                            target: None,
+                            focus: focus.clone(),
+                            launch_hint: launch_hint.clone(),
+                            infer_only: false,
+                        };
+                        managed
+                            .submit_to_thread(id.clone(), text.clone(), attachments.clone(), cues)
+                            .await
+                            .map(Some)
+                    } else {
+                        managed
+                            .submit_new(
+                                &conversation,
+                                id.clone(),
+                                text.clone(),
+                                attachments.clone(),
+                                &workspace,
+                            )
+                            .await
+                            .map(|()| None)
+                    };
+                    match result {
+                        Ok(Some(Intake::Ask { candidates, reason })) => {
+                            // Nothing was written: keep the draft, then ask.
+                            pending_updates.push_back(Update::SubmitRejected {
+                                id: id.clone(),
+                                context: Some(context),
+                                text,
+                                attachments,
+                                reason: "which project?".into(),
                             });
+                            pending_updates.push_back(Update::ProjectPicker {
+                                id,
+                                candidates,
+                                reason,
+                                resubmit: true,
+                            });
+                        }
+                        Ok(accepted) => {
+                            pending_updates.push_back(Update::Submitted {
+                                id: id.clone(),
+                                context,
+                            });
+                            if let Some(Intake::Accepted {
+                                task,
+                                workspace,
+                                binding,
+                                ..
+                            }) = accepted
+                            {
+                                pending_updates.push_back(Update::WorkspaceBound {
+                                    id,
+                                    task: task.id,
+                                    workspace,
+                                    label: binding.reason,
+                                });
+                            }
                             last_ensure = Instant::now();
                             if let Err(error) = ensure_daemon(store.root(), &executable) {
                                 output.try_send(Update::Notice(format!("Task was saved, but the background supervisor could not start: {error}"))).ok();
@@ -5977,9 +6403,7 @@ pub async fn serve_ui(
                         Err(error) => {
                             pending_updates.push_back(Update::SubmitRejected {
                                 id,
-                                context: Some(xcb_core::ui::TranscriptContext::Conversation(
-                                    conversation.clone(),
-                                )),
+                                context: Some(context),
                                 text,
                                 attachments,
                                 reason: error.to_string(),
@@ -6004,10 +6428,88 @@ pub async fn serve_ui(
                     break;
                 }
                 Intent::Refresh => (),
+                Intent::Focus(None) => {
+                    focus = None;
+                    pending_updates.push_back(Update::Notice(
+                        "Focus cleared; the thread picks each prompt's project.".into(),
+                    ));
+                }
+                Intent::Focus(Some(value)) => match managed.ui_workspace(&value) {
+                    Ok(directory) => {
+                        pending_updates.push_back(Update::Notice(format!("Focus: `{directory}`")));
+                        focus = Some(directory);
+                    }
+                    Err(reason) => pending_updates
+                        .push_back(Update::Notice(format!("Focus was not changed: {reason}"))),
+                },
+                Intent::MoveTask {
+                    task,
+                    revision,
+                    target,
+                    focus: refocus,
+                } => {
+                    let notice = match managed.ui_workspace(&target) {
+                        Err(reason) if refocus => {
+                            format!("Focus was not changed and {task} was not moved: {reason}")
+                        }
+                        Err(reason) => format!("{task} was not moved: {reason}"),
+                        Ok(directory) => {
+                            let moved = match managed.move_task(&task, revision, &directory).await {
+                                Ok(moved) => {
+                                    last_ensure = Instant::now();
+                                    ensure_daemon(store.root(), &executable).ok();
+                                    // The recreated task is the one a further
+                                    // `/workspace <dir>` corrects.
+                                    pending_updates.push_back(Update::WorkspaceBound {
+                                        id: moved.source_message.clone(),
+                                        task: moved.id.clone(),
+                                        workspace: directory.clone(),
+                                        label: "moved".into(),
+                                    });
+                                    format!("Moved {task} to `{directory}` as {}", moved.id)
+                                }
+                                Err(error) => format!("{task} was not moved: {error}"),
+                            };
+                            if refocus {
+                                let notice = format!("{moved} · Focus: `{directory}`");
+                                focus = Some(directory);
+                                notice
+                            } else {
+                                moved
+                            }
+                        }
+                    };
+                    pending_updates.push_back(Update::Notice(notice));
+                }
+                Intent::ReleaseHold { task, revision } => {
+                    let notice = match managed.release_hold(&task, revision).await {
+                        Ok(released) => {
+                            last_ensure = Instant::now();
+                            ensure_daemon(store.root(), &executable).ok();
+                            format!("{} starts now in `{}`", released.id, released.workspace)
+                        }
+                        Err(error) => format!("{task} is still held: {error}"),
+                    };
+                    pending_updates.push_back(Update::Notice(notice));
+                }
+                // Adding is an explicit act: the named directory itself,
+                // never snapped to an enclosing repository (I6).
+                Intent::AddWorkspace { path } => {
+                    let notice = match managed.admit_workspace(
+                        &overview::expand_home(&path),
+                        "command",
+                        None,
+                    ) {
+                        Ok(directory) => format!("Added project `{directory}`"),
+                        Err(error) => format!("Project was not added: {error}"),
+                    };
+                    pending_updates.push_back(Update::Notice(notice));
+                }
                 Intent::Conversation(id) => match managed.conversation(&id)? {
                     Some(selected) => {
                         conversation = selected.id;
-                        workspace = PathBuf::from(selected.workspace);
+                        bound = selected.workspace;
+                        workspace = PathBuf::from(bound.clone().unwrap_or_default());
                     }
                     None => {
                         output
@@ -6015,6 +6517,14 @@ pub async fn serve_ui(
                             .ok();
                     }
                 },
+                // In the thread, new work starts from a clean slate: the
+                // focus clears and no conversation is created.
+                Intent::NewSession if thread => {
+                    focus = None;
+                    pending_updates.push_back(Update::Notice(
+                        "New work in the thread; focus cleared.".into(),
+                    ));
+                }
                 Intent::NewSession => match managed.create_conversation(&workspace).await {
                     Ok(created) => {
                         conversation = created.id;
@@ -6028,6 +6538,23 @@ pub async fn serve_ui(
                             .ok();
                     }
                 },
+                Intent::NewProjectView { workspace: path } => {
+                    match managed.create_conversation(Path::new(&path)).await {
+                        Ok(created) => {
+                            conversation = created.id;
+                            bound = created.workspace;
+                            workspace = PathBuf::from(bound.clone().unwrap_or_default());
+                            last_stamp = None;
+                        }
+                        Err(error) => {
+                            output
+                                .try_send(Update::Notice(format!(
+                                    "Project view was not created: {error}"
+                                )))
+                                .ok();
+                        }
+                    }
+                }
                 Intent::AttachPath(path) => {
                     match attachments::from_path(store.root(), Path::new(&path)) {
                         Ok(attachment) => {
@@ -6093,7 +6620,9 @@ pub async fn serve_ui(
         // otherwise idle terminal crossed a wall-clock time bucket.
         let liveness_changed = session_liveness.changed(&store, Instant::now(), refresh)?;
         if refresh || liveness_changed {
-            let view = managed_view(&store, &managed, &conversation, &workspace)?;
+            let mut view = managed_view(&store, &managed, &conversation, &workspace)?;
+            view.focus = focus.clone();
+            view.launch_hint = launch_hint.clone();
             dispatch_pending = view
                 .tasks
                 .iter()
@@ -6139,8 +6668,12 @@ mod tests {
     fn root() -> TempDir {
         tempfile::tempdir().unwrap()
     }
+    /// The project directory: a sibling of the state root, never inside it.
     fn workspace(root: &TempDir) -> PathBuf {
-        root.path().canonicalize().unwrap()
+        private::directory(&root.path().canonicalize().unwrap().join("work")).unwrap()
+    }
+    fn state_dir(root: &TempDir) -> PathBuf {
+        root.path().canonicalize().unwrap().join("state")
     }
     fn message(name: &str) -> Id {
         Id::new(name).unwrap()
@@ -6180,7 +6713,7 @@ mod tests {
     async fn user_input_renews_continuation_budget_and_receipts_replay() {
         let root = root();
         let workspace = workspace(&root);
-        let managed = ManagedStore::open(&workspace).unwrap();
+        let managed = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&managed, &workspace).await;
         let task = managed
             .create_task(
@@ -6329,7 +6862,7 @@ mod tests {
     async fn duplicate_client_message_creates_one_task_and_one_user_turn() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&store, &workspace).await;
         store
             .submit(
@@ -6494,7 +7027,7 @@ mod tests {
     async fn concurrent_conversations_isolate_transcripts_and_share_the_task_swarm() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let first = conversation(&store, &workspace).await;
         let second = conversation(&store, &workspace).await;
         let (first_result, second_result) = tokio::join!(
@@ -6751,7 +7284,7 @@ mod tests {
             .unwrap()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         let count: i64 = migrated
             .db()
             .unwrap()
@@ -6766,7 +7299,7 @@ mod tests {
     async fn one_pending_question_captures_the_next_conversational_reply() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&store, &workspace).await;
         let task = store
             .create_task(
@@ -6804,7 +7337,7 @@ mod tests {
     async fn bare_answer_in_another_conversation_never_reaches_a_waiting_worker() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let owner = conversation(&store, &workspace).await;
         let observer = conversation(&store, &workspace).await;
         let task = store
@@ -6853,7 +7386,7 @@ mod tests {
     async fn ambiguous_answer_is_never_broadcast_to_multiple_waiting_tasks() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&store, &workspace).await;
         for (message_id, text) in [("m_first", "first task"), ("m_second", "second task")] {
             let task = store
@@ -6889,7 +7422,7 @@ mod tests {
     async fn bare_cancellation_is_scoped_to_its_conversation() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let first = conversation(&store, &workspace).await;
         let second = conversation(&store, &workspace).await;
         let first_task = store
@@ -6942,7 +7475,7 @@ mod tests {
     async fn cancelling_queued_work_settles_without_claiming_a_worker_was_stopped() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&store, &workspace).await;
         let task = store
             .create_task(
@@ -6975,7 +7508,7 @@ mod tests {
     async fn startup_requeues_only_a_provably_unadmitted_dispatch_gap() {
         let root = root();
         let workspace = workspace(&root);
-        let state = private::directory(&workspace.join("state")).unwrap();
+        let state = private::directory(&state_dir(&root)).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -7239,7 +7772,7 @@ mod tests {
     fn learned_routes_require_repeated_success_and_reverse_after_failures() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         {
             let db = store.db().unwrap();
             db.execute(
@@ -7267,7 +7800,7 @@ mod tests {
     async fn learned_provider_is_soft_but_an_explicit_provider_request_is_required() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         store
             .db()
             .unwrap()
@@ -7318,6 +7851,7 @@ mod tests {
         let task = tokio::spawn(serve_ui(
             xcb,
             chat.clone(),
+            None,
             input,
             updates,
             PathBuf::from("/usr/bin/true"),
@@ -7403,7 +7937,7 @@ mod tests {
     async fn preference_is_scoped_and_injected_without_becoming_a_task() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&store, &workspace).await;
         store
             .submit(
@@ -7480,6 +8014,9 @@ mod tests {
             program_child: None,
             daemon_child: None,
             schedule: None,
+            binding: None,
+            hold_until_ms: None,
+            moved_from: None,
             detail: "x".into(),
             settle: None,
             acted: None,
@@ -7567,7 +8104,7 @@ mod tests {
     async fn replacement_session_drops_carried_prompt_context() {
         let root = root();
         let workspace = workspace(&root);
-        let managed = ManagedStore::open(&workspace).unwrap();
+        let managed = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&managed, &workspace).await;
         let task = managed
             .create_task(&chat, message("m_x"), "work".into(), vec![], &workspace)
@@ -7724,7 +8261,7 @@ mod tests {
     async fn startup_reconcile_continues_past_a_conflicting_task() {
         let root = root();
         let workspace = workspace(&root);
-        let state = private::directory(&workspace.join("state")).unwrap();
+        let state = private::directory(&state_dir(&root)).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -7985,7 +8522,7 @@ mod tests {
     async fn unresolvable_judge_keeps_the_deterministic_verdict() {
         let root = root();
         let workspace = workspace(&root);
-        let state = private::directory(&workspace.join("state")).unwrap();
+        let state = private::directory(&state_dir(&root)).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let mut config = Config::default();
@@ -8027,7 +8564,7 @@ mod tests {
     async fn undecodable_task_rows_are_skipped_counted_and_surfaced() {
         let root = root();
         let workspace = workspace(&root);
-        let managed = ManagedStore::open(&workspace).unwrap();
+        let managed = ManagedStore::open(&state_dir(&root)).unwrap();
         let chat = conversation(&managed, &workspace).await;
         managed
             .create_task(&chat, message("m_good"), "good".into(), vec![], &workspace)
@@ -8103,7 +8640,7 @@ mod tests {
     async fn unknown_route_stat_providers_do_not_block_intake() {
         let root = root();
         let workspace = workspace(&root);
-        let store = ManagedStore::open(&workspace).unwrap();
+        let store = ManagedStore::open(&state_dir(&root)).unwrap();
         {
             let db = store.db().unwrap();
             db.execute(
@@ -8226,6 +8763,7 @@ mod tests {
         let ui = tokio::spawn(serve_ui(
             xcb,
             chat,
+            None,
             input,
             updates,
             PathBuf::from("/usr/bin/true"),

@@ -409,13 +409,14 @@ mod tests {
 /// every visible command is listed.
 pub const ROOT_HELP: &str = "\
 xcb routes coding tasks across the Claude, Codex, and Devin subscriptions
-you already pay for. Plain `xcb` opens a conversation in the terminal UI.
+you already pay for. Plain `xcb` opens your thread from any directory; xcb
+picks each task's project directory and says which.
 
 Usage: xcb [command] [options]
 
 Start here
   setup          Add an account, check the provider and sign in, in one step
-  chat           Open the conversation for this folder
+  chat           Open your thread; --new starts a project view for this folder
   run            Run one task here and print the result
   doctor         Check providers, accounts and unfinished runs
 
@@ -426,7 +427,8 @@ Accounts and models
   reflex         Inspect and teach how xcb picks models and sorts turns
 
 Conversations and tasks
-  conversations  List your conversations
+  conversations  List your thread and project views
+  workspaces     List, add and hide the project folders the thread picks from
   history        Read a conversation's saved messages
   rename         Rename a conversation
   tasks          Inspect tasks and their messages
@@ -466,7 +468,8 @@ Setup and maintenance
 Options
   --state <dir>  State folder (default: $XCB_STATE or ~/.local/share/xcb)
   --json         Machine-readable output where a command supports it
-  --cwd <dir>    Workspace for run, chat and models route (default: .)
+  --cwd <dir>    Project hint for the thread; the exact folder for run,
+                 chat --new and models route (default: .)
   -h, --help     Show help; xcb <command> --help shows a command's help
   -V, --version  Show the version
 ";

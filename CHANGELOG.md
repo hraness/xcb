@@ -10,6 +10,76 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+Plain `xcb` opens one thread for all your projects from any directory, and xcb
+picks each task's project directory and says why. Projects are directories, so
+a grant for one directory never authorizes work in another.
+
+- Plain `xcb` and `xcb chat` open your thread, one conversation per machine
+  whose tasks can run in any project directory. Each prompt is bound to a
+  directory when its task is created: a path or project name in the prompt,
+  the focused project, a continuation of your last task, then the launch
+  directory or recent work. The reply says which directory and why, and
+  `xcb workspaces why <task>` shows the full record. xcb asks instead of
+  guessing when a prompt names an unregistered directory or several projects,
+  and saves nothing until you pick. `--cwd` is a hint for the thread.
+  `xcb chat --new` still starts a new project view for the current directory.
+- `/workspace` focuses the thread on a project, moves an unstarted task
+  (`/workspace move`), starts a waiting task (`/workspace go`), clears the
+  focus, or registers a directory (`/workspace add`). A less certain choice,
+  or a prompt that names a project other than the focused one, waits 8 seconds
+  before it starts so you can move it. Alt-Left and Alt-Right move the focus,
+  task messages carry a project chip, and the overview shows one card per
+  project.
+- A project is now a directory. The backlog, grants, schedules, working
+  memory, and Wordcell binding belong to the directory and are shared by the
+  thread and every project view over it. A grant authorizes automatic work
+  only in its own directory, and worker tools read only their own directory's
+  backlog and memory. Commands that took a conversation ID take `<dir|name>`,
+  and a project view's ID still works: `xcb projects configure <dir>`,
+  `xcb memory configure|status|search <dir>`, `xcb backlog memory <dir>`, and
+  `xcb backlog add|program`, `xcb schedules add|program`, and
+  `xcb daemons run` (add `--workspace <dir>` to target the thread by ID).
+  `xcb backlog --workspace <dir>` filters by directory. In the thread,
+  `/project`, `/memory`, `/schedule`, and `/backlog add` never guess a
+  directory.
+- `xcb workspaces` lists, adds, hides, and explains the directories the thread
+  picks from, and `xcb workspaces conflicts` lists what the upgrade changed.
+  xcb refuses `/`, your home directory, its hidden directories, `~/Library`,
+  xcb's state, and system directories as projects.
+- Tasks in a directory and a directory inside it (`/repo` and `/repo/site`)
+  now run one at a time.
+- Upgrading moves grants and Wordcell bindings to directories. A grant that was
+  the only grant for its directory keeps its budget and expiry and now covers
+  every conversation over that directory, including remote dispatches and
+  thread tasks bound there. When several conversations over one directory had
+  active grants, the kept grant is paused as `paused by upgrade` until you
+  resume it; budgets are never added together. Different Wordcell bindings
+  for one directory unbind until `xcb memory configure <dir>`.
+  `xcb doctor --upgrade-plan` previews all of this on a private copy. Quit
+  every xcb terminal before installing.
+- Remote dispatch lands in the device's thread (`conversation` is
+  `c_global`), and the result adds `task`, `workspace`, and `workspaceSource`.
+  The fleet projection adds `xcb` and `capabilities`, and its task rows add
+  `workspaceSource`. A relative workspace is a project name on that device,
+  `@infer` lets the device pick from the prompt without guessing, and an
+  absolute path binds exactly. Home, its hidden directories, `~/Library`, `/`,
+  xcb's state, and system directories are refused.
+- `xcb conversations --json` rows add `isThread`; the thread's row has
+  `"workspace": null`.
+- `xcb memory status --json` now prints `{workspace, binding, conflicts}`
+  instead of the binding object or `null`; the binding is under `binding`, and
+  `conflicts` lists the directory's open upgrade conflicts. Binding rows from
+  `xcb memory configure` and `memory status` name `workspace` instead of
+  `conversation`.
+- Relative directories and project names in every command start at `--cwd`,
+  including `xcb projects`, `xcb memory`, `xcb backlog`, `xcb schedules`, and
+  `xcb daemons run` and their `--workspace`.
+- Managed schema v7 cannot be downgraded; restore the pre-v7 backup to roll
+  back. The upgrade writes `managed/managed.pre-v7.<time>.sqlite` in the state
+  root first when there is room.
+
 ## 0.8.14 - 2026-09-26
 
 The first run is shorter and every error says what to do next.

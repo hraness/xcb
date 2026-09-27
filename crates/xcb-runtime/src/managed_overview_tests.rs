@@ -332,7 +332,12 @@ async fn overview_owner_exit_invalidates_once_without_a_database_write() {
         observed_at_ms: 1,
     };
     let session = store
-        .create_session(&account.id, model, Path::new(&f.conversation.workspace), 2)
+        .create_session(
+            &account.id,
+            model,
+            Path::new(f.conversation.workspace.as_deref().unwrap()),
+            2,
+        )
         .unwrap();
     let mut run = store.prepare_run(&session.id, session.revision, 3).unwrap();
     let mut child = ChildGuard(
@@ -431,7 +436,7 @@ async fn overview_global_attention_failures_and_running_survive_current_workspac
         // so another_task's creation-time clamp cannot tie these timestamps.
         conversation.updated_at_ms = f.task.updated_at_ms + index + 1;
         if index < 3 {
-            conversation.workspace = "/another/workspace".into();
+            conversation.workspace = Some("/another/workspace".into());
         }
         f.managed
             .db()
@@ -453,7 +458,7 @@ async fn overview_global_attention_failures_and_running_survive_current_workspac
             };
             let mut task = another_task(&f, state, conversation.updated_at_ms);
             task.conversation = conversation.id.clone();
-            task.workspace = conversation.workspace;
+            task.workspace = conversation.workspace.unwrap();
             if index == 0 {
                 task.attention = Some(State::NeedsAnswer);
             }
@@ -565,7 +570,7 @@ async fn managed_view_combines_direct_and_managed_sessions_without_worker_duplic
         effort: None,
         observed_at_ms: 1,
     };
-    let workspace = Path::new(&f.conversation.workspace);
+    let workspace = Path::new(f.conversation.workspace.as_deref().unwrap());
     let session = store
         .create_session(&account.id, model.clone(), workspace, 2)
         .unwrap();
@@ -592,4 +597,77 @@ async fn managed_view_combines_direct_and_managed_sessions_without_worker_duplic
             .iter()
             .all(|row| row.context != TranscriptContext::Session(worker.id.clone()))
     );
+}
+
+/// A thread task bound to `workspace`, written as the intake would.
+async fn thread_task(f: &Fixture, workspace: &Path, state: TaskState, updated: u64) -> ManagedTask {
+    let thread = f.managed.global_thread().await.unwrap();
+    let mut task = another_task(f, state, updated);
+    task.conversation = thread.id;
+    task.workspace = workspace.to_str().unwrap().into();
+    put_task(f, &task);
+    task
+}
+
+#[tokio::test]
+async fn thread_grid_one_card_per_project() {
+    let f = fixture().await;
+    let base = Path::new(f.conversation.workspace.as_deref().unwrap())
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let api = private::directory(&base.join("api")).unwrap();
+    let site = private::directory(&base.join("site")).unwrap();
+    f.managed
+        .admit_workspace(&site, "command", Some("marketing"))
+        .unwrap();
+    let now = now_ms();
+    thread_task(&f, &api, TaskState::Completed, now - 50).await;
+    let running = thread_task(&f, &api, TaskState::Running, now - 10).await;
+    let question = thread_task(&f, &site, TaskState::NeedsInput, now - 20).await;
+    let result = rows(&f);
+    // The view keeps its one card; the thread has one card per directory.
+    assert_eq!(result.len(), 3);
+    let thread = TranscriptContext::Conversation(Id::new(GLOBAL_THREAD_ID).unwrap());
+    let cards: Vec<_> = result.iter().filter(|row| row.context == thread).collect();
+    assert_eq!(cards.len(), 2);
+    let api_card = cards
+        .iter()
+        .find(|row| row.workspace == api.to_str().unwrap())
+        .unwrap();
+    assert_eq!(api_card.task, Some(running.id));
+    assert_eq!(api_card.title, "api");
+    assert_eq!(api_card.state, State::Working);
+    let site_card = cards
+        .iter()
+        .find(|row| row.workspace == site.to_str().unwrap())
+        .unwrap();
+    assert_eq!(site_card.task, Some(question.id));
+    assert_eq!(site_card.title, "marketing");
+    assert_eq!(
+        result
+            .iter()
+            .filter(|row| row.context == TranscriptContext::Conversation(f.conversation.id.clone()))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn thread_task_not_uncertain() {
+    let f = fixture().await;
+    let workspace = Path::new(f.conversation.workspace.as_deref().unwrap()).to_path_buf();
+    let mut task = thread_task(&f, &workspace, TaskState::Completed, now_ms()).await;
+    task.last_output = Some("Shipped the fix".into());
+    put_task(&f, &task);
+    let thread = TranscriptContext::Conversation(Id::new(GLOBAL_THREAD_ID).unwrap());
+    let card = rows(&f)
+        .into_iter()
+        .find(|row| row.context == thread)
+        .unwrap();
+    // The thread has no directory of its own; the task's directory is used.
+    assert_ne!(card.state, State::Uncertain);
+    assert_eq!(card.response, "Shipped the fix");
+    assert_eq!(card.workspace, workspace.to_str().unwrap());
+    assert_eq!(f.managed.unreadable_tasks(), 0);
 }

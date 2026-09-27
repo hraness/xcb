@@ -1,11 +1,15 @@
 //! Explicit, bounded authority for project agents. A goal is guidance, never a
-//! semantic proof that an arbitrary proposed task is in scope.
+//! semantic proof that an arbitrary proposed task is in scope. A project is
+//! a canonical workspace directory: every grant, admission and Wordcell
+//! binding is keyed on `task.workspace`, never on a conversation.
 use super::*;
+use crate::workspace_infer::BindingOrigin;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectPolicy {
-    pub conversation: Id,
+    /// The canonical project directory the grant covers.
+    pub workspace: String,
     pub generation: Id,
     pub goal: String,
     pub enabled: bool,
@@ -16,9 +20,11 @@ pub struct ProjectPolicy {
     pub revision: u64,
 }
 impl ProjectPolicy {
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         habitat::validate_prompt(&self.goal)?;
-        if self.max_tasks == 0
+        bounded_text(&self.workspace, 4096)?;
+        if !Path::new(&self.workspace).is_absolute()
+            || self.max_tasks == 0
             || self.max_tasks > 100
             || self.admitted_tasks > self.max_tasks
             || self.revision == 0
@@ -58,11 +64,11 @@ pub(super) fn migrate(db: &mut Connection) -> Result<()> {
     }
     Ok(())
 }
-pub(super) fn policy_from(db: &Connection, conversation: &Id) -> Result<Option<ProjectPolicy>> {
+pub(super) fn policy_from(db: &Connection, workspace: &str) -> Result<Option<ProjectPolicy>> {
     let row: Option<(i64, String)> = db
         .query_row(
-            "SELECT revision,substr(payload,1,65537) FROM project_policies WHERE conversation=?1",
-            [conversation.as_str()],
+            "SELECT revision,substr(payload,1,65537) FROM project_policies WHERE workspace=?1",
+            [workspace],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
@@ -70,7 +76,7 @@ pub(super) fn policy_from(db: &Connection, conversation: &Id) -> Result<Option<P
         bounded_text(&payload, 65536)?;
         let policy: ProjectPolicy = decode(&payload)?;
         policy.validate()?;
-        if &policy.conversation != conversation || sql(policy.revision)? != revision {
+        if policy.workspace != workspace || sql(policy.revision)? != revision {
             return Err(Error::Conflict("project policy index mismatch"));
         }
         Ok(policy)
@@ -79,29 +85,52 @@ pub(super) fn policy_from(db: &Connection, conversation: &Id) -> Result<Option<P
 }
 pub(super) fn write_policy(tx: &Transaction<'_>, policy: &ProjectPolicy) -> Result<()> {
     policy.validate()?;
-    tx.execute("INSERT INTO project_policies(conversation,revision,payload) VALUES(?1,?2,?3) ON CONFLICT(conversation) DO UPDATE SET revision=excluded.revision,payload=excluded.payload", params![policy.conversation.as_str(),sql(policy.revision)?,serde_json::to_string(policy)?])?;
+    tx.execute("INSERT INTO project_policies(workspace,revision,payload) VALUES(?1,?2,?3) ON CONFLICT(workspace) DO UPDATE SET revision=excluded.revision,payload=excluded.payload", params![policy.workspace,sql(policy.revision)?,serde_json::to_string(policy)?])?;
     Ok(())
 }
-fn no_outstanding(db: &Connection, conversation: &Id, excluded: Option<&Id>) -> Result<bool> {
-    let mut query = db.prepare("SELECT id,payload FROM tasks WHERE conversation=?1 AND state IN ('queued','running','needs_input','uncertain')")?;
-    for row in query.query_map([conversation.as_str()], |row| {
+/// Nonterminal tasks bound to `workspace`, other than `exclude`.
+pub(super) fn outstanding_in(
+    db: &Connection,
+    workspace: &str,
+    exclude: Option<&Id>,
+) -> Result<Vec<ManagedTask>> {
+    let mut query = db.prepare("SELECT id,payload FROM tasks WHERE workspace=?1 AND state IN ('queued','running','needs_input','uncertain') ORDER BY updated_at,id")?;
+    let mut tasks = Vec::new();
+    for row in query.query_map([workspace], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })? {
         let (id, payload) = row?;
-        if excluded.is_some_and(|except| except.as_str() == id) {
+        if exclude.is_some_and(|except| except.as_str() == id) {
             continue;
         }
         let task: ManagedTask = decode(&payload)?;
         task.validate()?;
-        if !task.deferred {
-            return Ok(false);
-        }
+        tasks.push(task);
     }
-    Ok(true)
+    Ok(tasks)
+}
+/// No undeferred nonterminal work is bound to `workspace`, other than `excluded`.
+fn no_outstanding_in(db: &Connection, workspace: &str, excluded: Option<&Id>) -> Result<bool> {
+    Ok(outstanding_in(db, workspace, excluded)?
+        .iter()
+        .all(|task| task.deferred))
+}
+/// Deferred, unadmitted proposals of one grant generation in `workspace`,
+/// the only candidates a grant may release.
+fn proposals_in(db: &Connection, workspace: &str, generation: &Id) -> Result<Vec<Id>> {
+    let mut query = db.prepare("SELECT id FROM tasks WHERE workspace=?1 AND state='queued' AND CASE WHEN json_valid(payload) THEN json_extract(payload,'$.deferred')=1 AND json_extract(payload,'$.project_proposal.generation')=?2 ELSE 0 END ORDER BY updated_at,id LIMIT 256")?;
+    let ids = query
+        .query_map(params![workspace, generation.as_str()], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ids.into_iter()
+        .map(|id| Id::new(id).map_err(Error::from))
+        .collect()
 }
 pub(super) fn check_dispatch(db: &Connection, task: &ManagedTask, now: u64) -> Result<()> {
     program_state::check_dispatch(db, task, now)?;
-    if task.schedule.is_some() && policy_from(db, &task.conversation)?.is_some_and(|p| !p.enabled) {
+    if task.schedule.is_some() && policy_from(db, &task.workspace)?.is_some_and(|p| !p.enabled) {
         return Err(Error::Conflict(
             "project authority is paused; scheduled work waits",
         ));
@@ -109,8 +138,8 @@ pub(super) fn check_dispatch(db: &Connection, task: &ManagedTask, now: u64) -> R
     let Some(proposal) = task.project_proposal.as_ref().filter(|p| p.admitted) else {
         return Ok(());
     };
-    let policy = policy_from(db, &task.conversation)?
-        .ok_or(Error::Conflict("project authority is missing"))?;
+    let policy =
+        policy_from(db, &task.workspace)?.ok_or(Error::Conflict("project authority is missing"))?;
     if !policy.enabled || policy.expires_at_ms <= now || policy.generation != proposal.generation {
         return Err(Error::Conflict(
             "project authority is paused, expired, or replaced",
@@ -124,8 +153,8 @@ pub(super) struct ProjectAdmission {
 }
 impl ProjectAdmission {
     pub fn check_and_record(&self, tx: &Transaction<'_>, task: &ManagedTask) -> Result<()> {
-        let policy = policy_from(tx, &task.conversation)?
-            .ok_or(Error::Conflict("project policy changed"))?;
+        let policy =
+            policy_from(tx, &task.workspace)?.ok_or(Error::Conflict("project policy changed"))?;
         let proposal = task
             .project_proposal
             .as_ref()
@@ -144,8 +173,9 @@ impl ProjectAdmission {
         let parent = task_from(tx, &proposal.parent)?
             .ok_or(Error::Conflict("proposal parent is unavailable"))?;
         if parent.conversation != task.conversation
+            || parent.workspace != task.workspace
             || parent.state != TaskState::Completed
-            || !no_outstanding(tx, &task.conversation, Some(&task.id))?
+            || !no_outstanding_in(tx, &task.workspace, Some(&task.id))?
         {
             return Err(Error::Conflict("project waits for conclusive completion"));
         }
@@ -164,10 +194,15 @@ impl ProjectAdmission {
 }
 
 impl ManagedStore {
+    /// Shim: the grant for a project view's workspace.
     pub fn project_policy(&self, conversation: &Id) -> Result<Option<ProjectPolicy>> {
-        let db = self.db()?;
-        policy_from(&db, conversation)
+        workspace::policy_for_conversation(&*self.db()?, conversation)
     }
+    pub fn project_policy_in(&self, workspace: &str) -> Result<Option<ProjectPolicy>> {
+        let db = self.db()?;
+        policy_from(&db, workspace)
+    }
+    /// Shim: configure the grant for a project view's workspace.
     pub fn configure_project_policy(
         &self,
         conversation: &Id,
@@ -177,22 +212,47 @@ impl ManagedStore {
         expires_at_ms: u64,
         required_provider: Option<Provider>,
     ) -> Result<ProjectPolicy> {
-        self.conversation(conversation)?
-            .ok_or(Error::Unavailable("conversation not found"))?;
+        let workspace = self.conversation_workspace(conversation)?;
+        self.configure_project_policy_in(
+            Path::new(&workspace),
+            expected_revision,
+            goal,
+            max_tasks,
+            expires_at_ms,
+            required_provider,
+        )
+    }
+    /// Grant bounded project authority over a validated directory. Admits
+    /// the directory and resolves its open upgrade grant conflicts.
+    pub fn configure_project_policy_in(
+        &self,
+        workspace: &Path,
+        expected_revision: Option<u64>,
+        goal: String,
+        max_tasks: u32,
+        expires_at_ms: u64,
+        required_provider: Option<Provider>,
+    ) -> Result<ProjectPolicy> {
+        let workspace = self.validate_workspace(workspace)?;
         let now = now_ms();
         if expires_at_ms < now.saturating_add(3_599_000)
             || expires_at_ms > now.saturating_add(30 * 24 * 60 * 60 * 1000)
         {
             return Err(xcb_core::Error::Invalid("project authority expiry").into());
         }
+        let known: Vec<String> = self
+            .known_workspaces(4096)?
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
         let mut db = self.write_db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let current = policy_from(&tx, conversation)?;
+        let current = policy_from(&tx, &workspace)?;
         if current.as_ref().map(|p| p.revision) != expected_revision {
             return Err(Error::Conflict("project policy revision changed"));
         }
         let policy = ProjectPolicy {
-            conversation: conversation.clone(),
+            workspace: workspace.clone(),
             generation: new_id("grant"),
             goal,
             enabled: true,
@@ -203,42 +263,58 @@ impl ManagedStore {
             revision: expected_revision.unwrap_or(0) + 1,
         };
         write_policy(&tx, &policy)?;
+        workspace::admit_tx(&tx, &workspace, "grant", None, &known, now)?;
+        workspace::resolve_conflicts_tx(&tx, &workspace, "grant", now)?;
         tx.commit()?;
         Ok(policy)
     }
+    /// Shim: pause or resume the grant for a project view's workspace.
     pub fn set_project_policy_enabled(
         &self,
         conversation: &Id,
         expected_revision: u64,
         enabled: bool,
     ) -> Result<ProjectPolicy> {
+        self.set_project_policy_enabled_in(
+            &self.conversation_workspace(conversation)?,
+            expected_revision,
+            enabled,
+        )
+    }
+    /// Resuming a grant resolves its workspace's open upgrade grant conflicts.
+    pub fn set_project_policy_enabled_in(
+        &self,
+        workspace: &str,
+        expected_revision: u64,
+        enabled: bool,
+    ) -> Result<ProjectPolicy> {
         let mut db = self.write_db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mut policy = policy_from(&tx, conversation)?
-            .ok_or(Error::Unavailable("project policy not found"))?;
+        let mut policy =
+            policy_from(&tx, workspace)?.ok_or(Error::Unavailable("project policy not found"))?;
         if policy.revision != expected_revision {
             return Err(Error::Conflict("project policy revision changed"));
         }
         policy.enabled = enabled;
         policy.revision += 1;
         write_policy(&tx, &policy)?;
+        if enabled {
+            workspace::resolve_conflicts_tx(&tx, workspace, "grant", now_ms())?;
+        }
         tx.commit()?;
         Ok(policy)
     }
+    /// Every readable grant, ordered by workspace.
     pub fn project_policies(&self) -> Result<Vec<ProjectPolicy>> {
         let db = self.db()?;
-        let mut query = db.prepare(
-            "SELECT conversation FROM project_policies ORDER BY conversation LIMIT 4096",
-        )?;
-        let ids = query
+        let mut query =
+            db.prepare("SELECT workspace FROM project_policies ORDER BY workspace LIMIT 4096")?;
+        let workspaces = query
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut policies = Vec::new();
-        for id in ids {
-            match Id::new(id)
-                .map_err(Error::from)
-                .and_then(|id| policy_from(&db, &id))
-            {
+        for workspace in workspaces {
+            match policy_from(&db, &workspace) {
                 Ok(Some(policy)) => policies.push(policy),
                 _ => record_supervisor_fault(
                     self.root(),
@@ -248,21 +324,41 @@ impl ManagedStore {
         }
         Ok(policies)
     }
+    /// A grant's status for `xcb projects` and the TUI: `active`, `paused`,
+    /// `paused by upgrade` (an open upgrade conflict paused it), `expired` or
+    /// `spent`.
+    pub fn project_status(&self, policy: &ProjectPolicy) -> Result<&'static str> {
+        Ok(if !policy.enabled {
+            if workspace::paused_by_upgrade(&*self.db()?, &policy.workspace)? {
+                "paused by upgrade"
+            } else {
+                "paused"
+            }
+        } else if policy.expires_at_ms <= now_ms() {
+            "expired"
+        } else if policy.admitted_tasks >= policy.max_tasks {
+            "spent"
+        } else {
+            "active"
+        })
+    }
     pub(super) fn project_rows(&self) -> Result<Vec<xcb_core::ui::ProjectRow>> {
-        Ok(self
-            .project_policies()?
-            .into_iter()
-            .map(|p| xcb_core::ui::ProjectRow {
-                status: p.status().into(),
-                conversation: p.conversation,
+        let mut rows = Vec::new();
+        for p in self.project_policies()? {
+            let status = self.project_status(&p)?;
+            rows.push(xcb_core::ui::ProjectRow {
+                name: self.workspace_name(&p.workspace)?,
+                status: status.into(),
+                workspace: p.workspace,
                 goal: p.goal,
                 enabled: p.enabled,
                 remaining_tasks: p.max_tasks - p.admitted_tasks,
                 expires_at_ms: p.expires_at_ms,
                 required_provider: p.required_provider,
                 revision: p.revision,
-            })
-            .collect())
+            });
+        }
+        Ok(rows)
     }
     pub(super) fn project_dispatch_block(
         &self,
@@ -275,9 +371,9 @@ impl ManagedStore {
             Err(error) => Err(error),
         }
     }
-    pub(super) fn project_context(&self, conversation: &Id) -> Result<String> {
+    pub(super) fn project_context_in(&self, workspace: &str) -> Result<String> {
         let Some(policy) = self
-            .project_policy(conversation)?
+            .project_policy_in(workspace)?
             .filter(|p| p.enabled && p.expires_at_ms > now_ms())
         else {
             return Ok(String::new());
@@ -299,18 +395,21 @@ impl ManagedStore {
             .into_iter()
             .filter(|p| p.enabled && p.expires_at_ms > now && p.admitted_tasks < p.max_tasks)
         {
-            let mut candidates = self
-                .backlog(Some(&policy.conversation), 256)?
-                .into_iter()
-                .filter(|t| {
-                    t.conversation == policy.conversation
-                        && t.deferred
-                        && !t.cancel_requested
-                        && t.project_proposal
-                            .as_ref()
-                            .is_some_and(|p| p.generation == policy.generation)
-                })
-                .collect::<Vec<_>>();
+            let mut candidates = {
+                let db = self.db()?;
+                proposals_in(&db, &policy.workspace, &policy.generation)?
+                    .iter()
+                    .filter_map(|id| self.habitat_list_task(&db, id.as_str()))
+                    .filter(|t| {
+                        t.workspace == policy.workspace
+                            && t.deferred
+                            && !t.cancel_requested
+                            && t.project_proposal
+                                .as_ref()
+                                .is_some_and(|p| p.generation == policy.generation)
+                    })
+                    .collect::<Vec<_>>()
+            };
             candidates
                 .sort_by_key(|t| (std::cmp::Reverse(t.priority), t.created_at_ms, t.id.clone()));
             for task in candidates {
@@ -400,7 +499,7 @@ impl ManagedStore {
             || task.state != TaskState::Queued
             || task.session.is_some()
             || task.cancel_requested
-            || mutation.is_some_and(|m| m.source.conversation != task.conversation)
+            || mutation.is_some_and(|m| m.source.workspace != task.workspace)
         {
             return Err(Error::Conflict(
                 "only current deferred work can be completed",
@@ -549,17 +648,22 @@ mod tests;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemoryBinding {
-    pub conversation: Id,
+    /// The canonical project directory the binding serves.
+    pub workspace: String,
     pub config: crate::wordcell::WordcellConfig,
     pub revision: u64,
 }
 impl ManagedStore {
+    /// Shim: the Wordcell binding for a project view's workspace.
     pub fn memory_binding(&self, conversation: &Id) -> Result<Option<MemoryBinding>> {
+        self.memory_binding_in(&self.conversation_workspace(conversation)?)
+    }
+    pub fn memory_binding_in(&self, workspace: &str) -> Result<Option<MemoryBinding>> {
         let db = self.db()?;
-        let row:Option<(i64,String)>=db.query_row("SELECT revision,payload FROM project_memory WHERE conversation=?1 AND length(payload)<=65536",[conversation.as_str()],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+        let row:Option<(i64,String)>=db.query_row("SELECT revision,payload FROM project_memory WHERE workspace=?1 AND length(payload)<=65536",[workspace],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
         row.map(|(revision, payload)| {
             let binding: MemoryBinding = decode(&payload)?;
-            if &binding.conversation != conversation
+            if binding.workspace != workspace
                 || sql(binding.revision)? != revision
                 || binding.revision == 0
             {
@@ -569,21 +673,38 @@ impl ManagedStore {
         })
         .transpose()
     }
+    /// Shim: bind Wordcell memory for a project view's workspace.
     pub fn bind_memory(
         &self,
         conversation: &Id,
         expected_revision: Option<u64>,
         config: crate::wordcell::WordcellConfig,
     ) -> Result<MemoryBinding> {
+        let workspace = self.conversation_workspace(conversation)?;
+        self.bind_memory_in(Path::new(&workspace), expected_revision, config)
+    }
+    /// Bind Wordcell memory to a validated directory. Admits the directory
+    /// and resolves its open upgrade memory conflicts.
+    pub fn bind_memory_in(
+        &self,
+        workspace: &Path,
+        expected_revision: Option<u64>,
+        config: crate::wordcell::WordcellConfig,
+    ) -> Result<MemoryBinding> {
         config.verify()?;
-        self.conversation(conversation)?
-            .ok_or(Error::Unavailable("conversation not found"))?;
+        let workspace = self.validate_workspace(workspace)?;
+        let known: Vec<String> = self
+            .known_workspaces(4096)?
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
+        let now = now_ms();
         let mut db = self.write_db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let current: Option<i64> = tx
             .query_row(
-                "SELECT revision FROM project_memory WHERE conversation=?1",
-                [conversation.as_str()],
+                "SELECT revision FROM project_memory WHERE workspace=?1",
+                [&workspace],
                 |row| row.get(0),
             )
             .optional()?;
@@ -591,33 +712,52 @@ impl ManagedStore {
             return Err(Error::Conflict("memory binding revision changed"));
         }
         let binding = MemoryBinding {
-            conversation: conversation.clone(),
+            workspace: workspace.clone(),
             config,
             revision: u64::try_from(current.unwrap_or(0))
                 .map_err(|_| Error::Conflict("memory revision invalid"))?
                 + 1,
         };
-        tx.execute("INSERT INTO project_memory(conversation,revision,payload) VALUES(?1,?2,?3) ON CONFLICT(conversation) DO UPDATE SET revision=excluded.revision,payload=excluded.payload",params![conversation.as_str(),sql(binding.revision)?,serde_json::to_string(&binding)?])?;
+        tx.execute("INSERT INTO project_memory(workspace,revision,payload) VALUES(?1,?2,?3) ON CONFLICT(workspace) DO UPDATE SET revision=excluded.revision,payload=excluded.payload",params![workspace,sql(binding.revision)?,serde_json::to_string(&binding)?])?;
+        workspace::admit_tx(&tx, &workspace, "memory", None, &known, now)?;
+        workspace::resolve_conflicts_tx(&tx, &workspace, "memory", now)?;
         tx.commit()?;
         Ok(binding)
     }
+    /// Shim: search the Wordcell memory of a project view's workspace.
     pub async fn search_memory(
         &self,
         conversation: &Id,
         query: &str,
         limit: usize,
     ) -> Result<Value> {
-        let binding = self
-            .memory_binding(conversation)?
-            .ok_or(Error::Unavailable(
+        self.search_memory_in(&self.conversation_workspace(conversation)?, query, limit)
+            .await
+    }
+    pub async fn search_memory_in(
+        &self,
+        workspace: &str,
+        query: &str,
+        limit: usize,
+    ) -> Result<Value> {
+        let Some(binding) = self.memory_binding_in(workspace)? else {
+            if workspace::open_conflict(&*self.db()?, workspace, "memory")? {
+                return Err(Error::Unavailable(
+                    "conflicting Wordcell bindings from upgrade; run xcb memory configure <dir>",
+                ));
+            }
+            return Err(Error::Unavailable(
                 "project Wordcell memory is not configured",
-            ))?;
+            ));
+        };
         let (_cancel, cancelled) = watch::channel(false);
         binding.config.search(query, limit, cancelled).await
     }
+    /// Promote a note into the Wordcell binding of the task's workspace. The
+    /// promotion keeps the task's conversation as provenance, which is hashed
+    /// into its request digest.
     pub async fn promote_memory(
         &self,
-        conversation: &Id,
         task_id: &Id,
         note: &str,
     ) -> Result<crate::wordcell::PromotionReceipt> {
@@ -625,17 +765,14 @@ impl ManagedStore {
         let task = self
             .task(task_id)?
             .ok_or(Error::Unavailable("memory source task not found"))?;
-        if &task.conversation != conversation {
-            return Err(Error::Conflict("memory source belongs to another project"));
-        }
         let binding = self
-            .memory_binding(conversation)?
+            .memory_binding_in(&task.workspace)?
             .ok_or(Error::Unavailable(
                 "project Wordcell memory is not configured",
             ))?;
         let promotion = crate::wordcell::Promotion {
             task_id: task.id.to_string(),
-            conversation_id: conversation.to_string(),
+            conversation_id: task.conversation.to_string(),
             summary: note.to_owned(),
         };
         let custody = private::directory(&self.root.join("memory-promotions"))?;
@@ -664,7 +801,7 @@ impl ManagedStore {
             && let Some(prompt) = &report.prompt
         {
             let policy = self
-                .project_policy(&task.conversation)?
+                .project_policy_in(&task.workspace)?
                 .filter(|policy| Some(&policy.generation) == task.program_generation.as_ref());
             let proposal = policy.map(|policy| ProjectProposal {
                 parent: task.id.clone(),
@@ -686,6 +823,11 @@ impl ManagedStore {
                     priority: 5,
                     program_parent: Some(&task),
                     proposal,
+                    binding: habitat::inherited_binding(
+                        &task.conversation,
+                        BindingOrigin::Program,
+                        format!("from {}", task.id),
+                    ),
                     ..Default::default()
                 },
             )

@@ -1,7 +1,8 @@
 //! Explicit, local Wordcell memory exchange. A host binds one trusted CLI and
-//! vault to a conversation. Search never enables semantic, history, graph, or
-//! hosted lanes. Promotion exports only the supplied note, with provenance;
-//! it never reads or uploads conversation transcripts.
+//! vault to a project workspace directory, shared by every conversation over
+//! it. Search never enables semantic, history, graph, or hosted lanes.
+//! Promotion exports only the supplied note, with provenance; it never reads
+//! or uploads conversation transcripts.
 //!
 //! Pins detect launcher/interpreter drift, not changes throughout an imported
 //! package graph. The host explicitly trusts its installed Wordcell distribution.

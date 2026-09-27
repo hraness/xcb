@@ -37,7 +37,7 @@ def main():
     binary = args.binary.resolve(strict=True)
     parent = args.evidence_dir.resolve(strict=True)
     root = Path(tempfile.mkdtemp(prefix="xcb-inbox-acceptance-", dir=parent)).resolve()
-    paths = {name: root / name for name in ("state", "coord", "workspace", "home", "tmp")}
+    paths = {name: root / name for name in ("state", "coord", "workspace", "workspace2", "home", "tmp")}
     for path in paths.values():
         path.mkdir(mode=0o700)
     # Do not pass provider keys, real HOME, provider configuration or real state.
@@ -46,6 +46,11 @@ def main():
            "XCB_STATE": str(paths["state"]), "XCB_COORDINATION_ROOT": str(paths["coord"]),
            "HRANESS_SUPPORT_AUDIENCE": "off"}
     base = [str(binary), "--state", str(paths["state"]), "--cwd", str(paths["workspace"])]
+
+    def based(cwd=None):
+        # A second project directory gets its own `--cwd`; the default is the first.
+        cwd = paths["workspace"] if cwd is None else cwd
+        return [str(binary), "--state", str(paths["state"]), "--cwd", str(cwd)], cwd
     results, errors = [], []
     daemon = None
     schedule = None
@@ -57,13 +62,14 @@ def main():
         if not condition:
             raise AssertionError(name)
 
-    def command(*argv, ok=True):
+    def command(*argv, ok=True, cwd=None):
         if daemon is not None:
             check("owned daemon remains active", daemon.poll() is None)
         log = root / "daemon.log"
         if log.exists():
             check("daemon log bounded", log.stat().st_size <= CAPTURE_LIMIT)
-        proc = subprocess.Popen(base + list(argv), env=env, cwd=paths["workspace"],
+        prefix, cwd = based(cwd)
+        proc = subprocess.Popen(prefix + list(argv), env=env, cwd=cwd,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         streams = {proc.stdout: bytearray(), proc.stderr: bytearray()}
         deadline = time.monotonic() + 25
@@ -103,8 +109,8 @@ def main():
             raise RuntimeError(f"{argv}: {problem or stderr or code}")
         return code, stdout
 
-    def value(*argv):
-        return json.loads(command(*argv, "--json")[1])
+    def value(*argv, cwd=None):
+        return json.loads(command(*argv, "--json", cwd=cwd)[1])
 
     def task(task_id):
         return value("tasks", "show", task_id)
@@ -146,11 +152,12 @@ def main():
             return record["pid"] == daemon.pid and record["sha256"] == sha and record["executable"] == str(binary)
         eventually("owned daemon exact identity", registered)
 
-    def terminal(name, argv, actions, redraw_at=(), durable_at=None):
+    def terminal(name, argv, actions, redraw_at=(), durable_at=None, cwd=None):
+        prefix, cwd = based(cwd)
         pid, fd = pty.fork()
         if pid == 0:
-            os.chdir(paths["workspace"])
-            os.execve(str(binary), base + argv, env)
+            os.chdir(cwd)
+            os.execve(str(binary), prefix + argv, env)
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 48, 160, 0, 0))
         os.set_blocking(fd, False)
         capture = bytearray()
@@ -265,7 +272,9 @@ def main():
     try:
         start_daemon()
         terminal("create-conversation", ["chat", "--new"], [(b"\x04", .3)])
-        conversations = value("conversations")
+        # The thread row (`isThread`) is listed first when something created
+        # it; this check is about the one project view `chat --new` made.
+        conversations = [row for row in value("conversations") if not row.get("isThread")]
         check("one isolated conversation", len(conversations) == 1)
         conversation = conversations[0]["id"]
         # Keep the exact daemon alive during PTY checks. The first occurrence
@@ -302,7 +311,9 @@ def main():
             check("out of bounds page rejected " + limit, command("inbox", "--limit", limit, ok=False)[0] != 0)
         saved = task(target["id"])
         check("inbox did not release or attempt deferred task", saved["deferred"] and saved["attempts"] == target["attempts"] and saved.get("session") is None)
-        terminal("second-conversation", ["chat", "--new"], [(b"\x04", .3)])
+        # The other project lives in its own directory, so it holds its own
+        # grants and watches no matter how projects are keyed.
+        terminal("second-conversation", ["chat", "--new"], [(b"\x04", .3)], cwd=paths["workspace2"])
         other_conversation = next(row["id"] for row in value("conversations") if row["id"] != conversation)
         other = value("backlog", "add", other_conversation, "Other project")
         value("steer", other["id"], "OTHER_PROJECT_GUIDANCE", "--id", "other_project_event")
@@ -392,7 +403,7 @@ def main():
               str(program_file), ok=False)[0] != 0)
         check("managed admission requires project authority", command("backlog", "program", conversation,
               str(program_file), "--managed-calls", "2", ok=False)[0] != 0)
-        value("projects", "configure", conversation, "Exercise bounded controller admission", "--tasks", "2", "--hours", "1")
+        value("projects", "configure", str(paths["workspace"]), "Exercise bounded controller admission", "--tasks", "2", "--hours", "1")
         program_args = ("backlog", "program", conversation, str(program_file), "--managed-calls", "2", "--id", "acceptance_controller")
         program = value(*program_args)
         def program_status():
@@ -409,7 +420,7 @@ def main():
               "--managed-calls", "2", "--id", "conflicting_controller", ok=False)[0] != 0)
         check("program inputs reject steering", command("steer", program["id"], "Change pinned program", ok=False)[0] != 0)
         policies = value("projects")
-        policy = next(row for row in policies if row["conversation"] == conversation)
+        policy = next(row for row in policies if row["workspace"] == str(paths["workspace"].resolve()))
         check("exactly one grant task consumed", policy["admitted_tasks"] == 1)
         # File edits cannot mutate a registered manifest or its suspended call.
         program_file.write_text("{}")

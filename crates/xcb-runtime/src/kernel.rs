@@ -444,12 +444,13 @@ fn workspace_lease(store: &Store, session: &Session) -> Result<private::Exclusiv
     // Inspect durable custody only after excluding competing launchers. An
     // earlier owner may have released this lock with an unsettled run between
     // a pre-lock check and acquisition; the filesystem lock alone is no proof
-    // that its provider and effects have stopped.
+    // that its provider and effects have stopped. A run in a nested or
+    // enclosing directory writes the same files, so it blocks too.
     for run in store.unsettled_runs()? {
         if let Some(id) = run.session
-            && store
-                .session(&id)?
-                .is_some_and(|active| active.workspace == session.workspace)
+            && store.session(&id)?.is_some_and(|active| {
+                crate::workspace_infer::workspaces_overlap(&active.workspace, &session.workspace)
+            })
         {
             return Err(Error::Conflict("workspace has an unsettled writer"));
         }
@@ -1406,6 +1407,7 @@ pub async fn serve(
                             }
                             Intent::Conversation(_) => return Err(Error::Unavailable("managed conversations are available from plain xcb chat")),
                             Intent::Habitat(_) | Intent::HabitatAt { .. } => return Err(Error::Unavailable("persistent backlog and schedules are available from plain xcb chat")),
+                            Intent::Focus(_) | Intent::MoveTask { .. } | Intent::ReleaseHold { .. } | Intent::AddWorkspace { .. } | Intent::NewProjectView { .. } => return Err(Error::Unavailable("projects are available from plain xcb chat")),
                             Intent::Resume(id) => { if store.session(&id)?.is_none() { return Err(Error::Unavailable("session not found")); } current = Some(id); }
                             Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None, None)?.id),
                             Intent::Account(account) => {

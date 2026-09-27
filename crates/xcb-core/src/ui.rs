@@ -5,6 +5,11 @@ use crate::{
     session::{Attachment, Message, Session, State, Subagent},
     usage::Estimate,
 };
+use std::collections::BTreeMap;
+
+/// The one machine-global managed conversation. It has no workspace of its
+/// own: each of its tasks binds a project directory when it is created.
+pub const GLOBAL_THREAD_ID: &str = "c_global";
 
 #[derive(Debug, Clone)]
 pub struct AccountRow {
@@ -45,10 +50,18 @@ impl AccountRow {
 pub struct ConversationRow {
     pub id: Id,
     pub title: String,
+    /// The project view's directory; empty for the thread.
     pub workspace: String,
     /// Durable messages recorded in the conversation.
     pub messages: usize,
     pub updated_at_ms: u64,
+}
+
+impl ConversationRow {
+    /// The machine-global thread, which spans every project directory.
+    pub fn is_thread(&self) -> bool {
+        self.id.as_str() == GLOBAL_THREAD_ID
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +86,13 @@ pub struct TaskRow {
     /// How the last settled worker turn ended (settle reflex category).
     pub settle: Option<String>,
     pub workspace: String,
+    /// Short label for why a thread task runs in `workspace` (for example
+    /// `continuing`); `None` for tasks bound by their project view.
+    pub binding: Option<String>,
+    /// A doubtful binding waits until this instant before its first dispatch.
+    pub hold_until_ms: Option<u64>,
+    /// The unstarted task this one replaced when it moved directories.
+    pub moved_from: Option<Id>,
     pub updated_at_ms: u64,
 }
 
@@ -92,6 +112,8 @@ pub struct RoutePreview {
 pub struct BacklogRow {
     pub id: Id,
     pub conversation: Id,
+    /// The task's project directory; empty when unresolved.
+    pub workspace: String,
     pub title: String,
     pub prompt: String,
     pub summary: String,
@@ -107,6 +129,8 @@ pub struct BacklogRow {
 pub struct ScheduleRow {
     pub id: Id,
     pub conversation: Id,
+    /// The directory each occurrence runs in; empty when unresolved.
+    pub workspace: String,
     pub prompt: String,
     pub interval_ms: u64,
     pub next_due_ms: u64,
@@ -116,14 +140,33 @@ pub struct ScheduleRow {
 
 #[derive(Debug, Clone)]
 pub struct ProjectRow {
-    pub conversation: Id,
+    /// The canonical project directory the grant covers.
+    pub workspace: String,
+    /// Registry name, or the directory's basename.
+    pub name: String,
     pub goal: String,
     pub enabled: bool,
     pub remaining_tasks: u32,
     pub expires_at_ms: u64,
     pub required_provider: Option<Provider>,
     pub revision: u64,
+    /// `active`, `paused`, `paused by upgrade`, `expired` or `spent`.
     pub status: String,
+}
+
+/// A known project directory as the thread's picker and header show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRow {
+    pub path: String,
+    pub name: String,
+    pub repo: Option<String>,
+    pub last_used_ms: u64,
+    /// Nonterminal tasks currently bound to this directory.
+    pub active: usize,
+    /// Holds other known projects and is never inferred.
+    pub container: bool,
+    /// An unregistered prompt root offered for an explicit add.
+    pub new: bool,
 }
 
 /// A bounded view of durable program progress. Worker approvals belong to the
@@ -169,6 +212,21 @@ pub struct TranscriptPage {
     pub messages: Vec<Message>,
     pub first_sequence: Option<u64>,
     pub has_older: bool,
+    /// Sequence → task workspace for task-attributed messages.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub workspaces: BTreeMap<u64, String>,
+    /// The durable sequence of each entry in `messages`, in the same order,
+    /// so `workspaces` can be joined to a message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sequences: Vec<u64>,
+}
+
+impl TranscriptPage {
+    /// The task workspace a message was attributed to, if any.
+    pub fn workspace_of(&self, index: usize) -> Option<&str> {
+        let sequence = self.sequences.get(index)?;
+        self.workspaces.get(sequence).map(String::as_str)
+    }
 }
 
 pub enum HabitatCommand {
@@ -192,6 +250,7 @@ pub enum HabitatCommand {
         event: Id,
     },
     ConfigureProject {
+        workspace: String,
         expected_revision: Option<u64>,
         goal: String,
         max_tasks: u32,
@@ -199,7 +258,7 @@ pub enum HabitatCommand {
         required_provider: Option<Provider>,
     },
     ProjectEnabled {
-        conversation: Id,
+        workspace: String,
         expected_revision: u64,
         enabled: bool,
     },
@@ -213,13 +272,17 @@ pub enum HabitatCommand {
         expected_revision: u64,
     },
     MemorySearch {
+        workspace: String,
         query: String,
     },
+    /// `workspace` is required in the thread and resolved at keystroke time
+    /// by the authority ladder, never by inference.
     Enqueue {
         id: Id,
         prompt: String,
         deferred: bool,
         priority: u8,
+        workspace: Option<String>,
     },
     EnqueueIn {
         conversation: Id,
@@ -227,6 +290,7 @@ pub enum HabitatCommand {
         prompt: String,
         deferred: bool,
         priority: u8,
+        workspace: Option<String>,
     },
     Edit {
         id: Id,
@@ -247,6 +311,7 @@ pub enum HabitatCommand {
     Schedule {
         prompt: String,
         interval_ms: u64,
+        workspace: Option<String>,
     },
     ScheduleEnabled {
         id: Id,
@@ -345,6 +410,12 @@ pub struct View {
     pub total_runway_seconds: Option<f64>,
     pub runway_coverage: (usize, usize),
     pub reduced_motion: bool,
+    /// The thread's session-local project focus.
+    pub focus: Option<String>,
+    /// The launch directory's project root, when it is a usable hint.
+    pub launch_hint: Option<String>,
+    /// Known project directories for the thread's header and picker.
+    pub workspaces: Vec<WorkspaceRow>,
 }
 impl Default for View {
     fn default() -> Self {
@@ -380,6 +451,9 @@ impl Default for View {
             total_runway_seconds: None,
             runway_coverage: (0, 0),
             reduced_motion: false,
+            focus: None,
+            launch_hint: None,
+            workspaces: vec![],
         }
     }
 }
@@ -437,6 +511,31 @@ pub enum Intent {
         enabled: bool,
     },
     Refresh,
+    /// Set (or clear) the thread's session-local project focus.
+    Focus(Option<String>),
+    /// Recreate an unstarted thread task in another project directory.
+    /// With `focus`, the target also becomes the thread's focus and one
+    /// notice reports both.
+    MoveTask {
+        task: Id,
+        revision: u64,
+        target: String,
+        focus: bool,
+    },
+    /// Dispatch a held thread task now.
+    ReleaseHold {
+        task: Id,
+        revision: u64,
+    },
+    /// Admit a directory to the known-workspace registry by explicit act.
+    AddWorkspace {
+        path: String,
+    },
+    /// Open a new project view for this directory (from the thread, where
+    /// `NewSession` only clears the focus).
+    NewProjectView {
+        workspace: String,
+    },
 }
 
 pub enum Update {
@@ -502,5 +601,23 @@ pub enum Update {
     Attachment(Attachment),
     PaneCandidate(Pane),
     Notice(String),
+    /// A thread submission bound its task to this project directory.
+    WorkspaceBound {
+        id: Id,
+        task: Id,
+        workspace: String,
+        label: String,
+    },
+    /// The thread could not pick a project for a submission; nothing was
+    /// written and the draft is kept. `resubmit` is true when Enter on the
+    /// restored draft redoes the same act after the pick: an ordinary
+    /// submission, or a restored `/backlog add` or `/schedule` command. A
+    /// Tab-queued draft is only focused, never sent as a live task.
+    ProjectPicker {
+        id: Id,
+        candidates: Vec<WorkspaceRow>,
+        reason: String,
+        resubmit: bool,
+    },
     Stopped,
 }

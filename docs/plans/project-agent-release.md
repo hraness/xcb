@@ -1,5 +1,7 @@
 # Project agent release 0.4.0
 
+> Superseded in part by [global-thread.md](global-thread.md): projects are workspace-keyed.
+
 The persistent habitat foundation is merged in PR 139. This release makes it
 usable for delegated project work and publishes the first verified native xcb
 artifacts. A managed conversation remains the project identity; its tasks remain

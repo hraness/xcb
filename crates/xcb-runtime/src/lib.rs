@@ -47,6 +47,7 @@ mod transcript;
 pub mod update;
 mod wire_helpers;
 pub mod wordcell;
+pub mod workspace_infer;
 
 use sha2::{Digest, Sha256};
 use xcb_core::Id;

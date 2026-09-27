@@ -147,7 +147,7 @@ Managed supervisors record their exact executable identity. When that binary
 is replaced, a current supervisor stops starting new turns, retains custody of
 its active workers until they settle, then exits. Queued tasks and tasks waiting
 for input remain saved. Wait for that exit, restart the terminal, and reopen
-the control conversation to continue; provider pins rebind automatically.
+the thread or project view to continue; provider pins rebind automatically.
 A different running build produces an explicit supervisor-version error.
 Legacy supervisors without an identity record need their exact process verified
 and stopped after active workers settle; a saved PID or a deleted lock file is
@@ -185,19 +185,39 @@ xcb accounts refresh <account-id>
 xcb models
 ```
 
-Plain `xcb` reopens the latest persistent control conversation for the workspace;
-`xcb chat --new` starts another. Prompts become durable
-managed tasks routed through admitted Codex, Claude, or Devin sessions; closing
-the terminal detaches without cancelling them. Open another terminal for an
-independent conversation over the same task swarm, use `/tasks` to inspect work,
-or `/resume` to switch control conversations. Ordinary prompts create new work.
+Plain `xcb` opens your thread from any directory. The thread is one managed
+conversation per machine that spans your projects: xcb picks the project
+directory each task runs in and says why in its reply, for example
+“Started Fix the parser in `xcb` · named `xcb` · /workspace to move”.
+It uses a path or project name in the prompt, the project you focused with
+`/workspace`, the task you are continuing, and only then the directory you
+launched from, so `--cwd` is a hint. When none of these settles it, xcb asks
+which project, keeps your draft, and saves nothing. A less certain choice, or
+a prompt that names a project other than the focused one, waits 8 seconds
+before it starts so you can move it with `/workspace <name|path>`. xcb only
+picks directories you have used or registered: `/workspace add <dir>` or
+`xcb workspaces add <dir>` registers one, and xcb refuses your home directory,
+its hidden directories, `~/Library`, xcb's own state and system directories.
+`xcb chat --new` starts a separate project view whose tasks all run in the
+current directory.
+
+Prompts become durable managed tasks routed through admitted Codex, Claude, or
+Devin sessions; closing the terminal detaches without cancelling them. Open
+another terminal for another view of the same task swarm, use `/tasks` to
+inspect work, or `/sessions` to switch between the thread and project views.
+Ordinary prompts create new work.
 In the v0.7 terminal, select a task in `/agents` and press `s` to guide it or `a`
 to answer its current question; the prompt displays the target. `/task` returns
 to new work and Tab queues it. Independent workspaces can run concurrently;
-tasks in the same workspace run one at a time. Use
+tasks in the same workspace, or in a directory inside it, run one at a time. Use
 `/cancel <task-id>` to request cancellation and inspect `/tasks` for settlement.
 
-Use `/backlog` for this conversation's backlog and `/backlog all` to browse all
+A project is a directory. Its backlog, work history, autonomy grant, working
+memory and Wordcell binding belong to that directory and are shared by the
+thread and every project view over it. A grant authorizes automatic work only
+in its own directory, even though the thread holds tasks for several.
+Use `/backlog` for this conversation's backlog (in the thread, narrowed to the
+focused project) and `/backlog all` to browse all
 projects. `/attention` collects questions, approvals and actions across agents.
 Use `/steer <task-id> <guidance>` to queue guidance for a task's next safe turn,
 and `/inbox` to inspect acceptance and delivery. `/watch <target-id> <source-id>`
@@ -206,8 +226,12 @@ share a bounded batch; they do not renew budgets or reopen closed work. The CLI
 offers the same `steer`, `watch` and `inbox` controls, including stable IDs for
 retries and paginated JSON inspection.
 Deferred work can be edited, released, or completed with a summary. `/project
-grant <tasks> <hours> <goal>` delegates a bounded follow-up budget; `/project
-pause` holds future automatic work. `/schedule` manages recurring prompts, and
+grant [project] <tasks> <hours> <goal>` delegates a bounded follow-up budget;
+`/project pause` holds future automatic work. In the thread, `/project` and
+`/memory` use the project you name, then the focused project, then the selected
+task's directory; `/schedule` and `/backlog add` use the focused project or the
+selected task's directory. None of them guesses: without a project they ask and
+save nothing. `/schedule` manages recurring prompts, and
 `xcb schedules program` pins bounded ALGAL planners. Starting in v0.6.0, add
 `--managed-calls 2`
 to run a controller that can suspend for up to two ordinary worker tasks, or use
@@ -373,15 +397,18 @@ Sign-in and a successful `doctor` alone do not qualify the application route.
 ### Everyday commands
 
 ```sh
-xcb --cwd /absolute/path/to/your/project       # new control conversation
-xcb conversations                                # resumable control conversations
+xcb                                              # your thread, from any directory
+xcb --cwd /absolute/path/to/your/project       # the thread, hinting this project
+xcb chat --new                                   # a new project view for this directory
+xcb conversations                                # the thread and project views
 xcb chat --resume <conversation-id>
+xcb workspaces                                   # project directories the thread picks from
 xcb tasks                                        # global managed task swarm
 xcb backlog                                      # backlog and work history across projects
 xcb attention                                    # questions, approvals and actions
 xcb schedules                                    # durable recurring prompts
 xcb projects                                     # project goals and remaining autonomy grants
-xcb memory status <conversation-id>               # explicit Wordcell binding
+xcb memory status <dir>                          # explicit Wordcell binding
 xcb service status                               # opt-in macOS login startup
 xcb tasks verify <task-id>                       # verify local transition receipts
 xcb tasks messages <task-id>                     # durable cross-provider mailbox
@@ -406,7 +433,7 @@ account/model route and runs exactly one bounded turn, returning the selected
 route, saved session id, and settled outcome facts as bounded JSON. See
 [the route contract](docs/route.md).
 
-`xcb chat --resume` reopens a control conversation; `xcb resume` opens a saved
+`xcb chat --resume` reopens the thread or a project view; `xcb resume` opens a saved
 direct provider session and its workspace. Neither is a headless continuation
 command. `/help` lists terminal commands. The [terminal guide](docs/terminal.md)
 covers editing keys, optional Vim editing, transcript search, agent guidance,
@@ -428,9 +455,12 @@ has its own separate limits.
 Control conversations are concurrent and share one durable task supervisor.
 Each account still owns at most one active provider turn, and one workspace can
 have only one admitted writer even when different accounts or terminals are
-available. Independent workspaces and accounts can run concurrently. Managed
+available. Independent workspaces and accounts can run concurrently; a
+workspace and a directory inside it take turns. Managed
 cancellation may be requested from the task’s originating conversation or by an
-explicit task ID/title elsewhere; direct provider-session cancellation remains
+explicit task ID/title elsewhere. In the thread, a bare `/cancel` cancels the
+selected task or the only cancellable one; when several could be cancelled it
+asks which, listing each task's project. Direct provider-session cancellation is
 owned by its terminal. Ctrl-C and SIGTERM request bounded cleanup for a headless
 run. `xcb run` reports success only for a completed, joined, settled idle result.
 

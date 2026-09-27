@@ -1,5 +1,7 @@
 # Remote access: xcb machines as a fleet
 
+> Superseded in part by [global-thread.md](global-thread.md): projects are workspace-keyed.
+
 ## Outcome and scope
 
 Treat every machine running xcb as an enrolled device in a Convex relay.

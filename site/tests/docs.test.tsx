@@ -102,6 +102,9 @@ describe("organized documentation", () => {
     expect(html).toContain("xcb accounts add claude --plan Max");
     expect(html).not.toContain("--label");
     expect(html).toContain("xcb --cwd /absolute/path/to/your/project");
+    // Plain `xcb` opens the one thread for every project, from any directory.
+    expect(html).toContain("Plain <code>xcb</code> opens your thread from any directory");
+    expect(html).toContain("xcb chat --new");
     expect(html).toContain("It is not a headless continuation command");
     expect(html).not.toMatch(/(?:npm|bun) (?:install|add) -g @hraness\/xcb/u);
   });

@@ -619,6 +619,9 @@ fn global_conversation_shows_managed_tasks_instead_of_provider_chrome() {
         route_reason: None,
         settle: None,
         workspace: "/project".into(),
+        binding: None,
+        hold_until_ms: None,
+        moved_from: None,
         updated_at_ms: 1,
     }];
     app.view.pane = Pane::focus();
@@ -657,6 +660,9 @@ fn managed_task(
         route_reason: None,
         settle: None,
         workspace: "/project".into(),
+        binding: None,
+        hold_until_ms: None,
+        moved_from: None,
         updated_at_ms,
     }
 }
@@ -1657,6 +1663,136 @@ fn one_row_history_preview_shows_the_match_instead_of_preceding_context() {
         .draw(|frame| render::draw(frame, &mut app, 0))
         .unwrap();
     assert!(buffer_text(&terminal).contains("NEEDLE"));
+}
+
+fn thread_view(app: &mut App) {
+    use xcb_core::ui::{ConversationRow, GLOBAL_THREAD_ID, WorkspaceRow};
+    app.view.session = None;
+    app.view
+        .extensions
+        .insert(0, ("algal supervisor".into(), "on".into()));
+    app.view.conversation = Some(Id::new(GLOBAL_THREAD_ID).unwrap());
+    app.view.conversations = vec![ConversationRow {
+        id: Id::new(GLOBAL_THREAD_ID).unwrap(),
+        title: "Thread".into(),
+        workspace: String::new(),
+        messages: 0,
+        updated_at_ms: 1,
+    }];
+    app.view.workspaces = ["/src/xcb", "/src/site", "/src/api"]
+        .into_iter()
+        .map(|path| WorkspaceRow {
+            path: path.into(),
+            name: path.rsplit('/').next().unwrap().into(),
+            repo: None,
+            last_used_ms: 1,
+            active: 0,
+            container: false,
+            new: false,
+        })
+        .collect();
+}
+
+#[test]
+fn thread_header_all_projects_and_focus() {
+    let mut app = app();
+    thread_view(&mut app);
+    app.view.tasks = vec![managed_task("t_run", "Build", "running", None, 1)];
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    assert!(screen_rows(&terminal)[0].starts_with("xcb · all projects · 1 active"));
+    app.view.focus = Some("/src/site".into());
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    assert!(screen_rows(&terminal)[0].starts_with("xcb · → site"));
+}
+
+#[test]
+fn footer_counts_projects() {
+    let mut app = app();
+    thread_view(&mut app);
+    app.view.tasks = vec![managed_task("t_run", "Build", "running", None, 1)];
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    assert!(contents.contains("· 3 projects"), "{contents}");
+    assert!(!contents.contains("chats"));
+}
+
+#[test]
+fn message_workspace_chips() {
+    let mut app = app();
+    thread_view(&mut app);
+    let message = |id: &str, role, text: &str| Message {
+        id: Id::new(id).unwrap(),
+        role,
+        text: text.into(),
+        attachments: vec![],
+        at_ms: 1,
+        provenance: None,
+    };
+    let messages = vec![
+        message("m_one", Role::User, "update the landing page"),
+        message("m_two", Role::User, "an unattributed note"),
+    ];
+    app.view.messages = messages.clone();
+    app.view.transcript = Some(xcb_core::ui::TranscriptPage {
+        context: xcb_core::ui::TranscriptContext::Conversation(
+            Id::new(xcb_core::ui::GLOBAL_THREAD_ID).unwrap(),
+        ),
+        messages,
+        first_sequence: Some(1),
+        has_older: false,
+        workspaces: [(1, "/src/site".to_owned())].into_iter().collect(),
+        sequences: vec![1, 2],
+    });
+    app.view.pane = narrow_transcript_pane(1);
+    app.show_history = true;
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let rows = screen_rows(&terminal);
+    let chip = rows
+        .iter()
+        .position(|row| row.trim() == "⌂ site")
+        .unwrap_or_else(|| panic!("{rows:#?}"));
+    assert!(rows[chip + 1].contains("update the landing page"));
+    assert_eq!(rows.iter().filter(|row| row.contains('⌂')).count(), 1);
+}
+
+#[test]
+fn held_chip_countdown() {
+    let mut app = app();
+    thread_view(&mut app);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mut held = managed_task("t_held", "Held", "queued", None, 1);
+    held.workspace = "/src/api".into();
+    held.hold_until_ms = Some(now + 6_000);
+    app.view.tasks = vec![held];
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let contents = buffer_text(&terminal);
+    assert!(
+        contents.contains("→ api · starts in 6s · /workspace go")
+            || contents.contains("→ api · starts in 5s · /workspace go"),
+        "{contents}"
+    );
+    app.view.tasks[0].hold_until_ms = Some(now.saturating_sub(1));
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    assert!(!buffer_text(&terminal).contains("starts in"));
 }
 
 #[test]

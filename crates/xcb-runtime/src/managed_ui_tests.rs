@@ -500,7 +500,8 @@ async fn ui_rename_preserves_task_custody_and_refreshes_each_changed_row() {
 async fn ui_recovery_and_pages_keep_identity_when_context_switches_under_backpressure() {
     use xcb_core::ui::HabitatCommand;
     let f = fixture().await;
-    let other = f.store.create_conversation(&f.workspace).await.unwrap();
+    let elsewhere = private::directory(&f.workspace.parent().unwrap().join("elsewhere")).unwrap();
+    let other = f.store.create_conversation(&elsewhere).await.unwrap();
     let (commands, input) = std::sync::mpsc::sync_channel(8);
     let (output, display) = std::sync::mpsc::sync_channel(1);
     let enqueue = new_id("m");
@@ -515,6 +516,7 @@ async fn ui_recovery_and_pages_keep_identity_when_context_switches_under_backpre
             prompt: "Save this queued draft".into(),
             deferred: true,
             priority: 0,
+            workspace: None,
         }))
         .unwrap();
     commands
@@ -549,6 +551,7 @@ async fn ui_recovery_and_pages_keep_identity_when_context_switches_under_backpre
     let ui = tokio::spawn(serve_ui(
         Arc::new(Store::open(&f.state).unwrap()),
         f.conversation.clone(),
+        None,
         input,
         output,
         PathBuf::from("/usr/bin/true"),
@@ -640,7 +643,8 @@ async fn ui_recovery_and_pages_keep_identity_when_context_switches_under_backpre
 async fn ui_navigation_burst_rejects_stale_submission_and_queue_contexts() {
     use xcb_core::ui::HabitatCommand;
     let f = fixture().await;
-    let other = f.store.create_conversation(&f.workspace).await.unwrap();
+    let elsewhere = private::directory(&f.workspace.parent().unwrap().join("elsewhere")).unwrap();
+    let other = f.store.create_conversation(&elsewhere).await.unwrap();
     let (commands, input) = std::sync::mpsc::sync_channel(8);
     let (output, display) = std::sync::mpsc::sync_channel(1);
     let submission = new_id("m");
@@ -672,12 +676,14 @@ async fn ui_navigation_burst_rejects_stale_submission_and_queue_contexts() {
             prompt: "Keep this queued draft in its original conversation".into(),
             deferred: true,
             priority: 0,
+            workspace: None,
         }))
         .unwrap();
     commands
         .send(Intent::HabitatAt {
             conversation: f.conversation.clone(),
             command: HabitatCommand::ConfigureProject {
+                workspace: f.workspace.to_str().unwrap().into(),
                 expected_revision: None,
                 goal: "Never authorize the newly selected project".into(),
                 max_tasks: 5,
@@ -692,6 +698,7 @@ async fn ui_navigation_burst_rejects_stale_submission_and_queue_contexts() {
             command: HabitatCommand::Schedule {
                 prompt: "Never schedule the other conversation".into(),
                 interval_ms: 60_000,
+                workspace: None,
             },
         })
         .unwrap();
@@ -706,6 +713,7 @@ async fn ui_navigation_burst_rejects_stale_submission_and_queue_contexts() {
     let ui = tokio::spawn(serve_ui(
         Arc::new(Store::open(&f.state).unwrap()),
         f.conversation.clone(),
+        None,
         input,
         output,
         PathBuf::from("/usr/bin/true"),
@@ -770,4 +778,412 @@ async fn ui_navigation_burst_rejects_stale_submission_and_queue_contexts() {
     assert_eq!(tasks[0].source_message, accepted);
     assert!(f.store.project_policies().unwrap().is_empty());
     assert!(f.store.schedules(None).unwrap().is_empty());
+}
+
+/// Run `serve_ui` on the thread and collect updates until `done` holds.
+struct ThreadUi {
+    commands: std::sync::mpsc::SyncSender<Intent>,
+    display: std::sync::mpsc::Receiver<Update>,
+    ui: tokio::task::JoinHandle<Result<()>>,
+    /// The latest view seen while waiting.
+    view: Option<xcb_core::ui::View>,
+}
+
+impl ThreadUi {
+    async fn start(f: &Fixture, launch_hint: Option<String>) -> Self {
+        let thread = f.store.global_thread().await.unwrap();
+        Self::start_in(f, thread.id, launch_hint)
+    }
+
+    /// Serve `conversation`, which may be a project view.
+    fn start_in(f: &Fixture, conversation: Id, launch_hint: Option<String>) -> Self {
+        let (commands, input) = std::sync::mpsc::sync_channel(16);
+        let (output, display) = std::sync::mpsc::sync_channel(64);
+        let ui = tokio::spawn(serve_ui(
+            Arc::new(Store::open(&f.state).unwrap()),
+            conversation,
+            launch_hint,
+            input,
+            output,
+            PathBuf::from("/usr/bin/true"),
+        ));
+        Self {
+            commands,
+            display,
+            ui,
+            view: None,
+        }
+    }
+
+    fn send(&self, intent: Intent) {
+        self.commands.send(intent).unwrap();
+    }
+
+    /// Wait for an update matching `wanted`, dropping the others.
+    async fn wait(&mut self, wanted: impl Fn(&Update) -> bool) -> Update {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                while let Ok(update) = self.display.try_recv() {
+                    if let Update::View(view) = &update {
+                        self.view = Some(view.as_ref().clone());
+                    }
+                    if wanted(&update) {
+                        return update;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("expected update")
+    }
+
+    async fn notice(&mut self, text: &str) -> String {
+        match self
+            .wait(|update| matches!(update, Update::Notice(notice) if notice.contains(text)))
+            .await
+        {
+            Update::Notice(notice) => notice,
+            _ => unreachable!(),
+        }
+    }
+
+    async fn stop(self) {
+        self.commands.send(Intent::Quit).unwrap();
+        self.ui.await.unwrap().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn serve_ui_thread_submit_ask_opens_picker_and_resubmits() {
+    let f = fixture().await;
+    let mut ui = ThreadUi::start(&f, None).await;
+    let thread = TranscriptContext::Conversation(Id::new(GLOBAL_THREAD_ID).unwrap());
+    let first = new_id("m");
+    ui.send(Intent::SubmitTo {
+        context: thread.clone(),
+        id: first.clone(),
+        text: "Tidy the parser".into(),
+        attachments: vec![],
+    });
+    // No focus, no hint: the draft comes back and the picker opens.
+    match ui
+        .wait(|update| matches!(update, Update::SubmitRejected { .. }))
+        .await
+    {
+        Update::SubmitRejected {
+            id, text, reason, ..
+        } => {
+            assert_eq!(id, first);
+            assert_eq!(text, "Tidy the parser");
+            assert_eq!(reason, "which project?");
+        }
+        _ => unreachable!(),
+    }
+    assert!(matches!(
+        ui.wait(|update| matches!(update, Update::ProjectPicker { .. })).await,
+        Update::ProjectPicker { id, .. } if id == first
+    ));
+    assert!(f.store.tasks(16).unwrap().is_empty());
+    // Picking a new candidate adds it, focuses it and resends.
+    let workspace = f.workspace.to_str().unwrap().to_owned();
+    ui.send(Intent::AddWorkspace {
+        path: workspace.clone(),
+    });
+    ui.notice("Added project").await;
+    ui.send(Intent::Focus(Some(workspace.clone())));
+    ui.notice("Focus:").await;
+    let second = new_id("m");
+    ui.send(Intent::SubmitTo {
+        context: thread,
+        id: second.clone(),
+        text: "Tidy the parser".into(),
+        attachments: vec![],
+    });
+    match ui
+        .wait(|update| matches!(update, Update::WorkspaceBound { .. }))
+        .await
+    {
+        Update::WorkspaceBound {
+            id,
+            workspace: bound,
+            label,
+            ..
+        } => {
+            assert_eq!(id, second);
+            assert_eq!(bound, workspace);
+            assert_eq!(label, "focus");
+        }
+        _ => unreachable!(),
+    }
+    // The view names the thread's focus and counts its projects.
+    let view = match ui.view.clone().filter(|view| view.focus.is_some()) {
+        Some(view) => view,
+        None => match ui
+            .wait(|update| matches!(update, Update::View(view) if view.focus.is_some()))
+            .await
+        {
+            Update::View(view) => *view,
+            _ => unreachable!(),
+        },
+    };
+    assert_eq!(view.focus.as_deref(), Some(workspace.as_str()));
+    assert!(view.workspaces.iter().any(|row| row.path == workspace));
+    ui.stop().await;
+    let tasks = f.store.tasks(16).unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].workspace, workspace);
+}
+
+#[tokio::test]
+async fn thread_schedule_and_enqueue_never_use_launch_or_recent() {
+    use xcb_core::ui::HabitatCommand;
+    let f = fixture().await;
+    let workspace = f.workspace.to_str().unwrap().to_owned();
+    // The launch hint names a real project, and it is also the most recent.
+    f.store
+        .admit_workspace(&f.workspace, "command", None)
+        .unwrap();
+    let mut ui = ThreadUi::start(&f, Some(workspace.clone())).await;
+    let thread = Id::new(GLOBAL_THREAD_ID).unwrap();
+    ui.send(Intent::HabitatAt {
+        conversation: thread.clone(),
+        command: HabitatCommand::Schedule {
+            prompt: "Check the build".into(),
+            interval_ms: 3_600_000,
+            workspace: None,
+        },
+    });
+    ui.wait(|update| matches!(update, Update::ProjectPicker { .. }))
+        .await;
+    let queued = new_id("m");
+    ui.send(Intent::Habitat(HabitatCommand::EnqueueIn {
+        conversation: thread.clone(),
+        id: queued.clone(),
+        prompt: "Later: tidy".into(),
+        deferred: true,
+        priority: 5,
+        workspace: None,
+    }));
+    // The draft is returned before the picker, and nothing is written.
+    assert!(matches!(
+        ui.wait(|update| matches!(update, Update::HabitatDraft { .. })).await,
+        Update::HabitatDraft { operation, .. } if operation == queued
+    ));
+    ui.wait(|update| matches!(update, Update::ProjectPicker { id, .. } if *id == queued))
+        .await;
+    assert!(f.store.schedules(None).unwrap().is_empty());
+    assert!(f.store.tasks(16).unwrap().is_empty());
+    // With a focus, the schedule is saved in the focused directory and the
+    // notice echoes it.
+    ui.send(Intent::Focus(Some(workspace.clone())));
+    ui.notice("Focus:").await;
+    ui.send(Intent::HabitatAt {
+        conversation: thread.clone(),
+        command: HabitatCommand::Schedule {
+            prompt: "Check the build".into(),
+            interval_ms: 3_600_000,
+            workspace: None,
+        },
+    });
+    let placed = format!("in `{workspace}`");
+    let notice = match ui
+        .wait(|update| {
+            matches!(update, Update::Notice(notice)
+                if notice.contains(&placed) || notice.contains("not accepted"))
+        })
+        .await
+    {
+        Update::Notice(notice) => notice,
+        _ => unreachable!(),
+    };
+    assert!(notice.contains(&placed), "{notice}");
+    let schedules = f.store.schedules(None).unwrap();
+    assert_eq!(schedules.len(), 1);
+    assert_eq!(schedules[0].conversation, thread);
+    assert_eq!(schedules[0].workspace.as_deref(), Some(workspace.as_str()));
+    ui.stop().await;
+}
+
+#[tokio::test]
+async fn focus_refuses_container_without_explicit_add() {
+    let f = fixture().await;
+    let parent = private::directory(&f.workspace.parent().unwrap().join("src")).unwrap();
+    let child = private::directory(&parent.join("api")).unwrap();
+    let sibling = private::directory(&parent.join("site")).unwrap();
+    f.store.admit_workspace(&child, "command", None).unwrap();
+    f.store.admit_workspace(&sibling, "command", None).unwrap();
+    f.store.admit_workspace(&parent, "dispatch", None).unwrap();
+    let parent = parent.to_str().unwrap().to_owned();
+    let mut ui = ThreadUi::start(&f, None).await;
+    ui.send(Intent::Focus(Some(parent.clone())));
+    let notice = ui.notice("holds other projects").await;
+    assert!(
+        notice.contains(&format!(
+            "`{parent}` holds other projects; /workspace add `{parent}` to use it as one"
+        )),
+        "{notice}"
+    );
+    // A child by name is fine; the container once added by hand is too.
+    ui.send(Intent::Focus(Some("api".into())));
+    let notice = ui.notice("Focus:").await;
+    assert!(notice.contains(child.to_str().unwrap()), "{notice}");
+    ui.send(Intent::AddWorkspace {
+        path: parent.clone(),
+    });
+    ui.notice("Added project").await;
+    ui.send(Intent::Focus(Some(parent.clone())));
+    let notice = ui.notice("Focus:").await;
+    assert!(notice.contains(&parent), "{notice}");
+    ui.send(Intent::Focus(None));
+    ui.notice("Focus cleared").await;
+    ui.stop().await;
+}
+
+#[tokio::test]
+async fn thread_pinned_in_view_beyond_64_conversations() {
+    let f = fixture().await;
+    let thread = f.store.global_thread().await.unwrap();
+    for index in 0..70 {
+        let directory =
+            private::directory(&f.workspace.parent().unwrap().join(format!("p{index}"))).unwrap();
+        f.store.create_conversation(&directory).await.unwrap();
+    }
+    let mut ui = ThreadUi::start(&f, None).await;
+    let view = match ui.wait(|update| matches!(update, Update::View(_))).await {
+        Update::View(view) => view,
+        _ => unreachable!(),
+    };
+    assert_eq!(view.conversations[0].id, thread.id);
+    assert!(view.conversations[0].is_thread());
+    assert_eq!(
+        view.conversations
+            .iter()
+            .filter(|row| row.is_thread())
+            .count(),
+        1
+    );
+    assert!(view.conversations.len() <= 65);
+    // New work in the thread only clears the focus; no view is created.
+    let before = f.store.conversations(256).unwrap().len();
+    ui.send(Intent::NewSession);
+    ui.notice("focus cleared").await;
+    assert_eq!(f.store.conversations(256).unwrap().len(), before);
+    ui.stop().await;
+}
+
+#[tokio::test]
+async fn workspace_add_admits_the_named_directory_not_its_repository() {
+    let f = fixture().await;
+    let repo = private::directory(&f.workspace.parent().unwrap().join("mono")).unwrap();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let sub = private::directory(&repo.join("sub")).unwrap();
+    let sub = sub.to_str().unwrap().to_owned();
+    let mut ui = ThreadUi::start(&f, None).await;
+    ui.send(Intent::AddWorkspace { path: sub.clone() });
+    let notice = ui.notice("Added project").await;
+    assert!(notice.contains(&format!("`{sub}`")), "{notice}");
+    let paths: Vec<String> = f
+        .store
+        .all_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    assert!(paths.contains(&sub), "{paths:?}");
+    assert!(
+        !paths.contains(&repo.to_str().unwrap().to_owned()),
+        "{paths:?}"
+    );
+    ui.stop().await;
+}
+
+#[tokio::test]
+async fn correcting_a_binding_moves_and_focuses_with_one_notice() {
+    let f = fixture().await;
+    let other = private::directory(&f.workspace.parent().unwrap().join("other")).unwrap();
+    f.store.admit_workspace(&other, "command", None).unwrap();
+    let other = other.to_str().unwrap().to_owned();
+    let intake = f
+        .store
+        .submit_to_thread(
+            new_id("m"),
+            "Tidy the parser".into(),
+            vec![],
+            IntakeCues {
+                origin: Origin::Cli,
+                explicit: Some(f.workspace.clone()),
+                target: None,
+                focus: None,
+                launch_hint: None,
+                infer_only: false,
+            },
+        )
+        .await
+        .unwrap();
+    let Intake::Accepted { task, .. } = intake else {
+        panic!("explicit intake binds")
+    };
+    let mut ui = ThreadUi::start(&f, None).await;
+    ui.send(Intent::MoveTask {
+        task: task.id.clone(),
+        revision: task.revision,
+        target: other.clone(),
+        focus: true,
+    });
+    // The recreated task becomes the one a further correction moves.
+    let moved = match ui
+        .wait(|update| matches!(update, Update::WorkspaceBound { .. }))
+        .await
+    {
+        Update::WorkspaceBound {
+            task: moved,
+            workspace,
+            ..
+        } => {
+            assert_eq!(workspace, other);
+            moved
+        }
+        _ => unreachable!(),
+    };
+    assert_ne!(moved, task.id);
+    let notice = ui.notice("Moved").await;
+    assert!(notice.contains(moved.as_str()), "{notice}");
+    assert!(notice.ends_with(&format!("· Focus: `{other}`")), "{notice}");
+    // A failed move still says so next to the new focus.
+    let workspace = f.workspace.to_str().unwrap().to_owned();
+    ui.send(Intent::MoveTask {
+        task: Id::new("t_missing").unwrap(),
+        revision: 1,
+        target: workspace.clone(),
+        focus: true,
+    });
+    let notice = ui.notice("was not moved").await;
+    assert!(
+        notice.ends_with(&format!("· Focus: `{workspace}`")),
+        "{notice}"
+    );
+    ui.stop().await;
+}
+
+#[tokio::test]
+async fn an_old_view_stays_in_its_own_view_beyond_64_conversations() {
+    let f = fixture().await;
+    for index in 0..70 {
+        let directory =
+            private::directory(&f.workspace.parent().unwrap().join(format!("p{index}"))).unwrap();
+        f.store.create_conversation(&directory).await.unwrap();
+    }
+    let mut ui = ThreadUi::start_in(&f, f.conversation.clone(), None);
+    let view = match ui.wait(|update| matches!(update, Update::View(_))).await {
+        Update::View(view) => view,
+        _ => unreachable!(),
+    };
+    let row = view
+        .conversations
+        .iter()
+        .find(|row| row.id == f.conversation)
+        .expect("the open view is listed");
+    assert_eq!(row.workspace, f.workspace.to_str().unwrap());
+    ui.stop().await;
 }
