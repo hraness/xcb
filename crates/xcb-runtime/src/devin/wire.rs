@@ -96,8 +96,10 @@ pub(crate) struct DevinProtocol {
     /// native fixture can show which answer Devin continued after.
     #[cfg(test)]
     permission_observations: Vec<Value>,
-    listed: bool,
     output_tokens: u64,
+    /// A tool call ran since the last answer text, so the next answer text
+    /// starts a new paragraph instead of running into the previous one.
+    text_break: bool,
     /// Per-request initialization deadline; tests shorten it.
     init_deadline: Duration,
 }
@@ -285,8 +287,8 @@ impl DevinProtocol {
             compaction_observations: Vec::new(),
             #[cfg(test)]
             permission_observations: Vec::new(),
-            listed: false,
             output_tokens: 0,
+            text_break: false,
             init_deadline: INIT_DEADLINE,
         })
     }
@@ -659,8 +661,14 @@ impl DevinProtocol {
                         u["content"]["type"] == "text",
                         "Devin unsupported output content",
                     )?;
-                    let delta = text(&u["content"]["text"], MAX_TEXT_BYTES)?.to_owned();
+                    let mut delta = text(&u["content"]["text"], MAX_TEXT_BYTES)?.to_owned();
                     let thinking = u["sessionUpdate"] == "agent_thought_chunk";
+                    if !thinking && self.text_break && !self.text.is_empty() && !delta.is_empty() {
+                        delta.insert_str(0, "\n\n");
+                    }
+                    if !thinking && !delta.is_empty() {
+                        self.text_break = false;
+                    }
                     if !thinking {
                         require(
                             self.text.len() + delta.len() <= MAX_TEXT_BYTES,
@@ -674,6 +682,7 @@ impl DevinProtocol {
                     });
                 }
                 Some("tool_call") => {
+                    self.text_break = true;
                     require(
                         self.ready && !self.completed && self.calls.len() < MAX_CALLS,
                         "Devin tool outside turn",
@@ -844,13 +853,16 @@ impl DevinProtocol {
             }
             "tools/list" => {
                 require(self.mcp_initialized, "Devin MCP uninitialized")?;
-                self.listed = true;
                 json!({"tools":broker::compact_descriptors()})
             }
             "ping" => json!({}),
             "tools/call" => {
+                // MCP does not require tools/list before tools/call, and Devin
+                // lists lazily: a model that already knows a tool from the
+                // prompt's guide calls it directly. Authority still comes only
+                // from the approved declaration matched below.
                 require(
-                    self.ready && !self.completed && self.mcp_initialized && self.listed,
+                    self.ready && !self.completed && self.mcp_initialized,
                     "Devin MCP call before admission",
                 )?;
                 closed(&v["params"], &["name", "arguments", "_meta"])?;

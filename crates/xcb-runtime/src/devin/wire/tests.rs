@@ -26,7 +26,6 @@ fn protocol() -> DevinProtocol {
     p.ready = true;
     p.prompt_id = Some(7);
     p.mcp_initialized = true;
-    p.listed = true;
     p
 }
 fn declaration(id: &str, name: &str, args: Value) -> Value {
@@ -72,7 +71,7 @@ fn transition_state(p: &DevinProtocol) -> Value {
         "mcpInitialized": p.mcp_initialized, "mcpProposedVersion": p.mcp_proposed_version,
         "mcpMetadataSeen": p.mcp_metadata_seen,
         "unexpectedNotification": p.unexpected_notification,
-        "compactionObservations": p.compaction_observations, "listed": p.listed
+        "compactionObservations": p.compaction_observations
     })
 }
 
@@ -780,7 +779,6 @@ fn mcp_negotiates_only_supported_versions_and_retains_tool_authority() {
     ] {
         let mut p = protocol();
         p.mcp_initialized = false;
-        p.listed = false;
         let (reply, mut receive) = oneshot::channel();
         let events = p.mcp(Request {
             value: json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":proposed,"capabilities":{"sampling":{},"roots":{"listChanged":true}},"clientInfo":{"name":"fixture","version":"1"}}}),
@@ -1175,4 +1173,37 @@ fn session_cancel_names_only_a_live_prompt_session() {
     let mut p = protocol();
     p.completed = true;
     assert!(p.interruption().is_none());
+}
+
+#[test]
+fn an_approved_broker_call_does_not_need_a_prior_tool_listing() {
+    // Devin lists MCP tools lazily. A model that learned a tool from the
+    // prompt's guide calls it without mcp_list_tools, and the approved
+    // declaration alone grants the call.
+    let mut p = protocol();
+    p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
+        .unwrap();
+    let (_, replies) = p.accept(permission("allow", "call-1")).unwrap();
+    assert_eq!(
+        replies[0]["result"]["outcome"],
+        json!({"outcome":"selected","optionId":"allow_once"})
+    );
+    assert!(p.mcp(mcp(1, "workspace_read", json!({"path":"a"}))).is_ok());
+    // Without an approved declaration the same call is still refused.
+    assert!(
+        p.mcp(mcp(2, "workspace_read", json!({"path":"b"})))
+            .is_err()
+    );
+}
+
+#[test]
+fn answer_text_on_each_side_of_a_tool_call_stays_separate() {
+    let chunk = |text: &str| json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}}});
+    let mut p = protocol();
+    p.accept(chunk("Fixing the operator.")).unwrap();
+    p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
+        .unwrap();
+    p.accept(chunk("Fixed add.js.")).unwrap();
+    p.accept(chunk(" Done.")).unwrap();
+    assert_eq!(p.text, "Fixing the operator.\n\nFixed add.js. Done.");
 }
