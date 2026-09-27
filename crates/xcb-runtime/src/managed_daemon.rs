@@ -961,9 +961,26 @@ impl ManagedStore {
         if !self.daemon_root().is_dir() {
             return Ok(());
         }
-        let mut service = self.daemon_service()?;
+        // An unreadable daemon store pauses daemons only: it is faulted (once
+        // a minute while it lasts) and the supervisor keeps dispatching.
+        let listed = self
+            .daemon_service()
+            .and_then(|service| Ok((service.list().map_err(|_| store_fault())?, service)));
+        let (states, mut service) = match listed {
+            Ok(listed) => listed,
+            Err(error) => {
+                record_supervisor_fault(
+                    self.root(),
+                    &format!(
+                        "daemons are paused: their process store could not be read ({}); other work continues",
+                        fault_text(&error)
+                    ),
+                );
+                return Ok(());
+            }
+        };
         let mailboxes = self.daemon_mailboxes();
-        for state in service.list().map_err(|_| store_fault())? {
+        for state in states {
             if let Err(error) = self
                 .pump_daemon(
                     &mut service,

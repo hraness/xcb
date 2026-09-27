@@ -1001,6 +1001,8 @@ impl StreamProcess {
         self.reap().await
     }
     async fn reap(&mut self) -> bool {
+        // Disarm first: once the leader is reaped the group number can be
+        // recycled, so neither Drop nor later cleanup may signal it.
         let Some(group) = self.group.take() else {
             return false;
         };
@@ -1018,8 +1020,20 @@ impl StreamProcess {
         })
         .await
         .unwrap_or(false);
+        if !joined {
+            resignal_unjoined(group, self.child.id().is_some());
+        }
         joined && group_absent(group).await
     }
+}
+
+/// One best-effort second SIGKILL after a timed-out join, reaching members
+/// the first signal missed (for example one forked while it was delivered).
+/// Sent only while the leader is unreaped: its pid still pins the group
+/// number, so the signal cannot reach a recycled group. The join stays
+/// unproven either way; the caller keeps the account held.
+fn resignal_unjoined(group: Pid, leader_unreaped: bool) -> bool {
+    leader_unreaped && kill_process_group(group, Signal::KILL).is_ok()
 }
 impl Drop for StreamProcess {
     fn drop(&mut self) {
@@ -2147,6 +2161,36 @@ mod tests {
         );
         assert!(process.join().await);
     }
+    /// After a timed-out join the group gets one more SIGKILL, but only
+    /// while its unreaped leader still pins the group number; a reaped
+    /// leader's number may already name someone else's group.
+    #[test]
+    fn a_timed_out_join_resignals_only_a_group_its_unreaped_leader_pins() {
+        let mut leader = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = leader.id();
+        let group = Pid::from_raw(pid as i32).unwrap();
+        assert!(!resignal_unjoined(group, false));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            prove_process_group_absent(pid).is_err(),
+            "nothing was sent to a group whose leader counts as reaped"
+        );
+        assert!(resignal_unjoined(group, true));
+        leader.wait().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while prove_process_group_absent(pid).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the second SIGKILL reached the group"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[tokio::test]
     async fn stderr_volume_never_leaves_a_proven_join_unsettled() {
         let mut command = Command::new("/bin/sh");
