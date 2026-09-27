@@ -43,7 +43,7 @@ stay above the overview.
 
 ## Original implementation ownership
 
-All lanes share `/Users/benguo/Documents/xcb-persistent-routing` and preserve one
+All lanes share `~/Documents/xcb-persistent-routing` and preserve one
 another's edits.
 
 1. `/root/agent_reference_explore`: core `AgentRow` contract and runtime

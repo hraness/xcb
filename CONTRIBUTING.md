@@ -1,8 +1,11 @@
 # Contributing
 
-xcb is in development. Preserve checkable custody, qualification, and bounded
-tool contracts. Native xcb lives in `crates/`; the retained TypeScript library
-and compatibility CLI live in `src/`. The informational Next.js site is `site/`.
+Changes keep xcb's safety properties checkable: each task holds one account
+until the provider process exits, provider builds are checked before they run,
+and model-facing tools take fixed inputs with fixed limits. Native xcb lives in
+`crates/`; the TypeScript package and its `xcb-compat` CLI live in `src/`. The
+Next.js site, including the docs at xcb.sh/docs, is `site/`, and repository
+references live in `docs/`. Public copy follows [STYLE.md](STYLE.md).
 
 ## Setup
 

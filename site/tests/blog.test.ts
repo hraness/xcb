@@ -14,6 +14,7 @@ import { blogAtomFeed } from "../app/blog/feed";
 import { blogBodies, blogStatusLabel } from "../app/blog/posts.generated";
 import { blogPath, blogPostPath, blogPosts, indexableBlogPosts } from "../app/blog/posts";
 import { publishedRelease } from "../app/publication";
+import nextConfig from "../next.config";
 import { renderBlogBody } from "../scripts/blog-html";
 
 const site = join(import.meta.dir, "..");
@@ -55,10 +56,30 @@ describe("xcb blog", () => {
   test("names the AI review as AI and never as human", () => {
     for (const entry of blogPosts) {
       const sentence = articleProvenanceSentence(articleProvenanceFromAdmission(entry.admission));
-      expect(sentence).toStartWith("Drafted with AI from the source code and reviewed by ");
       expect(sentence).not.toMatch(/human/iu);
-      expect(entry.admission.review?.reviewerType).toBe("ai");
       expect(entry.admission.humanReview).toBeNull();
+      if (entry.admission.review === null) {
+        // A post nobody has reviewed says so on the page and stays out of discovery.
+        expect(sentence).toBe("Drafted with AI from the source code. It has not been reviewed yet.");
+        expect(entry.admission.lifecycle).toBe("quarantined");
+      } else {
+        expect(sentence).toStartWith("Drafted with AI from the source code and reviewed by ");
+        expect(entry.admission.review.reviewerType).toBe("ai");
+      }
+    }
+  });
+
+  test("redirects retired post URLs to posts in the registry", async () => {
+    const paths: string[] = blogPosts.map(blogPostPath);
+    const redirects = (await nextConfig.redirects?.()) ?? [];
+    expect(redirects).toContainEqual({ source: "/blog/introducing-xcb", destination: "/blog/introducing-excalibur", permanent: true });
+    const sitemap = await read("public/sitemap.xml");
+    for (const redirect of redirects.filter(({ source }) => source.startsWith(`${blogPath}/`))) {
+      // A redirect never shadows a live post and always lands on one.
+      expect(paths).not.toContain(redirect.source);
+      expect(paths).toContain(redirect.destination);
+      expect(redirect.permanent).toBe(true);
+      expect(sitemap).not.toContain(`https://xcb.sh${redirect.source}<`);
     }
   });
 

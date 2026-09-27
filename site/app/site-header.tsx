@@ -1,9 +1,9 @@
 import { MarketingSiteHeader } from "@hraness/design-kit/react/server";
 import { ThemeMenuButton } from "@hraness/design-kit/react";
 
-export function SiteHeader({ active }: Readonly<{ active?: "home" | "docs" | "compare" | "blog" }>) {
+export function SiteHeader({ active }: Readonly<{ active?: "home" | "docs" | "compare" | "blog" | "install" }>) {
   return (
-    <div data-hraness-marketing-preset="editorial" className="xcb-header-wrap">
+    <div data-hraness-marketing-preset="minimal" className="xcb-header-wrap">
       <a className="skip-link" href="#main">Skip to content</a>
       <MarketingSiteHeader
         ariaLabel="Primary"
@@ -12,13 +12,12 @@ export function SiteHeader({ active }: Readonly<{ active?: "home" | "docs" | "co
         brandMark="/marks/xcb.svg"
         brandLabel="xcb home"
         links={[
-          { href: "/#router", label: "The router" },
-          { href: "/compare", label: "Compare", current: active === "compare" },
           { href: "/docs", label: "Docs", current: active === "docs" },
+          { href: "/compare", label: "Compare", current: active === "compare" },
           { href: "/blog", label: "Blog", current: active === "blog" },
-          { href: "https://github.com/hraness/xcb", label: "GitHub" },
+          { href: "https://github.com/hraness/xcb", label: "GitHub ↗" },
         ]}
-        action={{ href: "/docs/getting-started", label: "Get started" }}
+        action={{ href: "/install", label: "Install xcb", emphasis: "secondary" }}
         trailing={<ThemeMenuButton aria-label="Appearance" />}
       />
     </div>

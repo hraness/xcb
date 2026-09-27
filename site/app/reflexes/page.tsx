@@ -18,12 +18,13 @@ export const metadata: Metadata = {
 
 export default function Reflexes() {
   return (
-    <div data-hraness-marketing-preset="editorial" className="xcb-compare-page">
+    <div data-hraness-marketing-preset="minimal" className="xcb-compare-page">
       <SiteHeader />
       <main id="main" tabIndex={-1}>
         <MarketingPage>
           <ProductHero
             align="start"
+            backdrop={false}
             className="xcb-compare-hero"
             eyebrow="Use case · learned routing"
             name=""

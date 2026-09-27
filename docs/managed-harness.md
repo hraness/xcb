@@ -1,13 +1,18 @@
 # Managed harness
 
-Native xcb separates a user's control conversations from provider worker
-sessions. Plain `xcb` opens the thread: one conversation per machine whose tasks
-can run in any of your project directories. `xcb chat --new` opens a project
-view, a conversation whose tasks all run in one directory. Each terminal has its
-own transcript and draft. Conversations share durable tasks; each task retains
-its originating conversation, workspace, original goal, explicit follow-ups,
-worker history, and transition receipts. A task's workspace never changes after
-it is created.
+The managed harness runs the thread, its tasks, and the background supervisor.
+The self-tuning version of the harness, which would propose and keep its own
+routing rules, is in development; the current build does not run
+self-modifying routing policies.
+
+Native xcb separates your conversations from provider worker sessions. Plain
+`xcb` opens the thread: one conversation per machine whose tasks can run in any
+of your project directories. `xcb chat --new` opens a project view, a
+conversation whose tasks all run in one directory. Each terminal has its own
+transcript and draft. Conversations share saved tasks; each task keeps its
+originating conversation, workspace, original goal, follow-ups, worker history,
+and a local record that `xcb tasks verify` replays. A task's workspace never
+changes after it is created.
 
 ## Choosing a task's directory
 

@@ -1,14 +1,23 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import Home from "../app/page";
 import Docs from "../app/docs/page";
 import Compare from "../app/compare/page";
-import { parsePublishedRelease, publishedRelease } from "../app/publication";
-import { CompatibilityArchive, NativeDownloads } from "../app/release-state";
+import { publishedRelease } from "../app/publication";
+import { providerStatus } from "../app/docs/provider-status";
+import Install from "../app/install/page";
+import { agentPrompt, installCommand } from "../app/install/commands";
 import RootLayout from "../app/layout";
 import { siteDefaultPalette } from "../palette";
+
+
+/** Visible text: tags removed and the entities React and the highlighter emit decoded. */
+function textOf(html: string): string {
+  return html
+    .replace(/<[^>]+>/gu, "")
+    .replaceAll("&quot;", '"').replaceAll("&#x27;", "'").replaceAll("&#39;", "'")
+    .replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
+}
 
 test("the appearance menu agrees with the bootstrap Tokyo Night/system preference", () => {
   const html = renderToStaticMarkup(<RootLayout><Home /></RootLayout>);
@@ -30,101 +39,65 @@ test("public entry pages keep one optional support footer and no product signup"
   }
 });
 
-test("the homepage clearly separates source installation from verified releases", () => {
+test("the homepage leads with the registry headline and installs with one command", () => {
   const html = renderToStaticMarkup(<Home />);
   expect(html.match(/<h1\b/gu)).toHaveLength(1);
   const heroHeadings: string[] = [];
   new HTMLRewriter().on("h1#hero-title", { text(chunk) { heroHeadings.push(chunk.text); } }).transform(html);
-  expect(heroHeadings.join("").trim()).not.toBe("");
-  // The hero summary names every supported provider.
+  expect(heroHeadings.join("").trim()).toBe("Use your Claude, Codex, and Devin plans from one agent.");
   const heroSummary: string[] = [];
   new HTMLRewriter().on('header[aria-labelledby="hero-title"] .hraness-marketing-hero__summary', { text(chunk) { heroSummary.push(chunk.text); } }).transform(html);
-  expect(heroSummary.join("").trim()).not.toBe("");
-  for (const provider of ["Claude", "Codex", "Devin"]) expect(heroSummary.join("")).toContain(provider);
-  expect(html).toContain("./scripts/install-native.sh");
+  for (const provider of ["agent or app", "signed in, idle, and not at a known limit"]) expect(heroSummary.join("")).toContain(provider);
   if (publishedRelease === null) {
-    expect(html).toContain("No native release is published yet; install from source");
-    expect(html).not.toContain(".tgz");
-    expect(html).not.toContain("npm install @hraness/xcb");
+    expect(html).toContain("./scripts/install-native.sh");
   } else {
-    expect(html).toContain(`v${publishedRelease.version}`);
-    expect(html).toContain(publishedRelease.verificationRun);
-    for (const asset of publishedRelease.native) expect(html).toContain(asset.url);
-    if (publishedRelease.archiveUrl !== null) expect(html).toContain(publishedRelease.archiveUrl);
+    expect(textOf(html)).toContain("curl -fsSL https://xcb.sh/install.sh | sh");
+    expect(html).toContain(`Latest release: v${publishedRelease.version}`);
   }
+  // Installation is a command, never a browser download.
+  expect(html).not.toContain(".tar.gz");
+  expect(html).not.toContain(".tgz");
+  expect(html).not.toContain("source preview");
+  expect(html).toContain('href="/install"');
 });
 
-test("the release state renders verified native downloads from the fixture datum", async () => {
-  const fixture = JSON.parse(
-    await readFile(join(import.meta.dir, "fixtures/published-release.json"), "utf8"),
-  ) as unknown;
-  const release = parsePublishedRelease(fixture);
-  if (release === null) throw new Error("The release fixture must exercise the published state.");
-  const downloads = renderToStaticMarkup(<NativeDownloads release={release} />);
-  expect(downloads).toContain("Latest verified release:");
-  expect(downloads).toContain("<strong>v0.20.0</strong>");
-  for (const asset of release.native) {
-    expect(downloads).toContain(`href="${asset.url}"`);
-    expect(downloads).toContain(`href="${asset.sha256Url}"`);
-  }
-  expect(downloads).toContain(release.verificationRun);
-  if (release.archiveUrl === null) throw new Error("The release fixture must carry the compatibility archive.");
-  const archive = renderToStaticMarkup(<CompatibilityArchive release={release} />);
-  expect(archive).toContain(`href="${release.archiveUrl}"`);
-});
-
-test("the product examples are illustrative, with accessible view controls", () => {
+test("the homepage gives both readers a way in and states each limit once", () => {
   const html = renderToStaticMarkup(<Home />);
-  const routeButtons: string[] = [];
-  const workspaceButtons: string[] = [];
-  new HTMLRewriter()
-    .on('button[aria-controls="route-example"]', {
-      element(element) { routeButtons.push(element.getAttribute("aria-pressed") ?? ""); },
-    })
-    .on('button[aria-controls="workspace-example"]', {
-      element(element) { workspaceButtons.push(element.getAttribute("aria-pressed") ?? ""); },
-    })
-    .transform(html);
-  expect(routeButtons).toEqual(["true", "false"]);
-  expect(workspaceButtons).toEqual(["true", "false", "false"]);
-  expect(html).toContain("Illustrative workspace");
-  expect(html).toContain("no live provider calls");
-  expect(html).toContain('aria-live="polite"');
-  expect(html).not.toContain("Subagents");
-});
-
-test("the router leads and the experimental harness comes last", () => {
-  const html = renderToStaticMarkup(<Home />);
-  expect(html).toContain("xcb --json route");
-  expect(html).toContain("createSubscriptionRouter");
+  expect(textOf(html)).toContain("xcb --json route");
   expect(html).toContain('href="/docs/route"');
+  expect(html).toContain('href="/docs/getting-started"');
+  expect(html).toContain("the app names the account and model");
+  for (const status of Object.values(providerStatus)) expect(html).toContain(status.replaceAll("'", "&#x27;"));
+  expect(html).toContain("offline in a Linux VM");
+  expect(html).toContain("Git is read-only");
+  expect(html).toContain("does not run self-modifying routing policies");
+  expect(html).toContain("herdr");
+  expect(html).toContain("does not lift provider usage limits");
   for (const [before, after] of [
-    ['id="why"', 'id="router"'],
-    ['id="router"', 'id="interfaces"'],
-    ['id="interfaces"', 'id="routing"'],
-    ['id="routing"', 'id="workspace"'],
-    ['id="workspace"', 'id="harness"'],
-    ['id="harness"', 'id="readiness"'],
+    ['id="use"', 'id="router"'],
+    ['id="router"', 'id="readiness"'],
+    ['id="readiness"', 'id="install"'],
+    ['id="install"', 'id="questions"'],
   ] as const) {
     expect(html.indexOf(before)).toBeLessThan(html.indexOf(after));
   }
-  expect(html).toContain("Experimental");
-  expect(html).toContain("does not execute self-modifying orchestration policies");
 });
 
-test("support boundaries appear before installation without implying offline inference", () => {
-  const html = renderToStaticMarkup(<Home />);
-  expect(html).toContain("source preview");
-  expect(html).toContain("macOS ARM64");
-  expect(html).toContain("signed-in Devin account hasn’t been confirmed");
-  expect(html).toContain("offline in a Linux ARM64 VM");
-  expect(html).toContain("native macOS commands can’t run");
-  expect(html).toContain("Model requests still go to the provider");
-  expect(html.indexOf('id="readiness"')).toBeLessThan(html.indexOf('id="install"'));
-  expect(html).toContain('href="/compare"');
-  expect(html).toContain('href="/docs/getting-started"');
+test("the install page offers one command, copyable highlighted code, and a prompt for your agent", () => {
+  const html = renderToStaticMarkup(<Install />);
+  expect(html.match(/<h1\b/gu)).toHaveLength(1);
+  const text = textOf(html);
+  expect(text).toContain(installCommand);
+  expect(html).toContain("syntax-code");
+  expect(html).toContain("Copy prompt");
+  expect(html.match(/xcb-code-copy/gu)?.length ?? 0).toBeGreaterThanOrEqual(6);
+  expect(text).toContain(agentPrompt);
+  expect(text).toContain("npm install @hraness/xcb");
+  expect(html).toContain('id="source"');
+  expect(html).toContain("glibc 2.34");
+  expect(html).not.toContain(".tar.gz");
+  expect(agentPrompt).toContain(installCommand);
 });
-
 
 test("the shared header keeps a named home link and exact-artwork foil fallback", () => {
   for (const Page of [Home, Docs, Compare]) {

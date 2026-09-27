@@ -17,7 +17,7 @@
     "postbuild": "bun test ./tests/runtime.test.ts",
     "start": "next start",
     "lint": "eslint . --ignore-pattern .next",
-    "test": "bun test ./tests/source.test.ts ./tests/home.test.tsx ./tests/docs.test.tsx ./tests/compare.test.tsx ./scripts/readme-html.test.ts ./tests/ui-styles.test.tsx ./tests/blog.test.ts ./tests/install-script.test.ts",
+    "test": "bun test ./tests/source.test.ts ./tests/home.test.tsx ./tests/docs.test.tsx ./tests/compare.test.tsx ./scripts/readme-html.test.ts ./tests/ui-styles.test.tsx ./tests/blog.test.ts ./tests/reflexes.test.tsx ./tests/install-script.test.ts",
     "typecheck": "tsc --noEmit",
     "check": "bun run check:theme && bun run sync:readme && bun run sync:blog && bun run sync:installer && bun run build:theme && bun run test && bun run lint && bun run typecheck && bun run build",
     "sync:installer": "bun scripts/sync-installer.ts"
