@@ -2,6 +2,7 @@ import type {
   ArticleAdmission,
   ArticleAuthor,
   ArticleIsoDate,
+  ArticleReview,
   ArticleSourceItem,
 } from "@hraness/design-kit";
 
@@ -24,6 +25,13 @@ export const blogAuthor: ArticleAuthor = { kind: "organization", name: "Hraness"
 const reviewer = "Claude Opus 5.5 (claude-opus-5-5) editorial review";
 const reviewedOn: ArticleIsoDate = "2026-09-27";
 const checkedOn: ArticleIsoDate = "2026-09-24";
+
+/**
+ * The AI editorial review on record for the posts published on 2026-09-24.
+ * Each post names its own review; a post nobody has reviewed yet passes null
+ * and stays quarantined.
+ */
+const editorialReview: ArticleReview = { reviewer, reviewerType: "ai", reviewedOn };
 
 /** Sources pinned to the commits the fact check read. */
 const xcb = (path: string) => `https://github.com/hraness/xcb/blob/6437bcb/${path}`;
@@ -57,7 +65,7 @@ function sourceRecords(sources: readonly ArticleSourceItem[]) {
 
 function post(
   entry: Omit<BlogPost, "admission"> & Readonly<{
-    admission: Omit<ArticleAdmission, "href" | "sources" | "drafting" | "review" | "humanReview" | "owner">;
+    admission: Omit<ArticleAdmission, "href" | "sources" | "drafting" | "humanReview" | "owner">;
   }>,
 ): BlogPost {
   return {
@@ -68,7 +76,6 @@ function post(
       sources: sourceRecords(entry.sources),
       owner: "Hraness",
       drafting: "ai-from-source",
-      review: { reviewer, reviewerType: "ai", reviewedOn },
       humanReview: null,
     },
   };
@@ -108,6 +115,7 @@ export const blogPosts: readonly BlogPost[] = [
         "The --plan flag on xcb accounts add is a display label that checks nothing, so routing depends on xcb's own sign-in and quota observations rather than the plan name.",
       ],
       scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
+      review: editorialReview,
       reassessOn: "2026-11-05",
       harmIfWrong: "A reader could install xcb expecting a daily-driver replacement, or trust a reflex or history check further than the source supports.",
       refreshTriggers: [
@@ -155,6 +163,7 @@ export const blogPosts: readonly BlogPost[] = [
         "Devin sessions are sent without elision because context.rs maps the Devin provider to no Gobstopper provider.",
       ],
       scores: { readerUtility: 2, originalEvidence: 2, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
+      review: editorialReview,
       reassessOn: "2026-11-05",
       harmIfWrong: "A reader could expect elided output to be gone for good, or expect Devin sessions to be trimmed, and size their sessions on a wrong assumption.",
       refreshTriggers: [
@@ -202,6 +211,7 @@ export const blogPosts: readonly BlogPost[] = [
         "The chain's first link is the literal placeholder sha256:pending, which lets the verifier distinguish a history truncated in the middle from one that starts at revision 1.",
       ],
       scores: { readerUtility: 2, originalEvidence: 2, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
+      review: editorialReview,
       reassessOn: "2026-11-05",
       harmIfWrong: "A reader could treat a passing check as proof the agent's work is right, or run it against their only state directory.",
       refreshTriggers: [
@@ -248,6 +258,7 @@ export const blogPosts: readonly BlogPost[] = [
         "The September 26 edit dropped \"continuation\" from the dek, which then said every reflex waits for certification; the route reflex defaults to active (docs/reflexes.md), so the September 27 fact review restored the qualifier.",
       ],
       scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
+      review: editorialReview,
       reassessOn: "2026-11-05",
       harmIfWrong: "A reader could let reflexes answer go-ahead requests on the belief that a certificate guarantees a correct call.",
       refreshTriggers: [
@@ -292,6 +303,7 @@ export const blogPosts: readonly BlogPost[] = [
         "Only the memory tools are read-only; a worker's ordinary file tools could reach a vault placed inside the workspace, so the separation holds only when the vault lives outside it.",
       ],
       scores: { readerUtility: 2, originalEvidence: 2, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
+      review: editorialReview,
       reassessOn: "2026-11-05",
       harmIfWrong: "A reader could place a vault inside the workspace believing workers cannot write to it.",
       refreshTriggers: [
