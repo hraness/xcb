@@ -1,7 +1,10 @@
 mod application;
+mod doctor;
 mod habitat;
+mod health;
 mod remote;
 mod route;
+mod table;
 mod ux;
 mod workspaces;
 
@@ -73,13 +76,15 @@ enum Commands {
         #[arg(long)]
         new: bool,
     },
-    /// Bounded, ephemeral application inference with no tools or hooks.
+    /// Generate text for an app from a JSON request: one turn, no tools or
+    /// hooks, nothing saved as a session.
     Generate {
         /// Print capability rows and exit without running inference.
         #[arg(long)]
         capabilities: bool,
     },
-    /// Read bounded private failure metadata for one exact application request.
+    /// Read private failure details, up to a size limit, for one application
+    /// request.
     #[command(hide = true)]
     ApplicationDiagnostic {
         /// Account that ran the request.
@@ -123,8 +128,8 @@ enum Commands {
         #[arg(long = "image")]
         images: Vec<PathBuf>,
     },
-    /// Select one eligible account/model route and run a single bounded turn.
-    /// Machine contract: requires --json and a closed request on stdin.
+    /// Pick an account and model that can take the task now and run one turn.
+    /// For programs: requires --json and a JSON request on stdin.
     #[command(hide = true)]
     Route,
     /// Reopen a direct provider session in the terminal UI.
@@ -166,7 +171,7 @@ enum Commands {
         #[arg(long)]
         invite: Option<String>,
         /// Relay deployment URL; defaults to $XCB_RELAY_URL or the local
-        /// backend, and persists into custody at enrollment.
+        /// backend, and is saved with this machine's link at enrollment.
         #[arg(long)]
         relay: Option<String>,
         /// Enroll as a dispatch-only controller instead of a workspace
@@ -198,8 +203,8 @@ enum Commands {
         /// Message text.
         text: String,
     },
-    /// Drive commands on remote devices: task steer, cancel, answer, refresh,
-    /// command status, abort, ack — plus device admit and revoke.
+    /// Steer, cancel, or answer work on other devices, follow remote commands,
+    /// and approve or remove linked devices.
     Remote {
         #[command(subcommand)]
         command: remote::RemoteCommand,
@@ -313,12 +318,14 @@ enum Commands {
         #[arg(long)]
         remote: bool,
     },
-    /// Configure bounded project autonomy and inspect remaining grants.
+    /// Set how much a project may do on its own, and see what each grant has
+    /// left.
     Projects {
         #[command(subcommand)]
         command: Option<habitat::ProjectCommand>,
     },
-    /// Opt-in habitat startup at macOS login; scoped to this state root.
+    /// Start xcb's background supervisor at macOS login, for this state
+    /// folder only.
     Service {
         #[command(subcommand)]
         command: Option<ServiceCommand>,
@@ -348,12 +355,16 @@ enum Commands {
         #[command(subcommand)]
         command: Option<JudgeCommand>,
     },
-    /// Check provider binaries, accounts, and recent unsettled runs.
+    /// Check provider builds, accounts, and unfinished runs.
+    ///
+    /// Exits 0 when an account can take a task and nothing needs your
+    /// attention, and 1 when a check failed or needs attention; the output
+    /// names the one next step.
     Doctor {
         /// Check only this provider (claude, codex, or devin).
         #[arg(long)]
         provider: Option<Provider>,
-        /// Provider binary to qualify instead of the discovered one;
+        /// Provider binary to check instead of the one found on PATH;
         /// requires --provider.
         #[arg(long)]
         executable: Option<PathBuf>,
@@ -374,19 +385,22 @@ enum Commands {
     Upgrade {
         /// Version tag to install; the latest verified release when omitted.
         version: Option<String>,
+        /// Allow installing a release older than the running one.
+        #[arg(long)]
+        allow_downgrade: bool,
         /// Suppress progress output (used by the updater itself).
         #[arg(long, hide = true)]
         quiet: bool,
     },
-    /// Inspect or clean up unsettled runs and disposable launch artifacts.
+    /// Inspect or clean up unfinished runs and leftover launch folders.
     Recover {
-        /// Recover this run; lists unsettled runs when omitted.
+        /// Recover this run; lists unfinished runs when omitted.
         run: Option<Id>,
         /// Apply the recovery instead of only reporting what would change.
         #[arg(long)]
         yes: bool,
-        /// Inventory disposable launch snapshots; --yes removes only snapshots
-        /// with durable settlement evidence. Unproven artifacts remain held.
+        /// List leftover launch folders; --yes removes only those whose runs
+        /// xcb confirmed finished. The rest stay.
         #[arg(long = "launch-artifacts")]
         launch_artifacts: bool,
     },
@@ -432,18 +446,23 @@ enum UpdateCommand {
     Check,
     /// Show the local update policy and the last cached result.
     Status,
-    /// Set the user-level policy. The default is notify.
+    /// Set the update policy (default notify); on macOS also add the daily
+    /// check. --policy disable turns checks off like `xcb update disable`.
     Enable {
         /// Update policy: notify, auto, or disable.
         #[arg(long, default_value = "notify", value_parser = parse_update_policy)]
         policy: xcb_runtime::update::Policy,
     },
-    /// Disable update checks and scheduled upgrades.
+    /// Turn off update checks and scheduled upgrades, and remove the daily
+    /// check on macOS.
     Disable,
     /// Install a verified release using the recorded global installer.
     Install {
         /// Version tag to install; the latest verified release when omitted.
         version: Option<String>,
+        /// Allow installing a release older than the running one.
+        #[arg(long)]
+        allow_downgrade: bool,
         /// Suppress progress output (used by the updater itself).
         #[arg(long, hide = true)]
         quiet: bool,
@@ -459,7 +478,7 @@ enum UpdateCommand {
 #[derive(Subcommand)]
 enum AccountCommand {
     /// Add an account. Its name is fixed: the provider account email once
-    /// observed, otherwise `provider/<id>` — there are no custom labels.
+    /// observed, otherwise `provider/<id>`; there are no custom labels.
     Add {
         /// Provider to add: claude, codex, or devin.
         provider: Provider,
@@ -559,7 +578,7 @@ enum ReflexCommand {
         /// Only this reflex (route or settle).
         reflex: Option<ReflexName>,
     },
-    /// Decide finished trials and fit new challengers; a challenger is promoted only after it beats the active generation on labels that arrived after it was fitted.
+    /// Decide finished trials and fit new challengers; xcb adopts a challenger only after it beats the active generation on labels that arrived after it was fitted.
     Train {
         /// Reflex to train (route or settle).
         reflex: ReflexName,
@@ -582,7 +601,7 @@ enum ReflexCommand {
     },
     /// Import labeled JSONL ({id,text,label[,weight][,judge|head,tool_calls]}), oldest first.
     /// The examples are replayed as a forward trial from the shipped prior; heads that won
-    /// promotion in the replay are adopted. Only derived features are stored.
+    /// the replay are adopted. Only derived features are stored.
     Import {
         /// Reflex the examples are for (route or settle).
         reflex: ReflexName,
@@ -592,7 +611,7 @@ enum ReflexCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Check that a reflex program file is admissible and print its digest.
+    /// Check that a reflex program file is valid and print its digest.
     Check {
         /// Program file (an ALGAL organism).
         file: PathBuf,
@@ -635,23 +654,24 @@ enum SessionCommand {
 }
 #[derive(Subcommand)]
 enum ServiceCommand {
-    /// Register startup and one-minute restart checks for this habitat.
+    /// Start the supervisor at login and check every minute that it runs.
     Install,
-    /// Inspect registration and supervisor liveness without changing it.
+    /// Show whether it starts at login and whether the supervisor runs.
     Status,
-    /// Remove an idle service; never terminate active workers.
+    /// Stop starting at login; refuses while work is running and never
+    /// stops it.
     Uninstall,
-    /// Print the exact launchd declaration without installing it.
+    /// Print the LaunchAgent file without installing it.
     Plan,
 }
 
 #[derive(Subcommand)]
 enum CommandJobs {
-    /// Move joined, acknowledged command jobs older than --days into
-    /// jobs-archive/. Records are never deleted; unjoined, cleanup-pending
-    /// and recent jobs are retained.
+    /// Move finished, acknowledged command jobs older than --days into
+    /// jobs-archive/. Nothing is deleted; jobs whose processes haven't been
+    /// confirmed stopped, jobs waiting for cleanup, and recent jobs stay.
     Prune {
-        /// Archive only jobs whose newest receipt is older than this many days.
+        /// Archive only jobs last updated more than this many days ago.
         #[arg(long, default_value_t = 30)]
         days: u32,
         /// Apply the archive; without it only the dry-run report prints.
@@ -663,7 +683,7 @@ enum CommandJobs {
 enum TaskCommand {
     /// List managed tasks (same as bare `xcb tasks`).
     List,
-    /// Replay local ALGAL transition receipts and verify their chain and task record.
+    /// Replay the task's local record and check that no step is missing or changed.
     Verify {
         /// Managed task id (listed by `xcb tasks`).
         id: Id,
@@ -673,13 +693,17 @@ enum TaskCommand {
         /// Managed task id (listed by `xcb tasks`).
         id: Id,
     },
-    /// Read up to 64 messages; pass the last sequence as --after for the next page.
+    /// Read a page of a task's messages, oldest first; pass the last sequence
+    /// as --after for the next page.
     Messages {
         /// Managed task id (listed by `xcb tasks`).
         id: Id,
         /// Only messages after this sequence number (default 0).
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(..=i64::MAX as u64))]
         after: u64,
+        /// Maximum messages in this page, from 1 to 64.
+        #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u8).range(1..=64))]
+        limit: u8,
     },
     /// Request cancellation only if the task still matches the inspected revision.
     Cancel {
@@ -787,17 +811,11 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-/// One table cell: control characters stripped, then cut to `width` display
-/// columns. A cut cell ends with `…` so truncation is visible instead of a
-/// silent drop.
+/// One table cell: control characters stripped, cut to `width` display
+/// columns and padded to exactly that width. A cut cell ends with `…` so
+/// truncation is visible instead of a silent drop.
 fn cell(value: &str, width: usize) -> String {
-    let clean = xcb_core::display_text(value, usize::MAX);
-    if clean.chars().count() <= width {
-        return clean;
-    }
-    let mut text: String = clean.chars().take(width.saturating_sub(1)).collect();
-    text.push('…');
-    text
+    table::cell(value, width)
 }
 
 /// Relative time like "3h ago" for table output; 0 ms renders as "never".
@@ -862,12 +880,32 @@ fn print_json(value: impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
+/// `xcb run --json`: the text is cut to 256 KiB like `xcb --json route`,
+/// and `textTruncated` appears only when it was cut.
 fn run_output(session: &Id, result: &runner::Outcome) -> serde_json::Value {
-    let mut output = json!({"version":1,"session":session,"state":result.state,"outcome":result.facts.reported(&result.text),"text":result.text});
+    let truncated = result.text.len() > xcb_core::MAX_TEXT_BYTES;
+    let text = if truncated {
+        xcb_core::display_text(&result.text, xcb_core::MAX_TEXT_BYTES)
+    } else {
+        result.text.clone()
+    };
+    let mut output = json!({"version":1,"session":session,"state":result.state,"outcome":result.facts.reported(&result.text),"text":text});
+    if truncated {
+        output["textTruncated"] = json!(true);
+    }
     if let Some(diagnostic) = &result.diagnostic {
         output["diagnostic"] = json!(diagnostic);
     }
     output
+}
+
+/// Aborts a background task when the command returns early.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 fn run_exit_code(result: &runner::Outcome) -> i32 {
@@ -961,25 +999,6 @@ impl PublicAccount<'_> {
     }
 }
 
-/// One provider line in `xcb doctor`.
-fn doctor_line(style: ux::Style, provider: Provider, version: &str, native: bool) -> String {
-    if !native {
-        return format!(
-            "{} {provider} {version}: found, but xcb can't run this build yet",
-            style.symbol(ux::Symbol::Warn)
-        );
-    }
-    let detail = if provider == Provider::Devin {
-        "ready · after importing credentials, xcb accounts refresh <account> loads its models"
-    } else {
-        "ready"
-    };
-    format!(
-        "{} {provider} {version}: {detail}",
-        style.symbol(ux::Symbol::Ok)
-    )
-}
-
 /// `xcb service` status: what starts at login, whether the supervisor runs,
 /// where it logs, and a Files & Folders denial found in that log.
 fn service_text(status: &xcb_runtime::habitat_service::Status, style: ux::Style) -> String {
@@ -1052,6 +1071,29 @@ async fn ensure_pin(root: &std::path::Path, provider: Provider) -> Result<Pin> {
     Ok(pin)
 }
 
+/// Refuse a provider build xcb can't run, saying why and what fixes it.
+fn require_supported(root: &std::path::Path, pin: &Pin) -> Result<()> {
+    if runner::provider_admitted(root, pin) {
+        return Ok(());
+    }
+    let name = provider_name(pin.provider);
+    if !cfg!(target_os = "macos") {
+        return Err(Error::Guided {
+            message: format!(
+                "xcb can't run {name} on this system yet; provider runs need macOS for now"
+            ),
+            next: None,
+        });
+    }
+    Err(Error::guided(
+        format!(
+            "xcb can't run {name} {} yet; it runs only provider builds it has checked",
+            pin.version
+        ),
+        format!("install a supported {name} build (xcb.sh/docs/providers lists them)"),
+    ))
+}
+
 fn require_account_credentials(store: &Store, account: &xcb_runtime::store::Account) -> Result<()> {
     if auth::has_credentials(store, &account.id)? {
         return Ok(());
@@ -1105,84 +1147,34 @@ fn catalog_account(
 }
 
 fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
-    let view = summary::snapshot(store, None, config, now_ms())?;
+    let now = now_ms();
     if as_json {
+        let view = summary::snapshot(store, None, config, now)?;
         return print_json(
             json!({"version":1,"accounts":view.accounts.iter().map(|account| json!({"id":account.id,"name":account.name,"email":account.email,"provider":account.provider,"subscription":account.subscription,"remainingPercent":account.remaining_percent,"resetsAtMs":account.resets_at_ms,"quotaBlockedUntilMs":account.quota_blocked_until_ms,"runway":account.runway,"busy":account.busy,"enabled":account.enabled,"authenticationRequired":account.authentication_required})).collect::<Vec<_>>(),"estimatedPoolSeconds":view.total_runway_seconds,"measuredPools":view.runway_coverage.0,"totalPools":view.runway_coverage.1,"localOnly":true}),
         );
     }
-    if view.accounts.is_empty() {
+    let loaded = health::load(store, config, now)?;
+    if loaded.accounts.is_empty() {
         println!("No accounts yet.");
         ux::next("xcb setup <provider>");
         return Ok(());
     }
-    println!(
-        "  ID          ACCOUNT                             PROVIDER  PLAN                REMAINING              EST. RUNWAY"
+    // codeql[rust/cleartext-logging]: the account name is the user's own
+    // provider email rendered as the account's display identity, which is
+    // the documented purpose of this local status table.
+    print!(
+        "{}",
+        health::table(&loaded.accounts, config.default_account.as_ref(), now)
     );
-    let now = now_ms();
-    for account in view.accounts {
-        let reset = account
-            .resets_at_ms
-            .filter(|at| *at > now)
-            .map(|at| {
-                let minutes = (at - now).div_ceil(60_000);
-                if minutes >= 60 * 24 {
-                    format!(" · resets in ~{}d", minutes / (60 * 24))
-                } else if minutes >= 60 {
-                    format!(" · resets in ~{}h{}m", minutes / 60, minutes % 60)
-                } else {
-                    format!(" · resets in ~{minutes}m")
-                }
-            })
-            .unwrap_or_default();
-        let remaining = account
-            .remaining_percent
-            .map(|percent| format!("{percent:.0}% left{reset}"))
-            .unwrap_or_else(|| "unmeasured".into());
-        let runway = account
-            .runway
-            .seconds()
-            .map(|seconds| format!("~{:.1}h", seconds / 3600.0))
-            .unwrap_or_else(|| "unmeasured".into());
-        // codeql[rust/cleartext-logging]: the account name is the user's own
-        // provider email rendered as the account's display identity, which is
-        // the documented purpose of this local status table.
+    if let Some((seconds, measured, pools)) = loaded.runway {
         println!(
-            "{} {:<11} {:<35} {:<9} {:<19} {:<22} {}{}{}{}{}",
-            if config.default_account.as_ref() == Some(&account.id) {
-                ">"
-            } else {
-                " "
-            },
-            cell(account.id.as_str(), 11),
-            cell(&account.name, 35),
-            account.provider,
-            cell(&account.subscription, 19),
-            remaining,
-            runway,
-            if account.busy { " · busy" } else { "" },
-            if account.enabled { "" } else { " · disabled" },
-            if account.authentication_required {
-                " · reconnect required"
-            } else {
-                ""
-            },
-            account
-                .quota_block_label(now)
-                .map(|label| format!(" · {label}"))
-                .unwrap_or_default()
+            "Estimated use left at the current pace: ~{:.1}h ({measured} of {pools} usage pools measured; not a billing statement)",
+            seconds / 3600.0,
         );
     }
-    println!(
-        "\n> marks the default account · a shortened id works in any accounts command; xcb accounts --json prints full ids"
-    );
-    if let Some(seconds) = view.total_runway_seconds {
-        println!(
-            "Measured pool runway: ~{:.1}h ({}/{} pools; estimate, not a billing statement)",
-            seconds / 3600.0,
-            view.runway_coverage.0,
-            view.runway_coverage.1
-        );
+    if let Some(step) = health::first_sign_in(&loaded.accounts, config.default_account.as_ref()) {
+        ux::next(&step);
     }
     Ok(())
 }
@@ -1218,6 +1210,53 @@ fn parse_update_policy(value: &str) -> std::result::Result<xcb_runtime::update::
         "disable" => Ok(xcb_runtime::update::Policy::Disable),
         _ => Err("update policy must be notify, auto, or disable".to_owned()),
     }
+}
+
+/// `xcb update enable|disable`: record the policy, then add or remove the
+/// daily check where the platform has one. Turning updates off never
+/// installs anything and works on every platform.
+fn set_update_policy(
+    root: &std::path::Path,
+    policy: xcb_runtime::update::Policy,
+    as_json: bool,
+) -> Result<()> {
+    use xcb_runtime::update::{self, Policy};
+    let state = update::set_policy(root, policy)?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let scheduled = if policy == Policy::Disable {
+        if let Some(home) = &home {
+            update::remove_scheduler(home)?;
+        }
+        false
+    } else if update::scheduler_supported() {
+        let home = home.ok_or(Error::PrivateState)?;
+        if !update::scheduler_path(&home).exists() {
+            ux::login_item_notice(
+                "It checks once a day for a verified xcb release, until you run xcb update disable.",
+            );
+        }
+        update::install_scheduler(&std::env::current_exe()?)?;
+        true
+    } else {
+        false
+    };
+    if as_json {
+        return print_json(json!({
+            "version": 1,
+            "policy": state.policy,
+            "enabled": state.policy != Policy::Disable,
+            "scheduled": scheduled,
+        }));
+    }
+    if policy == Policy::Disable {
+        println!("xcb updates disabled");
+    } else if scheduled {
+        println!("xcb updates: {} · checked once a day", state.policy);
+    } else {
+        println!("xcb updates: {}", state.policy);
+        ux::next("run xcb update daemon once a day from a user timer (systemd or cron)");
+    }
+    Ok(())
 }
 
 fn parse_expected_generation(value: &str) -> std::result::Result<String, &'static str> {
@@ -1438,6 +1477,23 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             if images.len() > 8 {
                 return Err(xcb_core::Error::Limit("images").into());
             }
+            let (cancel, cancelled) = watch::channel(false);
+            // Install both handlers before routing, which can start provider
+            // work, and before any provider starts. SIGTERM must use the same
+            // independent join/custody path as interactive Ctrl-C.
+            let mut interrupts =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+            let mut terminates =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            let _interrupt = AbortOnDrop(tokio::spawn(async move {
+                tokio::select! {
+                    _ = interrupts.recv() => {},
+                    _ = terminates.recv() => {},
+                }
+                let _ = cancel.send(true);
+            }));
+            let stopped_early =
+                || Error::Unavailable("cancelled before the task started; no provider ran");
             let attachments = images
                 .iter()
                 .map(|path| xcb_runtime::attachments::from_path(store.root(), path))
@@ -1473,6 +1529,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 account = Some(decision.account);
                 model = Some(decision.model.key());
             }
+            if *cancelled.borrow() {
+                return Err(stopped_early());
+            }
             let session = kernel::new_session(
                 &store,
                 &cli.cwd.canonicalize()?,
@@ -1481,20 +1540,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 model.as_deref(),
                 None,
             )?;
-            let (cancel, cancelled) = watch::channel(false);
-            // Install both handlers before starting any provider. SIGTERM must
-            // use the same independent join/custody path as interactive Ctrl-C.
-            let mut interrupts =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-            let mut terminates =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-            let interrupt = tokio::spawn(async move {
-                tokio::select! {
-                    _ = interrupts.recv() => {},
-                    _ = terminates.recv() => {},
-                }
-                let _ = cancel.send(true);
-            });
+            if *cancelled.borrow() {
+                return Err(stopped_early());
+            }
             let observer: Observer = Arc::new(|event| {
                 if let Progress::Notice(message) = event {
                     eprintln!("xcb: {message}");
@@ -1510,7 +1558,6 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 observer,
             )
             .await;
-            interrupt.abort();
             let result = result?;
             if cli.json {
                 print_json(run_output(&session.id, &result))?;
@@ -1646,11 +1693,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let account = store.resolve_account(&account)?;
                     require_account_credentials(&store, &account)?;
                     let pin = ensure_pin(store.root(), account.provider).await?;
-                    if !runner::provider_admitted(store.root(), &pin) {
-                        return Err(Error::Unavailable(
-                            "native account metadata querying for this runtime is not yet qualified",
-                        ));
-                    }
+                    require_supported(store.root(), &pin)?;
                     let models = runner::probe(&store, &pin, Some(&account.id)).await?;
                     store.set_models(account.provider, &models)?;
                     accounts(&store, &config, cli.json)?;
@@ -1699,7 +1742,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             let ok = ux::Style::stdout().symbol(ux::Symbol::Ok);
             let name = provider_name(provider);
-            // 1. One account for this provider: reuse the first, or add one.
+            // 1. One account for this provider: reuse a signed-in one, then
+            // any enabled one, or add one.
             let accounts: Vec<_> = store
                 .accounts()?
                 .into_iter()
@@ -1716,7 +1760,14 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     format!("xcb accounts enable {}", accounts[0].id),
                 ));
             }
-            let existing = accounts.into_iter().find(|account| account.enabled);
+            let signed_in = |account: &xcb_runtime::store::Account| {
+                auth::has_credentials(&store, &account.id).unwrap_or(false)
+            };
+            let existing = accounts
+                .iter()
+                .find(|account| account.enabled && signed_in(account))
+                .or_else(|| accounts.iter().find(|account| account.enabled))
+                .cloned();
             let account = match existing {
                 Some(account) => {
                     println!(
@@ -1724,8 +1775,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         xcb_core::display_text(&account.name(), 80),
                         account.id
                     );
-                    account
+                    Some(account)
                 }
+                // Devin signs in with its own tool, and importing that
+                // sign-in adds the account, so an empty one would only
+                // linger as needing sign-in.
+                None if provider == Provider::Devin => None,
                 None => {
                     let account = store.add_account(provider, &plan, now_ms(), None)?;
                     let (mut config, revision) = Config::load(store.root())?;
@@ -1734,16 +1789,24 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         config.save(store.root(), revision.as_deref())?;
                     }
                     println!("{ok} {}", PublicAccount::from(&account).added_message().0);
-                    account
+                    Some(account)
                 }
             };
-            // 2. Check the provider build.
+            // 2. Check the provider build, and that xcb can run it, before
+            // any sign-in starts.
             let pin = ensure_pin(store.root(), provider).await?;
+            require_supported(store.root(), &pin)?;
             println!("{ok} {name} {} is installed", pin.version);
             // 3. Sign in, unless this account already has credentials.
+            let Some(account) = account else {
+                ux::next(
+                    "sign in with devin auth login, then run xcb accounts import-devin --source <path to credentials.toml>",
+                );
+                return Ok(0);
+            };
             if !auth::has_credentials(&store, &account.id)? {
                 if provider == Provider::Devin {
-                    ux::next(&PublicAccount::from(&account).added_message().1);
+                    ux::next(&health::sign_in_step(provider, &account.id));
                     return Ok(0);
                 }
                 let _held = ux::hold_next();
@@ -1761,11 +1824,6 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             // 4. Load the account's models (what `accounts refresh` does).
             require_account_credentials(&store, &account)?;
-            if !runner::provider_admitted(store.root(), &pin) {
-                return Err(Error::Unavailable(
-                    "native account metadata querying for this runtime is not yet qualified",
-                ));
-            }
             let models = runner::probe(&store, &pin, Some(&account.id)).await?;
             store.set_models(provider, &models)?;
             println!("{ok} Loaded {} models", models.len());
@@ -1778,318 +1836,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             executable,
             upgrade_plan: _,
         }) => {
-            if executable.is_some() && provider.is_none() {
-                return Err(Error::Unavailable("--executable requires --provider"));
-            }
-            let home = private::directory(&root.join("metadata-home"))?;
-            private::directory(&home.join("tmp"))?;
-            let mut found = 0;
-            let mut reports = vec![];
-            let style = ux::Style::stdout();
-            let mut ready: Option<Provider> = None;
-            let mut missing: Vec<Provider> = vec![];
-            // Checks that passed and ones that need attention, for the
-            // count line at the end.
-            let (mut passed, mut warnings) = (0usize, 0usize);
-            for provider in
-                provider.map_or_else(|| Provider::ALL.to_vec(), |provider| vec![provider])
-            {
-                match process::inspect(provider, executable.as_deref(), &home).await {
-                    Ok(mut pin) => {
-                        pin.save(&root)?;
-                        let native = runner::provider_admitted(store.root(), &pin);
-                        let detail = if native && provider == Provider::Devin {
-                            "pinned · accounts refresh <account> loads the catalog after credential import"
-                        } else if native {
-                            "pinned · per-run boundary verification required"
-                        } else {
-                            "metadata pin only · native execution unavailable"
-                        };
-                        reports.push(json!({"provider":provider,"version":pin.version,"sha256":pin.sha256,"nativeCandidate":native,"detail":detail}));
-                        if !cli.json {
-                            println!("{}", doctor_line(style, provider, &pin.version, native));
-                        }
-                        if native {
-                            ready.get_or_insert(provider);
-                            passed += 1;
-                        } else {
-                            warnings += 1;
-                        }
-                        found += 1;
-                        // Devin catalog discovery requires explicit account-owned
-                        // credentials; doctor only pins its executable.
-                        if native && provider != Provider::Devin {
-                            match runner::probe(&store, &pin, None).await {
-                                Ok(models) => store.set_models(provider, &models)?,
-                                Err(error) => {
-                                    warnings += 1;
-                                    eprintln!(
-                                        "{} xcb couldn't list {} models: {}",
-                                        ux::Style::stderr().symbol(ux::Symbol::Warn),
-                                        provider_name(provider),
-                                        ux::sentence(&error)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    Err(error) => match process::Pin::load(&root, provider) {
-                        Ok(pin) => {
-                            let native = runner::provider_admitted(store.root(), &pin);
-                            let detail = if native {
-                                "pinned · per-run boundary verification required"
-                            } else {
-                                "metadata pin only · native execution unavailable"
-                            };
-                            reports.push(json!({"provider":provider,"version":pin.version,"sha256":pin.sha256,"nativeCandidate":native,"storedPin":true,"detail":detail}));
-                            if !cli.json {
-                                println!(
-                                    "{} (last checked build; {name} didn't answer now)",
-                                    doctor_line(style, provider, &pin.version, native),
-                                    name = provider_name(provider)
-                                );
-                            }
-                            if native {
-                                ready.get_or_insert(provider);
-                                passed += 1;
-                            } else {
-                                warnings += 1;
-                            }
-                            found += 1;
-                        }
-                        Err(_) => {
-                            reports.push(json!({"provider":provider,"error":error.to_string()}));
-                            if !cli.json {
-                                println!(
-                                    "{} {provider}: {}",
-                                    style.symbol(ux::Symbol::Fail),
-                                    ux::sentence(&error)
-                                );
-                            }
-                            missing.push(provider);
-                        }
-                    },
-                }
-            }
-            // Reviewed-builds catalog state and builds parked on it.
-            let catalog_status = xcb_runtime::catalog::status(&root);
-            let pending_admissions: Vec<_> = Provider::ALL
-                .iter()
-                .filter_map(|provider| {
-                    process::pending_build(&root, *provider).map(|build| {
-                        json!({"provider":provider,"version":build.version,"sha256":build.sha256})
-                    })
-                })
-                .collect();
-            let judge_key = judge::judge_token(store.root())?.map(|(_, source)| source);
-            if let Some(source) = judge_key {
-                judge::check_key_target(source, &config.extensions.judge)?;
-            }
-            let judge_key_name = match judge_key {
-                Some(judge::JudgeKeySource::Env) => "env",
-                Some(judge::JudgeKeySource::Vault) => "vault",
-                None => "none",
-            };
-            // Reclaim only snapshots already marked disposable after safe
-            // settlement; parent exit alone cannot release provider custody.
-            let sweep = runner::reclaim_launch_artifacts(&root, true)?;
-            let (judge_model, judge_endpoint) =
-                xcb_runtime::jev::effective_target(&config.extensions.judge)?;
-            let judge_status = json!({
-                "enabled": config.extensions.judge.enabled,
-                "key": judge_key_name,
-                "model": judge_model,
-                "endpoint": judge_endpoint,
-            });
-            // Custody-level relay state; reachability belongs to `xcb fleet`.
-            let remote_status = {
-                use xcb_runtime::cloud::custody;
-                match (custody::load_device(&root)?, custody::load_link(&root)?) {
-                    (Some(device), Some(link)) => {
-                        let session = custody::load_session(&root)?;
-                        let admitted = custody::load_account_key(&root)?.is_some();
-                        json!({
-                            "linked": true,
-                            "device": device.device,
-                            "relay": link.deployment_url,
-                            "admitted": admitted,
-                            "sessionDueForRefresh": session
-                                .as_ref()
-                                .map(|session| session.due_for_refresh(now_ms()))
-                                .unwrap_or(true),
-                        })
-                    }
-                    _ => json!({"linked": false}),
-                }
-            };
-            if cli.json {
-                let mut report = json!({"version":1,"providers":reports,"unsettledRuns":store.unsettled_runs()?});
-                report["judge"] = judge_status;
-                report["remote"] = remote_status;
-                report["catalog"] = json!({
-                    "reviewedBuilds": catalog_status.builds,
-                    "denied": catalog_status.denied,
-                    "ageSeconds": catalog_status.age_secs,
-                    "pendingAdmissions": pending_admissions,
-                });
-                report["launchArtifacts"] = json!({
-                    "reclaimed": sweep.reclaimed,
-                    "reclaimedBytes": sweep.reclaimed_bytes,
-                    "liveHeld": sweep.live,
-                    "unreclaimable": sweep.unprovable.len(),
-                    "unreclaimableBytes": sweep.unprovable_bytes,
-                    "remedy": if sweep.unprovable.is_empty() {
-                        serde_json::Value::Null
-                    } else {
-                        json!("retained because independent provider-join and settled-effect evidence is missing; --yes does not override custody")
-                    },
-                });
-                if cfg!(target_os = "linux") {
-                    let status = xcb_runtime::sandbox::linux_sandbox(&root);
-                    report["sandbox"] = json!({"backend":"bwrap","candidate":status.candidate,"admitted":status.admitted,"unprivilegedUsernsClone":status.unprivileged_userns_clone,"maxUserNamespaces":status.max_user_namespaces,"qualified":status.qualified});
-                }
-                print_json(report)?;
-            } else {
-                match remote_status.get("linked").and_then(|v| v.as_bool()) {
-                    Some(true) => println!(
-                        "{} remote: linked · device {} · relay {}{}",
-                        style.symbol(ux::Symbol::On),
-                        remote_status["device"].as_str().unwrap_or("?"),
-                        remote_status["relay"].as_str().unwrap_or("?"),
-                        if remote_status["admitted"].as_bool().unwrap_or(false) {
-                            ""
-                        } else {
-                            " · awaiting admit"
-                        },
-                    ),
-                    _ => println!(
-                        "{} remote: not linked (xcb link connects this machine)",
-                        style.symbol(ux::Symbol::Off)
-                    ),
-                }
-                let catalog_age = match catalog_status.age_secs {
-                    Some(secs) if secs < 120 => format!("refreshed {secs}s ago"),
-                    Some(secs) if secs < 7200 => format!("refreshed {}m ago", secs / 60),
-                    Some(secs) => format!("refreshed {}h ago", secs / 3600),
-                    None => "not fetched yet".to_owned(),
-                };
-                println!(
-                    "{} catalog: {} reviewed builds{} · {catalog_age}",
-                    style.symbol(ux::Symbol::On),
-                    catalog_status.builds,
-                    if catalog_status.denied > 0 {
-                        format!(" · {} denied", catalog_status.denied)
-                    } else {
-                        String::new()
-                    },
-                );
-                warnings += pending_admissions.len();
-                for pending in &pending_admissions {
-                    println!(
-                        "{} {}: {} is waiting for review before xcb runs it",
-                        style.symbol(ux::Symbol::Warn),
-                        pending["provider"].as_str().unwrap_or("provider"),
-                        pending["version"].as_str().unwrap_or("discovered build"),
-                    );
-                }
-                if cfg!(target_os = "linux") {
-                    let status = xcb_runtime::sandbox::linux_sandbox(&root);
-                    let detail = match &status.candidate {
-                        Some(path) if status.admitted => {
-                            format!("bwrap candidate {} admitted", path.display())
-                        }
-                        Some(path) => {
-                            format!("bwrap candidate {} fails admission", path.display())
-                        }
-                        None => "bwrap unavailable".to_owned(),
-                    };
-                    let userns =
-                        match (status.unprivileged_userns_clone, status.max_user_namespaces) {
-                            (Some(false), _) | (_, Some(0)) => " · user namespaces restricted",
-                            _ => "",
-                        };
-                    let qual = if status.qualified {
-                        "qualified"
-                    } else {
-                        "unqualified · place a current qualification receipt"
-                    };
-                    println!("sandbox: {detail}{userns} · {qual}");
-                }
-                println!(
-                    "{} judge: {} · key {judge_key_name} · {judge_endpoint}",
-                    if config.extensions.judge.enabled {
-                        style.symbol(ux::Symbol::On)
-                    } else {
-                        style.symbol(ux::Symbol::Off)
-                    },
-                    if config.extensions.judge.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    },
-                );
-                if sweep.reclaimed > 0 {
-                    println!(
-                        "{} launch folders: removed {} finished {} ({})",
-                        style.symbol(ux::Symbol::Ok),
-                        sweep.reclaimed,
-                        if sweep.reclaimed == 1 {
-                            "directory"
-                        } else {
-                            "directories"
-                        },
-                        human_bytes(sweep.reclaimed_bytes),
-                    );
-                }
-                if !sweep.unprovable.is_empty() {
-                    warnings += 1;
-                    println!(
-                        "{} launch folders: kept {} {} ({}) because xcb can't yet prove their runs finished.",
-                        style.symbol(ux::Symbol::Warn),
-                        sweep.unprovable.len(),
-                        if sweep.unprovable.len() == 1 {
-                            "directory"
-                        } else {
-                            "directories"
-                        },
-                        human_bytes(sweep.unprovable_bytes),
-                    );
-                    println!("  Inspect the recorded runs with xcb recover before removing them.");
-                }
-                let unsettled = store.unsettled_runs()?;
-                warnings += unsettled.len();
-                for run in &unsettled {
-                    println!(
-                        "{} run {} hasn't finished cleanly; xcb keeps its account until it does",
-                        style.symbol(ux::Symbol::Warn),
-                        run.id
-                    );
-                }
-                println!(
-                    "\n{}",
-                    hraness_cli_kit::style::check_summary(passed, warnings, missing.len())
-                );
-                // One next step, in order of what blocks the first task.
-                if let Some(provider) =
-                    ready.filter(|_| store.accounts().is_ok_and(|a| a.is_empty()))
-                {
-                    ux::next(&format!("xcb setup {provider}"));
-                } else if !unsettled.is_empty() {
-                    ux::next("xcb recover");
-                } else if found == 0 {
-                    // Suggest the most common provider first.
-                    let suggested = [Provider::Claude, Provider::Codex, Provider::Devin]
-                        .into_iter()
-                        .find(|provider| missing.contains(provider));
-                    if let Some(provider) = suggested {
-                        ux::next(&format!(
-                            "install {}, or run xcb doctor --provider {provider} --executable <absolute path>",
-                            provider_name(provider)
-                        ));
-                    }
-                }
-            }
-            Ok(if found > 0 { 0 } else { 1 })
+            doctor::run(
+                &root,
+                &store,
+                &config,
+                provider,
+                executable.as_deref(),
+                cli.json,
+            )
+            .await
         }
         Some(Commands::Models { command }) => {
             match command {
@@ -2101,11 +1856,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let account =
                         catalog_account(&store, provider, account.as_deref(), from_native)?;
                     let pin = ensure_pin(store.root(), provider).await?;
-                    if !runner::provider_admitted(store.root(), &pin) {
-                        return Err(Error::Unavailable(
-                            "native catalog discovery for this runtime is not yet qualified",
-                        ));
-                    }
+                    require_supported(store.root(), &pin)?;
                     let models = runner::probe(&store, &pin, account.as_ref()).await?;
                     store.set_models(provider, &models)?;
                 }
@@ -2215,20 +1966,20 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             if cli.json {
                 print_json(choices)?;
             } else {
-                println!("  MODEL                                                 LABEL · MODE");
+                println!("  {} LABEL · MODE", cell("MODEL", 56));
                 // choose_model defaults each provider to its first row in this
                 // ordering, so mark those rows.
                 let mut defaulted = std::collections::BTreeSet::new();
                 for choice in choices {
                     println!(
-                        "{} {:<56} {} · {:?}",
+                        "{} {} {} · {:?}",
                         if defaulted.insert(choice.provider) {
                             "*"
                         } else {
                             " "
                         },
-                        choice.key(),
-                        cell(&choice.label, 56),
+                        cell(&choice.key(), 56),
+                        table::fit(&choice.label, 56),
                         choice.mode
                     );
                 }
@@ -2316,7 +2067,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         }
                         match report.promoted_version {
                             Some(version) => println!(
-                                "promoted generation {version} (from {}); `xcb reflex rollback {} {}` restores it",
+                                "adopted generation {version} (from {}); `xcb reflex rollback {} {}` restores it",
                                 report.from_version,
                                 report.reflex.as_str(),
                                 report.from_version
@@ -2388,7 +2139,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     if !cli.json {
                         for (head, replay) in &replays {
                             println!(
-                                "{head}: replayed {} · {} trial{}, {} promoted",
+                                "{head}: replayed {} · {} trial{}, {} adopted",
                                 metrics_line(&replay.prequential),
                                 replay.trials,
                                 if replay.trials == 1 { "" } else { "s" },
@@ -2428,7 +2179,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         println!("imported {inserted} of {} examples", rows.len());
                         match adopted {
                             Some(version) => println!(
-                                "adopted the replay's promoted heads as generation {version}; `xcb reflex rollback {} {}` restores the previous one",
+                                "adopted the heads that won the replay as generation {version}; `xcb reflex rollback {} {}` restores the previous one",
                                 reflex.as_str(),
                                 active.version
                             ),
@@ -2444,7 +2195,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 ReflexCommand::Check { file } => {
                     let source: serde_json::Value = serde_json::from_slice(&std::fs::read(&file)?)?;
                     let (_, digest) = reflex::admit(&source)?;
-                    println!("admissible reflex program {digest}");
+                    println!("valid reflex program {digest}");
                 }
             }
             Ok(0)
@@ -2493,19 +2244,23 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         ux::next("xcb");
                     } else {
                         println!(
-                            "{:<34}  {:<8} {:<24} {:<15} {:<9} TITLE",
-                            "SESSION ID", "PROVIDER", "MODEL", "STATE", "ACTIVE"
+                            "{}  {} {} {} {} TITLE",
+                            cell("SESSION ID", 34),
+                            cell("PROVIDER", 8),
+                            cell("MODEL", 24),
+                            cell("STATE", 15),
+                            cell("ACTIVE", 9)
                         );
                         let now = now_ms();
                         for session in sessions {
                             println!(
-                                "{:<34}  {:<8} {:<24} {:<15} {:<9} {}",
-                                session.id.as_str(),
-                                session.model.provider,
+                                "{}  {} {} {} {} {}",
+                                cell(session.id.as_str(), 34),
+                                cell(session.model.provider.as_str(), 8),
                                 cell(&session.model.label, 24),
-                                session.state.label(),
-                                human_age(now, session.last_active_at_ms),
-                                cell(&session.title, 60)
+                                cell(session.state.label(), 15),
+                                cell(&human_age(now, session.last_active_at_ms), 9),
+                                table::fit(&session.title, 60)
                             );
                         }
                     }
@@ -2525,9 +2280,18 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 }
                 Some(SessionCommand::Rm { id, yes }) => {
                     if !yes {
-                        println!(
-                            "Would remove {id} and its transcript. Repeat with --yes to apply."
-                        );
+                        let found = store.session(&id)?.is_some();
+                        if cli.json {
+                            print_json(
+                                json!({"version":1,"applied":false,"session":id,"found":found}),
+                            )?;
+                        } else if found {
+                            println!(
+                                "Would remove {id} and its transcript. Repeat with --yes to apply."
+                            );
+                        } else {
+                            println!("Session {id} not found.");
+                        }
                     } else {
                         let removed = store.remove_session(&id)?;
                         if cli.json {
@@ -2561,7 +2325,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         )?;
                     } else {
                         println!(
-                            "{} {count} idle session(s) older than {days} days. Active or unsettled sessions are excluded.{}",
+                            "{} {count} idle session(s) older than {days} days. Active or unfinished sessions are skipped.{}",
                             if yes { "Pruned" } else { "Would prune" },
                             if yes {
                                 ""
@@ -2724,15 +2488,32 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             expected_title,
             direct,
         }) => {
-            if direct {
-                print_json(store.rename_session(&id, &expected_title, &title)?)?;
+            let (renamed, new_title) = if direct {
+                let session = store.rename_session(&id, &expected_title, &title)?;
+                let title = session.title.clone();
+                if cli.json {
+                    print_json(session)?;
+                }
+                (id, title)
             } else {
                 let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
-                print_json(managed.rename_conversation(
+                let conversation = managed.rename_conversation(
                     &managed.resolve_conversation(&id)?,
                     &expected_title,
                     &title,
-                )?)?;
+                )?;
+                let renamed = (conversation.id.clone(), conversation.title.clone());
+                if cli.json {
+                    print_json(conversation)?;
+                }
+                renamed
+            };
+            if !cli.json {
+                println!(
+                    "{} Renamed {renamed} to \u{201c}{}\u{201d}",
+                    ux::Style::stdout().symbol(ux::Symbol::Ok),
+                    table::fit(&new_title, 160)
+                );
             }
             Ok(0)
         }
@@ -2788,7 +2569,29 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     }
                 }
                 Some(TaskCommand::Verify { id }) => {
-                    print_json(managed.verify_task(&managed.resolve_task(&id)?).await?)?;
+                    let id = managed.resolve_task(&id)?;
+                    let report = managed.verify_task(&id).await.map_err(|error| {
+                        // --json keeps the stable error code.
+                        if cli.json {
+                            error
+                        } else {
+                            verify_failure(&id, error)
+                        }
+                    })?;
+                    if cli.json {
+                        print_json(report)?;
+                    } else {
+                        let steps = report["revisions"].as_u64().unwrap_or(0);
+                        println!(
+                            "{} {id}: {}",
+                            ux::Style::stdout().symbol(ux::Symbol::Ok),
+                            if steps == 1 {
+                                "its 1 recorded step replays and matches the task.".to_owned()
+                            } else {
+                                format!("all {steps} recorded steps replay and match the task.")
+                            }
+                        );
+                    }
                 }
                 Some(TaskCommand::Show { id }) => {
                     let task =
@@ -2800,21 +2603,33 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let task = managed
                         .cancel_task(&managed.resolve_task(&id)?, revision)
                         .await?;
-                    print_json(task)?;
+                    if cli.json {
+                        print_json(&task)?;
+                    } else {
+                        println!(
+                            "{} Cancelling {}; it stops once its provider exits (now revision {}).",
+                            ux::Style::stdout().symbol(ux::Symbol::Ok),
+                            task.id,
+                            task.revision
+                        );
+                    }
                     xcb_runtime::managed::ensure_daemon(store.root(), &std::env::current_exe()?)?;
                 }
-                Some(TaskCommand::Messages { id, after }) => {
+                Some(TaskCommand::Messages { id, after, limit }) => {
                     let id = managed.resolve_task(&id)?;
                     managed
                         .task(&id)?
                         .ok_or(Error::Unavailable("managed task not found"))?;
-                    let messages = managed.mailbox(&id, after, 64)?;
+                    let messages = managed.mailbox(&id, after, usize::from(limit))?;
                     if cli.json {
                         print_json(messages)?;
                     } else if messages.is_empty() {
-                        println!("No XCB messages for {id} after sequence {after}.");
+                        println!("No messages for {id} after sequence {after}.");
                     } else {
+                        let full = messages.len() == usize::from(limit);
+                        let mut last = after;
                         for message in messages {
+                            last = message.sequence;
                             println!(
                                 "#{} {} {} → {} · {}",
                                 message.sequence,
@@ -2823,6 +2638,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                                 message.target_task,
                                 xcb_core::display_text(&message.body, xcb_core::MAX_TEXT_BYTES),
                             );
+                        }
+                        if full {
+                            println!("Newer messages: xcb tasks messages {id} --after {last}");
                         }
                     }
                 }
@@ -3066,39 +2884,26 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     }
                 }
                 UpdateCommand::Enable { policy } => {
-                    if cfg!(target_os = "macos") {
-                        ux::login_item_notice(
-                            "It checks once a day for a verified xcb release, until you run xcb update disable.",
-                        );
-                    }
-                    xcb_runtime::update::configure_scheduler(&std::env::current_exe()?, true)?;
-                    let state = xcb_runtime::update::set_policy(store.root(), policy)?;
-                    if cli.json {
-                        print_json(
-                            json!({"version":1,"policy":state.policy,"enabled":state.policy != xcb_runtime::update::Policy::Disable}),
-                        )?;
-                    } else {
-                        println!("xcb updates: {}", state.policy);
-                    }
+                    set_update_policy(store.root(), policy, cli.json)?;
                 }
                 UpdateCommand::Disable => {
-                    xcb_runtime::update::configure_scheduler(&std::env::current_exe()?, false)?;
-                    let state = xcb_runtime::update::set_policy(
+                    set_update_policy(
                         store.root(),
                         xcb_runtime::update::Policy::Disable,
+                        cli.json,
                     )?;
-                    if cli.json {
-                        print_json(json!({"version":1,"policy":state.policy,"enabled":false}))?;
-                    } else {
-                        println!("xcb updates disabled");
-                    }
                 }
-                UpdateCommand::Install { version, quiet } => {
+                UpdateCommand::Install {
+                    version,
+                    allow_downgrade,
+                    quiet,
+                } => {
                     xcb_runtime::update::upgrade(
                         store.root(),
                         env!("CARGO_PKG_VERSION"),
                         version.as_deref(),
                         quiet || cli.json,
+                        allow_downgrade,
                     )?;
                 }
                 UpdateCommand::Daemon { quiet } => {
@@ -3117,6 +2922,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                                 env!("CARGO_PKG_VERSION"),
                                 None,
                                 quiet || cli.json,
+                                false,
                             )?;
                         }
                     }
@@ -3124,11 +2930,16 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Some(Commands::Upgrade { version, quiet }) => xcb_runtime::update::upgrade(
+        Some(Commands::Upgrade {
+            version,
+            allow_downgrade,
+            quiet,
+        }) => xcb_runtime::update::upgrade(
             store.root(),
             env!("CARGO_PKG_VERSION"),
             version.as_deref(),
             quiet || cli.json,
+            allow_downgrade,
         ),
         Some(Commands::Config) => {
             print_json(config)?;
@@ -3142,7 +2953,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             if launch_artifacts {
                 if run.is_some() {
                     return Err(Error::Unavailable(
-                        "--launch-artifacts recovers disposable files, not a run; pass one or the other",
+                        "--launch-artifacts cleans up leftover launch folders, not a run; pass one or the other",
                     ));
                 }
                 let sweep = runner::reclaim_launch_artifacts(&root, yes)?;
@@ -3159,14 +2970,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         "unreclaimableBytes": sweep.unprovable_bytes,
                     }))?;
                 } else {
+                    let count = if yes {
+                        sweep.reclaimed
+                    } else {
+                        sweep.reclaimable
+                    };
                     println!(
-                        "{} {} settled launch snapshots ({}).",
-                        if yes { "Reclaimed" } else { "Can reclaim" },
-                        if yes {
-                            sweep.reclaimed
-                        } else {
-                            sweep.reclaimable
-                        },
+                        "{} {count} launch {} from finished runs ({}).",
+                        if yes { "Removed" } else { "Can remove" },
+                        if count == 1 { "folder" } else { "folders" },
                         human_bytes(if yes {
                             sweep.reclaimed_bytes
                         } else {
@@ -3174,12 +2986,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         }),
                     );
                     println!(
-                        "Retained {} live and {} unproven launch snapshots; --yes does not override custody.",
+                        "Kept {} in use and {} whose runs xcb can't confirm finished; --yes doesn't remove those.",
                         sweep.live,
                         sweep.unprovable.len(),
                     );
                     if !yes && sweep.reclaimable > 0 {
-                        println!("Re-run with --yes to remove the proven disposable snapshots.");
+                        println!("Repeat with --yes to remove the finished ones.");
                     }
                 }
                 return Ok(0);
@@ -3190,11 +3002,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     .ok_or(Error::Unavailable("run not found"))?;
                 // Prepared state also covers a child spawned before its PID
                 // was persisted. Neither --yes nor owner absence proves that
-                // child stopped, so this path only explains retained custody.
+                // child stopped, so this path only explains why the account
+                // stays held.
                 if run.phase == "prepared" && run.pid.is_none() {
                     if yes {
                         return Err(Error::Conflict(
-                            "run has no recorded process group; account custody retained because provider stop cannot be proven",
+                            "run has no recorded process ID; xcb keeps its account held because it can't confirm the provider stopped",
                         ));
                     }
                     if cli.json {
@@ -3211,22 +3024,22 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         }))?;
                     } else {
                         println!(
-                            "Run {} has no recorded process group; account custody is retained.",
+                            "Run {} has no recorded process ID, so xcb keeps its account held.",
                             run.id
                         );
                         println!(
-                            "  A provider may have started before its PID was saved. Its stop cannot be proven from this record."
+                            "  A provider may have started before its process ID was saved, and this record can't show that it stopped."
                         );
-                        println!("  --yes cannot override missing process-stop evidence.");
+                        println!("  --yes can't change that.");
                     }
                     return Ok(0);
                 }
                 let pid = run.pid.ok_or(Error::Conflict(
-                    "run has no process group; recovery requires a running phase with a recorded pid",
+                    "run has no recorded process ID; recovery needs a running run with one",
                 ))?;
                 if run.phase != "running" {
                     return Err(Error::Conflict(
-                        "run is not in running phase; recovery requires a recorded process group",
+                        "run isn't running; recovery needs a running run with a recorded process ID",
                     ));
                 }
                 run.verify_recovery_stop()?;
@@ -3237,7 +3050,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         )?;
                     } else {
                         println!(
-                            "Would recover run {} · phase {} · process group {}.\nRepeat with --yes to independently verify any guest command, reconcile retained credentials and release custody. Staged command edits are never published by recovery.",
+                            "Would recover run {} (phase {}, process group {}).\nRepeat with --yes to confirm the provider and any command it ran have stopped, restore the account's sign-in, and free the account. Recovery never applies staged command edits.",
                             run.id, run.phase, pid
                         );
                     }
@@ -3251,15 +3064,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         .ok_or(Error::Unavailable("run not found"))?
                         .1;
                 }
-                let settled = store.recover_run(&run_id, &run_digest, now_ms())?;
+                let recovered = store.recover_run(&run_id, &run_digest, now_ms())?;
                 if cli.json {
                     print_json(
-                        json!({"version":1,"recovered":settled.id,"phase":settled.phase,"pid":pid}),
+                        json!({"version":1,"recovered":recovered.id,"phase":recovered.phase,"pid":pid}),
                     )?;
                 } else {
                     println!(
-                        "Recovered run {} · process group {} confirmed absent",
-                        settled.id, pid
+                        "Recovered run {}: process group {} has exited and its account is free.",
+                        recovered.id, pid
                     );
                 }
             } else {
@@ -3269,15 +3082,23 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         json!({"version":1,"runs":runs.iter().map(|run| json!({"id":run.id,"phase":run.phase,"pid":run.pid,"createdAtMs":run.created_at_ms})).collect::<Vec<_>>()}),
                     )?;
                 } else if runs.is_empty() {
-                    println!("No unsettled runs.");
+                    println!("No unfinished runs.");
                 } else {
-                    println!("Unsettled runs:");
-                    for run in runs {
-                        println!("  {} · phase {} · pid {:?}", run.id, run.phase, run.pid);
+                    println!("Unfinished runs:");
+                    for run in &runs {
+                        println!(
+                            "  {} · phase {} · {}",
+                            run.id,
+                            run.phase,
+                            run.pid
+                                .map(|pid| format!("process group {pid}"))
+                                .unwrap_or_else(|| "no process ID recorded".to_owned())
+                        );
                     }
                     println!(
-                        "Use `xcb recover <run-id> --yes` after the original host and process group have stopped; unresolved credentials must reconcile safely."
+                        "After the xcb that started a run and its provider have exited, xcb recover <run-id> --yes frees its account."
                     );
+                    ux::next(&format!("xcb recover {}", runs[0].id));
                 }
             }
             Ok(0)
@@ -3286,6 +3107,18 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             command: CommandJobs::Prune { days, yes },
         }) => {
             let root = xcb_runtime::command_tool::default_root()?;
+            if !root.exists() {
+                // No command runner on this machine means no jobs to archive.
+                if cli.json {
+                    print_json(xcb_runtime::command::PruneReport::default())?;
+                } else {
+                    println!(
+                        "No offline command jobs: the command runner isn't set up at {}.",
+                        root.display()
+                    );
+                }
+                return Ok(0);
+            }
             let report = xcb_runtime::command::CommandBackend::prune_joined_jobs(
                 &root,
                 now_ms().saturating_sub(u64::from(days) * 86_400_000),
@@ -3295,7 +3128,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 print_json(report)?;
             } else {
                 println!(
-                    "{} {} joined command job(s) older than {days} days into {}. {} unjoined, {} cleanup-pending and {} recent job(s) retained.{}",
+                    "{} {} finished command job(s) older than {days} days into {}. Kept {} whose processes aren't confirmed stopped, {} waiting for cleanup, and {} recent.{}",
                     if yes { "Archived" } else { "Would archive" },
                     report.candidates.len(),
                     root.join("jobs-archive").display(),
@@ -3561,10 +3394,9 @@ async fn direct_chat(
 async fn main() {
     ux::restore_sigpipe();
     let args: Vec<String> = std::env::args().collect();
-    let words: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
     if matches!(
-        words.as_slice(),
-        ["help", "advanced"] | ["advanced", "--help"]
+        command_words(&args).as_slice(),
+        ["help", "advanced"] | ["advanced"] | ["advanced", "--help" | "-h"]
     ) {
         hraness_cli_kit::style::write_stdout(ux::ADVANCED);
         return;
@@ -3599,13 +3431,67 @@ async fn main() {
     std::process::exit(code);
 }
 
+/// The words after `xcb` with the global options (`--state <dir>`,
+/// `--cwd <dir>`, `--json`) left out, for the `advanced` screen, which is
+/// not a subcommand.
+fn command_words(args: &[String]) -> Vec<&str> {
+    let mut words = Vec::new();
+    let mut rest = args.iter().skip(1).map(String::as_str);
+    while let Some(word) = rest.next() {
+        match word {
+            "--state" | "--cwd" => {
+                rest.next();
+            }
+            "--json" => {}
+            word if word.starts_with("--state=") || word.starts_with("--cwd=") => {}
+            word => words.push(word),
+        }
+    }
+    words
+}
+
+/// `xcb tasks verify` failures in plain words: which part of the task's
+/// local record didn't hold up. Other errors pass through unchanged.
+fn verify_failure(task: &Id, error: Error) -> Error {
+    let problem = match &error {
+        Error::Conflict(message) | Error::Unavailable(message) => match *message {
+            "managed receipt chain is missing the persisted task revision" => {
+                "the latest step of its record is missing"
+            }
+            "managed receipt chain is missing a prior revision" => {
+                "a step in the middle of its record is missing"
+            }
+            "managed receipt origin mismatch" => "the first step of its record is missing",
+            "managed receipt replay mismatch" | "managed receipt replay failed" => {
+                "a recorded step doesn't replay to the same result"
+            }
+            "managed receipt does not match persisted task" => {
+                "the task doesn't match the last step of its record"
+            }
+            "managed receipt chain identity mismatch" => {
+                "a step of its record belongs to another task"
+            }
+            "managed receipt output rejected" => "a step of its record can't be read",
+            _ => return error,
+        },
+        Error::Core(xcb_core::Error::Limit("managed receipt chain")) => {
+            "its record has more steps than xcb can replay (1024)"
+        }
+        _ => return error,
+    };
+    Error::Guided {
+        message: format!("Task {task} failed verification: {problem}"),
+        next: None,
+    }
+}
+
 /// Stderr is often retained by callers. Keep this notice independent of
 /// account-bearing route records and provider-supplied model metadata.
 fn automatic_route_notice(reason: &str) -> &'static str {
     if reason.starts_with("Warning: usage limits") {
-        "Usage limits block a higher-ranked model; using the best eligible route."
+        "Usage limits rule out a higher-ranked model; using the best one available now."
     } else {
-        "Automatically selected an admitted route."
+        "Picked an account and model automatically."
     }
 }
 
@@ -4031,11 +3917,11 @@ mod tests {
     fn automatic_route_notice_does_not_echo_route_record_data() {
         assert_eq!(
             automatic_route_notice("Warning: usage limits block private-provider-metadata"),
-            "Usage limits block a higher-ranked model; using the best eligible route."
+            "Usage limits rule out a higher-ranked model; using the best one available now."
         );
         assert_eq!(
             automatic_route_notice("private-account-and-model-metadata"),
-            "Automatically selected an admitted route."
+            "Picked an account and model automatically."
         );
     }
 
@@ -4393,6 +4279,68 @@ mod tests {
     }
 
     #[test]
+    fn json_run_output_marks_text_cut_to_the_route_limit() {
+        let mut result = runner::Outcome {
+            tool_calls: Some(0),
+            diagnostic: None,
+            text: "é".repeat(xcb_core::MAX_TEXT_BYTES),
+            facts: xcb_core::policy::TurnFacts {
+                terminal: Terminal::Completed,
+                joined: true,
+                effects: xcb_core::policy::EffectState::None,
+                pending_attention: false,
+                failure: None,
+            },
+            state: xcb_core::session::State::Idle,
+        };
+        let session = Id::new("s_long").unwrap();
+        let output = run_output(&session, &result);
+        assert_eq!(output["textTruncated"], true);
+        let text = output["text"].as_str().unwrap();
+        assert!(text.len() <= xcb_core::MAX_TEXT_BYTES);
+        assert!(result.text.starts_with(text));
+        result.text = "short".into();
+        let output = run_output(&session, &result);
+        assert!(output.get("textTruncated").is_none());
+        assert_eq!(output["text"], "short");
+    }
+
+    #[test]
+    fn global_options_do_not_hide_the_advanced_screen() {
+        let words = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            command_words(&args)
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            words(&["xcb", "--state", "/s", "--json", "advanced"]),
+            ["advanced"]
+        );
+        assert_eq!(
+            words(&["xcb", "--cwd=/w", "help", "advanced"]),
+            ["help", "advanced"]
+        );
+        assert_eq!(words(&["xcb", "accounts"]), ["accounts"]);
+    }
+
+    #[test]
+    fn verify_failures_name_the_broken_step_in_plain_words() {
+        let id = Id::new("t_fixture").unwrap();
+        let error = verify_failure(
+            &id,
+            Error::Conflict("managed receipt chain is missing a prior revision"),
+        );
+        assert_eq!(
+            ux::sentence(&error),
+            "Task t_fixture failed verification: a step in the middle of its record is missing."
+        );
+        let other = verify_failure(&id, Error::Unavailable("managed task not found"));
+        assert_eq!(ux::sentence(&other), "Managed task not found.");
+    }
+
+    #[test]
     fn headless_success_requires_completed_joined_settled_idle_outcome() {
         use xcb_core::{
             policy::{EffectState, Failure, TurnFacts},
@@ -4533,12 +4481,27 @@ mod tests {
         ));
         let cli = Cli::try_parse_from(["xcb", "update", "install", "0.5.0"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Commands::Update { command: Some(UpdateCommand::Install { version: Some(version), quiet: false }) }) if version == "0.5.0")
+            matches!(cli.command, Some(Commands::Update { command: Some(UpdateCommand::Install { version: Some(version), quiet: false, allow_downgrade: false }) }) if version == "0.5.0")
         );
         let cli = Cli::try_parse_from(["xcb", "upgrade", "0.5.0"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Commands::Upgrade { version: Some(version), quiet: false }) if version == "0.5.0")
+            matches!(cli.command, Some(Commands::Upgrade { version: Some(version), quiet: false, allow_downgrade: false }) if version == "0.5.0")
         );
+        let cli = Cli::try_parse_from(["xcb", "upgrade", "0.5.0", "--allow-downgrade"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Upgrade {
+                allow_downgrade: true,
+                ..
+            })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "update", "disable"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Update {
+                command: Some(UpdateCommand::Disable)
+            })
+        ));
         assert!(Cli::try_parse_from(["xcb", "update", "enable", "--policy", "project"]).is_err());
     }
 
@@ -4585,9 +4548,23 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Commands::Tasks {
-                command: Some(TaskCommand::Messages { id, after: 4 })
+                command: Some(TaskCommand::Messages { id, after: 4, limit: 64 })
             }) if id.as_str() == "t_example"
         ));
+        let cli =
+            Cli::try_parse_from(["xcb", "tasks", "messages", "t_example", "--limit", "5"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Tasks {
+                command: Some(TaskCommand::Messages { limit: 5, .. })
+            })
+        ));
+        for limit in ["0", "65"] {
+            assert!(
+                Cli::try_parse_from(["xcb", "tasks", "messages", "t_example", "--limit", limit])
+                    .is_err()
+            );
+        }
         let cli = Cli::try_parse_from(["xcb", "reflex", "label", "route", "t_example", "frontier"])
             .unwrap();
         assert!(matches!(

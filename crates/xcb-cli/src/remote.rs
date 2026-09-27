@@ -34,8 +34,8 @@ pub enum RemoteCommand {
         /// Device id from `xcb fleet`.
         device: String,
     },
-    /// Queue guidance for a running managed task on a remote device —
-    /// the remote form of `xcb steer`.
+    /// Queue guidance for a running managed task on a remote device; the
+    /// remote form of `xcb steer`.
     Steer {
         /// Target daemon device id from `xcb fleet`.
         device: String,
@@ -105,7 +105,7 @@ fn invalid(what: &'static str) -> Error {
 }
 
 fn not_linked() -> Error {
-    Error::Message("this machine is not linked — run `xcb link`")
+    Error::Message("this machine is not linked; run `xcb link`")
 }
 
 /// Resolve the relay URL: explicit flag, then environment, then the
@@ -166,7 +166,7 @@ async fn open_controller(state_root: &Path) -> Result<Controller> {
     let session = custody::load_session(state_root)?.ok_or_else(not_linked)?;
     let Some((account_key, key_version)) = custody::load_account_key(state_root)? else {
         return Err(Error::Message(
-            "device enrolled but not admitted — run `xcb remote admit <device>` on a linked device",
+            "this device is linked but not approved yet; run `xcb remote admit <device>` on a device that is already linked",
         ));
     };
     Controller::open(
@@ -252,7 +252,7 @@ pub async fn link(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
         let email = match email {
             Some(email) => email.to_string(),
             None => {
-                prompt("Email:")?.ok_or_else(|| Error::Message("email required — pass --email"))?
+                prompt("Email:")?.ok_or_else(|| Error::Message("email required; pass --email"))?
             }
         };
         if !email_ok(&email) {
@@ -269,11 +269,11 @@ pub async fn link(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
             Some(code) => code.to_string(),
             None => {
                 eprintln!("A sign-in code was emailed to {email}.");
-                prompt("Code:")?.ok_or_else(|| Error::Message("code required — pass --code"))?
+                prompt("Code:")?.ok_or_else(|| Error::Message("code required; pass --code"))?
             }
         };
         if code.len() != 8 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
-            return Err(invalid("code — the emailed code is 8 digits"));
+            return Err(invalid("code: the emailed code is 8 digits"));
         }
         let session = relay_link::verify_code(&mut client, &email, &code).await?;
         custody::store_session(state_root, &session)?;
@@ -315,7 +315,7 @@ pub async fn link(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
         }
         relay_link::KeyOutcome::AwaitingWrap => {
             eprintln!(
-                "Enrolled as {} device {} — waiting for an enrolled device to run `xcb remote admit {}`.",
+                "Enrolled as {} device {}; waiting for a linked device to run `xcb remote admit {}`.",
                 device_class, outcome.public_id, outcome.public_id
             );
             wait_for_wrap(&mut client, state_root, &outcome.device, json_out).await
@@ -341,7 +341,7 @@ async fn wait_for_wrap(
     loop {
         if Instant::now() >= deadline {
             return Err(Error::from(xcb_core::Error::Limit(
-                "admission wait expired — rerun `xcb link` after `xcb remote admit`",
+                "timed out waiting for approval; run `xcb remote admit <device>` on a linked device, then rerun `xcb link`",
             )));
         }
         if let Some(mut session) = custody::load_session(state_root)? {
@@ -351,7 +351,7 @@ async fn wait_for_wrap(
             _ = tokio::time::sleep(WRAP_POLL) => {}
             _ = tokio::signal::ctrl_c() => {
                 return Err(Error::from(xcb_core::Error::Invalid(
-                    "link interrupted — rerun `xcb link` to resume",
+                    "link interrupted; rerun `xcb link` to resume",
                 )));
             }
         }
@@ -360,7 +360,7 @@ async fn wait_for_wrap(
             return print_json_or(
                 json_out,
                 || {
-                    println!("Admitted — account key received.");
+                    println!("Approved; account key received.");
                 },
                 json!({
                     "version": 1,
@@ -546,10 +546,10 @@ async fn resolve_device(controller: &mut Controller, typed: &str) -> Result<Stri
         .map(|row| row.device.as_str())
         .collect();
     match matches.as_slice() {
-        [] => Err(Error::Message("unknown fleet device — see `xcb fleet`")),
+        [] => Err(Error::Message("unknown fleet device; see `xcb fleet`")),
         [only] => Ok((*only).to_string()),
         _ => Err(Error::Message(
-            "device id prefix is ambiguous — pass more characters",
+            "device id prefix matches more than one device; type more of the id",
         )),
     }
 }
@@ -572,7 +572,7 @@ async fn post(state_root: &Path, device: &str, body: &CommandBody, json_out: boo
                 device, sent.command.public_id, sent.idempotency_key
             );
             if sent.replayed {
-                println!("Matched an in-flight command — no second effect.");
+                println!("Matched a command already in flight; nothing ran twice.");
             }
         },
         json!({
@@ -597,7 +597,7 @@ pub async fn remote(state_root: &Path, command: &RemoteCommand, json_out: bool) 
             print_json_or(
                 json_out,
                 || {
-                    println!("Admitted {device} — it can now collect the account key.");
+                    println!("Approved {device}; it can now collect the account key.");
                 },
                 json!({ "version": 1, "admitted": device }),
             )
@@ -665,7 +665,7 @@ pub async fn remote(state_root: &Path, command: &RemoteCommand, json_out: bool) 
             print_json_or(
                 json_out,
                 || {
-                    println!("Aborted {command} — it cannot be claimed now.");
+                    println!("Aborted {command}; no device can pick it up now.");
                 },
                 json!({ "version": 1, "aborted": command }),
             )

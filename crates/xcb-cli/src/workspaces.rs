@@ -201,8 +201,13 @@ fn list(store: &ManagedStore, json: bool) -> Result<i32> {
     }
     let now = now_ms();
     println!(
-        "  {:<20} {:<44} {:<20} {:<9} {:<10} {:>5}  STATUS",
-        "NAME", "PATH", "REPO", "ADDED BY", "LAST USED", "TASKS"
+        "  {} {} {} {} {} {:>5}  STATUS",
+        cell("NAME", 20),
+        cell("PATH", 44),
+        cell("REPO", 20),
+        cell("ADDED BY", 9),
+        cell("LAST USED", 10),
+        "TASKS"
     );
     for row in &rows {
         let conflicts = open_for(&row.path);
@@ -215,12 +220,12 @@ fn list(store: &ManagedStore, json: bool) -> Result<i32> {
             )
         };
         println!(
-            "  {:<20} {:<44} {:<20} {:<9} {:<10} {:>5}  {}{flag}",
+            "  {} {} {} {} {} {:>5}  {}{flag}",
             cell(&row.name, 20),
             cell(&row.path, 44),
             cell(row.repo.as_deref().unwrap_or("-"), 20),
             cell(&row.admitted_by, 9),
-            human_age(now, row.last_used_ms),
+            cell(&human_age(now, row.last_used_ms), 10),
             row.task_count,
             row.status,
         );
