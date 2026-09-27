@@ -125,6 +125,116 @@ fn history_and_all_insertion_paths_enforce_byte_limits() {
     assert_eq!(composer.text(), "before\nafter");
 }
 #[test]
+fn a_full_size_draft_still_edits_correctly() {
+    let none = KeyModifiers::NONE;
+    let row = "0123456789 abcdefghij, klmnop.\n";
+    let tail = "e\u{301}👩\u{200d}💻 end";
+    let rows = row.repeat((MAX_INPUT - 1 - tail.len()) / row.len());
+    let pad = "x".repeat(MAX_INPUT - 1 - rows.len() - tail.len());
+    let text = format!("{pad}{rows}{tail}");
+    assert_eq!(text.len(), MAX_INPUT - 1);
+    let mut composer = Composer::default();
+    composer.set_text(&text);
+
+    // The last byte fits; anything more is refused whole and changes nothing.
+    assert!(matches!(
+        key(&mut composer, KeyCode::Char('!'), none),
+        ComposerAction::None
+    ));
+    assert_eq!(composer.text(), format!("{text}!"));
+    for refused in [
+        key(&mut composer, KeyCode::Char('?'), none),
+        key(&mut composer, KeyCode::Enter, KeyModifiers::ALT),
+        composer.handle(Event::Paste("?".into())),
+    ] {
+        assert!(matches!(refused, ComposerAction::Rejected(_)));
+    }
+    assert_eq!(composer.text().len(), MAX_INPUT);
+
+    // Deleting at the tail keeps combining marks and emoji sequences whole.
+    key(&mut composer, KeyCode::Backspace, none);
+    ctrl(&mut composer, 'w');
+    ctrl(&mut composer, 'w');
+    assert_eq!(composer.text(), format!("{pad}{rows}e\u{301}"));
+    key(&mut composer, KeyCode::Backspace, none);
+    assert_eq!(composer.text(), format!("{pad}{rows}"));
+    ctrl(&mut composer, 'y');
+    assert_eq!(composer.text(), format!("{pad}{rows}👩\u{200d}💻 "));
+
+    // Edits on another line land where the cursor moved.
+    key(&mut composer, KeyCode::Up, none);
+    key(&mut composer, KeyCode::Home, none);
+    key(&mut composer, KeyCode::Char('Z'), none);
+    ctrl(&mut composer, 'e');
+    ctrl(&mut composer, 'w');
+    ctrl(&mut composer, 'w');
+    let body = format!("{pad}{rows}");
+    let last_row = body[..body.len() - 1].rfind('\n').unwrap() + 1;
+    let expected = format!(
+        "{}Z0123456789 abcdefghij, \n👩\u{200d}💻 ",
+        &body[..last_row]
+    );
+    assert_eq!(composer.text(), expected);
+    assert!(
+        matches!(key(&mut composer, KeyCode::Enter, none), ComposerAction::Submit(sent) if sent == expected)
+    );
+    assert!(composer.text().is_empty());
+}
+
+/// Per-keystroke cost on near-limit drafts, many short lines and one long
+/// line. Run with `cargo test -p xcb-tui --test composer_readline --
+/// --ignored --nocapture composer_keystroke_benchmark`; timings print.
+#[test]
+#[ignore]
+fn composer_keystroke_benchmark() {
+    let row = format!("{}\n", "word ".repeat(12).trim_end());
+    let lines = row.repeat((MAX_INPUT - 4096) / row.len());
+    let long = "word ".repeat((MAX_INPUT - 4096) / 5);
+    for (shape, text) in [("multi-line", lines), ("single-line", long)] {
+        let mut composer = Composer::default();
+        composer.set_text(&text);
+        let mut time = |label: &str, keys: &[(KeyCode, KeyModifiers)]| {
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                for (code, modifiers) in keys {
+                    key(&mut composer, *code, *modifiers);
+                }
+            }
+            let per_key = started.elapsed() / (100 * keys.len() as u32);
+            println!(
+                "{shape} {} KiB · {label}: {per_key:?}/key",
+                text.len() / 1024
+            );
+        };
+        let none = KeyModifiers::NONE;
+        time(
+            "type + backspace",
+            &[(KeyCode::Char('a'), none), (KeyCode::Backspace, none)],
+        );
+        time(
+            "left + right",
+            &[(KeyCode::Left, none), (KeyCode::Right, none)],
+        );
+        time(
+            "word left + right",
+            &[
+                (KeyCode::Char('b'), KeyModifiers::ALT),
+                (KeyCode::Char('f'), KeyModifiers::ALT),
+            ],
+        );
+        time("home + end", &[(KeyCode::Home, none), (KeyCode::End, none)]);
+        time(
+            "kill word + yank",
+            &[
+                (KeyCode::Char('w'), KeyModifiers::CONTROL),
+                (KeyCode::Char('y'), KeyModifiers::CONTROL),
+            ],
+        );
+        assert_eq!(composer.text(), text);
+    }
+}
+
+#[test]
 fn cursor_positions_beyond_u16_remain_correct() {
     let mut composer = Composer::default();
     composer.set_text(&format!("{}é", "x".repeat(70_000)));

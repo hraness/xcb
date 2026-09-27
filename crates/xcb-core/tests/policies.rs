@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 use xcb_core::models::{Mode, ModelChoice, default_preferences, sort_choices};
 use xcb_core::panes::{Pane, PaneSlot};
-use xcb_core::policy::{EffectState, Failure, RouteCandidate, Terminal, TurnFacts, next_route};
+use xcb_core::policy::{
+    EffectState, Failure, RouteCandidate, Terminal, TurnFacts, next_route, no_reply,
+};
 use xcb_core::usage::{Estimate, QuotaPoint, runway};
 use xcb_core::{Id, Provider};
 
@@ -179,6 +181,53 @@ fn quota_failover_only_happens_at_failed_terminal_boundary() {
         )
         .is_none()
     );
+}
+
+#[test]
+fn only_a_completed_turn_without_text_or_effects_reports_no_reply() {
+    let silent = TurnFacts {
+        effects: EffectState::None,
+        ..facts_with_terminal(Terminal::Completed, None)
+    };
+    for text in ["", " \n\t"] {
+        assert!(no_reply(text, &silent));
+        let reported = silent.reported(text);
+        assert_eq!(reported.failure, Some(Failure::NoReply));
+        assert_eq!(reported.terminal, Terminal::Completed);
+        assert_eq!(
+            serde_json::to_value(&reported).unwrap()["failure"],
+            "no_reply"
+        );
+    }
+    // Answer text, settled file changes, another terminal, or a recorded
+    // failure each say how the turn ended; none of them reports no_reply.
+    let answered = silent.reported("Fixed the subtraction.");
+    assert_eq!(answered.failure, None);
+    let changed = TurnFacts {
+        effects: EffectState::Settled,
+        ..silent.clone()
+    };
+    assert!(!no_reply("", &changed));
+    assert_eq!(changed.reported("").failure, None);
+    for terminal in [
+        Terminal::TokenLimit,
+        Terminal::TurnLimit,
+        Terminal::Cancelled,
+        Terminal::Failed,
+    ] {
+        let stopped = TurnFacts {
+            terminal,
+            ..silent.clone()
+        };
+        assert!(!no_reply("", &stopped), "{terminal:?}");
+    }
+    let failed = TurnFacts {
+        failure: Some(Failure::Transport),
+        ..silent.clone()
+    };
+    assert_eq!(failed.reported("").failure, Some(Failure::Transport));
+    // Deriving the report never rewrites the recorded facts.
+    assert_eq!(silent.failure, None);
 }
 
 #[test]

@@ -61,8 +61,11 @@ optional judge can only reorder routes that already qualify. See
 
 Top-level fields are camelCase; the fields inside `outcome` are snake_case.
 A chosen route reports `provider`, `account`, the full `model` key, a display
-`label`, and a short `reason`: why xcb chose it, not a price or quality
-guarantee. A dry run returns:
+`label`, and a short `reason` for a person to read: how xcb classified the
+task, the capability tier (`standard` or `frontier`), and the model's relative
+quality, cost, and speed. It explains the choice and is not a price or quality
+guarantee. A public pricing promotion is named in the reason but never changes
+which route wins. A dry run returns:
 
 ```json
 {
@@ -74,14 +77,14 @@ guarantee. A dry run returns:
     "account": "a_…",
     "model": "claude/sonnet/low",
     "label": "Sonnet · low",
-    "reason": "…"
+    "reason": "deterministic fallback · classifier not available · standard tier · balanced task · Pareto P1 · quality 92 · relative cost 55 · relative latency 50"
   }
 }
 ```
 
 A run returns `status: "completed"` only when the turn completed, the provider
-process has exited, xcb has recorded its effects, and nothing is waiting for an
-answer:
+process has exited, xcb has recorded its effects, nothing is waiting for an
+answer, and the turn produced answer text or file changes:
 
 ```json
 {
@@ -130,7 +133,7 @@ A failure exits 1 and prints one object:
 | `busy` | The account is running another task. |
 | `deadline` | The caller's `timeoutMs` expired and the turn was cancelled. |
 | `cancelled` | SIGINT or SIGTERM cancelled the turn. |
-| `provider_error` | The turn failed or hit a provider limit; `outcome.terminal` and `outcome.failure` carry the detail, such as `account_quota` or `model_quota`. |
+| `provider_error` | The turn failed, hit a provider limit, or ended without a reply or file changes; `outcome.terminal` and `outcome.failure` carry the detail, such as `account_quota`, `model_quota`, or `no_reply`, and a person can reopen `session`. |
 | `custody_unproven` | xcb couldn't confirm that the provider stopped or what it changed, so it keeps the account held. Don't retry blindly; see `xcb recover`. |
 | `needs_input` | The provider stopped with a question; `text` carries it, and a person can reopen `session`. |
 

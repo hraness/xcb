@@ -374,7 +374,7 @@ def main():
         check("TUI steer targets exact task once", len(ui_guidance) == 1 and ui_guidance[0]["task"] == ui_target["id"])
         check("TUI watch reserves a waiting report", len(ui_rows) == 2 and sum(status(row) == "waiting" for row in ui_rows) == 1)
         check("TUI full event inspector identities", all(identifier in inspector for identifier in (ui_guidance[0]["id"], ui_target["id"], conversation)))
-        check("TUI full inspector scrolls to content tail and receipt", "UI_GUIDANCE_TAIL" in inspector and "Deliveryreceipt" in inspector and "Nosettleddeliveryreceiptyet." in inspector)
+        check("TUI full inspector scrolls to content tail and delivery record", "UI_GUIDANCE_TAIL" in inspector and "Deliveryrecord" in inspector and "Notinaworkerturnyet." in inspector)
         check("slash actions do not create ordinary tasks", len(value("backlog", "--conversation", conversation)) == len(before_tasks))
         complete(ui_source, "TUI_WATCH_REPORT_COMPLETE")
         ui_rows = events(ui_target["id"])

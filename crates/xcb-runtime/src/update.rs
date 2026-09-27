@@ -67,6 +67,22 @@ struct InstallManifest {
     helper_path: PathBuf,
     #[serde(rename = "prefix")]
     prefix: PathBuf,
+    /// Written by every installer since the manifest existed; older
+    /// manifests fall back to `<prefix>/bin/xcb`.
+    #[serde(rename = "binaryPath", default)]
+    binary_path: Option<PathBuf>,
+}
+
+/// What `install-native.sh` recorded about one global install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallRecord {
+    /// The `install.json` this record came from.
+    pub manifest: PathBuf,
+    pub prefix: PathBuf,
+    /// The installer copy `xcb upgrade` runs.
+    pub helper: PathBuf,
+    /// The installed `xcb` binary.
+    pub binary: PathBuf,
 }
 
 fn state_path(root: &Path) -> PathBuf {
@@ -256,7 +272,10 @@ pub fn should_check(root: &Path) -> Result<bool> {
         && now_ms().saturating_sub(state.last_check_ms) >= CHECK_INTERVAL_MS)
 }
 
-fn manifest(root: &Path) -> Result<InstallManifest> {
+/// The first install manifest found: the state root's (the default state
+/// root is the installer's share directory), then the one beside the
+/// running binary.
+fn find_manifest(root: &Path) -> Result<Option<(PathBuf, InstallManifest)>> {
     let mut paths = vec![root.join("install.json")];
     if let Ok(binary) = std::env::current_exe()
         && let Some(prefix) = binary.parent().and_then(Path::parent)
@@ -265,21 +284,87 @@ fn manifest(root: &Path) -> Result<InstallManifest> {
     }
     for path in paths {
         match private::read(&path, 16 * 1024) {
-            Ok(bytes) => return serde_json::from_slice(&bytes).map_err(|_| {
-                Error::Unavailable(
-                    "global install metadata is invalid; reinstall with scripts/install-native.sh",
-                )
-            }),
+            Ok(bytes) => {
+                let manifest = serde_json::from_slice(&bytes).map_err(|_| {
+                    Error::Unavailable(
+                        "global install metadata is invalid; reinstall with scripts/install-native.sh",
+                    )
+                })?;
+                return Ok(Some((path, manifest)));
+            }
             Err(Error::Io(io)) if io.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         }
     }
-    Err(Error::Unavailable(
+    Ok(None)
+}
+
+fn manifest(root: &Path) -> Result<InstallManifest> {
+    find_manifest(root)?.map(|(_, manifest)| manifest).ok_or(Error::Unavailable(
         "global install metadata is missing; reinstall with scripts/install-native.sh to enable xcb upgrade",
     ))
 }
 
-pub fn upgrade(root: &Path, current: &str, requested: Option<&str>, quiet: bool) -> Result<i32> {
+/// The install `install-native.sh` recorded, if any. Paths must be the
+/// installer's own layout (`<prefix>/bin/xcb`, `<prefix>/share/xcb/...`);
+/// anything else is refused rather than trusted for removal.
+pub fn install_record(root: &Path) -> Result<Option<InstallRecord>> {
+    let Some((manifest, recorded)) = find_manifest(root)? else {
+        return Ok(None);
+    };
+    let prefix = recorded.prefix;
+    let binary = recorded
+        .binary_path
+        .unwrap_or_else(|| prefix.join("bin/xcb"));
+    let plain = |path: &Path| {
+        path.is_absolute()
+            && !path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+    };
+    if !plain(&prefix)
+        || binary != prefix.join("bin/xcb")
+        || recorded.helper_path != prefix.join("share/xcb/install-native.sh")
+    {
+        return Err(Error::Unavailable(
+            "the install record names paths outside its install prefix; remove xcb by hand",
+        ));
+    }
+    Ok(Some(InstallRecord {
+        manifest,
+        prefix,
+        helper: recorded.helper_path,
+        binary,
+    }))
+}
+
+/// Refuse to install an older release unless the caller asked for it.
+pub fn check_downgrade(current: &str, requested: &str, allowed: bool) -> Result<()> {
+    let requested = requested.strip_prefix('v').unwrap_or(requested);
+    match (version_tuple(requested), version_tuple(current)) {
+        (Some(wanted), Some(running)) if wanted < running && !allowed => Err(Error::guided(
+            format!(
+                "xcb {requested} is older than the installed {current}; installing it would downgrade xcb"
+            ),
+            format!("xcb upgrade {requested} --allow-downgrade"),
+        )),
+        _ => Ok(()),
+    }
+}
+
+pub fn upgrade(
+    root: &Path,
+    current: &str,
+    requested: Option<&str>,
+    quiet: bool,
+    allow_downgrade: bool,
+) -> Result<i32> {
+    if let Some(requested) = requested {
+        check_downgrade(current, requested, allow_downgrade)?;
+    }
     let releases = fetch_releases()?;
     let release = match requested {
         Some(requested) => releases
@@ -346,45 +431,78 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// Install or remove the per-user macOS scheduler. The scheduler invokes the
-/// already-installed binary once a day; it never runs a shell or follows a
-/// project-local setting.
-pub fn configure_scheduler(binary: &Path, enabled: bool) -> Result<()> {
-    if std::env::consts::OS != "macos" {
+const SCHEDULER_LABEL: &str = "dev.hraness.xcb.update";
+
+/// Whether this platform has the daily update LaunchAgent (macOS only).
+pub fn scheduler_supported() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// Where the daily update LaunchAgent lives under `home`.
+pub fn scheduler_path(home: &Path) -> PathBuf {
+    home.join("Library/LaunchAgents")
+        .join(format!("{SCHEDULER_LABEL}.plist"))
+}
+
+fn launchd_domain() -> String {
+    format!("gui/{}", rustix::process::getuid().as_raw())
+}
+
+/// Remove the daily update LaunchAgent under `home` when it is there, and
+/// report whether it was. A missing agent is not an error, so this works on
+/// every platform; it never touches a LaunchAgent it did not find.
+pub fn remove_scheduler(home: &Path) -> Result<bool> {
+    remove_scheduler_with(home, |plist| {
+        // The agent may already be unloaded; removing the file is what
+        // keeps it from loading at the next login.
+        let _ = Command::new("/bin/launchctl")
+            .args(["bootout", &launchd_domain(), &plist.to_string_lossy()])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    })
+}
+
+/// [`remove_scheduler`] with the unload step supplied, so tests never reach
+/// the user's real launchd session.
+pub fn remove_scheduler_with(home: &Path, unload: impl FnOnce(&Path)) -> Result<bool> {
+    let plist = scheduler_path(home);
+    match std::fs::symlink_metadata(&plist) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+            return Err(Error::PrivateState);
+        }
+        Ok(_) => {}
+    }
+    if scheduler_supported() {
+        unload(&plist);
+    }
+    std::fs::remove_file(&plist)?;
+    Ok(true)
+}
+
+/// Install the per-user macOS scheduler. It invokes the already-installed
+/// binary once a day; it never runs a shell or follows a project-local
+/// setting.
+pub fn install_scheduler(binary: &Path) -> Result<()> {
+    if !scheduler_supported() {
         return Err(Error::Unavailable(
-            "automatic scheduling is currently supported on macOS only; use xcb update check from your user timer on Linux",
+            "the daily update check runs on macOS only; on Linux, run xcb update daemon from a user timer",
         ));
     }
     let home = std::env::var_os("HOME").ok_or(Error::PrivateState)?;
     let home = PathBuf::from(home);
     let agents = home.join("Library/LaunchAgents");
-    let plist = agents.join("dev.hraness.xcb.update.plist");
-    let label = "dev.hraness.xcb.update";
-    let uid = Command::new("id").arg("-u").output().map_err(|_| {
-        Error::Unavailable("could not determine the current user for the xcb scheduler")
-    })?;
-    let uid = String::from_utf8(uid.stdout)
-        .map_err(|_| Error::Unavailable("current user id was not UTF-8"))?
-        .trim()
-        .to_owned();
-    let domain = format!("gui/{uid}");
+    let plist = scheduler_path(&home);
+    let label = SCHEDULER_LABEL;
+    let domain = launchd_domain();
     let bootout = || {
-        let _ = Command::new("launchctl")
+        let _ = Command::new("/bin/launchctl")
             .args(["bootout", &domain, &plist.to_string_lossy()])
             .status();
     };
-    if !enabled {
-        bootout();
-        match std::fs::symlink_metadata(&plist) {
-            Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
-                return Err(Error::PrivateState);
-            }
-            Ok(_) => std::fs::remove_file(&plist)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-            Err(error) => return Err(error.into()),
-        }
-        return Ok(());
-    }
     std::fs::create_dir_all(&agents)?;
     if std::fs::symlink_metadata(&agents)?.file_type().is_symlink() {
         return Err(Error::PrivateState);
@@ -413,7 +531,7 @@ pub fn configure_scheduler(binary: &Path, enabled: bool) -> Result<()> {
     }
     std::fs::rename(&temp, &plist)?;
     bootout();
-    let status = Command::new("launchctl")
+    let status = Command::new("/bin/launchctl")
         .args(["bootstrap", &domain, &plist.to_string_lossy()])
         .status()?;
     if !status.success() {
@@ -427,6 +545,102 @@ pub fn configure_scheduler(binary: &Path, enabled: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downgrades_need_an_explicit_flag() {
+        let error = check_downgrade("0.9.1", "v0.8.0", false).unwrap_err();
+        assert!(
+            matches!(&error, Error::Guided { next: Some(next), .. } if next == "xcb upgrade 0.8.0 --allow-downgrade"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("older than the installed 0.9.1"));
+        assert!(check_downgrade("0.9.1", "0.9.0", true).is_ok());
+        // Reinstalling the same version or moving forward needs no flag;
+        // an unparseable version is left to the release lookup.
+        for requested in ["0.9.1", "0.10.0", "v1.0.0", "latest"] {
+            assert!(
+                check_downgrade("0.9.1", requested, false).is_ok(),
+                "{requested}"
+            );
+        }
+    }
+
+    #[test]
+    fn removing_the_scheduler_touches_only_the_agent_it_finds() {
+        let home = tempfile::tempdir().unwrap();
+        let mut unloaded = false;
+        assert!(!remove_scheduler_with(home.path(), |_| unloaded = true).unwrap());
+        assert!(!unloaded, "nothing to unload without the agent file");
+        let plist = scheduler_path(home.path());
+        std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        std::fs::write(&plist, "<plist/>").unwrap();
+        let mut seen = None;
+        assert!(remove_scheduler_with(home.path(), |path| seen = Some(path.to_owned())).unwrap());
+        assert!(!plist.exists());
+        assert_eq!(seen.is_some(), scheduler_supported());
+        // Something else in its place is refused and left alone.
+        let target = home.path().join("elsewhere.plist");
+        std::fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(&target, &plist).unwrap();
+        assert!(remove_scheduler_with(home.path(), |_| panic!("must not unload")).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    }
+
+    fn write_manifest(root: &Path, body: serde_json::Value) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = root.join("install.json");
+        std::fs::write(&path, body.to_string()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn install_records_must_use_the_installer_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        assert_eq!(install_record(&root).unwrap(), None);
+        let prefix = root.join("prefix");
+        write_manifest(
+            &root,
+            serde_json::json!({
+                "version": 1,
+                "installMethod": "release",
+                "prefix": prefix,
+                "helperPath": prefix.join("share/xcb/install-native.sh"),
+                "binaryPath": prefix.join("bin/xcb"),
+            }),
+        );
+        assert_eq!(
+            install_record(&root).unwrap(),
+            Some(InstallRecord {
+                manifest: root.join("install.json"),
+                prefix: prefix.clone(),
+                helper: prefix.join("share/xcb/install-native.sh"),
+                binary: prefix.join("bin/xcb"),
+            })
+        );
+        // An older manifest without binaryPath means <prefix>/bin/xcb.
+        write_manifest(
+            &root,
+            serde_json::json!({"prefix": prefix, "helperPath": prefix.join("share/xcb/install-native.sh")}),
+        );
+        assert_eq!(
+            install_record(&root).unwrap().unwrap().binary,
+            prefix.join("bin/xcb")
+        );
+        // A record pointing anywhere else is never trusted for removal.
+        for binary in ["/usr/bin/xcb", "/etc/passwd"] {
+            write_manifest(
+                &root,
+                serde_json::json!({"prefix": prefix, "helperPath": prefix.join("share/xcb/install-native.sh"), "binaryPath": binary}),
+            );
+            assert!(install_record(&root).is_err(), "{binary}");
+        }
+        write_manifest(
+            &root,
+            serde_json::json!({"prefix": "relative", "helperPath": "relative/share/xcb/install-native.sh"}),
+        );
+        assert!(install_record(&root).is_err());
+    }
 
     #[test]
     fn release_selection_requires_platform_binary_and_checksum() {

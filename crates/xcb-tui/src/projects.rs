@@ -97,7 +97,8 @@ impl App {
             "" => {
                 let items = workspace_items(&self.view.workspaces, false);
                 if items.is_empty() {
-                    self.notice = "No known projects yet. /workspace add <dir> admits one.".into();
+                    self.notice =
+                        "No known projects yet. /workspace add <dir> registers one.".into();
                 } else {
                     self.picker("Focus a project", items);
                 }
@@ -130,7 +131,7 @@ impl App {
                     }
                     None => {
                         self.notice =
-                            "No held task to start. /workspace go <task> names one.".into()
+                            "No waiting task to start. /workspace go <task> names one.".into()
                     }
                 }
             }
@@ -195,7 +196,7 @@ impl App {
         }
     }
 
-    /// A picked project: admit a new one, focus it, then resend the draft
+    /// A picked project: register a new one, focus it, then resend the draft
     /// the which-project question kept.
     pub(crate) fn pick_workspace(
         &mut self,

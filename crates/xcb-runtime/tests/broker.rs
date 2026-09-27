@@ -848,3 +848,57 @@ fn workspace_read_rejects_oversized_files_with_a_guided_tool_error() {
         .expect_err("oversized call");
     assert!(error.to_string().contains("exceeds the 128 KiB read limit"));
 }
+
+/// Devin shows `tools/list` to its model as indented JSON and moves any tool
+/// output over 10,000 characters into a file that only a denied native tool
+/// could read. The listing it receives stays well inside that limit while
+/// naming the same tools, the same required arguments, and every argument.
+#[test]
+fn compact_tool_listing_fits_devin_output_limit_and_matches_the_broker() {
+    use serde_json::{Value, json};
+    use xcb_runtime::broker::{compact_descriptors, descriptors};
+    let full = descriptors();
+    let compact = compact_descriptors();
+    assert_eq!(compact.len(), full.len());
+    for (full, compact) in full.iter().zip(&compact) {
+        let name = compact["name"].as_str().unwrap();
+        assert_eq!(full["name"], compact["name"]);
+        assert_eq!(compact["inputSchema"]["type"], "object");
+        let required = compact["inputSchema"]
+            .get("required")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        assert_eq!(required, full["inputSchema"]["required"], "{name}");
+        let description = compact["description"].as_str().unwrap();
+        assert!(
+            !description.is_empty() && description.len() <= 400,
+            "{name}"
+        );
+        for argument in full["inputSchema"]["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+        {
+            assert!(
+                description.contains(argument.as_str()),
+                "{name} description omits {argument}"
+            );
+        }
+    }
+    let result = serde_json::to_vec(&json!({"tools": compact})).unwrap();
+    assert!(
+        result.len() <= 4096,
+        "tools/list result is {} bytes",
+        result.len()
+    );
+    // The shape Devin's mcp_list_tools prints for one server.
+    let shown = serde_json::to_string_pretty(&json!([{
+        "server_name": "xcb", "tools": compact, "resources": Value::Array(vec![]),
+    }]))
+    .unwrap();
+    assert!(
+        shown.len() <= 6144,
+        "mcp_list_tools output is {} characters",
+        shown.len()
+    );
+}

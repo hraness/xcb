@@ -2608,7 +2608,7 @@ impl ManagedStore {
             } else {
                 format!(
                     "Started **{}**. I’ll keep it moving in the background and bring back results or a specific question.",
-                    task.title
+                    task.title.trim_end_matches(['.', '!', '?'])
                 )
             },
             Some(&task.id),
@@ -3681,6 +3681,12 @@ impl ManagedStore {
             }
             _ => false,
         };
+        // A completed turn with no reply and no file changes stopped short.
+        // It never records `completed`; unless continuation picked it up
+        // above, it waits for the user's reply in the same session.
+        let silent = result
+            .as_ref()
+            .is_ok_and(|outcome| xcb_core::policy::no_reply(&outcome.text, &outcome.facts));
         let mut next = task.clone();
         // A run that produced an outcome provably appended the prompt it was
         // handed: this session's transcript now carries the task context and
@@ -3722,7 +3728,8 @@ impl ManagedStore {
             }
             // A cancel that lands after the worker already completed does not
             // un-complete the settled turn; the completion arm below records it.
-            Ok(outcome) if task.cancel_requested && !settled_completion(outcome) => (
+            // A turn that stopped short without a reply did not complete.
+            Ok(outcome) if task.cancel_requested && (silent || !settled_completion(outcome)) => (
                 TaskState::Cancelled,
                 "worker cancellation settled".into(),
                 Some(outcome.text.clone()),
@@ -3742,7 +3749,7 @@ impl ManagedStore {
                 if next.attempts < task.max_attempts { "dispatch did not cross the provider boundary; inbox input is queued again within the existing attempt budget" } else { "inbox delivery did not cross the provider boundary; repair the route and reply to retry" }.into(),
                 Some(outcome.text.clone()),
             ),
-            Ok(outcome) if !pending_inbox.is_empty() && settled_completion(outcome) && !task.cancel_requested => (
+            Ok(outcome) if !pending_inbox.is_empty() && settled_completion(outcome) && !silent && !task.cancel_requested => (
                 TaskState::NeedsInput,
                 "inbox guidance is held: automatic continuation is disabled, its budget is exhausted, project authority is unavailable, or continuation was vetoed; reply explicitly to resume".into(),
                 Some(outcome.text.clone()),
@@ -3752,11 +3759,12 @@ impl ManagedStore {
                     State::NeedsAnswer | State::NeedsAction | State::NeedsApproval => {
                         TaskState::NeedsInput
                     }
-                    State::Idle if settled_completion(outcome) => TaskState::Completed,
+                    State::Idle if settled_completion(outcome) && !silent => TaskState::Completed,
                     // An interrupted but settled worker whose automatic
                     // continuation budget ran out is not a failure: the user
-                    // renews the budget by replying.
-                    State::Idle if budget_exhausted => TaskState::NeedsInput,
+                    // renews the budget by replying. Neither is a turn that
+                    // stopped short without a reply.
+                    State::Idle if budget_exhausted || silent => TaskState::NeedsInput,
                     State::Cancelled => TaskState::Cancelled,
                     State::Uncertain => TaskState::Uncertain,
                     _ => TaskState::Failed,
@@ -3764,6 +3772,9 @@ impl ManagedStore {
                 let detail = match state {
                     TaskState::NeedsInput if budget_exhausted => {
                         "automatic continuation budget exhausted; reply to continue"
+                    }
+                    TaskState::NeedsInput if silent => {
+                        "the worker ended its turn without a reply or file changes; reply to continue"
                     }
                     TaskState::NeedsInput => "the worker needs your input",
                     TaskState::Completed => {
@@ -9420,6 +9431,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(held.state, TaskState::Completed);
+    }
+
+    /// A worker turn that completes without a reply or file changes stopped
+    /// short. It waits for the user's reply instead of reading as a finished
+    /// task, while a quiet turn that did change files still completes.
+    #[tokio::test]
+    async fn a_turn_without_a_reply_or_changes_waits_for_the_user() {
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let mut silent = worked_outcome(" \n", 1);
+        silent.facts.effects = EffectState::None;
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_silent").await;
+        let running = mark_running(&managed, &task).await;
+        let waiting = managed.finish(&xcb, &running.id, Ok(silent)).await.unwrap();
+        assert_eq!(waiting.state, TaskState::NeedsInput);
+        assert_eq!(waiting.attention, Some(State::NeedsAnswer));
+        assert!(
+            waiting.detail.contains("without a reply or file changes"),
+            "{}",
+            waiting.detail
+        );
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_quiet").await;
+        let running = mark_running(&managed, &task).await;
+        let quiet = managed
+            .finish(&xcb, &running.id, Ok(worked_outcome("", 1)))
+            .await
+            .unwrap();
+        assert_eq!(quiet.state, TaskState::Completed);
     }
 
     #[test]

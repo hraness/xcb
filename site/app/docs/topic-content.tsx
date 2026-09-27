@@ -544,7 +544,7 @@ EOF`}</Code>
         [<code key="c">busy</code>, "The pinned account is running another task.", "Try later or pin another account."],
         [<code key="c">deadline</code>, <>Your <code>timeoutMs</code> expired and the turn was cancelled.</>, "Retry with more time."],
         [<code key="c">cancelled</code>, "The turn was cancelled by SIGINT or SIGTERM.", "Retry if you still want the result."],
-        [<code key="c">provider_error</code>, <>The turn failed or hit a usage limit; <code>outcome.failure</code> says which, such as <code>account_quota</code>.</>, "Send it again; xcb skips accounts at a known limit."],
+        [<code key="c">provider_error</code>, <>The turn failed, hit a usage limit, or ended without a reply or file changes; <code>outcome.failure</code> says which, such as <code>account_quota</code> or <code>no_reply</code>.</>, "Send it again; xcb skips accounts at a known limit. After no_reply, try another model."],
         [<code key="c">needs_input</code>, <>The provider stopped with a question, in <code>text</code>.</>, <>Answer in a new request, or reopen <code>session</code>.</>],
         [<code key="c">custody_unproven</code>, "xcb couldn’t confirm the provider stopped, so it keeps the account held.", <>Don’t retry on that account; run <code>xcb recover</code>.</>],
       ]} />

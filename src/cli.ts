@@ -37,7 +37,7 @@ Usage:
   xcb-compat auth devin        sign in with your Devin account
   xcb-compat auth status       show stored sign-in state
   xcb-compat auth logout [p]   remove the stored credential (default: claude)
-  xcb-compat doctor            inspect provider binaries and admit this runtime
+  xcb-compat doctor            check provider binaries and record the ones this build can run
   xcb-compat sessions          list local sessions
   xcb-compat sessions rm <id>  remove one session and its transcript
   xcb-compat sessions prune    remove sessions idle over 30 days (or N days)
