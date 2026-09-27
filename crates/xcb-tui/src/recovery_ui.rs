@@ -232,7 +232,7 @@ impl App {
             return;
         }
         if view_context(&self.view).as_ref() == Some(&context)
-            && self.composer.text().is_empty()
+            && self.composer.is_empty()
             && self.attachments.is_empty()
             && !self.pending_image
             && self.composer_target == target
@@ -417,7 +417,7 @@ impl App {
                 if self.unbound_matches_loaded_workspace(&value)
                     && view_context(&self.view).is_some()
                 {
-                    if !self.composer.text().is_empty()
+                    if !self.composer.is_empty()
                         || !self.attachments.is_empty()
                         || self.pending_image
                     {
@@ -559,7 +559,7 @@ impl App {
             );
             return false;
         }
-        if !self.composer.text().is_empty() || !self.attachments.is_empty() || self.pending_image {
+        if !self.composer.is_empty() || !self.attachments.is_empty() || self.pending_image {
             self.notice =
                 "Current input is newer. Finish or clear it before recovering another draft."
                     .into();

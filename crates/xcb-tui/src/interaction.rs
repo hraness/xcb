@@ -225,7 +225,7 @@ impl App {
             KeyCode::Left | KeyCode::Right
                 if alt
                     && self.managed_mode()
-                    && self.composer.text().is_empty()
+                    && self.composer.is_empty()
                     && self.attachments.is_empty()
                     && !self.pending_image =>
             {
@@ -252,7 +252,7 @@ impl App {
                     );
                 }
             }
-            KeyCode::Tab if !self.composer.text().starts_with('/') && self.managed_mode() => {
+            KeyCode::Tab if !self.composer.first_line().starts_with('/') && self.managed_mode() => {
                 let text = self.composer.text();
                 self.targeted_submit(text, true, output);
             }
@@ -597,7 +597,7 @@ impl App {
                     .is_some_and(|target| target.answer_revision.is_some())
                 && view_context(&self.view).as_ref() == Some(&pending.context)
                 && self.composer_target == pending.target
-                && self.composer.text().is_empty()
+                && self.composer.is_empty()
                 && self.attachments.is_empty()
                 && !self.pending_image
                 && let Some(target) = &mut self.composer_target
@@ -620,7 +620,7 @@ impl App {
         let context = pending.as_ref().expect("matched operation").context.clone();
         self.composer.remember(&text);
         if view_context(&self.view).as_ref() == Some(&context)
-            && self.composer.text().is_empty()
+            && self.composer.is_empty()
             && self.attachments.is_empty()
             && !self.pending_image
             && self.composer_target == pending.as_ref().and_then(|entry| entry.target.clone())
@@ -714,7 +714,7 @@ impl App {
             self.notice = "Waiting for earlier input acknowledgements.".into();
             return;
         }
-        if !self.composer.text().is_empty() || !self.attachments.is_empty() {
+        if !self.composer.is_empty() || !self.attachments.is_empty() {
             self.notice = "Clear or save the current draft before recalling queued input.".into();
             return;
         }
@@ -765,7 +765,7 @@ impl App {
             .remove(pending.expect("checked pending recall"));
         self.composer.remember(&text);
         if view_context(&self.view).as_ref() == Some(&context)
-            && self.composer.text().is_empty()
+            && self.composer.is_empty()
             && self.attachments.is_empty()
             && !self.pending_image
             && self.composer_target.is_none()

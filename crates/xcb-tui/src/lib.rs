@@ -1063,7 +1063,7 @@ pub struct App {
     slash_selected: Cell<usize>,
     /// Esc closes the menu without canceling the turn; typing reopens it.
     slash_dismissed: Cell<bool>,
-    /// Composer text the menu state belongs to; any edit resets selection.
+    /// Command token the menu state belongs to; any edit resets selection.
     slash_text: std::cell::RefCell<String>,
     /// Per-frame render state: wrapped transcript rows per message, the
     /// streaming tail's last wrap, and textarea viewport mirrors. Interior
@@ -1205,13 +1205,20 @@ impl App {
     pub fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }
+    /// The draft while it can still be a command name: one line of at most
+    /// 64 bytes, starting with `/` and holding no whitespace. Reading only
+    /// that much keeps the per-key menu check cheap for a large draft.
+    fn slash_token(&self) -> Option<&str> {
+        self.composer
+            .short_text(64)
+            .filter(|text| text.starts_with('/') && !text.contains(char::is_whitespace))
+    }
     /// Commands matching the composer's current `/` prefix, in menu order. The
     /// menu only covers the command token — typing a space closes it.
     pub fn slash_matches(&self) -> Vec<&'static SlashCommand> {
-        let text = self.composer.text();
-        if !text.starts_with('/') || text.contains(char::is_whitespace) || text.len() > 64 {
+        let Some(text) = self.slash_token() else {
             return Vec::new();
-        }
+        };
         const MANAGED: &[&str] = &[
             "/detach",
             "/resume",
@@ -1263,28 +1270,25 @@ impl App {
         let mut matches: Vec<_> = SLASH_COMMANDS
             .iter()
             .filter(|command| available(command))
-            .filter(|command| command.name.starts_with(&text))
+            .filter(|command| command.name.starts_with(text))
             .collect();
         matches.sort_by_key(|command| command.name);
         matches
     }
     /// The open typeahead menu as `(matches, selected)`, if any. Lazily resyncs
-    /// menu state against the live composer text so any edit — typed, pasted,
+    /// menu state against the live command token so any edit — typed, pasted,
     /// or a restored draft — resets selection and un-dismisses the menu.
     pub fn slash_menu(&self) -> Option<(Vec<&'static SlashCommand>, usize)> {
-        let text = self.composer.text();
-        if *self.slash_text.borrow() != text {
-            *self.slash_text.borrow_mut() = text;
+        let token = self.slash_token().unwrap_or_default();
+        if *self.slash_text.borrow() != token {
+            *self.slash_text.borrow_mut() = token.to_owned();
             self.slash_selected.set(0);
             self.slash_dismissed.set(false);
         }
-        let matches = self.slash_matches();
-        if self.slash_dismissed.get()
-            || !self.composer.text().starts_with('/')
-            || self.composer.text().contains(char::is_whitespace)
-        {
+        if token.is_empty() || self.slash_dismissed.get() {
             return None;
         }
+        let matches = self.slash_matches();
         Some((
             matches.clone(),
             self.slash_selected
@@ -1331,7 +1335,7 @@ impl App {
     fn restore_draft(&mut self, text: String, attachments: Vec<Attachment>) {
         // A composer the user already started typing into is never clobbered;
         // the rejected text stays recoverable from prompt history.
-        if self.composer.text().is_empty() {
+        if self.composer.is_empty() {
             self.composer.set_text(&text);
         }
         for attachment in attachments {
@@ -1370,7 +1374,7 @@ impl App {
                         .or(pending.session);
                     self.composer.remember(&text);
                     if context == view_context(&self.view)
-                        && self.composer.text().is_empty()
+                        && self.composer.is_empty()
                         && self.attachments.is_empty()
                         && self.composer_target.is_none()
                         && !self.pending_image
@@ -1449,7 +1453,7 @@ impl App {
                     // the context being opened. A delayed initial view must not
                     // erase part of a command or an attachment typed meanwhile.
                     let preserve_unbound_input = previous.is_none()
-                        && (!self.composer.text().is_empty() || !self.attachments.is_empty());
+                        && (!self.composer.is_empty() || !self.attachments.is_empty());
                     // The draft belongs to the conversation or session it was typed in:
                     // stash it and restore the target context's own draft.
                     if let Some(previous) = previous {
@@ -2436,7 +2440,7 @@ impl App {
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                 // Clear a draft before interrupting work; quit only
                 // after the composer is empty and no work can stop.
-                if !self.composer.text().is_empty() {
+                if !self.composer.is_empty() {
                     self.composer.clear_to_history();
                     self.notice =
                         "Draft cleared (Ctrl-R restores). Press Ctrl-C again to quit.".into();
@@ -2450,7 +2454,7 @@ impl App {
             }
             match key.code {
                 KeyCode::Char('?')
-                    if self.composer.text().is_empty()
+                    if self.composer.is_empty()
                         && !key
                             .modifiers
                             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -2481,13 +2485,13 @@ impl App {
                     if key
                         .modifiers
                         .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL)
-                        || self.composer.text().is_empty() =>
+                        || self.composer.is_empty() =>
                 {
                     self.paused.set(false);
                     self.scroll.set(0);
                     return true;
                 }
-                KeyCode::Tab if self.composer.text().starts_with('/') => {
+                KeyCode::Tab if self.composer.first_line().starts_with('/') => {
                     // The menu is open iff matches exist and it is not
                     // dismissed; a dismissed menu leaves Tab a no-op.
                     return true;
@@ -2693,7 +2697,7 @@ impl App {
                     self.composer.set_text(&text);
                 }
             }
-            self.notice = if self.composer.text().is_empty() {
+            self.notice = if self.composer.is_empty() {
                 "Dialog closed. Press Ctrl-C again to quit."
             } else {
                 "Dialog closed; draft kept. Ctrl-C again clears it (Ctrl-R restores)."
@@ -2708,7 +2712,7 @@ impl App {
             self.modal = None;
             // `?` opened help from an empty composer, so a second `?` means
             // the character itself was wanted.
-            if std::mem::take(&mut self.help_via_question) && self.composer.text().is_empty() {
+            if std::mem::take(&mut self.help_via_question) && self.composer.is_empty() {
                 self.composer.handle(Event::Paste("?".into()));
             }
             return true;
@@ -3737,5 +3741,38 @@ mod quota_display_tests {
         let healthy = fingerprint_at(&view, 0);
         view.accounts[0].authentication_required = true;
         assert_ne!(healthy, fingerprint_at(&view, 0));
+    }
+}
+
+#[cfg(test)]
+mod keystroke_tests {
+    use super::*;
+    use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn keys_and_frames_on_a_full_draft_never_join_it() {
+        let (tx, _rx) = sync_channel(4);
+        let mut app = App::default();
+        let row = format!("{}\n", "word ".repeat(12).trim_end());
+        app.composer
+            .set_text(&row.repeat((composer::MAX_INPUT - 64) / row.len()));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        composer::JOINS.with(|joins| joins.set(0));
+        for code in [
+            KeyCode::Char('/'),
+            KeyCode::Char('x'),
+            KeyCode::Backspace,
+            KeyCode::Backspace,
+            KeyCode::Left,
+            KeyCode::End,
+            KeyCode::Up,
+        ] {
+            app.handle(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)), &tx);
+            terminal
+                .draw(|frame| render::draw(frame, &mut app, 0))
+                .unwrap();
+        }
+        assert_eq!(composer::JOINS.with(std::cell::Cell::get), 0);
     }
 }
