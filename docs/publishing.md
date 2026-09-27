@@ -137,7 +137,8 @@ bytes:
 
 Every later `v*` tag is then unattended: the preflight proves the OIDC
 exchange in a dry run, the writer publishes the exact reviewed tarball
-with provenance, and admission verifies the registry bytes, npm `latest`,
+with provenance and waits up to 15 minutes for npm to serve it, and
+admission verifies the registry bytes, npm `latest`,
 the trusted-publisher identity, and the Sigstore certificate bound to this
 repository, workflow, tag, and run.
 
@@ -226,7 +227,8 @@ After public release verification passes, set:
 
 At least one of `archiveUrl` or a native entry is required once `version` is
 set. The site then renders "latest verified release: v<version>" with the
-per-platform native download and checksum links and the verification run.
+verification run, and `/install.sh` installs that version. The site offers no
+browser downloads; the one-line installer verifies each archive's checksum.
 
 Verify the actual assets — the packed manifest (`name: @hraness/xcb`, matching
 version), each native archive's checksum, and provenance — before changing the

@@ -21,6 +21,9 @@ import {
 } from "./release-distribution-policy.ts";
 import { trustedPublishingEnvironment } from "./release-process-environment.ts";
 
+/** How long a publish waits for npm to serve the new version as latest. */
+const NPM_VISIBILITY_WINDOW_MILLISECONDS = 15 * 60_000;
+
 export type NpmWriterTransition = "observe_existing" | "publish";
 
 export function chooseNpmWriterTransition(
@@ -410,10 +413,12 @@ async function main(): Promise<void> {
 
     let observed: CompleteRelease | null = null;
     let lookupFailure: unknown;
-    const deadline = Date.now() + 180_000;
+    // npm can take several minutes to show a trusted-publisher version: the
+    // v0.10.0 publish became readable about five minutes after npm exited.
+    const deadline = Date.now() + NPM_VISIBILITY_WINDOW_MILLISECONDS;
     let attempt = 0;
     while (Date.now() < deadline) {
-      if (attempt > 0) await Bun.sleep(3_000);
+      if (attempt > 0) await Bun.sleep(10_000);
       attempt += 1;
       try {
         const candidate = await lookupCompleteRelease();
