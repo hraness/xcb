@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { articleProvenanceFromAdmission, articleProvenanceSentence } from "@hraness/design-kit";
 
 import { blogPostPath, blogPosts, indexableBlogPosts } from "../app/blog/posts";
 import { publishedRelease } from "../app/publication";
@@ -167,7 +168,8 @@ describe("built xcb site", () => {
       for (const entry of blogPosts) {
         const path = blogPostPath(entry);
         const body = documents.get(path) ?? await (await fetch(`${server.origin}${path}`)).text();
-        expect(body).toContain("Drafted with AI from the source code and reviewed by");
+        // The visible drafting and review note matches the post's own review record.
+        expect(body).toContain(articleProvenanceSentence(articleProvenanceFromAdmission(entry.admission)));
         const noindex = /<meta name="robots" content="noindex/u.test(body);
         expect(noindex).toBe(entry.admission.lifecycle !== "indexable");
         if (entry.admission.lifecycle !== "indexable") {
@@ -176,6 +178,11 @@ describe("built xcb site", () => {
           expect(documents.get("/blog")).not.toContain(`href="${path}"`);
         }
       }
+
+      // The renamed introduction's old URL redirects permanently to the new post.
+      const retired = await fetch(`${server.origin}/blog/introducing-xcb`, { redirect: "manual" });
+      expect(retired.status).toBe(308);
+      expect(new URL(retired.headers.get("location") ?? "", server.origin).pathname).toBe("/blog/introducing-excalibur");
     } finally {
       await stopBuiltSite(server);
     }
