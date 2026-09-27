@@ -22,7 +22,7 @@ export const blogDescription = "How xcb routes coding tasks across your Claude, 
 export const blogAuthor: ArticleAuthor = { kind: "organization", name: "Hraness" };
 
 const reviewer = "Claude Opus 5.5 (claude-opus-5-5) editorial review";
-const reviewedOn: ArticleIsoDate = "2026-09-24";
+const reviewedOn: ArticleIsoDate = "2026-09-26";
 const checkedOn: ArticleIsoDate = "2026-09-24";
 
 /** Sources pinned to the commits the fact check read. */
@@ -123,7 +123,7 @@ export const blogPosts: readonly BlogPost[] = [
   post({
     slug: "how-xcb-uses-gobstopper",
     title: "How xcb uses Gobstopper to trim stale tool output",
-    dek: "Once a Claude Code or Codex session passes a size threshold, xcb uses Gobstopper to replace old tool output in the prompt with a short marker and keeps the original locally.",
+    dek: "Past a size threshold, xcb uses Gobstopper to swap old tool output in Claude Code and Codex prompts for a short marker, keeping the original locally.",
     eyebrow: "Integration",
     published: "2026-09-24",
     keywords: ["xcb", "Gobstopper", "context management", "coding agents", "Claude Code", "Codex"],
@@ -217,7 +217,7 @@ export const blogPosts: readonly BlogPost[] = [
   post({
     slug: "how-xcb-uses-algal",
     title: "How xcb uses ALGAL for reflexes your replies must certify",
-    dek: "xcb's continuation reflexes run as small ALGAL programs and, by default, act only after your own replies certify them, with about one turn in ten still left for you to answer.",
+    dek: "xcb's reflexes run as small ALGAL programs that, by default, act only after your own replies certify them, leaving about one turn in ten to you.",
     eyebrow: "Integration",
     published: "2026-09-24",
     keywords: ["xcb", "ALGAL", "reflexes", "coding agents", "routing", "replay"],

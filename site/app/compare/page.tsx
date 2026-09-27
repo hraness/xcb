@@ -4,8 +4,8 @@ import { AskAiAboutThis } from "@hraness/ui";
 import { SiteHeader } from "../site-header";
 import { socialImages } from "../social";
 
-const title = "Compare xcb with coding agents and developer tools";
-const description = "See where xcb fits alongside Claude Code, Codex, OpenCode, and Devin. Compare product focus, workflows, and current limits.";
+const title = "xcb vs Claude Code, Codex, Devin, and agent workspaces";
+const description = "xcb sends coding tasks to your own Claude, Codex, and Devin accounts. See when it fits and when OpenRouter, Conductor, or a provider’s tool fits better.";
 
 export const metadata: Metadata = {
   title,
@@ -26,9 +26,9 @@ export default function Compare() {
             className="xcb-compare-hero"
             eyebrow="How xcb compares"
             name=""
-            heading="Choose the layer you need."
+            heading="How xcb compares with coding agents and agent tools"
             headingId="compare-title"
-            summary="Some tools give you a coding agent. Others help you build an agent system. xcb routes work across the coding-agent accounts you already have."
+            summary="Most tools on this page give you a coding agent or a place to run several at once. xcb decides which of your Claude, Codex, and Devin accounts runs each task, so it often sits beside them rather than replacing them."
             actions={[{ href: "/docs/getting-started", label: "Try the source preview" }, { href: "/docs/providers", label: "Check provider support" }]}
             boundary="xcb picks one of your accounts and a model, runs the task, and keeps that account locked until the provider process has exited. Your providers’ access rules and usage limits still apply."
           />
@@ -39,7 +39,7 @@ export default function Compare() {
             headingId="approaches-title"
             summary="Start with the workflow you want. These products overlap, and you may use more than one."
           >
-            <p className="xcb-compare-reviewed">Updated <time dateTime="2026-09-23">September 23, 2026</time>. Product descriptions link to official documentation. This is a comparison of focus, not a performance ranking.</p>
+            <p className="xcb-compare-reviewed">Updated <time dateTime="2026-09-23">September 23, 2026</time>. Each row links to the product’s own site or documentation, and the “When it fits” column is our reading of it.</p>
             <p className="xcb-compare-scroll-hint" id="comparison-scroll-hint">On a small screen, scroll the table sideways to compare each approach.</p>
             <div className="xcb-comparison-scroll" role="region" aria-labelledby="comparison-caption" aria-describedby="comparison-scroll-hint" tabIndex={0}>
               <table className="xcb-comparison-table">
@@ -61,7 +61,7 @@ export default function Compare() {
                   <tr>
                     <th scope="row"><span className="xcb-comparison-name">OpenRouter</span><span className="xcb-comparison-kind">Multi-provider model API</span></th>
                     <td><p>One OpenAI-compatible endpoint, API key, and bill in front of hundreds of models from dozens of providers, billed per token, with model and provider routing and automatic fallbacks.</p><div className="xcb-comparison-sources"><a href="https://openrouter.ai">OpenRouter</a><a href="https://openrouter.ai/blog/insights/model-routing">Routing guide</a></div></td>
-                    <td><p>You want metered API access to many models inside one app, or a fallback chain across providers. xcb instead routes whole coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.</p><a href="/compare/openrouter">xcb compared with OpenRouter →</a></td>
+                    <td><p>You want metered API access to many models inside one app, or a fallback chain across providers. xcb instead routes whole coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.</p><a href="/compare/openrouter">xcb vs OpenRouter →</a></td>
                   </tr>
                   <tr>
                     <th scope="row"><span className="xcb-comparison-name">Superset</span><span className="xcb-comparison-kind">Agent workspace</span></th>
@@ -91,7 +91,7 @@ export default function Compare() {
                   <tr>
                     <th scope="row"><span className="xcb-comparison-name">Claude Code &amp; Codex</span><span className="xcb-comparison-kind">Provider coding tools</span></th>
                     <td><p>Work directly in a provider’s coding experience. Claude Code includes file editing, commands, integrations, and agent delegation. Codex offers its CLI, IDE extension, and cloud app surfaces for delegated tasks.</p><div className="xcb-comparison-sources"><a href="https://code.claude.com/docs/en/overview">Claude Code docs</a><a href="https://github.com/openai/codex">Codex source &amp; docs</a><a href="https://developers.openai.com/codex/app">Codex app</a></div></td>
-                    <td><p>You want that provider’s full native experience. xcb wraps the exact supported provider runtimes with its own tools and terminal; it does not reproduce every provider feature.</p></td>
+                    <td><p>You want that provider’s full native experience. xcb runs supported builds of those tools with its own tools and terminal, and does not reproduce every provider feature.</p></td>
                   </tr>
                   <tr>
                     <th scope="row"><span className="xcb-comparison-name">OpenCode</span><span className="xcb-comparison-kind">Multi-provider coding agent</span></th>
@@ -111,21 +111,20 @@ export default function Compare() {
                 </tbody>
               </table>
             </div>
-            <p className="xcb-compare-note">This page focuses on user-facing coding tools. xcb is a local subscription router around those tools, not a general-purpose multi-agent task graph. The fit guidance is our interpretation of documented capabilities; it does not claim that other tools lack account controls, customization, local storage, or parallel work.</p>
           </MarketingSection>
 
           <MarketingSection
             id="fit"
-            heading="Make the choice concrete."
+            heading="When to use xcb and when to use something else"
             headingId="fit-title"
             layout="split"
             summary="xcb is for developers, and the agents they run, who want each coding task sent to one of their own accounts with a record of where it ran."
           >
             <div className="xcb-comparison-fit">
               <div><h3>Choose xcb to spread tasks across your accounts.</h3><p>Send a task with the JSON command and you get back the account and model xcb chose, a session you can resume, and how the run ended. The account stays locked until the provider process has exited.</p></div>
-              <div><h3>Keep provider tools for their full capabilities.</h3><p>The tested Claude and Codex setups passed coding workflows on macOS ARM64. xcb’s command runner currently uses offline Linux with prepared public dependencies and read-only Git inspection. Native macOS commands, Git commits, and pushes are outside that runner.</p></div>
-              <div><h3>Use orchestration tools for a task graph.</h3><p>xcb’s current evidence covers account concurrency and controlled continuation, not a general fleet of agents planning and merging parallel work. It selects observed, supported models; an unknown model name cannot activate a provider.</p></div>
-              <div><h3>Distinguish local state from local inference.</h3><p>xcb keeps its sessions and account state on your machine. Model requests still go to the selected provider. Subscription allowances remain separate, and unknown usage stays unknown.</p></div>
+              <div><h3>Use a provider’s own tool to commit, push, or build for macOS.</h3><p>xcb’s command runner uses offline Linux with prepared public dependencies and read-only Git inspection, so Git commits, pushes, and native macOS commands happen outside it. The tested Claude and Codex setups passed coding workflows on macOS on Apple silicon.</p></div>
+              <div><h3>Use an orchestration tool for a task graph.</h3><p>xcb has been tested running tasks on several accounts at once and continuing a stopped task automatically under its continuation rules. It is not a general fleet of agents planning and merging parallel work. It picks only supported models it has seen on your accounts, and an unknown model name cannot activate a provider.</p></div>
+              <div><h3>Expect local sessions, not local models.</h3><p>xcb keeps its sessions and account state on your machine. Model requests still go to the selected provider. Each subscription keeps its own allowance, and xcb does not guess usage it cannot see.</p></div>
               <a className="xcb-compare-guide-link" href="/docs/getting-started">Read the setup guide →</a>
             </div>
           </MarketingSection>

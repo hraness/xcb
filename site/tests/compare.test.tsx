@@ -60,7 +60,7 @@ test("comparison metadata and Ask AI target its canonical public URL", () => {
   expect(html.match(/<footer\b/gu)).toBeNull();
 });
 
-test("the OpenRouter comparison stays honest about the two layers", () => {
+test("the OpenRouter comparison is dated, sourced, and addressable", () => {
   const html = renderToStaticMarkup(<CompareOpenRouter />);
   const headings: string[] = [];
   const rows: string[] = [];

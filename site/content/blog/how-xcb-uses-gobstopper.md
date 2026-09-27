@@ -2,11 +2,11 @@ Two hours into a refactor, much of what your coding agent receives each turn can
 
 xcb handles this for Claude Code and Codex sessions with Gobstopper. When a session grows past a threshold, xcb applies Gobstopper's elision policy to the prompt it is about to send: old tool results become a one-line marker, the recent work stays word for word, and the original output stays in xcb's local history. It is on by default. Latest release: {{release.version}}.
 
-## Long sessions fill up with output nobody rereads
+## Most of a long prompt is old tool output
 
 A coding agent works by reading. It opens files, runs searches, lists directories and runs tests, and each result lands in the conversation. The model usually needs the conclusion from that output, which it already wrote down in its own reply, and rarely needs the raw text again.
 
-That raw text still counts against the context window. As a session grows, something eventually has to be cut or summarized, and the parts worth keeping are what you asked for, what was decided and the last few results.
+That raw text still counts against the context window. As a session grows, something has to be cut or summarized, and the parts worth keeping are what you asked for, what was decided, and the last few results.
 
 ## What Gobstopper is
 
@@ -14,7 +14,7 @@ That raw text still counts against the context window. As a session grows, somet
 
 Used on its own, Gobstopper also keeps a local archive of each transcript before it prepares a compacted copy, so you can search old sessions and read back a specific archived record when a summary leaves it out.
 
-xcb uses a smaller piece: Gobstopper's core library, pinned to a specific commit in xcb's build, and its elide strategy. On this path xcb neither runs the Gobstopper program nor uses its archive; it keeps its own history.
+xcb uses a smaller piece: Gobstopper's core library, pinned to one commit in xcb's build, and its elide strategy. On this path xcb neither runs the Gobstopper program nor uses its archive; it keeps its own history.
 
 ## How xcb applies the policy each turn
 
@@ -45,8 +45,6 @@ In place of each old result, the model sees this marker:
 ```
 
 When xcb elides anything, it tells you in the session: "Gobstopper elided N stale tool outputs in the prompt; history is retained."
-
-Three rules hold at any settings. Your messages and the agent's replies are never rewritten, only tool output. The saved session is never edited; each turn starts again from the saved history. And with the judge off, the same history and settings give the same prompt, because Gobstopper's rule uses no model.
 
 ### An optional second opinion
 
@@ -79,14 +77,14 @@ xcb plugins disable gobstopper
 xcb plugins enable gobstopper
 ```
 
-## What changes for you
+## What you notice in a long session
 
 - **Long sessions keep going without manual cleanup.** Once a session crosses the trigger, stale output drops out of the prompt without you running a command or starting a fresh session.
-- **What you said and what was decided stay put.** Your instructions and the agent's replies go into every prompt as written, and the newest results stay in full.
-- **The originals stay in local history.** The saved session still has every original tool result, so the history you review, export or replay is complete.
-- **The same input gives the same trim.** Without the judge, the same session and settings always trim the same messages. With the judge, it can only keep more.
+- **What you said and what was decided stay put.** Only tool output is rewritten. Your instructions and the agent's replies go into every prompt as written, and the newest results stay in full.
+- **The originals stay in local history.** xcb never edits the saved session, and each turn starts again from it, so the history you review, export, or replay has every original tool result.
+- **The same input gives the same trim.** Gobstopper's rule uses no model, so without the judge the same session and settings always trim the same messages. With the judge, it can only keep more.
 
-## Where it stops
+## What it does not cover
 
 This covers Claude Code and Codex sessions that xcb runs. Devin sessions are sent without elision. The sizes are estimates from byte counts, not the provider's token counts, and xcb reports no measured savings or effect on your bill. A smaller prompt is also not proof that the next turn goes better; Gobstopper's own documentation makes the same point about its compaction. Once an output is elided, the model sees only the marker, so if it needs that text again it has to run the tool again. You can still read the original in xcb's history.
 
