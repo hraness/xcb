@@ -4,7 +4,7 @@ import { docsTopics, type DocsSlug } from "./topics";
 
 export function DocsShell({ active, children }: { active?: DocsSlug; children: ReactNode }) {
   return (
-    <div className="xcb-docs" data-hraness-marketing-preset="editorial">
+    <div className="xcb-docs" data-hraness-marketing-preset="minimal">
       <SiteHeader active="docs" />
       <div className="xcb-docs-shell">
         <aside className="xcb-docs-sidebar">

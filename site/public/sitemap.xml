@@ -12,7 +12,13 @@
   </url>
   <url><loc>https://xcb.sh/compare</loc></url>
   <url><loc>https://xcb.sh/compare/openrouter</loc></url>
-  <url><loc>https://xcb.sh/download</loc></url>
+  <url><loc>https://xcb.sh/compare/herdr</loc></url>
+  <url><loc>https://xcb.sh/compare/pi</loc></url>
+  <url><loc>https://xcb.sh/compare/claude-code</loc></url>
+  <url><loc>https://xcb.sh/compare/conductor</loc></url>
+  <url><loc>https://xcb.sh/compare/claude-code-router</loc></url>
+  <url><loc>https://xcb.sh/compare/opencode</loc></url>
+  <url><loc>https://xcb.sh/install</loc></url>
   <url><loc>https://xcb.sh/reflexes</loc></url>
   <url><loc>https://xcb.sh/docs/getting-started</loc></url>
   <url><loc>https://xcb.sh/docs/how-routing-works</loc></url>

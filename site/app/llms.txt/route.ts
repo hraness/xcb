@@ -48,7 +48,7 @@ ${docsLines}
 ## Pages
 
 - [Overview](https://xcb.sh/): what xcb does, how it routes, and how to install it.
-- [Download](https://xcb.sh/download): native archives, checksums, and the source build.
+- [Install](https://xcb.sh/install): the one-line installer, first steps, a prompt for your agent, and the source build.
 - [Documentation](https://xcb.sh/docs): all guides, grouped for using xcb and building on it.
 - [Compare](https://xcb.sh/compare): how xcb compares with request routers, agent workspaces, provider coding tools, and managed task environments.
 - [xcb vs OpenRouter](https://xcb.sh/compare/openrouter): OpenRouter bills per token for API calls to many models; xcb sends each coding task to a Claude, Codex, or Devin subscription you already pay for.

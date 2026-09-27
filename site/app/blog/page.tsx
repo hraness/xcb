@@ -27,7 +27,7 @@ export default function Blog() {
     indexableBlogPosts.map(blogArticleDiscovery),
   );
   return (
-    <div data-hraness-marketing-preset="editorial" className="xcb-blog-page">
+    <div data-hraness-marketing-preset="minimal" className="xcb-blog-page">
       <SiteHeader active="blog" />
       <main id="main" tabIndex={-1}>
         <ArticleIndex

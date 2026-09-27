@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { articleProvenanceFromAdmission, articleProvenanceSentence } from "@hraness/design-kit";
 
 import { blogPostPath, blogPosts, indexableBlogPosts } from "../app/blog/posts";
+import { comparisons } from "../app/compare/comparisons";
 import { docsTopics } from "../app/docs/topics";
 import { publishedRelease } from "../app/publication";
 
@@ -130,7 +131,11 @@ describe("built xcb site", () => {
 
       // Follow every local link across the actual built public pages. Broken
       // doc routes or fragments must fail before publishing the marketing site.
-      const paths = ["/", "/compare", "/reflexes", "/download", "/docs", ...docsTopics.map((topic) => `/docs/${topic.slug}`), "/blog", ...indexableBlogPosts.map(blogPostPath)];
+      const paths = ["/", "/install", "/compare", ...comparisons.map((entry) => `/compare/${entry.slug}`), "/reflexes", "/docs", ...docsTopics.map((topic) => `/docs/${topic.slug}`), "/blog", ...indexableBlogPosts.map(blogPostPath)];
+      // Downloads moved to the install page; the old URL keeps working.
+      const download = await fetch(`${server.origin}/download`, { redirect: "manual" });
+      expect(download.status).toBe(308);
+      expect(new URL(download.headers.get("location") ?? "", server.origin).pathname).toBe("/install");
       const documents = new Map<string, string>();
       for (const path of paths) {
         const response = await fetch(`${server.origin}${path}`, { redirect: "manual" });

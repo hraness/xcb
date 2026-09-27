@@ -4,11 +4,11 @@ import { DesignPaletteProvider, ThemeColorSync } from "@hraness/design-kit/react
 import { HranessSiteFooter } from "@hraness/site-footer/react";
 import { siteDefaultPalette } from "../palette";
 import { supportProfile } from "../../src/support-profile";
-import { FoilController } from "./foil-controller";
 import "./globals.css";
 import "./docs/docs.css";
 import "./compare/compare.css";
 import "./blog/blog.css";
+import "./calm.css";
 
 /**
  * Tokyo Night is the site's own palette; the initial class supplies its compiled
@@ -60,7 +60,7 @@ export default function RootLayout({
       data-hraness-theme="paper"
       data-hraness-material="lantern"
       data-palette="tokyo-night"
-      data-hraness-pattern="mesh"
+      data-hraness-pattern="none"
       className={initialPalette.className}
       suppressHydrationWarning
     >
@@ -76,7 +76,6 @@ export default function RootLayout({
           <div className="network-footer">
             <HranessSiteFooter placement="flow" mailingList={{ kind: "none" }} support={supportProfile} />
           </div>
-          <FoilController />
         </DesignPaletteProvider>
       </body>
     </html>

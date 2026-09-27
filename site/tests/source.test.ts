@@ -81,24 +81,17 @@ describe("xcb site source contract", () => {
   });
 
   test("sets headings in the sans text face from the shared level tokens", async () => {
-    const [globals, docs, compare, home, field] = await Promise.all([
+    const [globals, docs, compare, calm] = await Promise.all([
       read("app/globals.css"),
       read("app/docs/docs.css"),
       read("app/compare/compare.css"),
-      read("app/page.tsx"),
-      read("app/hero-field.tsx"),
+      read("app/calm.css"),
     ]);
     expect(globals).toContain('@import "@hraness/design-kit/typography.css"');
-    // The preset declares its serif on each preset element, so the sans
-    // override must be declared there too, not only on :root.
-    expect(globals).toMatch(/:root,\s*\[data-hraness-marketing-preset="editorial"\]\s*\{\s*--hraness-marketing-display-font: var\(--font-text\);/u);
-    expect(globals).toContain(".xcb-interface-grid h3, .xcb-download-platforms h3 { margin: 0 0 .5rem; font-family: var(--hraness-type-h3-font); font-size: var(--hraness-type-h3-size);");
     for (const level of ["h1", "h2", "h3"]) expect(docs).toContain(`font-size: var(--hraness-type-${level}-size)`);
-    expect(compare).toContain("font-size: var(--hraness-type-h3-size)");
-    for (const css of [globals, docs, compare]) expect(css).not.toMatch(/\bh[1-4][^{]*\{[^}]*font: 500 1\.05rem/u);
-    // The hero field is decorative (aria-hidden), so its note titles are not headings.
-    expect(field).not.toContain("<h3");
-    expect(home).not.toContain("relationship:");
+    for (const level of ["h1", "h2", "h3"]) expect(calm).toContain(`font-size: var(--hraness-type-${level}-size)`);
+    for (const css of [globals, docs, compare, calm]) expect(css).not.toMatch(/\bh[1-4][^{]*\{[^}]*font: 500 1\.05rem/u);
+    expect(calm).toContain('[data-hraness-marketing-preset="minimal"]');
   });
 
   test("keeps the sitemap and robots on the canonical origin", async () => {
@@ -190,7 +183,7 @@ test("publication metadata fails closed without an exact xcb artifact and verifi
   expect(parsePublishedRelease(fixture)).toEqual(valid);
 });
 
-test("publication Markdown includes only verified native and compatibility artifacts", async () => {
+test("publication Markdown names the verified release without offering a browser download", async () => {
   const release = parsePublishedRelease(JSON.parse(await read("tests/fixtures/published-release.json")));
   if (release === null) throw new Error("published fixture required");
   expect(publicationMarkdown(null)).toBe("");
@@ -198,16 +191,11 @@ test("publication Markdown includes only verified native and compatibility artif
   expect(markdown).toContain(`**v${release.version}**`);
   expect(markdown).toContain(release.verificationRun);
   for (const asset of release.native) {
-    expect(markdown).toContain(asset.url);
-    expect(markdown).toContain(asset.sha256Url);
+    expect(markdown).not.toContain(asset.url);
+    expect(markdown).not.toContain(asset.sha256Url);
   }
-  expect(markdown).toContain(release.archiveUrl!);
-  expect(markdown).not.toContain("npm");
-  expect(publicationMarkdown({ ...release, archiveUrl: null })).not.toContain(release.archiveUrl!);
-  const compatibilityOnly = publicationMarkdown({ ...release, native: [] });
-  expect(compatibilityOnly).toContain(release.archiveUrl!);
-  expect(compatibilityOnly).not.toContain("SHA-256");
-  expect(compatibilityOnly).not.toContain("darwin-aarch64");
+  expect(markdown).not.toContain(release.archiveUrl!);
+  expect(markdown).not.toContain(".tar.gz");
 });
 
 

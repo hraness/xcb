@@ -8,19 +8,20 @@ import { readmeWithPublication } from "./sync-readme.ts";
 
 const repository = join(import.meta.dir, "..", "..");
 
-test("adds verified links to both site README formats without changing generic source guidance", async () => {
+test("adds the verified release line to both site README formats without download links", async () => {
   const source = await readFile(join(repository, "README.md"), "utf8");
   const release = parsePublishedRelease(JSON.parse(await readFile(join(repository, "site/tests/fixtures/published-release.json"), "utf8")));
   if (release === null) throw new Error("published fixture required");
   expect(readmeWithPublication(source, null)).toBe(source);
   const published = readmeWithPublication(source, release);
   expect(published.indexOf("Latest verified release:")).toBeGreaterThan(published.indexOf("### Install a verified release"));
-  expect(published.indexOf("Latest verified release:")).toBeLessThan(published.indexOf("On a supported platform"));
-  const urls = [release.verificationRun, release.archiveUrl!, ...release.native.flatMap((asset) => [asset.url, asset.sha256Url])];
-  for (const url of urls) {
-    expect(renderReadmeHtml(published)).toContain(`href="${url}"`);
-    expect(renderReadmeMarkdown(published)).toContain(url);
-    expect(source).not.toContain(url);
+  expect(published.indexOf("Latest verified release:")).toBeLessThan(published.indexOf("curl -fsSL https://xcb.sh/install.sh | sh"));
+  expect(renderReadmeHtml(published)).toContain(`href="${release.verificationRun}"`);
+  expect(renderReadmeMarkdown(published)).toContain(release.verificationRun);
+  // xcb installs with one command; the site offers no archive downloads.
+  for (const url of [release.archiveUrl!, ...release.native.flatMap((asset) => [asset.url, asset.sha256Url])]) {
+    expect(renderReadmeHtml(published)).not.toContain(url);
+    expect(renderReadmeMarkdown(published)).not.toContain(url);
   }
   expect(() => readmeWithPublication("# No installation heading", release)).toThrow("exactly one");
   expect(() => readmeWithPublication(`${source}\n### Install a verified release\n`, release)).toThrow("exactly one");
