@@ -18,12 +18,13 @@ pub enum BacklogCommand {
         /// Conversation id from `xcb conversations`, or a project directory or
         /// name (the thread, in that directory).
         target: String,
-        /// Bounded ALGAL manifest to validate and pin for this run.
+        /// ALGAL manifest (at most 64 KiB) to validate and pin for this run.
         manifest: PathBuf,
         /// JSON object of typed inputs; defaults to an empty object.
         #[arg(long)]
         inputs: Option<PathBuf>,
-        /// Admit managed agent calls under the current project grant.
+        /// Allow up to this many agent calls (1 to 8) under the current
+        /// project grant.
         #[arg(long, value_parser = clap::value_parser!(u8).range(1..=8))]
         managed_calls: Option<u8>,
         /// Human-readable title retained in the project's work history.
@@ -140,13 +141,14 @@ pub enum DaemonCommand {
         target: String,
         /// Daemon name; lowercase kebab-case, at most 48 characters.
         name: String,
-        /// Bounded ALGAL process manifest to validate and pin.
+        /// ALGAL process manifest (at most 64 KiB) to validate and pin.
         manifest: PathBuf,
         /// JSON object of typed interface inputs; defaults to an empty object.
         /// Mailbox capability ports are bound to this daemon's own mailboxes.
         #[arg(long)]
         inputs: Option<PathBuf>,
-        /// Admit managed agent calls under the current project grant.
+        /// Allow up to this many agent calls (0 to 8) under the current
+        /// project grant.
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=8))]
         calls: u8,
         /// Maximum process generations before the daemon record stops.
@@ -161,14 +163,15 @@ pub enum DaemonCommand {
         /// Daemon name from `xcb daemons`.
         name: String,
     },
-    /// Post a bounded message to a daemon's inbox mailbox.
+    /// Post a message (at most 8 KiB) to a daemon's inbox.
     Send {
         /// Daemon name from `xcb daemons`.
         name: String,
         /// UTF-8 message, at most 8 KiB; the daemon reads it on a wake tick.
         text: String,
     },
-    /// Stop a daemon: no new calls or dispatches; a live child still settles.
+    /// Stop a daemon: no new calls or tasks; a child task already running
+    /// finishes first.
     Stop {
         /// Daemon name from `xcb daemons`.
         name: String,
@@ -190,13 +193,15 @@ pub enum DaemonCommand {
 
 #[derive(Subcommand)]
 pub enum ProjectCommand {
-    /// Grant bounded automatic follow-up work for a project goal.
+    /// Let a project start follow-up work on its own for a goal, within a
+    /// task count and a time limit.
     Configure {
         /// Project directory or name; a conversation id names its directory.
         scope: String,
-        /// Authoritative project goal for automatically admitted work.
+        /// The project goal that follow-up work serves.
         goal: String,
-        /// Maximum automatically admitted tasks in this grant.
+        /// Most tasks the project may start on its own under this grant
+        /// (1 to 100).
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
         tasks: u32,
         /// Grant lifetime, 1 hour to 30 days. A new grant replaces the old grant.
@@ -209,7 +214,7 @@ pub enum ProjectCommand {
         #[arg(long)]
         provider: Option<Provider>,
     },
-    /// Pause automatic dispatch; running work is allowed to settle.
+    /// Pause automatic follow-up work; work already running finishes.
     Pause {
         /// Project directory or name from `xcb projects`.
         scope: String,
@@ -385,7 +390,8 @@ pub fn projects(
 
 #[derive(Subcommand)]
 pub enum ScheduleCommand {
-    /// Schedule a pinned ALGAL planner or bounded managed-agent program.
+    /// Schedule a pinned ALGAL planner or a managed-agent program with a
+    /// call limit.
     Program {
         /// Conversation id from `xcb conversations`, or a project directory or
         /// name (the thread, in that directory).
@@ -395,7 +401,8 @@ pub enum ScheduleCommand {
         /// JSON object satisfying the manifest's input interface.
         #[arg(long)]
         inputs: Option<PathBuf>,
-        /// Admit up to this many agent calls per occurrence under a project grant.
+        /// Allow up to this many agent calls (1 to 8) per wake-up under a
+        /// project grant.
         #[arg(long, value_parser = clap::value_parser!(u8).range(1..=8))]
         managed_calls: Option<u8>,
         /// Human-readable schedule and backlog label.
@@ -475,7 +482,8 @@ pub enum MemoryCommand {
     Promote {
         /// Source task; its project directory owns the Wordcell binding.
         task: Id,
-        /// UTF-8 note, at most 8 KiB; identical promotion is idempotent.
+        /// UTF-8 note, at most 8 KiB; saving the same note again changes
+        /// nothing.
         #[arg(long)]
         body_file: PathBuf,
     },
@@ -643,7 +651,7 @@ pub async fn daemons(
             if json {
                 crate::print_json(serde_json::json!({"daemon":name,"stopped":true}))?;
             } else {
-                println!("Daemon {name} stopped; a live child still settles before it counts.");
+                println!("Daemon {name} stopped; a child task already running finishes first.");
             }
         }
         Some(DaemonCommand::Journal { name }) => {
@@ -756,7 +764,7 @@ pub async fn backlog(
                     println!("  xcb attention · resolve questions and approvals on the child");
                 }
                 if let Some(receipt) = status.receipt {
-                    println!("  receipt: {}", xcb_core::display_text(&receipt, 160));
+                    println!("  record: {}", xcb_core::display_text(&receipt, 160));
                 }
             }
             return Ok(0);
@@ -943,7 +951,7 @@ pub fn watch(root: &Path, target: &Id, source: &Id, id: Option<Id>, json: bool) 
         crate::print_json(subscription)?;
     } else {
         println!(
-            "Watch {id} saved: task {source} → inbox for {target}.\nReports wait for an authorized turn; closed work stays closed."
+            "Watch {id} saved: task {source} → inbox for {target}.\nThe report arrives at the target task's next turn; closed tasks stay closed."
         );
     }
     wake_saved_inbox(root, &id);
@@ -953,7 +961,7 @@ pub fn watch(root: &Path, target: &Id, source: &Id, id: Option<Id>, json: bool) 
 fn wake_saved_inbox(root: &Path, id: &Id) {
     if let Err(error) = wake(root) {
         eprintln!(
-            "warning: saved as {id}, but the supervisor could not start: {error}. The record is retained; an authorized turn is still required for delivery."
+            "warning: saved as {id}, but xcb's background supervisor couldn't start: {error}. The message is kept and arrives at the task's next turn once the supervisor runs."
         );
     }
 }
@@ -1007,7 +1015,7 @@ fn print_inbox_event(event: &managed::InboxEvent, json: bool) -> Result<()> {
             println!("  {}", xcb_core::display_text(reason, 512));
         }
         if let Some(receipt) = &event.receipt {
-            println!("  receipt: {}", xcb_core::display_text(receipt, 256));
+            println!("  record: {}", xcb_core::display_text(receipt, 256));
         }
     }
     Ok(())

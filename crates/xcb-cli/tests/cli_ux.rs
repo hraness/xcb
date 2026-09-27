@@ -806,3 +806,326 @@ fn workspaces_list_add_hide_and_upgrade_preview_on_a_scratch_state() {
     assert!(leftovers.is_empty(), "the preview copy is removed");
     assert_eq!(json(&["conversations"]), serde_json::json!([]));
 }
+
+/// xcb's internal delivery vocabulary, which public copy translates (see
+/// "Public copy" in AGENTS.md). Matched as whole words in any case, with
+/// their plural and negated forms.
+const INTERNAL_TERMS: [&str; 20] = [
+    "admission",
+    "admissions",
+    "admitted",
+    "admit",
+    "admits",
+    "qualification",
+    "qualifications",
+    "qualified",
+    "unqualified",
+    "custody",
+    "settled",
+    "unsettled",
+    "settlement",
+    "settlements",
+    "joined",
+    "unjoined",
+    "receipt",
+    "receipts",
+    "bounded",
+    "promoted",
+];
+
+/// Documented names that contain one of those words: the `xcb remote admit`
+/// command, in usage lines and in `xcb remote --help`'s command list.
+const DOCUMENTED_NAMES: [&str; 2] = ["remote admit", "\n  admit "];
+
+/// Internal words in `text`. `XCB` is matched exactly, so environment
+/// variable names such as `XCB_STATE` (one token) stay allowed.
+fn internal_words(text: &str) -> Vec<String> {
+    let mut text = format!("\n{text}");
+    for name in DOCUMENTED_NAMES {
+        text = text.replace(name, "\n");
+    }
+    text.split(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .filter(|word| word == &"XCB" || INTERNAL_TERMS.contains(&word.to_lowercase().as_str()))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn internal_word_check_matches_whole_words_only() {
+    assert_eq!(internal_words("No unsettled runs."), ["unsettled"]);
+    assert_eq!(internal_words("Bounded, ephemeral"), ["Bounded"]);
+    assert_eq!(internal_words("No XCB messages"), ["XCB"]);
+    assert!(internal_words("$XCB_STATE or ~/.local/share/xcb").is_empty());
+    assert!(internal_words("Usage: xcb remote admit [OPTIONS] <DEVICE>").is_empty());
+    assert!(internal_words("Commands:\n  admit    Post an account-key wrap").is_empty());
+    assert!(internal_words("promote notes; settle labels; adjoined").is_empty());
+}
+
+/// Every command's help, recursively, from the grouped root screens.
+fn every_help_screen() -> Vec<(String, String)> {
+    let run = |args: &[&str]| text(&plain(args).stdout);
+    let mut screens = vec![
+        ("xcb --help".to_owned(), run(&["--help"])),
+        ("xcb help advanced".to_owned(), run(&["help", "advanced"])),
+    ];
+    let mut pending: Vec<Vec<String>> = screens
+        .iter()
+        .flat_map(|(_, screen)| {
+            screen
+                .lines()
+                .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
+                .filter_map(|line| line.split_whitespace().next())
+                .filter(|word| {
+                    !word.starts_with('-')
+                        && word.chars().all(|ch| ch.is_ascii_lowercase() || ch == '-')
+                })
+                .map(|word| vec![word.to_owned()])
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    while let Some(path) = pending.pop() {
+        let mut args: Vec<&str> = path.iter().map(String::as_str).collect();
+        args.push("--help");
+        let output = plain(&args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        let screen = text(&output.stdout);
+        if let Some((_, listed)) = screen.split_once("\nCommands:\n") {
+            // Entries start two spaces in; wrapped descriptions start deeper.
+            for line in listed.lines().take_while(|line| !line.is_empty()) {
+                if let Some(name) = line
+                    .strip_prefix("  ")
+                    .filter(|rest| !rest.starts_with(' '))
+                    .and_then(|rest| rest.split_whitespace().next())
+                    && name != "help"
+                {
+                    let mut child = path.clone();
+                    child.push(name.to_owned());
+                    pending.push(child);
+                }
+            }
+        }
+        screens.push((format!("xcb {}", path.join(" ")), screen));
+    }
+    screens
+}
+
+/// Help and the everyday outputs speak the reader's language: none of the
+/// internal words above, and never "XCB" in prose.
+#[test]
+fn help_and_everyday_output_avoid_internal_words() {
+    let mut checked = every_help_screen();
+    assert!(
+        checked.len() > 80,
+        "only {} help screens found",
+        checked.len()
+    );
+    let sandbox = Sandbox::new("public-words");
+    let work = sandbox.root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let work = work.to_str().unwrap().to_owned();
+    sandbox.fake_provider("codex", "codex-cli 0.0.1");
+    sandbox.fake_provider("devin", "devin 0.0.1 (fixture)");
+    let codex = sandbox.add(&["codex", "--plan", "ChatGPT subscription"]);
+    sandbox.add(&["claude"]);
+    assert!(
+        sandbox
+            .run(&["accounts", "disable", &codex], &[])
+            .status
+            .success()
+    );
+    let added = sandbox.run(&["--json", "backlog", "add", &work, "Fix the parser"], &[]);
+    assert!(added.status.success(), "{added:?}");
+    let task: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    let task = task["id"].as_str().unwrap().to_owned();
+    let human = [("HRANESS_AUDIENCE", "human")];
+    for args in [
+        vec![],
+        vec!["doctor"],
+        vec!["accounts"],
+        vec!["setup", "devin"],
+        vec!["sessions"],
+        vec!["sessions", "prune"],
+        vec!["sessions", "rm", "s_missing"],
+        vec!["recover"],
+        vec!["recover", "--launch-artifacts"],
+        vec!["command", "prune"],
+        vec!["tasks"],
+        vec!["tasks", "verify", &task],
+        vec!["tasks", "messages", &task],
+        vec!["backlog"],
+        vec!["conversations"],
+        vec!["workspaces"],
+        vec!["inbox"],
+        vec!["attention"],
+        vec!["schedules"],
+        vec!["daemons"],
+        vec!["projects"],
+        vec!["reflex"],
+        vec!["models"],
+        vec!["update", "status"],
+        vec!["update", "disable"],
+        vec!["judge", "status"],
+        vec!["fleet"],
+        vec!["run"],
+        vec!["upgrade", "0.0.1"],
+        vec![
+            "rename",
+            "c_global",
+            "Parser work",
+            "--expected-title",
+            "Thread",
+        ],
+    ] {
+        let output = sandbox.run(&args, &human);
+        checked.push((
+            format!("xcb {}", args.join(" ")),
+            format!("{}{}", text(&output.stdout), text(&output.stderr)),
+        ));
+    }
+    let leaks: Vec<String> = checked
+        .iter()
+        .filter_map(|(what, screen)| {
+            let words = internal_words(screen);
+            (!words.is_empty()).then(|| format!("{what}: {words:?}"))
+        })
+        .collect();
+    assert!(
+        leaks.is_empty(),
+        "internal words in public output:\n{}",
+        leaks.join("\n")
+    );
+}
+
+#[test]
+fn advanced_is_the_same_screen_as_help_advanced() {
+    let expected = text(&plain(&["help", "advanced"]).stdout);
+    assert!(expected.starts_with("Advanced xcb commands."), "{expected}");
+    for args in [
+        &["advanced"][..],
+        &["advanced", "--help"],
+        &["advanced", "-h"],
+        &["--json", "advanced"],
+    ] {
+        let output = plain(args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        assert_eq!(text(&output.stdout), expected, "{args:?}");
+    }
+    let sandbox = Sandbox::new("advanced");
+    let output = sandbox.run(&["advanced"], &[]);
+    assert_eq!(text(&output.stdout), expected);
+    assert!(!sandbox.state().exists(), "the screen opens no state");
+}
+
+/// Setup checks the provider build before any account or sign-in: Devin
+/// gets no empty account, and an unsupported Claude build stops before the
+/// browser sign-in.
+#[test]
+fn setup_checks_the_build_is_supported_before_sign_in() {
+    let sandbox = Sandbox::new("setup-unsupported");
+    sandbox.fake_provider("devin", "devin 0.0.1 (fixture)");
+    let devin = sandbox.run(&["setup", "devin"], &[]);
+    assert_eq!(devin.status.code(), Some(1), "{devin:?}");
+    assert_eq!(text(&devin.stdout), "");
+    let stderr = text(&devin.stderr);
+    let expected = if cfg!(target_os = "macos") {
+        "✗ xcb can't run Devin 0.0.1 yet; it runs only provider builds it has checked.\n→ install a supported Devin build (xcb.sh/docs/providers lists them)\n"
+    } else {
+        "✗ xcb can't run Devin on this system yet; provider runs need macOS for now.\n"
+    };
+    assert!(stderr.ends_with(expected), "{stderr}");
+    assert!(!stderr.contains("qualified"), "{stderr}");
+    let accounts = sandbox.run(&["--json", "accounts"], &[]);
+    let list: serde_json::Value = serde_json::from_slice(&accounts.stdout).unwrap();
+    assert_eq!(
+        list["accounts"],
+        serde_json::json!([]),
+        "no empty Devin account"
+    );
+    sandbox.fake_provider("claude", "0.1.0 (Claude Code)");
+    let claude = sandbox.run(&["setup", "claude"], &[]);
+    assert_eq!(claude.status.code(), Some(1), "{claude:?}");
+    assert!(
+        text(&claude.stdout).starts_with("✓ Added claude/a_"),
+        "{claude:?}"
+    );
+    let stderr = text(&claude.stderr);
+    assert!(stderr.contains("✗ xcb can't run Claude Code"), "{stderr}");
+    assert!(!stderr.contains("Opening your browser"), "{stderr}");
+}
+
+#[test]
+fn task_and_rename_commands_print_sentences_unless_json() {
+    let sandbox = Sandbox::new("task-output");
+    let work = sandbox.root.join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    let added = sandbox.run(
+        &[
+            "--json",
+            "backlog",
+            "add",
+            work.to_str().unwrap(),
+            "Fix the parser",
+        ],
+        &[],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let task: serde_json::Value = serde_json::from_slice(&added.stdout).unwrap();
+    let task = task["id"].as_str().unwrap().to_owned();
+    let verify = sandbox.run(&["tasks", "verify", &task], &[]);
+    assert!(verify.status.success(), "{verify:?}");
+    assert_eq!(
+        text(&verify.stdout),
+        format!("✓ {task}: its 1 recorded step replays and matches the task.\n")
+    );
+    let json = sandbox.run(&["--json", "tasks", "verify", &task], &[]);
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["verified"], true, "{value}");
+    assert_eq!(value["revisions"], 1, "{value}");
+    let messages = sandbox.run(&["tasks", "messages", &task, "--limit", "5"], &[]);
+    assert_eq!(
+        text(&messages.stdout),
+        format!("No messages for {task} after sequence 0.\n")
+    );
+    let renamed = sandbox.run(
+        &[
+            "rename",
+            "c_global",
+            "Parser work",
+            "--expected-title",
+            "Thread",
+        ],
+        &[],
+    );
+    assert!(renamed.status.success(), "{renamed:?}");
+    assert_eq!(
+        text(&renamed.stdout),
+        "✓ Renamed c_global to \u{201c}Parser work\u{201d}\n"
+    );
+    let json = sandbox.run(
+        &[
+            "--json",
+            "rename",
+            "c_global",
+            "Thread",
+            "--expected-title",
+            "Parser work",
+        ],
+        &[],
+    );
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["title"], "Thread", "{value}");
+    // A dry-run session removal answers in JSON too.
+    let json = sandbox.run(&["--json", "sessions", "rm", "s_missing"], &[]);
+    assert!(json.status.success(), "{json:?}");
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"version":1,"applied":false,"session":"s_missing","found":false})
+    );
+    let prune = sandbox.run(&["command", "prune"], &[]);
+    assert!(prune.status.success(), "{prune:?}");
+    assert!(
+        text(&prune.stdout).starts_with("No offline command jobs"),
+        "{prune:?}"
+    );
+}

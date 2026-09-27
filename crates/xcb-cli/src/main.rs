@@ -76,13 +76,15 @@ enum Commands {
         #[arg(long)]
         new: bool,
     },
-    /// Bounded, ephemeral application inference with no tools or hooks.
+    /// Generate text for an app from a JSON request: one turn, no tools or
+    /// hooks, nothing saved as a session.
     Generate {
         /// Print capability rows and exit without running inference.
         #[arg(long)]
         capabilities: bool,
     },
-    /// Read bounded private failure metadata for one exact application request.
+    /// Read private failure details, up to a size limit, for one application
+    /// request.
     #[command(hide = true)]
     ApplicationDiagnostic {
         /// Account that ran the request.
@@ -126,8 +128,8 @@ enum Commands {
         #[arg(long = "image")]
         images: Vec<PathBuf>,
     },
-    /// Select one eligible account/model route and run a single bounded turn.
-    /// Machine contract: requires --json and a closed request on stdin.
+    /// Pick an account and model that can take the task now and run one turn.
+    /// For programs: requires --json and a JSON request on stdin.
     #[command(hide = true)]
     Route,
     /// Reopen a direct provider session in the terminal UI.
@@ -169,7 +171,7 @@ enum Commands {
         #[arg(long)]
         invite: Option<String>,
         /// Relay deployment URL; defaults to $XCB_RELAY_URL or the local
-        /// backend, and persists into custody at enrollment.
+        /// backend, and is saved with this machine's link at enrollment.
         #[arg(long)]
         relay: Option<String>,
         /// Enroll as a dispatch-only controller instead of a workspace
@@ -201,8 +203,8 @@ enum Commands {
         /// Message text.
         text: String,
     },
-    /// Drive commands on remote devices: task steer, cancel, answer, refresh,
-    /// command status, abort, ack — plus device admit and revoke.
+    /// Steer, cancel, or answer work on other devices, follow remote commands,
+    /// and approve or remove linked devices.
     Remote {
         #[command(subcommand)]
         command: remote::RemoteCommand,
@@ -316,12 +318,14 @@ enum Commands {
         #[arg(long)]
         remote: bool,
     },
-    /// Configure bounded project autonomy and inspect remaining grants.
+    /// Set how much a project may do on its own, and see what each grant has
+    /// left.
     Projects {
         #[command(subcommand)]
         command: Option<habitat::ProjectCommand>,
     },
-    /// Opt-in habitat startup at macOS login; scoped to this state root.
+    /// Start xcb's background supervisor at macOS login, for this state
+    /// folder only.
     Service {
         #[command(subcommand)]
         command: Option<ServiceCommand>,
@@ -388,15 +392,15 @@ enum Commands {
         #[arg(long, hide = true)]
         quiet: bool,
     },
-    /// Inspect or clean up unsettled runs and disposable launch artifacts.
+    /// Inspect or clean up unfinished runs and leftover launch folders.
     Recover {
-        /// Recover this run; lists unsettled runs when omitted.
+        /// Recover this run; lists unfinished runs when omitted.
         run: Option<Id>,
         /// Apply the recovery instead of only reporting what would change.
         #[arg(long)]
         yes: bool,
-        /// Inventory disposable launch snapshots; --yes removes only snapshots
-        /// with durable settlement evidence. Unproven artifacts remain held.
+        /// List leftover launch folders; --yes removes only those whose runs
+        /// xcb confirmed finished. The rest stay.
         #[arg(long = "launch-artifacts")]
         launch_artifacts: bool,
     },
@@ -474,7 +478,7 @@ enum UpdateCommand {
 #[derive(Subcommand)]
 enum AccountCommand {
     /// Add an account. Its name is fixed: the provider account email once
-    /// observed, otherwise `provider/<id>` — there are no custom labels.
+    /// observed, otherwise `provider/<id>`; there are no custom labels.
     Add {
         /// Provider to add: claude, codex, or devin.
         provider: Provider,
@@ -574,7 +578,7 @@ enum ReflexCommand {
         /// Only this reflex (route or settle).
         reflex: Option<ReflexName>,
     },
-    /// Decide finished trials and fit new challengers; a challenger is promoted only after it beats the active generation on labels that arrived after it was fitted.
+    /// Decide finished trials and fit new challengers; xcb adopts a challenger only after it beats the active generation on labels that arrived after it was fitted.
     Train {
         /// Reflex to train (route or settle).
         reflex: ReflexName,
@@ -597,7 +601,7 @@ enum ReflexCommand {
     },
     /// Import labeled JSONL ({id,text,label[,weight][,judge|head,tool_calls]}), oldest first.
     /// The examples are replayed as a forward trial from the shipped prior; heads that won
-    /// promotion in the replay are adopted. Only derived features are stored.
+    /// the replay are adopted. Only derived features are stored.
     Import {
         /// Reflex the examples are for (route or settle).
         reflex: ReflexName,
@@ -607,7 +611,7 @@ enum ReflexCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Check that a reflex program file is admissible and print its digest.
+    /// Check that a reflex program file is valid and print its digest.
     Check {
         /// Program file (an ALGAL organism).
         file: PathBuf,
@@ -650,23 +654,24 @@ enum SessionCommand {
 }
 #[derive(Subcommand)]
 enum ServiceCommand {
-    /// Register startup and one-minute restart checks for this habitat.
+    /// Start the supervisor at login and check every minute that it runs.
     Install,
-    /// Inspect registration and supervisor liveness without changing it.
+    /// Show whether it starts at login and whether the supervisor runs.
     Status,
-    /// Remove an idle service; never terminate active workers.
+    /// Stop starting at login; refuses while work is running and never
+    /// stops it.
     Uninstall,
-    /// Print the exact launchd declaration without installing it.
+    /// Print the LaunchAgent file without installing it.
     Plan,
 }
 
 #[derive(Subcommand)]
 enum CommandJobs {
-    /// Move joined, acknowledged command jobs older than --days into
-    /// jobs-archive/. Records are never deleted; unjoined, cleanup-pending
-    /// and recent jobs are retained.
+    /// Move finished, acknowledged command jobs older than --days into
+    /// jobs-archive/. Nothing is deleted; jobs whose processes haven't been
+    /// confirmed stopped, jobs waiting for cleanup, and recent jobs stay.
     Prune {
-        /// Archive only jobs whose newest receipt is older than this many days.
+        /// Archive only jobs last updated more than this many days ago.
         #[arg(long, default_value_t = 30)]
         days: u32,
         /// Apply the archive; without it only the dry-run report prints.
@@ -678,7 +683,7 @@ enum CommandJobs {
 enum TaskCommand {
     /// List managed tasks (same as bare `xcb tasks`).
     List,
-    /// Replay local ALGAL transition receipts and verify their chain and task record.
+    /// Replay the task's local record and check that no step is missing or changed.
     Verify {
         /// Managed task id (listed by `xcb tasks`).
         id: Id,
@@ -688,13 +693,17 @@ enum TaskCommand {
         /// Managed task id (listed by `xcb tasks`).
         id: Id,
     },
-    /// Read up to 64 messages; pass the last sequence as --after for the next page.
+    /// Read a page of a task's messages, oldest first; pass the last sequence
+    /// as --after for the next page.
     Messages {
         /// Managed task id (listed by `xcb tasks`).
         id: Id,
         /// Only messages after this sequence number (default 0).
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u64).range(..=i64::MAX as u64))]
         after: u64,
+        /// Maximum messages in this page, from 1 to 64.
+        #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u8).range(1..=64))]
+        limit: u8,
     },
     /// Request cancellation only if the task still matches the inspected revision.
     Cancel {
@@ -871,12 +880,32 @@ fn print_json(value: impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
+/// `xcb run --json`: the text is cut to 256 KiB like `xcb --json route`,
+/// and `textTruncated` appears only when it was cut.
 fn run_output(session: &Id, result: &runner::Outcome) -> serde_json::Value {
-    let mut output = json!({"version":1,"session":session,"state":result.state,"outcome":result.facts,"text":result.text});
+    let truncated = result.text.len() > xcb_core::MAX_TEXT_BYTES;
+    let text = if truncated {
+        xcb_core::display_text(&result.text, xcb_core::MAX_TEXT_BYTES)
+    } else {
+        result.text.clone()
+    };
+    let mut output = json!({"version":1,"session":session,"state":result.state,"outcome":result.facts,"text":text});
+    if truncated {
+        output["textTruncated"] = json!(true);
+    }
     if let Some(diagnostic) = &result.diagnostic {
         output["diagnostic"] = json!(diagnostic);
     }
     output
+}
+
+/// Aborts a background task when the command returns early.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 fn run_exit_code(result: &runner::Outcome) -> i32 {
@@ -1027,6 +1056,29 @@ async fn ensure_pin(root: &std::path::Path, provider: Provider) -> Result<Pin> {
         })?;
     pin.save(root)?;
     Ok(pin)
+}
+
+/// Refuse a provider build xcb can't run, saying why and what fixes it.
+fn require_supported(root: &std::path::Path, pin: &Pin) -> Result<()> {
+    if runner::provider_admitted(root, pin) {
+        return Ok(());
+    }
+    let name = provider_name(pin.provider);
+    if !cfg!(target_os = "macos") {
+        return Err(Error::Guided {
+            message: format!(
+                "xcb can't run {name} on this system yet; provider runs need macOS for now"
+            ),
+            next: None,
+        });
+    }
+    Err(Error::guided(
+        format!(
+            "xcb can't run {name} {} yet; it runs only provider builds it has checked",
+            pin.version
+        ),
+        format!("install a supported {name} build (xcb.sh/docs/providers lists them)"),
+    ))
 }
 
 fn require_account_credentials(store: &Store, account: &xcb_runtime::store::Account) -> Result<()> {
@@ -1412,6 +1464,23 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             if images.len() > 8 {
                 return Err(xcb_core::Error::Limit("images").into());
             }
+            let (cancel, cancelled) = watch::channel(false);
+            // Install both handlers before routing, which can start provider
+            // work, and before any provider starts. SIGTERM must use the same
+            // independent join/custody path as interactive Ctrl-C.
+            let mut interrupts =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+            let mut terminates =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            let _interrupt = AbortOnDrop(tokio::spawn(async move {
+                tokio::select! {
+                    _ = interrupts.recv() => {},
+                    _ = terminates.recv() => {},
+                }
+                let _ = cancel.send(true);
+            }));
+            let stopped_early =
+                || Error::Unavailable("cancelled before the task started; no provider ran");
             let attachments = images
                 .iter()
                 .map(|path| xcb_runtime::attachments::from_path(store.root(), path))
@@ -1447,6 +1516,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 account = Some(decision.account);
                 model = Some(decision.model.key());
             }
+            if *cancelled.borrow() {
+                return Err(stopped_early());
+            }
             let session = kernel::new_session(
                 &store,
                 &cli.cwd.canonicalize()?,
@@ -1455,20 +1527,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 model.as_deref(),
                 None,
             )?;
-            let (cancel, cancelled) = watch::channel(false);
-            // Install both handlers before starting any provider. SIGTERM must
-            // use the same independent join/custody path as interactive Ctrl-C.
-            let mut interrupts =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-            let mut terminates =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-            let interrupt = tokio::spawn(async move {
-                tokio::select! {
-                    _ = interrupts.recv() => {},
-                    _ = terminates.recv() => {},
-                }
-                let _ = cancel.send(true);
-            });
+            if *cancelled.borrow() {
+                return Err(stopped_early());
+            }
             let observer: Observer = Arc::new(|event| {
                 if let Progress::Notice(message) = event {
                     eprintln!("xcb: {message}");
@@ -1484,7 +1545,6 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 observer,
             )
             .await;
-            interrupt.abort();
             let result = result?;
             if cli.json {
                 print_json(run_output(&session.id, &result))?;
@@ -1614,11 +1674,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let account = store.resolve_account(&account)?;
                     require_account_credentials(&store, &account)?;
                     let pin = ensure_pin(store.root(), account.provider).await?;
-                    if !runner::provider_admitted(store.root(), &pin) {
-                        return Err(Error::Unavailable(
-                            "native account metadata querying for this runtime is not yet qualified",
-                        ));
-                    }
+                    require_supported(store.root(), &pin)?;
                     let models = runner::probe(&store, &pin, Some(&account.id)).await?;
                     store.set_models(account.provider, &models)?;
                     accounts(&store, &config, cli.json)?;
@@ -1667,7 +1723,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             let ok = ux::Style::stdout().symbol(ux::Symbol::Ok);
             let name = provider_name(provider);
-            // 1. One account for this provider: reuse the first, or add one.
+            // 1. One account for this provider: reuse a signed-in one, then
+            // any enabled one, or add one.
             let accounts: Vec<_> = store
                 .accounts()?
                 .into_iter()
@@ -1684,7 +1741,14 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     format!("xcb accounts enable {}", accounts[0].id),
                 ));
             }
-            let existing = accounts.into_iter().find(|account| account.enabled);
+            let signed_in = |account: &xcb_runtime::store::Account| {
+                auth::has_credentials(&store, &account.id).unwrap_or(false)
+            };
+            let existing = accounts
+                .iter()
+                .find(|account| account.enabled && signed_in(account))
+                .or_else(|| accounts.iter().find(|account| account.enabled))
+                .cloned();
             let account = match existing {
                 Some(account) => {
                     println!(
@@ -1692,8 +1756,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         xcb_core::display_text(&account.name(), 80),
                         account.id
                     );
-                    account
+                    Some(account)
                 }
+                // Devin signs in with its own tool, and importing that
+                // sign-in adds the account, so an empty one would only
+                // linger as needing sign-in.
+                None if provider == Provider::Devin => None,
                 None => {
                     let account = store.add_account(provider, &plan, now_ms(), None)?;
                     let (mut config, revision) = Config::load(store.root())?;
@@ -1702,16 +1770,24 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         config.save(store.root(), revision.as_deref())?;
                     }
                     println!("{ok} {}", PublicAccount::from(&account).added_message().0);
-                    account
+                    Some(account)
                 }
             };
-            // 2. Check the provider build.
+            // 2. Check the provider build, and that xcb can run it, before
+            // any sign-in starts.
             let pin = ensure_pin(store.root(), provider).await?;
+            require_supported(store.root(), &pin)?;
             println!("{ok} {name} {} is installed", pin.version);
             // 3. Sign in, unless this account already has credentials.
+            let Some(account) = account else {
+                ux::next(
+                    "sign in with devin auth login, then run xcb accounts import-devin --source <path to credentials.toml>",
+                );
+                return Ok(0);
+            };
             if !auth::has_credentials(&store, &account.id)? {
                 if provider == Provider::Devin {
-                    ux::next(&PublicAccount::from(&account).added_message().1);
+                    ux::next(&health::sign_in_step(provider, &account.id));
                     return Ok(0);
                 }
                 let _held = ux::hold_next();
@@ -1729,11 +1805,6 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             // 4. Load the account's models (what `accounts refresh` does).
             require_account_credentials(&store, &account)?;
-            if !runner::provider_admitted(store.root(), &pin) {
-                return Err(Error::Unavailable(
-                    "native account metadata querying for this runtime is not yet qualified",
-                ));
-            }
             let models = runner::probe(&store, &pin, Some(&account.id)).await?;
             store.set_models(provider, &models)?;
             println!("{ok} Loaded {} models", models.len());
@@ -1766,11 +1837,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let account =
                         catalog_account(&store, provider, account.as_deref(), from_native)?;
                     let pin = ensure_pin(store.root(), provider).await?;
-                    if !runner::provider_admitted(store.root(), &pin) {
-                        return Err(Error::Unavailable(
-                            "native catalog discovery for this runtime is not yet qualified",
-                        ));
-                    }
+                    require_supported(store.root(), &pin)?;
                     let models = runner::probe(&store, &pin, account.as_ref()).await?;
                     store.set_models(provider, &models)?;
                 }
@@ -1981,7 +2048,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         }
                         match report.promoted_version {
                             Some(version) => println!(
-                                "promoted generation {version} (from {}); `xcb reflex rollback {} {}` restores it",
+                                "adopted generation {version} (from {}); `xcb reflex rollback {} {}` restores it",
                                 report.from_version,
                                 report.reflex.as_str(),
                                 report.from_version
@@ -2053,7 +2120,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     if !cli.json {
                         for (head, replay) in &replays {
                             println!(
-                                "{head}: replayed {} · {} trial{}, {} promoted",
+                                "{head}: replayed {} · {} trial{}, {} adopted",
                                 metrics_line(&replay.prequential),
                                 replay.trials,
                                 if replay.trials == 1 { "" } else { "s" },
@@ -2093,7 +2160,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         println!("imported {inserted} of {} examples", rows.len());
                         match adopted {
                             Some(version) => println!(
-                                "adopted the replay's promoted heads as generation {version}; `xcb reflex rollback {} {}` restores the previous one",
+                                "adopted the heads that won the replay as generation {version}; `xcb reflex rollback {} {}` restores the previous one",
                                 reflex.as_str(),
                                 active.version
                             ),
@@ -2109,7 +2176,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 ReflexCommand::Check { file } => {
                     let source: serde_json::Value = serde_json::from_slice(&std::fs::read(&file)?)?;
                     let (_, digest) = reflex::admit(&source)?;
-                    println!("admissible reflex program {digest}");
+                    println!("valid reflex program {digest}");
                 }
             }
             Ok(0)
@@ -2194,9 +2261,18 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 }
                 Some(SessionCommand::Rm { id, yes }) => {
                     if !yes {
-                        println!(
-                            "Would remove {id} and its transcript. Repeat with --yes to apply."
-                        );
+                        let found = store.session(&id)?.is_some();
+                        if cli.json {
+                            print_json(
+                                json!({"version":1,"applied":false,"session":id,"found":found}),
+                            )?;
+                        } else if found {
+                            println!(
+                                "Would remove {id} and its transcript. Repeat with --yes to apply."
+                            );
+                        } else {
+                            println!("Session {id} not found.");
+                        }
                     } else {
                         let removed = store.remove_session(&id)?;
                         if cli.json {
@@ -2230,7 +2306,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         )?;
                     } else {
                         println!(
-                            "{} {count} idle session(s) older than {days} days. Active or unsettled sessions are excluded.{}",
+                            "{} {count} idle session(s) older than {days} days. Active or unfinished sessions are skipped.{}",
                             if yes { "Pruned" } else { "Would prune" },
                             if yes {
                                 ""
@@ -2393,15 +2469,32 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             expected_title,
             direct,
         }) => {
-            if direct {
-                print_json(store.rename_session(&id, &expected_title, &title)?)?;
+            let (renamed, new_title) = if direct {
+                let session = store.rename_session(&id, &expected_title, &title)?;
+                let title = session.title.clone();
+                if cli.json {
+                    print_json(session)?;
+                }
+                (id, title)
             } else {
                 let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
-                print_json(managed.rename_conversation(
+                let conversation = managed.rename_conversation(
                     &managed.resolve_conversation(&id)?,
                     &expected_title,
                     &title,
-                )?)?;
+                )?;
+                let renamed = (conversation.id.clone(), conversation.title.clone());
+                if cli.json {
+                    print_json(conversation)?;
+                }
+                renamed
+            };
+            if !cli.json {
+                println!(
+                    "{} Renamed {renamed} to \u{201c}{}\u{201d}",
+                    ux::Style::stdout().symbol(ux::Symbol::Ok),
+                    table::fit(&new_title, 160)
+                );
             }
             Ok(0)
         }
@@ -2457,7 +2550,29 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     }
                 }
                 Some(TaskCommand::Verify { id }) => {
-                    print_json(managed.verify_task(&managed.resolve_task(&id)?).await?)?;
+                    let id = managed.resolve_task(&id)?;
+                    let report = managed.verify_task(&id).await.map_err(|error| {
+                        // --json keeps the stable error code.
+                        if cli.json {
+                            error
+                        } else {
+                            verify_failure(&id, error)
+                        }
+                    })?;
+                    if cli.json {
+                        print_json(report)?;
+                    } else {
+                        let steps = report["revisions"].as_u64().unwrap_or(0);
+                        println!(
+                            "{} {id}: {}",
+                            ux::Style::stdout().symbol(ux::Symbol::Ok),
+                            if steps == 1 {
+                                "its 1 recorded step replays and matches the task.".to_owned()
+                            } else {
+                                format!("all {steps} recorded steps replay and match the task.")
+                            }
+                        );
+                    }
                 }
                 Some(TaskCommand::Show { id }) => {
                     let task =
@@ -2469,21 +2584,33 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     let task = managed
                         .cancel_task(&managed.resolve_task(&id)?, revision)
                         .await?;
-                    print_json(task)?;
+                    if cli.json {
+                        print_json(&task)?;
+                    } else {
+                        println!(
+                            "{} Cancelling {}; it stops once its provider exits (now revision {}).",
+                            ux::Style::stdout().symbol(ux::Symbol::Ok),
+                            task.id,
+                            task.revision
+                        );
+                    }
                     xcb_runtime::managed::ensure_daemon(store.root(), &std::env::current_exe()?)?;
                 }
-                Some(TaskCommand::Messages { id, after }) => {
+                Some(TaskCommand::Messages { id, after, limit }) => {
                     let id = managed.resolve_task(&id)?;
                     managed
                         .task(&id)?
                         .ok_or(Error::Unavailable("managed task not found"))?;
-                    let messages = managed.mailbox(&id, after, 64)?;
+                    let messages = managed.mailbox(&id, after, usize::from(limit))?;
                     if cli.json {
                         print_json(messages)?;
                     } else if messages.is_empty() {
-                        println!("No XCB messages for {id} after sequence {after}.");
+                        println!("No messages for {id} after sequence {after}.");
                     } else {
+                        let full = messages.len() == usize::from(limit);
+                        let mut last = after;
                         for message in messages {
+                            last = message.sequence;
                             println!(
                                 "#{} {} {} → {} · {}",
                                 message.sequence,
@@ -2492,6 +2619,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                                 message.target_task,
                                 xcb_core::display_text(&message.body, xcb_core::MAX_TEXT_BYTES),
                             );
+                        }
+                        if full {
+                            println!("Newer messages: xcb tasks messages {id} --after {last}");
                         }
                     }
                 }
@@ -2804,7 +2934,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             if launch_artifacts {
                 if run.is_some() {
                     return Err(Error::Unavailable(
-                        "--launch-artifacts recovers disposable files, not a run; pass one or the other",
+                        "--launch-artifacts cleans up leftover launch folders, not a run; pass one or the other",
                     ));
                 }
                 let sweep = runner::reclaim_launch_artifacts(&root, yes)?;
@@ -2821,14 +2951,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         "unreclaimableBytes": sweep.unprovable_bytes,
                     }))?;
                 } else {
+                    let count = if yes {
+                        sweep.reclaimed
+                    } else {
+                        sweep.reclaimable
+                    };
                     println!(
-                        "{} {} settled launch snapshots ({}).",
-                        if yes { "Reclaimed" } else { "Can reclaim" },
-                        if yes {
-                            sweep.reclaimed
-                        } else {
-                            sweep.reclaimable
-                        },
+                        "{} {count} launch {} from finished runs ({}).",
+                        if yes { "Removed" } else { "Can remove" },
+                        if count == 1 { "folder" } else { "folders" },
                         human_bytes(if yes {
                             sweep.reclaimed_bytes
                         } else {
@@ -2836,12 +2967,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         }),
                     );
                     println!(
-                        "Retained {} live and {} unproven launch snapshots; --yes does not override custody.",
+                        "Kept {} in use and {} whose runs xcb can't confirm finished; --yes doesn't remove those.",
                         sweep.live,
                         sweep.unprovable.len(),
                     );
                     if !yes && sweep.reclaimable > 0 {
-                        println!("Re-run with --yes to remove the proven disposable snapshots.");
+                        println!("Repeat with --yes to remove the finished ones.");
                     }
                 }
                 return Ok(0);
@@ -2852,11 +2983,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     .ok_or(Error::Unavailable("run not found"))?;
                 // Prepared state also covers a child spawned before its PID
                 // was persisted. Neither --yes nor owner absence proves that
-                // child stopped, so this path only explains retained custody.
+                // child stopped, so this path only explains why the account
+                // stays held.
                 if run.phase == "prepared" && run.pid.is_none() {
                     if yes {
                         return Err(Error::Conflict(
-                            "run has no recorded process group; account custody retained because provider stop cannot be proven",
+                            "run has no recorded process ID; xcb keeps its account held because it can't confirm the provider stopped",
                         ));
                     }
                     if cli.json {
@@ -2873,22 +3005,22 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         }))?;
                     } else {
                         println!(
-                            "Run {} has no recorded process group; account custody is retained.",
+                            "Run {} has no recorded process ID, so xcb keeps its account held.",
                             run.id
                         );
                         println!(
-                            "  A provider may have started before its PID was saved. Its stop cannot be proven from this record."
+                            "  A provider may have started before its process ID was saved, and this record can't show that it stopped."
                         );
-                        println!("  --yes cannot override missing process-stop evidence.");
+                        println!("  --yes can't change that.");
                     }
                     return Ok(0);
                 }
                 let pid = run.pid.ok_or(Error::Conflict(
-                    "run has no process group; recovery requires a running phase with a recorded pid",
+                    "run has no recorded process ID; recovery needs a running run with one",
                 ))?;
                 if run.phase != "running" {
                     return Err(Error::Conflict(
-                        "run is not in running phase; recovery requires a recorded process group",
+                        "run isn't running; recovery needs a running run with a recorded process ID",
                     ));
                 }
                 run.verify_recovery_stop()?;
@@ -2899,7 +3031,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         )?;
                     } else {
                         println!(
-                            "Would recover run {} · phase {} · process group {}.\nRepeat with --yes to independently verify any guest command, reconcile retained credentials and release custody. Staged command edits are never published by recovery.",
+                            "Would recover run {} (phase {}, process group {}).\nRepeat with --yes to confirm the provider and any command it ran have stopped, restore the account's sign-in, and free the account. Recovery never applies staged command edits.",
                             run.id, run.phase, pid
                         );
                     }
@@ -2913,15 +3045,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         .ok_or(Error::Unavailable("run not found"))?
                         .1;
                 }
-                let settled = store.recover_run(&run_id, &run_digest, now_ms())?;
+                let recovered = store.recover_run(&run_id, &run_digest, now_ms())?;
                 if cli.json {
                     print_json(
-                        json!({"version":1,"recovered":settled.id,"phase":settled.phase,"pid":pid}),
+                        json!({"version":1,"recovered":recovered.id,"phase":recovered.phase,"pid":pid}),
                     )?;
                 } else {
                     println!(
-                        "Recovered run {} · process group {} confirmed absent",
-                        settled.id, pid
+                        "Recovered run {}: process group {} has exited and its account is free.",
+                        recovered.id, pid
                     );
                 }
             } else {
@@ -2931,15 +3063,23 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         json!({"version":1,"runs":runs.iter().map(|run| json!({"id":run.id,"phase":run.phase,"pid":run.pid,"createdAtMs":run.created_at_ms})).collect::<Vec<_>>()}),
                     )?;
                 } else if runs.is_empty() {
-                    println!("No unsettled runs.");
+                    println!("No unfinished runs.");
                 } else {
-                    println!("Unsettled runs:");
-                    for run in runs {
-                        println!("  {} · phase {} · pid {:?}", run.id, run.phase, run.pid);
+                    println!("Unfinished runs:");
+                    for run in &runs {
+                        println!(
+                            "  {} · phase {} · {}",
+                            run.id,
+                            run.phase,
+                            run.pid
+                                .map(|pid| format!("process group {pid}"))
+                                .unwrap_or_else(|| "no process ID recorded".to_owned())
+                        );
                     }
                     println!(
-                        "Use `xcb recover <run-id> --yes` after the original host and process group have stopped; unresolved credentials must reconcile safely."
+                        "After the xcb that started a run and its provider have exited, xcb recover <run-id> --yes frees its account."
                     );
+                    ux::next(&format!("xcb recover {}", runs[0].id));
                 }
             }
             Ok(0)
@@ -2948,6 +3088,18 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             command: CommandJobs::Prune { days, yes },
         }) => {
             let root = xcb_runtime::command_tool::default_root()?;
+            if !root.exists() {
+                // No command runner on this machine means no jobs to archive.
+                if cli.json {
+                    print_json(xcb_runtime::command::PruneReport::default())?;
+                } else {
+                    println!(
+                        "No offline command jobs: the command runner isn't set up at {}.",
+                        root.display()
+                    );
+                }
+                return Ok(0);
+            }
             let report = xcb_runtime::command::CommandBackend::prune_joined_jobs(
                 &root,
                 now_ms().saturating_sub(u64::from(days) * 86_400_000),
@@ -2957,7 +3109,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 print_json(report)?;
             } else {
                 println!(
-                    "{} {} joined command job(s) older than {days} days into {}. {} unjoined, {} cleanup-pending and {} recent job(s) retained.{}",
+                    "{} {} finished command job(s) older than {days} days into {}. Kept {} whose processes aren't confirmed stopped, {} waiting for cleanup, and {} recent.{}",
                     if yes { "Archived" } else { "Would archive" },
                     report.candidates.len(),
                     root.join("jobs-archive").display(),
@@ -3223,10 +3375,9 @@ async fn direct_chat(
 async fn main() {
     ux::restore_sigpipe();
     let args: Vec<String> = std::env::args().collect();
-    let words: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
     if matches!(
-        words.as_slice(),
-        ["help", "advanced"] | ["advanced", "--help"]
+        command_words(&args).as_slice(),
+        ["help", "advanced"] | ["advanced"] | ["advanced", "--help" | "-h"]
     ) {
         hraness_cli_kit::style::write_stdout(ux::ADVANCED);
         return;
@@ -3261,13 +3412,67 @@ async fn main() {
     std::process::exit(code);
 }
 
+/// The words after `xcb` with the global options (`--state <dir>`,
+/// `--cwd <dir>`, `--json`) left out, for the `advanced` screen, which is
+/// not a subcommand.
+fn command_words(args: &[String]) -> Vec<&str> {
+    let mut words = Vec::new();
+    let mut rest = args.iter().skip(1).map(String::as_str);
+    while let Some(word) = rest.next() {
+        match word {
+            "--state" | "--cwd" => {
+                rest.next();
+            }
+            "--json" => {}
+            word if word.starts_with("--state=") || word.starts_with("--cwd=") => {}
+            word => words.push(word),
+        }
+    }
+    words
+}
+
+/// `xcb tasks verify` failures in plain words: which part of the task's
+/// local record didn't hold up. Other errors pass through unchanged.
+fn verify_failure(task: &Id, error: Error) -> Error {
+    let problem = match &error {
+        Error::Conflict(message) | Error::Unavailable(message) => match *message {
+            "managed receipt chain is missing the persisted task revision" => {
+                "the latest step of its record is missing"
+            }
+            "managed receipt chain is missing a prior revision" => {
+                "a step in the middle of its record is missing"
+            }
+            "managed receipt origin mismatch" => "the first step of its record is missing",
+            "managed receipt replay mismatch" | "managed receipt replay failed" => {
+                "a recorded step doesn't replay to the same result"
+            }
+            "managed receipt does not match persisted task" => {
+                "the task doesn't match the last step of its record"
+            }
+            "managed receipt chain identity mismatch" => {
+                "a step of its record belongs to another task"
+            }
+            "managed receipt output rejected" => "a step of its record can't be read",
+            _ => return error,
+        },
+        Error::Core(xcb_core::Error::Limit("managed receipt chain")) => {
+            "its record has more steps than xcb can replay (1024)"
+        }
+        _ => return error,
+    };
+    Error::Guided {
+        message: format!("Task {task} failed verification: {problem}"),
+        next: None,
+    }
+}
+
 /// Stderr is often retained by callers. Keep this notice independent of
 /// account-bearing route records and provider-supplied model metadata.
 fn automatic_route_notice(reason: &str) -> &'static str {
     if reason.starts_with("Warning: usage limits") {
-        "Usage limits block a higher-ranked model; using the best eligible route."
+        "Usage limits rule out a higher-ranked model; using the best one available now."
     } else {
-        "Automatically selected an admitted route."
+        "Picked an account and model automatically."
     }
 }
 
@@ -3693,11 +3898,11 @@ mod tests {
     fn automatic_route_notice_does_not_echo_route_record_data() {
         assert_eq!(
             automatic_route_notice("Warning: usage limits block private-provider-metadata"),
-            "Usage limits block a higher-ranked model; using the best eligible route."
+            "Usage limits rule out a higher-ranked model; using the best one available now."
         );
         assert_eq!(
             automatic_route_notice("private-account-and-model-metadata"),
-            "Automatically selected an admitted route."
+            "Picked an account and model automatically."
         );
     }
 
@@ -4012,6 +4217,68 @@ mod tests {
     }
 
     #[test]
+    fn json_run_output_marks_text_cut_to_the_route_limit() {
+        let mut result = runner::Outcome {
+            tool_calls: Some(0),
+            diagnostic: None,
+            text: "é".repeat(xcb_core::MAX_TEXT_BYTES),
+            facts: xcb_core::policy::TurnFacts {
+                terminal: Terminal::Completed,
+                joined: true,
+                effects: xcb_core::policy::EffectState::None,
+                pending_attention: false,
+                failure: None,
+            },
+            state: xcb_core::session::State::Idle,
+        };
+        let session = Id::new("s_long").unwrap();
+        let output = run_output(&session, &result);
+        assert_eq!(output["textTruncated"], true);
+        let text = output["text"].as_str().unwrap();
+        assert!(text.len() <= xcb_core::MAX_TEXT_BYTES);
+        assert!(result.text.starts_with(text));
+        result.text = "short".into();
+        let output = run_output(&session, &result);
+        assert!(output.get("textTruncated").is_none());
+        assert_eq!(output["text"], "short");
+    }
+
+    #[test]
+    fn global_options_do_not_hide_the_advanced_screen() {
+        let words = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            command_words(&args)
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            words(&["xcb", "--state", "/s", "--json", "advanced"]),
+            ["advanced"]
+        );
+        assert_eq!(
+            words(&["xcb", "--cwd=/w", "help", "advanced"]),
+            ["help", "advanced"]
+        );
+        assert_eq!(words(&["xcb", "accounts"]), ["accounts"]);
+    }
+
+    #[test]
+    fn verify_failures_name_the_broken_step_in_plain_words() {
+        let id = Id::new("t_fixture").unwrap();
+        let error = verify_failure(
+            &id,
+            Error::Conflict("managed receipt chain is missing a prior revision"),
+        );
+        assert_eq!(
+            ux::sentence(&error),
+            "Task t_fixture failed verification: a step in the middle of its record is missing."
+        );
+        let other = verify_failure(&id, Error::Unavailable("managed task not found"));
+        assert_eq!(ux::sentence(&other), "Managed task not found.");
+    }
+
+    #[test]
     fn headless_success_requires_completed_joined_settled_idle_outcome() {
         use xcb_core::{
             policy::{EffectState, Failure, TurnFacts},
@@ -4219,9 +4486,23 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Commands::Tasks {
-                command: Some(TaskCommand::Messages { id, after: 4 })
+                command: Some(TaskCommand::Messages { id, after: 4, limit: 64 })
             }) if id.as_str() == "t_example"
         ));
+        let cli =
+            Cli::try_parse_from(["xcb", "tasks", "messages", "t_example", "--limit", "5"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Tasks {
+                command: Some(TaskCommand::Messages { limit: 5, .. })
+            })
+        ));
+        for limit in ["0", "65"] {
+            assert!(
+                Cli::try_parse_from(["xcb", "tasks", "messages", "t_example", "--limit", limit])
+                    .is_err()
+            );
+        }
         let cli = Cli::try_parse_from(["xcb", "reflex", "label", "route", "t_example", "frontier"])
             .unwrap();
         assert!(matches!(
