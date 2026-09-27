@@ -22,7 +22,7 @@ export const blogDescription = "How xcb routes coding tasks across your Claude, 
 export const blogAuthor: ArticleAuthor = { kind: "organization", name: "Hraness" };
 
 const reviewer = "Claude Opus 5.5 (claude-opus-5-5) editorial review";
-const reviewedOn: ArticleIsoDate = "2026-09-26";
+const reviewedOn: ArticleIsoDate = "2026-09-27";
 const checkedOn: ArticleIsoDate = "2026-09-24";
 
 /** Sources pinned to the commits the fact check read. */
@@ -217,7 +217,7 @@ export const blogPosts: readonly BlogPost[] = [
   post({
     slug: "how-xcb-uses-algal",
     title: "How xcb uses ALGAL for reflexes your replies must certify",
-    dek: "xcb's reflexes run as small ALGAL programs that, by default, act only after your own replies certify them, leaving about one turn in ten to you.",
+    dek: "xcb's continuation reflexes run as small ALGAL programs that, by default, act only after your own replies certify them, leaving about one turn in ten to you.",
     eyebrow: "Integration",
     published: "2026-09-24",
     keywords: ["xcb", "ALGAL", "reflexes", "coding agents", "routing", "replay"],
@@ -245,6 +245,7 @@ export const blogPosts: readonly BlogPost[] = [
       observations: [
         "Labels from turns xcb answered itself train a head but cannot certify it, because they would only confirm its own choices.",
         "The risk veto lives in xcb rather than in the replaceable program, so a custom reflex program cannot remove it.",
+        "The September 26 edit dropped \"continuation\" from the dek, which then said every reflex waits for certification; the route reflex defaults to active (docs/reflexes.md), so the September 27 fact review restored the qualifier.",
       ],
       scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
       reassessOn: "2026-11-05",
