@@ -85,7 +85,8 @@ pub(super) fn migrate_v7(db: &mut Connection, now: u64) -> Result<()> {
         if table_exists(&tx, &archive)? {
             // A v7 store whose project tables an older step dropped and
             // recreated in the legacy shape: keep every row as evidence.
-            let rows = legacy_rows(&tx, table)?;
+            // Nothing is left to act on, so each is recorded settled.
+            let (rows, unreadable) = legacy_rows(&tx, table)?;
             for row in rows {
                 insert_conflict(
                     &tx,
@@ -98,8 +99,11 @@ pub(super) fn migrate_v7(db: &mut Connection, now: u64) -> Result<()> {
                         payload: row.payload,
                     },
                     now,
-                    false,
+                    true,
                 )?;
+            }
+            for conflict in &unreadable {
+                insert_conflict(&tx, conflict, now, true)?;
             }
             tx.execute_batch(&format!("DROP TABLE {table};"))?;
         } else {
@@ -112,22 +116,26 @@ pub(super) fn migrate_v7(db: &mut Connection, now: u64) -> Result<()> {
          CREATE TABLE IF NOT EXISTS project_memory(workspace TEXT PRIMARY KEY,revision INTEGER NOT NULL,payload TEXT NOT NULL);",
     )?;
     if rekey {
+        let mut unreadable = Vec::new();
+        let mut rows = |table: &str| -> Result<Vec<LegacyRow>> {
+            if !table_exists(&tx, table)? {
+                return Ok(vec![]);
+            }
+            let (rows, bad) = legacy_rows(&tx, table)?;
+            unreadable.extend(bad);
+            Ok(rows)
+        };
+        let grants = rows("project_policies_v6")?;
+        let memory = rows("project_memory_v6")?;
         let input = RekeyInput {
-            grants: if table_exists(&tx, "project_policies_v6")? {
-                legacy_rows(&tx, "project_policies_v6")?
-            } else {
-                vec![]
-            },
-            memory: if table_exists(&tx, "project_memory_v6")? {
-                legacy_rows(&tx, "project_memory_v6")?
-            } else {
-                vec![]
-            },
+            grants,
+            memory,
             conversations: conversation_infos(&tx)?,
             generation_refs: generation_refs(&tx)?,
             now,
         };
-        let plan = plan_project_rekey(&input);
+        let mut plan = plan_project_rekey(&input);
+        plan.conflicts.extend(unreadable);
         for policy in &plan.grants {
             project::write_policy(&tx, policy)?;
         }
@@ -141,8 +149,24 @@ pub(super) fn migrate_v7(db: &mut Connection, now: u64) -> Result<()> {
                 ],
             )?;
         }
+        // Only what still needs the owner stays open: a paused winner and
+        // the grants it superseded, and unbound Wordcell configs. Moved,
+        // merged and dropped rows are audit records.
+        let paused: BTreeSet<&str> = plan
+            .conflicts
+            .iter()
+            .filter(|conflict| conflict.disposition == "winner_paused")
+            .filter_map(|conflict| conflict.workspace.as_deref())
+            .collect();
         for conflict in &plan.conflicts {
-            let settled = matches!(conflict.disposition, "moved" | "merged");
+            let settled = match conflict.disposition {
+                "winner_paused" | "unbound" => false,
+                "superseded" => !conflict
+                    .workspace
+                    .as_deref()
+                    .is_some_and(|workspace| paused.contains(workspace)),
+                _ => true,
+            };
             insert_conflict(&tx, conflict, now, settled)?;
         }
     }
@@ -158,20 +182,72 @@ pub(super) struct LegacyRow {
     pub payload: String,
 }
 
-fn legacy_rows(db: &Connection, table: &str) -> Result<Vec<LegacyRow>> {
+/// The legacy rows, and each row whose columns do not have their declared
+/// types (storable where a 0.8.x writer ran without constraints) as a
+/// dropped `undecodable` conflict, so one bad row never fails the upgrade.
+fn legacy_rows(db: &Connection, table: &str) -> Result<(Vec<LegacyRow>, Vec<PlannedConflict>)> {
+    use rusqlite::types::Value;
     let mut query = db.prepare(&format!(
         "SELECT conversation,revision,payload FROM {table} ORDER BY conversation LIMIT 4096"
     ))?;
-    let rows = query
+    let values = query
         .query_map([], |row| {
-            Ok(LegacyRow {
-                key: row.get(0)?,
-                revision: row.get(1)?,
-                payload: row.get(2)?,
-            })
+            Ok((
+                row.get::<_, Value>(0)?,
+                row.get::<_, Value>(1)?,
+                row.get::<_, Value>(2)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    let mut rows = Vec::new();
+    let mut unreadable = Vec::new();
+    for values in values {
+        match values {
+            (Value::Text(key), Value::Integer(revision), Value::Text(payload)) => {
+                rows.push(LegacyRow {
+                    key,
+                    revision,
+                    payload,
+                })
+            }
+            (key, revision, payload) => unreadable.push(PlannedConflict {
+                kind: "undecodable",
+                workspace: None,
+                conversation: value_text(&key, 512),
+                disposition: "dropped",
+                stranded_tasks: 0,
+                payload: match payload {
+                    Value::Text(payload) => payload,
+                    payload => format!(
+                        "revision={} payload={}",
+                        value_text(&revision, 64),
+                        value_text(&payload, 4096)
+                    ),
+                },
+            }),
+        }
+    }
+    Ok((rows, unreadable))
+}
+
+/// A bounded rendering of one SQLite value for a conflict record.
+fn value_text(value: &rusqlite::types::Value, max: usize) -> String {
+    use rusqlite::types::Value;
+    let text = match value {
+        Value::Null => "NULL".to_owned(),
+        Value::Integer(number) => number.to_string(),
+        Value::Real(number) => number.to_string(),
+        Value::Text(text) => text.clone(),
+        Value::Blob(bytes) => format!(
+            "x'{}'",
+            bytes
+                .iter()
+                .take(max / 2)
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        ),
+    };
+    xcb_core::display_text(&text, max)
 }
 
 pub(super) struct ConversationInfo {
@@ -547,8 +623,9 @@ fn backfill_registry(tx: &Transaction<'_>) -> Result<()> {
 }
 
 /// Best-effort pre-upgrade copy: the only downgrade path. Skipped with a
-/// notice when the file is large or the volume is short on space.
-pub(super) fn backup_before_upgrade(db: &Connection, root: &Path, version: u32) {
+/// notice when the file is large or the volume is short on space. Returns
+/// the copy so an open whose upgrade then fails can remove it.
+pub(super) fn backup_before_upgrade(db: &Connection, root: &Path, version: u32) -> Option<PathBuf> {
     let skip = |why: &str| {
         record_supervisor_fault(
             root,
@@ -558,19 +635,11 @@ pub(super) fn backup_before_upgrade(db: &Connection, root: &Path, version: u32) 
     let bytes = db_bytes(&root.join("managed.sqlite"));
     if bytes > BACKUP_MAX_BYTES {
         skip("the database is larger than 1 GiB");
-        return;
+        return None;
     }
-    match rustix::fs::statvfs(root) {
-        Ok(stat) => {
-            if stat.f_bavail.saturating_mul(stat.f_frsize) < bytes.saturating_mul(2) {
-                skip("free space is below twice the database size");
-                return;
-            }
-        }
-        Err(_) => {
-            skip("free space could not be measured");
-            return;
-        }
+    if let Err(why) = room_for_copy(root, bytes) {
+        skip(why);
+        return None;
     }
     let target = root.join(format!("{BACKUP_PREFIX}{}.sqlite", now_ms()));
     let result: Result<()> = (|| {
@@ -586,13 +655,26 @@ pub(super) fn backup_before_upgrade(db: &Connection, root: &Path, version: u32) 
         fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
         Ok(())
     })();
-    if let Err(error) = result {
-        let _ = fs::remove_file(&target);
-        skip(&format!(
-            "the copy failed at v{version}: {}",
-            fault_text(&error)
-        ));
+    match result {
+        Ok(()) => Some(target),
+        Err(error) => {
+            let _ = fs::remove_file(&target);
+            skip(&format!(
+                "the copy failed at v{version}: {}",
+                fault_text(&error)
+            ));
+            None
+        }
     }
+}
+
+/// A `VACUUM INTO` copy of `bytes` needs twice that free on `dir`'s volume.
+fn room_for_copy(dir: &Path, bytes: u64) -> std::result::Result<(), &'static str> {
+    let stat = rustix::fs::statvfs(dir).map_err(|_| "free space could not be measured")?;
+    if stat.f_bavail.saturating_mul(stat.f_frsize) < bytes.saturating_mul(2) {
+        return Err("free space is below twice the database size");
+    }
+    Ok(())
 }
 
 pub(super) fn prune_upgrade_backups(root: &Path, now: u64) {
@@ -661,18 +743,21 @@ pub fn validate_workspace_root(root: &Path, path: &Path) -> Result<String> {
     if canonical.parent().is_none() {
         return refuse("workspace is not allowed: filesystem root");
     }
-    if let Some(home) = home_dir() {
-        if canonical == home || home.starts_with(&canonical) {
-            return refuse("workspace is not allowed: home");
-        }
-        if let Ok(inside) = canonical.strip_prefix(&home)
-            && inside.components().next().is_some_and(|first| {
-                let first = first.as_os_str().to_string_lossy();
-                first.starts_with('.') || first == "Library"
-            })
-        {
-            return refuse("workspace is not allowed: hidden or library directory");
-        }
+    // Without a home directory the home, hidden and Library checks cannot
+    // run, so nothing validates: the chokepoint fails closed.
+    let home = home_dir().ok_or(Error::Unavailable(
+        "home directory is unknown; set HOME to an absolute path",
+    ))?;
+    if canonical == home || home.starts_with(&canonical) {
+        return refuse("workspace is not allowed: home");
+    }
+    if let Ok(inside) = canonical.strip_prefix(&home)
+        && inside.components().next().is_some_and(|first| {
+            let first = first.as_os_str().to_string_lossy();
+            first.starts_with('.') || first == "Library"
+        })
+    {
+        return refuse("workspace is not allowed: hidden or library directory");
     }
     let mut state_roots = vec![root.to_path_buf()];
     if let Some(state) = root.parent() {
@@ -899,6 +984,34 @@ fn container_among(path: &str, valid: &[String]) -> bool {
         && !is_git_toplevel(Path::new(path))
 }
 
+/// How many entries of a launch directory are checked for repositories.
+const LAUNCH_SCAN_ENTRIES: usize = 512;
+
+/// A launch directory that looks like a directory of projects even before
+/// the registry holds any of them: not a repository, and either a container
+/// among the registered entries, a direct child of `$HOME` (`~/Documents`,
+/// `~/src`), or the parent of a git toplevel among its first 512 entries.
+/// Launching from one admits nothing; a human can still add it.
+fn launch_container(path: &str, valid: &[String]) -> bool {
+    let dir = Path::new(path);
+    if is_git_toplevel(dir) {
+        return false;
+    }
+    if container_among(path, valid) {
+        return true;
+    }
+    if home_dir().is_none_or(|home| dir.parent() == Some(home.as_path())) {
+        return true;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return true;
+    };
+    entries
+        .take(LAUNCH_SCAN_ENTRIES)
+        .flatten()
+        .any(|entry| is_git_toplevel(&entry.path()))
+}
+
 pub(super) fn touch_workspace(tx: &Transaction<'_>, path: &str, now: u64) -> Result<()> {
     tx.execute(
         "INSERT INTO workspaces(path,name,repo,admitted_by,first_seen,last_used,task_count,hidden) VALUES(?1,?2,NULL,'history',?3,?3,1,0) ON CONFLICT(path) DO UPDATE SET last_used=max(last_used,excluded.last_used),task_count=task_count+1",
@@ -1004,7 +1117,8 @@ impl ManagedStore {
     }
 
     /// Admit a directory by explicit act. A non-explicit (`launch`)
-    /// admission never admits a container.
+    /// admission never admits a container or a directory that looks like
+    /// one before the registry knows its projects.
     pub fn admit_workspace(
         &self,
         path: &Path,
@@ -1022,6 +1136,17 @@ impl ManagedStore {
         admit_tx(&tx, &canonical, admitted_by, name, &valid, now_ms())?;
         tx.commit()?;
         Ok(canonical)
+    }
+
+    /// Whether a `launch` admission of this canonical root would succeed,
+    /// without writing it: the read-only launch hint's check.
+    pub fn launch_admissible(&self, canonical: &str) -> Result<bool> {
+        let valid: Vec<String> = self
+            .known_workspaces(MAX_REGISTRY_ROWS as usize)?
+            .into_iter()
+            .map(|entry| entry.path)
+            .collect();
+        Ok(!launch_container(canonical, &valid))
     }
 
     /// Visible registry entries that validate now, `last_used DESC, path
@@ -1229,7 +1354,7 @@ impl ManagedStore {
                     record_supervisor_fault(
                         self.root(),
                         &format!(
-                            "project directory `{}` is missing or not allowed; `xcb workspaces hide` removes it from the picker",
+                            "project directory `{0}` is missing or not allowed; `xcb workspaces hide {0}` removes it from the picker",
                             xcb_core::display_text(&row.path, 512)
                         ),
                     );
@@ -1247,7 +1372,10 @@ impl ManagedStore {
             }
         }
         let open = self.migration_conflicts(true)?;
-        let grants = open.iter().filter(|c| c.kind == "grant").count();
+        let grants = open
+            .iter()
+            .filter(|c| c.kind == "grant" && c.disposition == "winner_paused")
+            .count();
         if !open.is_empty()
             && due(format!(
                 "conflicts\0{}\0{}",
@@ -1319,6 +1447,13 @@ impl ManagedStore {
         if fs::symlink_metadata(&target).is_ok() {
             return Err(Error::Conflict("upgrade preview copy already exists"));
         }
+        // The preview must never fill the volume ahead of the real upgrade.
+        room_for_copy(&scratch, db_bytes(&source)).map_err(|why| {
+            Error::guided(
+                format!("the upgrade preview needs room for a copy: {why}"),
+                "free disk space, then run xcb doctor --upgrade-plan again",
+            )
+        })?;
         let from_version = {
             let connection = Connection::open_with_flags(
                 &source,
@@ -1381,7 +1516,7 @@ pub(super) fn admit_tx(
             return Err(xcb_core::Error::Invalid("workspace name").into());
         }
     }
-    if admitted_by == "launch" && container_among(canonical, valid) {
+    if admitted_by == "launch" && launch_container(canonical, valid) {
         return Err(Error::Conflict(
             "workspace is not allowed: it holds other projects",
         ));
@@ -1417,6 +1552,14 @@ pub(super) fn resolve_conflicts_tx(
 
 pub(super) fn open_conflict(db: &Connection, workspace: &str, kind: &str) -> Result<bool> {
     Ok(!conflicts_from(db, true, Some((workspace, kind)))?.is_empty())
+}
+
+/// The directory's grant was paused by the upgrade and nobody has settled
+/// it yet; a grant the owner paused later is merely paused.
+pub(super) fn paused_by_upgrade(db: &Connection, workspace: &str) -> Result<bool> {
+    Ok(conflicts_from(db, true, Some((workspace, "grant")))?
+        .iter()
+        .any(|conflict| conflict.disposition == "winner_paused"))
 }
 
 fn conflicts_from(
@@ -1705,6 +1848,24 @@ impl ManagedStore {
     /// Submit a prompt to the thread. An `Ask` writes nothing; a bound
     /// prompt commits its message, task, receipt and registry touch in one
     /// transaction. A retry of the same message id replays the committed task.
+    /// The committed thread task for a retried operation, before any
+    /// workspace resolution or admission runs (I3): a registry change since
+    /// the first attempt never turns a committed dispatch into a failure.
+    pub(crate) fn replay_thread_submission(
+        &self,
+        message: &Id,
+        text: &str,
+    ) -> Result<Option<(ManagedTask, WorkspaceBinding)>> {
+        let thread = Id::new(GLOBAL_THREAD_ID)?;
+        let Some(task) = self.replay_intake(&thread, message, text, Some(&[]))? else {
+            return Ok(None);
+        };
+        let binding = task.binding.clone().ok_or(Error::Conflict(
+            "message id was reused with different input",
+        ))?;
+        Ok(Some((task, binding)))
+    }
+
     pub async fn submit_to_thread(
         &self,
         message: Id,

@@ -792,11 +792,16 @@ struct ThreadUi {
 impl ThreadUi {
     async fn start(f: &Fixture, launch_hint: Option<String>) -> Self {
         let thread = f.store.global_thread().await.unwrap();
+        Self::start_in(f, thread.id, launch_hint)
+    }
+
+    /// Serve `conversation`, which may be a project view.
+    fn start_in(f: &Fixture, conversation: Id, launch_hint: Option<String>) -> Self {
         let (commands, input) = std::sync::mpsc::sync_channel(16);
         let (output, display) = std::sync::mpsc::sync_channel(64);
         let ui = tokio::spawn(serve_ui(
             Arc::new(Store::open(&f.state).unwrap()),
-            thread.id,
+            conversation,
             launch_hint,
             input,
             output,
@@ -1064,5 +1069,121 @@ async fn thread_pinned_in_view_beyond_64_conversations() {
     ui.send(Intent::NewSession);
     ui.notice("focus cleared").await;
     assert_eq!(f.store.conversations(256).unwrap().len(), before);
+    ui.stop().await;
+}
+
+#[tokio::test]
+async fn workspace_add_admits_the_named_directory_not_its_repository() {
+    let f = fixture().await;
+    let repo = private::directory(&f.workspace.parent().unwrap().join("mono")).unwrap();
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let sub = private::directory(&repo.join("sub")).unwrap();
+    let sub = sub.to_str().unwrap().to_owned();
+    let mut ui = ThreadUi::start(&f, None).await;
+    ui.send(Intent::AddWorkspace { path: sub.clone() });
+    let notice = ui.notice("Added project").await;
+    assert!(notice.contains(&format!("`{sub}`")), "{notice}");
+    let paths: Vec<String> = f
+        .store
+        .all_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    assert!(paths.contains(&sub), "{paths:?}");
+    assert!(
+        !paths.contains(&repo.to_str().unwrap().to_owned()),
+        "{paths:?}"
+    );
+    ui.stop().await;
+}
+
+#[tokio::test]
+async fn correcting_a_binding_moves_and_focuses_with_one_notice() {
+    let f = fixture().await;
+    let other = private::directory(&f.workspace.parent().unwrap().join("other")).unwrap();
+    f.store.admit_workspace(&other, "command", None).unwrap();
+    let other = other.to_str().unwrap().to_owned();
+    let intake = f
+        .store
+        .submit_to_thread(
+            new_id("m"),
+            "Tidy the parser".into(),
+            vec![],
+            IntakeCues {
+                origin: Origin::Cli,
+                explicit: Some(f.workspace.clone()),
+                target: None,
+                focus: None,
+                launch_hint: None,
+                infer_only: false,
+            },
+        )
+        .await
+        .unwrap();
+    let Intake::Accepted { task, .. } = intake else {
+        panic!("explicit intake binds")
+    };
+    let mut ui = ThreadUi::start(&f, None).await;
+    ui.send(Intent::MoveTask {
+        task: task.id.clone(),
+        revision: task.revision,
+        target: other.clone(),
+        focus: true,
+    });
+    // The recreated task becomes the one a further correction moves.
+    let moved = match ui
+        .wait(|update| matches!(update, Update::WorkspaceBound { .. }))
+        .await
+    {
+        Update::WorkspaceBound {
+            task: moved,
+            workspace,
+            ..
+        } => {
+            assert_eq!(workspace, other);
+            moved
+        }
+        _ => unreachable!(),
+    };
+    assert_ne!(moved, task.id);
+    let notice = ui.notice("Moved").await;
+    assert!(notice.contains(moved.as_str()), "{notice}");
+    assert!(notice.ends_with(&format!("· Focus: `{other}`")), "{notice}");
+    // A failed move still says so next to the new focus.
+    let workspace = f.workspace.to_str().unwrap().to_owned();
+    ui.send(Intent::MoveTask {
+        task: Id::new("t_missing").unwrap(),
+        revision: 1,
+        target: workspace.clone(),
+        focus: true,
+    });
+    let notice = ui.notice("was not moved").await;
+    assert!(
+        notice.ends_with(&format!("· Focus: `{workspace}`")),
+        "{notice}"
+    );
+    ui.stop().await;
+}
+
+#[tokio::test]
+async fn an_old_view_stays_in_its_own_view_beyond_64_conversations() {
+    let f = fixture().await;
+    for index in 0..70 {
+        let directory =
+            private::directory(&f.workspace.parent().unwrap().join(format!("p{index}"))).unwrap();
+        f.store.create_conversation(&directory).await.unwrap();
+    }
+    let mut ui = ThreadUi::start_in(&f, f.conversation.clone(), None);
+    let view = match ui.wait(|update| matches!(update, Update::View(_))).await {
+        Update::View(view) => view,
+        _ => unreachable!(),
+    };
+    let row = view
+        .conversations
+        .iter()
+        .find(|row| row.id == f.conversation)
+        .expect("the open view is listed");
+    assert_eq!(row.workspace, f.workspace.to_str().unwrap());
     ui.stop().await;
 }

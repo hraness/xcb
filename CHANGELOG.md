@@ -69,6 +69,14 @@ shorter and every error says what to do next.
   xcb's state, and system directories are refused.
 - `xcb conversations --json` rows add `isThread`; the thread's row has
   `"workspace": null`.
+- `xcb memory status --json` now prints `{workspace, binding, conflicts}`
+  instead of the binding object or `null`; the binding is under `binding`, and
+  `conflicts` lists the directory's open upgrade conflicts. Binding rows from
+  `xcb memory configure` and `memory status` name `workspace` instead of
+  `conversation`.
+- Relative directories and project names in every command start at `--cwd`,
+  including `xcb projects`, `xcb memory`, `xcb backlog`, `xcb schedules`, and
+  `xcb daemons run` and their `--workspace`.
 - Managed schema v7 cannot be downgraded; restore the pre-v7 backup to roll
   back. The upgrade writes `managed/managed.pre-v7.<time>.sqlite` in the state
   root first when there is room.

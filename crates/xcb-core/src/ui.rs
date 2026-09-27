@@ -514,10 +514,13 @@ pub enum Intent {
     /// Set (or clear) the thread's session-local project focus.
     Focus(Option<String>),
     /// Recreate an unstarted thread task in another project directory.
+    /// With `focus`, the target also becomes the thread's focus and one
+    /// notice reports both.
     MoveTask {
         task: Id,
         revision: u64,
         target: String,
+        focus: bool,
     },
     /// Dispatch a held thread task now.
     ReleaseHold {
@@ -606,11 +609,15 @@ pub enum Update {
         label: String,
     },
     /// The thread could not pick a project for a submission; nothing was
-    /// written and the draft is kept.
+    /// written and the draft is kept. `resubmit` is true when Enter on the
+    /// restored draft redoes the same act after the pick: an ordinary
+    /// submission, or a restored `/backlog add` or `/schedule` command. A
+    /// Tab-queued draft is only focused, never sent as a live task.
     ProjectPicker {
         id: Id,
         candidates: Vec<WorkspaceRow>,
         reason: String,
+        resubmit: bool,
     },
     Stopped,
 }

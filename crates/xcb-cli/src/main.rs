@@ -45,7 +45,8 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
     /// Project hint for the thread; the exact directory for run, chat --new
-    /// and models route.
+    /// and models route; where every relative directory or scope argument
+    /// starts.
     #[arg(long, global = true, default_value = ".")]
     cwd: PathBuf,
     #[command(subcommand)]
@@ -2506,6 +2507,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         }) => {
             habitat::backlog(
                 store.root(),
+                &cli.cwd,
                 command,
                 conversation.as_ref(),
                 workspace.as_deref(),
@@ -2535,9 +2537,18 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         Some(Commands::Schedules {
             command,
             conversation,
-        }) => habitat::schedules(store.root(), command, conversation.as_ref(), cli.json).await,
+        }) => {
+            habitat::schedules(
+                store.root(),
+                &cli.cwd,
+                command,
+                conversation.as_ref(),
+                cli.json,
+            )
+            .await
+        }
         Some(Commands::Daemons { command }) => {
-            habitat::daemons(store.root(), command, cli.json).await
+            habitat::daemons(store.root(), &cli.cwd, command, cli.json).await
         }
         Some(Commands::Attention { remote }) => {
             if remote {
@@ -2546,9 +2557,11 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 habitat::attention(store.root(), cli.json)
             }
         }
-        Some(Commands::Projects { command }) => habitat::projects(store.root(), command, cli.json),
+        Some(Commands::Projects { command }) => {
+            habitat::projects(store.root(), &cli.cwd, command, cli.json)
+        }
         Some(Commands::Memory { command }) => {
-            habitat::memory(store.root(), command, cli.json).await
+            habitat::memory(store.root(), &cli.cwd, command, cli.json).await
         }
         Some(Commands::Service { command }) => {
             let home = std::env::var_os("HOME")
@@ -3283,9 +3296,11 @@ async fn chat_conversation(
 
 /// The launch directory's project root as a hint for the thread: snapped,
 /// valid and not a container. With `admit`, a new root is admitted as
-/// `launch` (refused for containers); without it (a read-only preview) a new
-/// root counts when admitting it would succeed. Anything else, such as
-/// launching from `~` or `~/Documents`, silently gives no hint.
+/// `launch` (refused for containers and for directories that look like one:
+/// a child of `$HOME` or a parent of repositories); without it (a read-only
+/// preview) a new root counts when admitting it would succeed. Anything
+/// else, such as launching from `~` or `~/Documents`, silently gives no
+/// hint.
 fn launch_hint(
     managed: &xcb_runtime::managed::ManagedStore,
     cwd: &std::path::Path,
@@ -3301,11 +3316,11 @@ fn launch_hint(
             .admit_workspace(std::path::Path::new(&root), "launch", None)
             .ok();
     }
-    let path = std::path::Path::new(&root);
-    let holds_others = known
-        .iter()
-        .any(|entry| std::path::Path::new(&entry.path).starts_with(path));
-    (!holds_others || path.join(".git").exists()).then_some(root)
+    managed
+        .launch_admissible(&root)
+        .ok()
+        .filter(|admissible| *admissible)
+        .map(|_| root)
 }
 
 /// Where `xcb models route` would run the prompt in the thread. Read-only:
@@ -3588,6 +3603,23 @@ mod thread_entry_tests {
                 .iter()
                 .all(|entry| entry.path != text(&documents)),
             "a container is never admitted by launch"
+        );
+    }
+
+    #[tokio::test]
+    async fn launching_from_a_parent_of_repositories_admits_nothing_on_an_empty_registry() {
+        let scratch = Scratch::new("parent");
+        let managed = scratch.store();
+        let documents = scratch.dir("documents");
+        scratch.repo("documents/app");
+        assert_eq!(launch_hint(&managed, &documents, false), None);
+        let (_, hint) = chat_conversation(&managed, &documents, None, false)
+            .await
+            .unwrap();
+        assert_eq!(hint, None);
+        assert!(
+            managed.all_workspaces().unwrap().is_empty(),
+            "launch never admits a directory of repositories"
         );
     }
 

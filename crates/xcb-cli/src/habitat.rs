@@ -228,14 +228,15 @@ pub enum ProjectCommand {
 }
 
 /// The directory `scope` names, resolved once by the shared scope order.
-fn scope(store: &ManagedStore, value: &str) -> Result<String> {
-    store.resolve_scope(value, &std::env::current_dir()?)
+/// Relative values start at `--cwd`, as in every other command.
+fn scope(store: &ManagedStore, cwd: &Path, value: &str) -> Result<String> {
+    store.resolve_scope(value, &cwd.canonicalize()?)
 }
 
 /// `--workspace <dir>`: validated to its canonical path, never snapped.
-fn exact_workspace(store: &ManagedStore, dir: &Path) -> Result<PathBuf> {
+fn exact_workspace(store: &ManagedStore, cwd: &Path, dir: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(
-        store.validate_workspace(&std::env::current_dir()?.join(dir))?,
+        store.validate_workspace(&cwd.canonicalize()?.join(dir))?,
     ))
 }
 
@@ -245,11 +246,12 @@ fn exact_workspace(store: &ManagedStore, dir: &Path) -> Result<PathBuf> {
 /// in that directory.
 async fn entry_target(
     store: &ManagedStore,
+    cwd: &Path,
     target: &str,
     workspace: Option<&Path>,
 ) -> Result<(Id, Option<PathBuf>)> {
     let exact = workspace
-        .map(|dir| exact_workspace(store, dir))
+        .map(|dir| exact_workspace(store, cwd, dir))
         .transpose()?;
     let conversation = match Id::new(target) {
         Ok(id) if target.starts_with("c_") => match store.resolve_conversation(&id) {
@@ -271,7 +273,7 @@ async fn entry_target(
             })?,
         ),
         None => {
-            let scope = PathBuf::from(scope(store, target)?);
+            let scope = PathBuf::from(scope(store, cwd, target)?);
             if exact.as_ref().is_some_and(|dir| *dir != scope) {
                 return Err(Error::Conflict(
                     "--workspace names a different directory than the project",
@@ -284,7 +286,12 @@ async fn entry_target(
     Ok((conversation, Some(workspace)))
 }
 
-pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Result<i32> {
+pub fn projects(
+    root: &Path,
+    cwd: &Path,
+    command: Option<ProjectCommand>,
+    json: bool,
+) -> Result<i32> {
     let store = ManagedStore::open(root)?;
     let rows = match command {
         None => store.project_policies()?,
@@ -299,7 +306,7 @@ pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Res
             let expiry = now_ms()
                 .checked_add(hours * 3_600_000)
                 .ok_or(Error::Unavailable("project expiry overflow"))?;
-            let workspace = scope(&store, &value)?;
+            let workspace = scope(&store, cwd, &value)?;
             let row = store.configure_project_policy_in(
                 Path::new(&workspace),
                 revision,
@@ -315,14 +322,14 @@ pub fn projects(root: &Path, command: Option<ProjectCommand>, json: bool) -> Res
             scope: value,
             revision,
         }) => {
-            let workspace = scope(&store, &value)?;
+            let workspace = scope(&store, cwd, &value)?;
             vec![store.set_project_policy_enabled_in(&workspace, revision, false)?]
         }
         Some(ProjectCommand::Resume {
             scope: value,
             revision,
         }) => {
-            let workspace = scope(&store, &value)?;
+            let workspace = scope(&store, cwd, &value)?;
             let row = store.set_project_policy_enabled_in(&workspace, revision, true)?;
             wake(root)?;
             vec![row]
@@ -487,7 +494,7 @@ fn read_bounded(path: &Path, max: usize) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub async fn memory(root: &Path, command: MemoryCommand, json: bool) -> Result<i32> {
+pub async fn memory(root: &Path, cwd: &Path, command: MemoryCommand, json: bool) -> Result<i32> {
     let store = ManagedStore::open(root)?;
     let value = match command {
         MemoryCommand::Configure {
@@ -496,13 +503,13 @@ pub async fn memory(root: &Path, command: MemoryCommand, json: bool) -> Result<i
             wordcell,
             revision,
         } => {
-            let workspace = scope(&store, &value)?;
+            let workspace = scope(&store, cwd, &value)?;
             let config =
                 xcb_runtime::wordcell::WordcellConfig::admit(&wordcell, &vault.canonicalize()?)?;
             serde_json::to_value(store.bind_memory_in(Path::new(&workspace), revision, config)?)?
         }
         MemoryCommand::Status { scope: value } => {
-            let workspace = scope(&store, &value)?;
+            let workspace = scope(&store, cwd, &value)?;
             let conflicts: Vec<_> = store
                 .migration_conflicts(true)?
                 .into_iter()
@@ -521,7 +528,7 @@ pub async fn memory(root: &Path, command: MemoryCommand, json: bool) -> Result<i
             query,
             limit,
         } => {
-            let workspace = scope(&store, &value)?;
+            let workspace = scope(&store, cwd, &value)?;
             store
                 .search_memory_in(&workspace, &query, usize::from(limit))
                 .await?
@@ -576,7 +583,12 @@ fn print_daemon(status: &managed::DaemonStatus, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn daemons(root: &Path, command: Option<DaemonCommand>, json: bool) -> Result<i32> {
+pub async fn daemons(
+    root: &Path,
+    cwd: &Path,
+    command: Option<DaemonCommand>,
+    json: bool,
+) -> Result<i32> {
     let store = std::sync::Arc::new(ManagedStore::open(root)?);
     match command {
         Some(DaemonCommand::Run {
@@ -605,7 +617,7 @@ pub async fn daemons(root: &Path, command: Option<DaemonCommand>, json: bool) ->
                     .ok_or(Error::Unavailable("invalid daemon generation bound"))?,
             )?;
             let (conversation, workspace) =
-                entry_target(&store, &target, workspace.as_deref()).await?;
+                entry_target(&store, cwd, &target, workspace.as_deref()).await?;
             let status =
                 store.enqueue_daemon_at(&conversation, workspace.as_deref(), &name, &daemon)?;
             wake(root)?;
@@ -684,6 +696,7 @@ fn print_task(task: &ManagedTask, json: bool) -> Result<()> {
 
 pub async fn backlog(
     root: &Path,
+    cwd: &Path,
     command: Option<BacklogCommand>,
     conversation: Option<&Id>,
     workspace: Option<&Path>,
@@ -703,7 +716,7 @@ pub async fn backlog(
         }) => {
             let program = load_program(&manifest, inputs.as_deref(), managed_calls)?;
             let (conversation, workspace) =
-                entry_target(&store, &target, workspace.as_deref()).await?;
+                entry_target(&store, cwd, &target, workspace.as_deref()).await?;
             let task = store
                 .enqueue_program_at(
                     &conversation,
@@ -767,7 +780,7 @@ pub async fn backlog(
         None => {
             let tasks = match workspace {
                 Some(dir) => store.backlog_in(
-                    exact_workspace(&store, dir)?
+                    exact_workspace(&store, cwd, dir)?
                         .to_str()
                         .ok_or(Error::PrivateState)?,
                     256,
@@ -791,7 +804,7 @@ pub async fn backlog(
             return Ok(0);
         }
         Some(BacklogCommand::Memory { scope: value }) => {
-            let memory = store.working_memory_in(&scope(&store, &value)?, 32)?;
+            let memory = store.working_memory_in(&scope(&store, cwd, &value)?, 32)?;
             if json {
                 crate::print_json(memory)?;
             } else if memory.is_empty() {
@@ -819,7 +832,7 @@ pub async fn backlog(
         }) => {
             runnable = ready;
             let (conversation, workspace) =
-                entry_target(&store, &target, workspace.as_deref()).await?;
+                entry_target(&store, cwd, &target, workspace.as_deref()).await?;
             store
                 .enqueue_backlog_at(
                     &conversation,
@@ -1019,6 +1032,7 @@ fn load_program(
 
 pub async fn schedules(
     root: &Path,
+    cwd: &Path,
     command: Option<ScheduleCommand>,
     conversation: Option<&Id>,
     json: bool,
@@ -1040,7 +1054,7 @@ pub async fn schedules(
                 .checked_add(interval)
                 .ok_or(Error::Unavailable("schedule time overflow"))?;
             let (conversation, workspace) =
-                entry_target(&store, &target, workspace.as_deref()).await?;
+                entry_target(&store, cwd, &target, workspace.as_deref()).await?;
             let schedule = store
                 .create_program_schedule_at(
                     &conversation,
@@ -1073,7 +1087,7 @@ pub async fn schedules(
                 .checked_add(interval)
                 .ok_or(Error::Unavailable("schedule time overflow"))?;
             let (conversation, workspace) =
-                entry_target(&store, &target, workspace.as_deref()).await?;
+                entry_target(&store, cwd, &target, workspace.as_deref()).await?;
             let schedule = store
                 .create_schedule_at(&conversation, workspace.as_deref(), prompt, interval, first)
                 .await?;
@@ -1231,32 +1245,63 @@ mod tests {
         store.admit_workspace(&one, "command", None).unwrap();
         let thread = store.global_thread().await.unwrap().id;
         let one_text = one.to_str().unwrap().to_owned();
-        assert_eq!(scope(&store, &one_text).unwrap(), one_text);
-        assert_eq!(scope(&store, view.id.as_str()).unwrap(), one_text);
-        assert_eq!(scope(&store, "app").unwrap(), one_text);
+        assert_eq!(scope(&store, base, &one_text).unwrap(), one_text);
+        assert_eq!(scope(&store, base, view.id.as_str()).unwrap(), one_text);
+        assert_eq!(scope(&store, base, "app").unwrap(), one_text);
         assert!(matches!(
-            scope(&store, GLOBAL_THREAD_ID),
+            scope(&store, base, GLOBAL_THREAD_ID),
             Err(Error::Conflict(_))
         ));
         store.admit_workspace(&two, "command", None).unwrap();
-        assert!(matches!(scope(&store, "app"), Err(Error::Guided { .. })));
+        assert!(matches!(
+            scope(&store, base, "app"),
+            Err(Error::Guided { .. })
+        ));
         // Entry targets: a view keeps its conversation, a scope means the
         // thread in that directory, and the thread itself needs --workspace.
         assert_eq!(
-            entry_target(&store, view.id.as_str(), None).await.unwrap(),
+            entry_target(&store, base, view.id.as_str(), None)
+                .await
+                .unwrap(),
             (view.id.clone(), None)
         );
         assert_eq!(
-            entry_target(&store, &one_text, None).await.unwrap(),
+            entry_target(&store, base, &one_text, None).await.unwrap(),
             (thread.clone(), Some(one.clone()))
         );
-        assert!(entry_target(&store, GLOBAL_THREAD_ID, None).await.is_err());
+        assert!(
+            entry_target(&store, base, GLOBAL_THREAD_ID, None)
+                .await
+                .is_err()
+        );
         assert_eq!(
-            entry_target(&store, GLOBAL_THREAD_ID, Some(&two))
+            entry_target(&store, base, GLOBAL_THREAD_ID, Some(&two))
                 .await
                 .unwrap(),
             (thread, Some(two.clone()))
         );
-        assert!(entry_target(&store, &one_text, Some(&two)).await.is_err());
+        assert!(
+            entry_target(&store, base, &one_text, Some(&two))
+                .await
+                .is_err()
+        );
+        // Relative scopes and --workspace start at --cwd, not the process cwd.
+        assert_eq!(scope(&store, base, "./one/app").unwrap(), one_text);
+        assert_eq!(
+            scope(&store, &base.join("one"), ".").unwrap(),
+            base.join("one").to_str().unwrap()
+        );
+        assert_eq!(
+            entry_target(
+                &store,
+                &base.join("two"),
+                GLOBAL_THREAD_ID,
+                Some(Path::new("app"))
+            )
+            .await
+            .unwrap()
+            .1,
+            Some(two.clone())
+        );
     }
 }

@@ -329,7 +329,7 @@ impl ManagedStore {
     /// `spent`.
     pub fn project_status(&self, policy: &ProjectPolicy) -> Result<&'static str> {
         Ok(if !policy.enabled {
-            if workspace::open_conflict(&*self.db()?, &policy.workspace, "grant")? {
+            if workspace::paused_by_upgrade(&*self.db()?, &policy.workspace)? {
                 "paused by upgrade"
             } else {
                 "paused"

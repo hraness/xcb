@@ -1683,13 +1683,21 @@ impl App {
                 self.dirty = true;
             }
             Update::ProjectPicker {
-                candidates, reason, ..
+                candidates,
+                reason,
+                resubmit,
+                ..
             } => {
                 self.notice = format!(
-                    "{} · Enter picks and resends; Esc keeps the draft",
-                    xcb_core::display_text(&reason, 240)
+                    "{} · {}",
+                    xcb_core::display_text(&reason, 240),
+                    if resubmit {
+                        "Enter picks and resends; Esc keeps the draft"
+                    } else {
+                        "Enter focuses the project, then Tab queues the draft; Esc keeps it"
+                    }
                 );
-                self.picker("Which project?", workspace_items(&candidates, true));
+                self.picker("Which project?", workspace_items(&candidates, resubmit));
                 self.dirty = true;
             }
             Update::Stopped => return false,
@@ -1780,20 +1788,22 @@ impl App {
             self.pending_image_session = view_context(&self.view);
         }
     }
+    /// Send a slash command's intent; false when it was not sent, with the
+    /// command back in the composer and the reason in the notice.
     fn send_habitat(
         &mut self,
         output: &SyncSender<Intent>,
         intent: Intent,
         command: &str,
         arguments: &str,
-    ) {
+    ) -> bool {
         let pending = self.habitat_pending(&intent);
         if pending.is_some()
             && (self.pending_habitat.len() >= 16 || !self.recovery_capacity_available())
         {
             self.composer.set_text(&format!("{command} {arguments}"));
             self.notice = "Waiting for earlier input acknowledgements; command retained.".into();
-            return;
+            return false;
         }
         let tracked = pending.is_some();
         if let Some(pending) = pending {
@@ -1802,16 +1812,18 @@ impl App {
         if tracked && !self.flush_recovery(true) {
             self.pending_habitat.pop_back();
             self.composer.set_text(&format!("{command} {arguments}"));
-            return;
+            return false;
         }
         if self.try_send(output, intent) {
             self.inbox_draft_event = None;
+            true
         } else {
             if tracked {
                 self.pending_habitat.pop_back();
             }
             self.composer.set_text(&format!("{command} {arguments}"));
             self.flush_recovery(true);
+            false
         }
     }
 
@@ -1914,8 +1926,9 @@ impl App {
                     Err(reason) => { self.notice = reason; return; }
                 };
                 if let Some(project) = self.view.projects.iter().find(|project| project.workspace == workspace) {
-                    self.send_habitat(output, Intent::Habitat(HabitatCommand::ProjectEnabled { workspace: project.workspace.clone(), expected_revision: project.revision, enabled: action == "resume" }), command, arguments);
-                    self.notice = format!("Project `{workspace}` {}", if action == "resume" { "resumes" } else { "pauses" });
+                    if self.send_habitat(output, Intent::Habitat(HabitatCommand::ProjectEnabled { workspace: project.workspace.clone(), expected_revision: project.revision, enabled: action == "resume" }), command, arguments) {
+                        self.notice = format!("Project `{workspace}` {}", if action == "resume" { "resumes" } else { "pauses" });
+                    }
                 } else { self.notice = format!("No project grant for `{workspace}`. /project all lists grants."); }
             }
             "/project" if action == "grant" => {
@@ -1944,12 +1957,13 @@ impl App {
                         Err(reason) => { self.notice = reason; return; }
                     };
                     let current = self.view.projects.iter().find(|p| p.workspace == workspace);
-                    self.send_habitat(output, Intent::Habitat(HabitatCommand::ConfigureProject {
+                    if self.send_habitat(output, Intent::Habitat(HabitatCommand::ConfigureProject {
                         workspace: workspace.clone(),
                         expected_revision: current.map(|p| p.revision), goal: goal.into(), max_tasks,
                         expires_at_ms: now.saturating_add(hours * 3_600_000), required_provider: current.and_then(|p| p.required_provider),
-                    }), command, arguments);
-                    self.notice = format!("Granting `{workspace}`");
+                    }), command, arguments) {
+                        self.notice = format!("Granting `{workspace}`");
+                    }
                 } else { self.notice = "Use /project grant [project] <1–100 tasks> <1–720 hours> <goal>. This authorizes automatic follow-up work.".into(); }
             }
             "/project" => self.notice = "Use /project [all], /project grant [project] <tasks> <hours> <goal>, or /project pause|resume [project].".into(),
@@ -1966,8 +1980,9 @@ impl App {
                     Ok(_) => { self.notice = "Use /memory [project] search <query>.".into(); return; }
                     Err(reason) => { self.notice = reason; return; }
                 };
-                self.send_habitat(output, Intent::Habitat(HabitatCommand::MemorySearch { workspace: workspace.clone(), query: query.into() }), command, arguments);
-                self.notice = format!("Searching the vault for `{workspace}`");
+                if self.send_habitat(output, Intent::Habitat(HabitatCommand::MemorySearch { workspace: workspace.clone(), query: query.into() }), command, arguments) {
+                    self.notice = format!("Searching the vault for `{workspace}`");
+                }
             }
             "/memory" => self.notice = "Use /memory [project] search <query>. Bind a vault first with xcb memory configure.".into(),
             "/workspace" => self.workspace_command(action, tail, output),

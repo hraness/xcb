@@ -718,63 +718,9 @@ impl ManagedStore {
         Self::open_with(root, true)
     }
 
-    /// `guarded` is false only for a private scratch copy (`migrate_copy`):
-    /// no live writer can share it, so it takes no upgrade guard and needs
-    /// no pre-upgrade backup.
-    fn open_with(root: &Path, guarded: bool) -> Result<Self> {
-        let root = private::directory(&root.join("managed"))?;
-        let path = root.join("managed.sqlite");
-        let mut oversized = false;
-        match fs::symlink_metadata(&path) {
-            Ok(meta) => {
-                // Custody-check even an oversized database so retention can
-                // run on it instead of the open failing outright.
-                private::open_file(&path, MAX_DB_OPEN_BYTES)?;
-                oversized = meta.len()
-                    + fs::metadata(path.with_extension("sqlite-wal"))
-                        .map(|wal| wal.len())
-                        .unwrap_or(0)
-                    > MAX_DB_BYTES;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                private::create(&path, &[])?
-            }
-            Err(error) => return Err(error.into()),
-        }
-        let mut connection = Connection::open(&path)?;
-        connection.busy_timeout(Duration::from_secs(15))?;
-        connection.pragma_update(None, "foreign_keys", "ON")?;
-        let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            connection.pragma_update(None, "journal_mode", "WAL")?;
-        }
-        connection.pragma_update(None, "synchronous", "FULL")?;
-        let mut version: u32 =
-            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > workspace::SCHEMA_VERSION {
-            return Err(Error::Unavailable(
-                "managed state was written by a newer xcb",
-            ));
-        }
-        // A prior supervisor owns the old writer contract until all its work
-        // settles. Never advance the schema underneath that admitted writer.
-        // The daemon itself opens/migrates before taking its dispatch lock.
-        // A peer upgrading the same store makes this caller wait (bounded),
-        // then proceed once the store reads as migrated.
-        let _migration_guard = if guarded && version < workspace::SCHEMA_VERSION {
-            let guard = managed_migration_guard_wait(&root, || {
-                let current: u32 =
-                    connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-                Ok(current >= workspace::SCHEMA_VERSION)
-            })?;
-            version = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if guard.is_some() && (1..workspace::SCHEMA_VERSION).contains(&version) {
-                workspace::backup_before_upgrade(&connection, &root, version);
-            }
-            guard
-        } else {
-            None
-        };
+    /// Every schema step in order; returns how many mailbox tables it had
+    /// to add.
+    fn migrate_schema(connection: &mut Connection, version: u32) -> Result<u64> {
         // Incremental vacuum lets routine retention return freed pages to the
         // filesystem; on an existing file it only takes effect if a rebuild
         // already enabled it, so this is a no-op there.
@@ -822,12 +768,85 @@ impl ManagedStore {
                 tx.commit()?;
             }
         }
-        habitat::migrate(&mut connection)?;
-        project::migrate(&mut connection)?;
-        inbox::migrate(&mut connection)?;
-        program_state::migrate(&mut connection)?;
-        daemon::migrate(&mut connection)?;
-        workspace::migrate_v7(&mut connection, now_ms())?;
+        habitat::migrate(connection)?;
+        project::migrate(connection)?;
+        inbox::migrate(connection)?;
+        program_state::migrate(connection)?;
+        daemon::migrate(connection)?;
+        workspace::migrate_v7(connection, now_ms())?;
+        Ok(mailbox_migrations)
+    }
+
+    /// `guarded` is false only for a private scratch copy (`migrate_copy`):
+    /// no live writer can share it, so it takes no upgrade guard and needs
+    /// no pre-upgrade backup.
+    fn open_with(root: &Path, guarded: bool) -> Result<Self> {
+        let root = private::directory(&root.join("managed"))?;
+        let path = root.join("managed.sqlite");
+        let mut oversized = false;
+        match fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                // Custody-check even an oversized database so retention can
+                // run on it instead of the open failing outright.
+                private::open_file(&path, MAX_DB_OPEN_BYTES)?;
+                oversized = meta.len()
+                    + fs::metadata(path.with_extension("sqlite-wal"))
+                        .map(|wal| wal.len())
+                        .unwrap_or(0)
+                    > MAX_DB_BYTES;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                private::create(&path, &[])?
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let mut connection = Connection::open(&path)?;
+        connection.busy_timeout(Duration::from_secs(15))?;
+        connection.pragma_update(None, "foreign_keys", "ON")?;
+        let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            connection.pragma_update(None, "journal_mode", "WAL")?;
+        }
+        connection.pragma_update(None, "synchronous", "FULL")?;
+        let mut version: u32 =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > workspace::SCHEMA_VERSION {
+            return Err(Error::Unavailable(
+                "managed state was written by a newer xcb",
+            ));
+        }
+        // A prior supervisor owns the old writer contract until all its work
+        // settles. Never advance the schema underneath that admitted writer.
+        // The daemon itself opens/migrates before taking its dispatch lock.
+        // A peer upgrading the same store makes this caller wait (bounded),
+        // then proceed once the store reads as migrated.
+        let mut backup = None;
+        let _migration_guard = if guarded && version < workspace::SCHEMA_VERSION {
+            let guard = managed_migration_guard_wait(&root, || {
+                let current: u32 =
+                    connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+                Ok(current >= workspace::SCHEMA_VERSION)
+            })?;
+            version = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if guard.is_some() && (1..workspace::SCHEMA_VERSION).contains(&version) {
+                backup = workspace::backup_before_upgrade(&connection, &root, version);
+            }
+            guard
+        } else {
+            None
+        };
+        let mailbox_migrations = match Self::migrate_schema(&mut connection, version) {
+            Ok(count) => count,
+            Err(error) => {
+                // A failed upgrade leaves the store pre-v7, so its copy is
+                // not the downgrade path; the next attempt makes its own.
+                // Retries therefore never pile up copies.
+                if let Some(backup) = backup {
+                    let _ = fs::remove_file(backup);
+                }
+                return Err(error);
+            }
+        };
         let mut store = Self {
             root,
             connection: Mutex::new(connection),
@@ -837,7 +856,9 @@ impl ManagedStore {
             mailbox_migrations: std::sync::atomic::AtomicU64::new(mailbox_migrations),
             workspace_checks: Mutex::new(BTreeMap::new()),
         };
-        if oversized || retention_due(store.root()) {
+        // A private preview copy reports what the migration alone did, so
+        // retention never runs on it.
+        if guarded && (oversized || retention_due(store.root())) {
             match store.retain() {
                 Ok(_) => stamp_retention(store.root()),
                 // A failed pass still opens the store; an oversized file then
@@ -848,7 +869,7 @@ impl ManagedStore {
                 ),
             }
         }
-        if oversized && db_bytes(&path) > MAX_DB_BYTES {
+        if guarded && oversized && db_bytes(&path) > MAX_DB_BYTES {
             // Deletes alone never shrink the file: freed pages sit on the
             // freelist until a rebuild. One bounded VACUUM attempt runs here
             // so a recoverable database does not degrade permanently; it
@@ -5793,6 +5814,14 @@ fn managed_view(
     // The thread is pinned first whenever it exists, independent of the
     // recency window, so it never falls off the list.
     conversations.retain(|conversation| !conversation.is_thread());
+    // The open view is pinned too: the TUI finds its directory in this
+    // list, so an old view resumed past the window keeps its authority.
+    if !conversations.iter().any(|row| &row.id == conversation)
+        && conversation.as_str() != GLOBAL_THREAD_ID
+        && let Some(open) = managed.conversation(conversation)?
+    {
+        conversations.insert(0, open);
+    }
     if let Some(thread) = managed.conversation(&Id::new(GLOBAL_THREAD_ID)?)? {
         conversations.insert(0, thread);
     }
@@ -6146,19 +6175,51 @@ pub async fn serve_ui(
                                         Some((_, operation, _)) => operation.clone(),
                                         None => new_id("m"),
                                     };
-                                    if let Some((task, operation, text)) = recovery {
-                                        pending_updates.push_back(Update::HabitatDraft {
-                                            context: command_context.clone(),
-                                            task,
-                                            operation,
-                                            text,
-                                        });
+                                    // The composer gets back the command
+                                    // itself, so Enter after the pick redoes
+                                    // it in the picked project; a bare prompt
+                                    // would run as a live task instead.
+                                    let command_text = match &command {
+                                        HabitatCommand::EnqueueIn {
+                                            prompt,
+                                            deferred: true,
+                                            ..
+                                        } => Some(format!("/backlog add {prompt}")),
+                                        HabitatCommand::Schedule {
+                                            prompt,
+                                            interval_ms,
+                                            ..
+                                        } => Some(format!(
+                                            "/schedule every {} {prompt}",
+                                            interval_ms / 1000
+                                        )),
+                                        _ => None,
+                                    };
+                                    let resubmit = command_text.is_some();
+                                    match recovery {
+                                        Some((task, operation, text)) => {
+                                            pending_updates.push_back(Update::HabitatDraft {
+                                                context: command_context.clone(),
+                                                task,
+                                                operation,
+                                                text: command_text.unwrap_or(text),
+                                            })
+                                        }
+                                        None => {
+                                            if let Some(text) = command_text {
+                                                pending_updates.push_back(Update::Draft {
+                                                    text,
+                                                    attachments: vec![],
+                                                });
+                                            }
+                                        }
                                     }
                                     pending_updates.push_back(Update::ProjectPicker {
                                         id,
                                         candidates: managed.workspace_rows(8).unwrap_or_default(),
                                         reason: "name the project for this work; nothing was saved"
                                             .into(),
+                                        resubmit,
                                     });
                                     continue;
                                 }
@@ -6312,6 +6373,7 @@ pub async fn serve_ui(
                                 id,
                                 candidates,
                                 reason,
+                                resubmit: true,
                             });
                         }
                         Ok(accepted) => {
@@ -6384,18 +6446,38 @@ pub async fn serve_ui(
                     task,
                     revision,
                     target,
+                    focus: refocus,
                 } => {
                     let notice = match managed.ui_workspace(&target) {
+                        Err(reason) if refocus => {
+                            format!("Focus was not changed and {task} was not moved: {reason}")
+                        }
                         Err(reason) => format!("{task} was not moved: {reason}"),
-                        Ok(directory) => match managed.move_task(&task, revision, &directory).await
-                        {
-                            Ok(moved) => {
-                                last_ensure = Instant::now();
-                                ensure_daemon(store.root(), &executable).ok();
-                                format!("Moved {task} to `{directory}` as {}", moved.id)
+                        Ok(directory) => {
+                            let moved = match managed.move_task(&task, revision, &directory).await {
+                                Ok(moved) => {
+                                    last_ensure = Instant::now();
+                                    ensure_daemon(store.root(), &executable).ok();
+                                    // The recreated task is the one a further
+                                    // `/workspace <dir>` corrects.
+                                    pending_updates.push_back(Update::WorkspaceBound {
+                                        id: moved.source_message.clone(),
+                                        task: moved.id.clone(),
+                                        workspace: directory.clone(),
+                                        label: "moved".into(),
+                                    });
+                                    format!("Moved {task} to `{directory}` as {}", moved.id)
+                                }
+                                Err(error) => format!("{task} was not moved: {error}"),
+                            };
+                            if refocus {
+                                let notice = format!("{moved} · Focus: `{directory}`");
+                                focus = Some(directory);
+                                notice
+                            } else {
+                                moved
                             }
-                            Err(error) => format!("{task} was not moved: {error}"),
-                        },
+                        }
                     };
                     pending_updates.push_back(Update::Notice(notice));
                 }
@@ -6410,11 +6492,14 @@ pub async fn serve_ui(
                     };
                     pending_updates.push_back(Update::Notice(notice));
                 }
+                // Adding is an explicit act: the named directory itself,
+                // never snapped to an enclosing repository (I6).
                 Intent::AddWorkspace { path } => {
-                    let notice = match managed
-                        .snap_root(&overview::expand_home(&path))
-                        .and_then(|root| managed.admit_workspace(Path::new(&root), "command", None))
-                    {
+                    let notice = match managed.admit_workspace(
+                        &overview::expand_home(&path),
+                        "command",
+                        None,
+                    ) {
                         Ok(directory) => format!("Added project `{directory}`"),
                         Err(error) => format!("Project was not added: {error}"),
                     };

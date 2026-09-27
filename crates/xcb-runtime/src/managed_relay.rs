@@ -330,6 +330,20 @@ async fn dispatch(
     prompt: &str,
     operation: &Id,
 ) -> Result<Value> {
+    let result = |task: &crate::managed::ManagedTask, source: &str| {
+        json!({
+            "conversation": task.conversation.as_str(),
+            "dispatched": true,
+            "task": task.id.as_str(),
+            "workspace": task.workspace,
+            "workspaceSource": source,
+        })
+    };
+    // A retry replays its committed task before the name lookup or the
+    // admission below can fail on a registry that changed since.
+    if let Some((task, binding)) = managed.replay_thread_submission(operation, prompt)? {
+        return Ok(result(&task, binding.source.as_str()));
+    }
     let mut cues = IntakeCues {
         origin: Origin::Relay,
         explicit: None,
@@ -352,18 +366,7 @@ async fn dispatch(
         .submit_to_thread(operation.clone(), prompt.to_string(), vec![], cues)
         .await?
     {
-        Intake::Accepted {
-            task,
-            workspace,
-            binding,
-            ..
-        } => Ok(json!({
-            "conversation": task.conversation.as_str(),
-            "dispatched": true,
-            "task": task.id.as_str(),
-            "workspace": workspace,
-            "workspaceSource": binding.source.as_str(),
-        })),
+        Intake::Accepted { task, binding, .. } => Ok(result(&task, binding.source.as_str())),
         Intake::Ask { candidates, reason } => {
             let names: Vec<&str> = candidates.iter().map(|row| row.name.as_str()).collect();
             Err(Error::Guided {
@@ -608,6 +611,26 @@ mod tests {
         assert_eq!(result["workspace"], json!(text(&named)));
         assert_eq!(result["workspaceSource"], json!("explicit"));
         assert!(f.store.tasks(16).unwrap().len() == 1);
+    }
+
+    /// A retried dispatch replays its committed task even when the name it
+    /// used has since become ambiguous or the directory is gone (I3).
+    #[tokio::test]
+    async fn retried_dispatch_replays_before_resolving() {
+        let f = fixture();
+        let one = f.dir("one/proj");
+        f.store.admit_workspace(&one, "command", None).unwrap();
+        let first = f.dispatch("proj", "by name", "retry").await.unwrap();
+        let two = f.dir("two/proj");
+        f.store.admit_workspace(&two, "command", None).unwrap();
+        let again = f.dispatch("proj", "by name", "retry").await.unwrap();
+        assert_eq!(again, first);
+        let gone = f.dir("gone");
+        let absolute = f.dispatch(text(&gone), "absolute", "gone").await.unwrap();
+        std::fs::remove_dir(&gone).unwrap();
+        let again = f.dispatch(text(&gone), "absolute", "gone").await.unwrap();
+        assert_eq!(again, absolute);
+        assert_eq!(f.store.tasks(16).unwrap().len(), 2);
     }
 
     #[tokio::test]

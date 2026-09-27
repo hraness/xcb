@@ -145,6 +145,7 @@ impl App {
                             task: row.id.clone(),
                             revision: row.revision,
                             target,
+                            focus: false,
                         };
                         self.send(output, intent);
                     }
@@ -171,7 +172,9 @@ impl App {
                         return;
                     }
                 };
-                if let Some(task) = self.last_bound.as_ref().and_then(|id| {
+                // Correcting the last binding moves it and focuses in one
+                // intent, so the single notice says whether the move landed.
+                let intent = match self.last_bound.as_ref().and_then(|id| {
                     self.view.tasks.iter().find(|task| {
                         &task.id == id
                             && task_queued(task)
@@ -179,14 +182,15 @@ impl App {
                             && task.workspace != target
                     })
                 }) {
-                    let intent = Intent::MoveTask {
+                    Some(task) => Intent::MoveTask {
                         task: task.id.clone(),
                         revision: task.revision,
-                        target: target.clone(),
-                    };
-                    self.send(output, intent);
-                }
-                self.send(output, Intent::Focus(Some(target)));
+                        target,
+                        focus: true,
+                    },
+                    None => Intent::Focus(Some(target)),
+                };
+                self.send(output, intent);
             }
         }
     }

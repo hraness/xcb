@@ -2333,12 +2333,11 @@ fn workspace_command_moves_undispatched_task_and_focuses() {
     assert!(app.notice.starts_with("→ one · recent project"));
     slash(&mut app, &tx, "/workspace two");
     let sent = drain(&rx);
+    // One intent moves and focuses, so its one notice reports both.
     assert!(matches!(
         &sent[..],
-        [
-            Intent::MoveTask { task, revision: 3, target },
-            Intent::Focus(Some(focus)),
-        ] if task.as_str() == "t_new" && target == "/two" && focus == "/two"
+        [Intent::MoveTask { task, revision: 3, target, focus: true }]
+            if task.as_str() == "t_new" && target == "/two"
     ));
     // A dispatched task stays put; the focus still moves.
     app.view.tasks[0].route = Some("codex/gpt · account".into());
@@ -2351,7 +2350,7 @@ fn workspace_command_moves_undispatched_task_and_focuses() {
     slash(&mut app, &tx, "/workspace move t_new two");
     assert!(matches!(
         &drain(&rx)[..],
-        [Intent::MoveTask { task, revision: 3, target }] if task.as_str() == "t_new" && target == "/two"
+        [Intent::MoveTask { task, revision: 3, target, focus: false }] if task.as_str() == "t_new" && target == "/two"
     ));
 }
 
@@ -2424,6 +2423,7 @@ fn ask_keeps_draft_and_resubmits_after_pick() {
         id,
         candidates: vec![fresh, workspace_row("/one", "one")],
         reason: "which project?".into(),
+        resubmit: true,
     });
     match &app.modal {
         Some(Modal::Picker { title, items, .. }) => {
@@ -2449,11 +2449,71 @@ fn ask_keeps_draft_and_resubmits_after_pick() {
         id: xcb_core::Id::new("m_2").unwrap(),
         candidates: vec![workspace_row("/one", "one")],
         reason: "which project?".into(),
+        resubmit: true,
     });
     picker_key(&mut app, &tx, KeyCode::Esc);
     assert!(app.modal.is_none());
     assert_eq!(app.composer.text(), "another");
     assert!(drain(&rx).is_empty());
+}
+
+#[test]
+fn backlog_add_picker_reruns_the_command_never_a_live_submit() {
+    let (tx, rx) = sync_channel(8);
+    let mut app = thread_app();
+    slash(&mut app, &tx, "/backlog add tidy later");
+    let Ok(Intent::Habitat(HabitatCommand::EnqueueIn {
+        id,
+        deferred: true,
+        workspace: None,
+        ..
+    })) = rx.try_recv()
+    else {
+        panic!("backlog add without a project")
+    };
+    // The runtime restores the command itself, then asks.
+    app.apply(Update::HabitatDraft {
+        context: xcb_core::Id::new(GLOBAL_THREAD_ID).unwrap(),
+        task: None,
+        operation: id.clone(),
+        text: "/backlog add tidy later".into(),
+    });
+    app.apply(Update::ProjectPicker {
+        id,
+        candidates: vec![workspace_row("/one", "one")],
+        reason: "name the project for this work; nothing was saved".into(),
+        resubmit: true,
+    });
+    assert_eq!(app.composer.text(), "/backlog add tidy later");
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    let sent = drain(&rx);
+    assert!(
+        matches!(
+            &sent[..],
+            [
+                Intent::Focus(Some(focus)),
+                Intent::Habitat(HabitatCommand::EnqueueIn { prompt, deferred: true, .. }),
+            ] if focus == "/one" && prompt == "tidy later"
+        ),
+        "{} intents",
+        sent.len()
+    );
+    // A Tab-queued draft is only focused; its text stays for Tab.
+    app.composer.set_text("queue this");
+    app.apply(Update::ProjectPicker {
+        id: xcb_core::Id::new("m_q").unwrap(),
+        candidates: vec![workspace_row("/one", "one")],
+        reason: "name the project for this work; nothing was saved".into(),
+        resubmit: false,
+    });
+    assert!(
+        app.notice.contains("Tab queues the draft"),
+        "{}",
+        app.notice
+    );
+    picker_key(&mut app, &tx, KeyCode::Enter);
+    assert!(matches!(&drain(&rx)[..], [Intent::Focus(Some(focus))] if focus == "/one"));
+    assert_eq!(app.composer.text(), "queue this");
 }
 
 fn thread_card(workspace: &str) -> xcb_core::ui::AgentRow {

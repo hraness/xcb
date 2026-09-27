@@ -69,7 +69,10 @@ pub fn dispatch(
             Ok(0)
         }
         WorkspaceCommand::Hide { scope } => {
-            let path = store.resolve_scope(&scope, &cwd.canonicalize()?)?;
+            let path = match registered(&store, &scope, cwd)? {
+                Some(path) => path,
+                None => store.resolve_scope(&scope, &cwd.canonicalize()?)?,
+            };
             store.hide_workspace(&path)?;
             report_visibility(&store, &path, json, "Hid")
         }
@@ -94,6 +97,47 @@ pub fn dispatch(
             Ok(0)
         }
     }
+}
+
+/// A registry entry named by its stored path (as given, or joined to
+/// `cwd` without resolving it) or by a unique name, whether or not it still
+/// validates. Hiding must work on exactly the entries that no longer do: a
+/// deleted worktree cannot be canonicalized, and a refused directory such as
+/// `$HOME` never resolves as a scope.
+fn registered(store: &ManagedStore, value: &str, cwd: &Path) -> Result<Option<String>> {
+    let entries = store.all_workspaces()?;
+    let joined = lexical(&cwd.join(value));
+    let base = cwd.canonicalize().ok().map(|cwd| lexical(&cwd.join(value)));
+    if let Some(entry) = entries.iter().find(|entry| {
+        let path = Path::new(&entry.path);
+        entry.path == value || path == joined || base.as_deref() == Some(path)
+    }) {
+        return Ok(Some(entry.path.clone()));
+    }
+    let named: Vec<&str> = entries
+        .iter()
+        .filter(|entry| entry.status != "hidden" && entry.name == value)
+        .map(|entry| entry.path.as_str())
+        .collect();
+    Ok(match named.as_slice() {
+        [only] => Some((*only).to_owned()),
+        _ => None,
+    })
+}
+
+/// `.` and `..` removed without touching the filesystem.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => (),
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            component => out.push(component),
+        }
+    }
+    out
 }
 
 /// A hidden entry is missing from name lookups, so `show <name>` matches

@@ -379,6 +379,47 @@ fn workspaces_list_add_hide_and_upgrade_preview_on_a_scratch_state() {
             .success()
     );
     assert_eq!(json(&["workspaces", "list"])[0]["status"], "ok");
+    // Entries that no longer validate can still be hidden, which is what the
+    // supervisor's notice asks for: a deleted directory by path or by name,
+    // and a directory that is now refused (here it became $HOME).
+    let mut extra = Vec::new();
+    for name in ["gone-path", "gone-name", "later-home"] {
+        let dir = sandbox.root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let added = sandbox.run(
+            &["workspaces", "add", dir.to_str().unwrap(), "--name", name],
+            &[],
+        );
+        assert!(added.status.success(), "{added:?}");
+        extra.push(dir);
+    }
+    std::fs::remove_dir(&extra[0]).unwrap();
+    std::fs::remove_dir(&extra[1]).unwrap();
+    for (args, env) in [
+        (
+            vec!["workspaces", "hide", extra[0].to_str().unwrap()],
+            vec![],
+        ),
+        (vec!["workspaces", "hide", "gone-name"], vec![]),
+        (
+            vec!["workspaces", "hide", extra[2].to_str().unwrap()],
+            vec![("HOME", extra[2].to_str().unwrap())],
+        ),
+    ] {
+        let hid = sandbox.run(&args, &env);
+        assert!(hid.status.success(), "{args:?}: {hid:?}");
+    }
+    let rows = json(&["workspaces", "list"]);
+    for name in ["gone-path", "gone-name", "later-home"] {
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == name)
+            .unwrap();
+        assert_eq!(row["status"], "hidden", "{rows}");
+    }
     let home = sandbox.run(
         &[
             "workspaces",
@@ -390,7 +431,7 @@ fn workspaces_list_add_hide_and_upgrade_preview_on_a_scratch_state() {
     assert_eq!(home.status.code(), Some(1), "{home:?}");
     let plan = json(&["doctor", "--upgrade-plan"]);
     assert_eq!(plan["toVersion"], 7, "{plan}");
-    assert_eq!(plan["workspaces"], 1, "{plan}");
+    assert_eq!(plan["workspaces"], 4, "{plan}");
     let leftovers: Vec<_> = std::fs::read_dir(sandbox.state())
         .unwrap()
         .flatten()

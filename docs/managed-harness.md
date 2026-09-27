@@ -57,7 +57,9 @@ worker, cannot move; cancel it instead. Remote and CLI tasks never wait.
 Only you register a directory: `xcb workspaces add`, `/workspace add`, picking a
 “new” picker entry, a remote dispatch or CLI `--workspace` path, a grant, or a
 memory binding. Launching the thread from a directory registers it (or its
-repository root) unless it holds other projects. Text in a prompt or a
+repository root) unless it looks like a directory of projects: it holds
+registered projects or repositories, or it sits directly in your home, such as
+`~/Documents`. `/workspace add <dir>` registers that exact directory. Text in a prompt or a
 worker's output never registers one. xcb refuses
 `/`, your home directory and its parents, every hidden directory in your home
 (`~/.ssh`, `~/.config`, …) and everything inside one, `~/Library`, xcb's own

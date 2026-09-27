@@ -601,6 +601,132 @@ async fn v7_undecodable_and_orphan_rows_recorded_open_succeeds() {
     assert!(rows.iter().any(|c| c.payload == "{bad"));
 }
 
+/// Audit-only rows are settled at upgrade: an orphan is dropped, and with
+/// one active grant nothing was paused, so its superseded sibling needs no
+/// action either. The supervisor raises no conflict notice.
+#[tokio::test]
+async fn v7_audit_only_conflicts_are_settled_and_raise_no_notice() {
+    let l = legacy_store().await;
+    let active = policy(&l.work, true, 0, 1);
+    let spent = policy(&l.work, true, 5, 3);
+    let db = raw(&l.state);
+    db.execute_batch("PRAGMA foreign_keys=OFF;").unwrap();
+    insert_legacy(
+        &db,
+        "project_policies",
+        l.first.as_str(),
+        1,
+        &legacy(&active, l.first.as_str()),
+    );
+    insert_legacy(
+        &db,
+        "project_policies",
+        l.second.as_str(),
+        3,
+        &legacy(&spent, l.second.as_str()),
+    );
+    let ghost = policy(&l.work, true, 0, 1);
+    insert_legacy(
+        &db,
+        "project_policies",
+        "c_missing",
+        1,
+        &legacy(&ghost, "c_missing"),
+    );
+    drop(db);
+    let store = ManagedStore::open(&l.state).unwrap();
+    let rows = conflicts(&store);
+    assert_eq!(disposition(&rows, "grant", &l.first), "moved");
+    assert_eq!(disposition(&rows, "grant", &l.second), "superseded");
+    assert_eq!(
+        disposition(&rows, "orphan", &Id::new("c_missing").unwrap()),
+        "dropped"
+    );
+    assert!(store.migration_conflicts(true).unwrap().is_empty());
+    assert_eq!(store.project_rows().unwrap()[0].status, "active");
+    store.tick_workspace_identity(now_ms()).unwrap();
+    let fault = supervisor_fault(store.root());
+    assert!(
+        !fault
+            .as_deref()
+            .is_some_and(|fault| fault.contains("upgrade conflict")),
+        "{fault:?}"
+    );
+    // A grant the owner pauses later is merely paused.
+    let kept = store.project_policy_in(text(&l.work)).unwrap().unwrap();
+    store
+        .set_project_policy_enabled_in(text(&l.work), kept.revision, false)
+        .unwrap();
+    assert_eq!(store.project_rows().unwrap()[0].status, "paused");
+}
+
+/// A legacy row whose columns have the wrong types is recorded as a dropped
+/// `undecodable` conflict instead of failing every open.
+#[tokio::test]
+async fn v7_rows_with_wrong_column_types_are_dropped_not_fatal() {
+    let l = legacy_store().await;
+    let db = raw(&l.state);
+    db.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         INSERT INTO project_policies(conversation,revision,payload) VALUES(NULL,1,'{}');
+         INSERT INTO project_policies(conversation,revision,payload) VALUES('c_x','abc',x'00');",
+    )
+    .unwrap();
+    drop(db);
+    let store = ManagedStore::open(&l.state).unwrap();
+    assert_eq!(user_version(&store.db().unwrap()), 7);
+    let rows = conflicts(&store);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(
+        rows.iter()
+            .all(|c| c.kind == "undecodable" && c.disposition == "dropped")
+    );
+    assert!(
+        rows.iter()
+            .any(|c| c.conversation == "NULL" && c.payload == "{}")
+    );
+    assert!(
+        rows.iter()
+            .any(|c| c.conversation == "c_x" && c.payload == "revision=abc payload=x'00'")
+    );
+    assert!(store.migration_conflicts(true).unwrap().is_empty());
+}
+
+/// A failed upgrade removes the copy it made, so retries never pile up
+/// copies; the attempt that succeeds keeps exactly one.
+#[tokio::test]
+async fn failed_upgrade_attempts_keep_no_backup() {
+    let l = legacy_store().await;
+    let managed_root = l.state.join("managed");
+    // A stray table in the registry's name makes the v7 step fail.
+    raw(&l.state)
+        .execute_batch("CREATE TABLE workspaces(x TEXT);")
+        .unwrap();
+    let backups = || {
+        fs::read_dir(&managed_root)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("managed.pre-v7.")
+            })
+            .count()
+    };
+    for _ in 0..2 {
+        assert!(ManagedStore::open(&l.state).is_err());
+        assert_eq!(user_version(&raw(&l.state)), 6);
+        assert_eq!(backups(), 0);
+    }
+    raw(&l.state)
+        .execute_batch("DROP TABLE workspaces;")
+        .unwrap();
+    let store = ManagedStore::open(&l.state).unwrap();
+    assert_eq!(user_version(&store.db().unwrap()), 7);
+    assert_eq!(backups(), 1);
+}
+
 #[tokio::test]
 async fn v7_is_idempotent_after_habitat_version_reset() {
     let e = env();
@@ -1056,6 +1182,29 @@ fn launch_from_container_admits_nothing() {
             .admit_workspace(&documents, "prompt", None)
             .is_err()
     );
+}
+
+/// Before the registry knows any project, a directory of repositories
+/// still looks like a container to a launch; a human can add it.
+#[test]
+fn launch_from_parent_of_repositories_admits_nothing_on_empty_registry() {
+    let e = env();
+    let documents = dir(&e.base, "documents");
+    git_repo(&documents, "app");
+    assert!(matches!(
+        e.managed.admit_workspace(&documents, "launch", None),
+        Err(Error::Conflict(_))
+    ));
+    assert!(!e.managed.launch_admissible(text(&documents)).unwrap());
+    assert!(e.managed.all_workspaces().unwrap().is_empty());
+    // A plain directory and a repository are still admitted by launch.
+    let plain = dir(&e.base, "plain");
+    e.managed.admit_workspace(&plain, "launch", None).unwrap();
+    let app = documents.join("app");
+    e.managed.admit_workspace(&app, "launch", None).unwrap();
+    e.managed
+        .admit_workspace(&documents, "command", None)
+        .unwrap();
 }
 
 #[test]
