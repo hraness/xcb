@@ -249,6 +249,26 @@ jobs:
         working-directory: site
       - run: bun run check
         working-directory: site
+      - name: Cache Chromium
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: site-chromium-${{ runner.os }}-1.58.2
+      - name: Install Chromium
+        working-directory: site
+        run: node node_modules/playwright-core/cli.js install --with-deps chromium
+      - name: Check public pages in a browser
+        working-directory: site
+        env:
+          SITE_BROWSER_ARTIFACTS: ${{ runner.temp }}/site-browser
+        run: node scripts/verify-site-browser.mjs
+      - name: Save public page screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: site-browser
+          path: ${{ runner.temp }}/site-browser
+          retention-days: 7
 
   qualification:
     # Credential-free kernel-boundary evidence for the Linux bwrap backend.
