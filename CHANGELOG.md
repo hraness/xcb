@@ -10,6 +10,22 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.9.1 - 2026-09-27
+
+Every command's help fits on one screen and errors say what to run next,
+for people at a terminal and for agents calling xcb.
+
+- `xcb --help` is a short grouped list of the everyday commands, and
+  `xcb help advanced` shows the full surface. Help text wraps within 100
+  columns and drops colors under `NO_COLOR` or `TERM=dumb`.
+- A usage error is one sentence naming what went wrong and the help to
+  read next. With `--json`, or when the caller is an agent, the same error
+  is a single JSON object on stdout.
+- Plain `xcb` outside a terminal prints a short start screen and exits,
+  instead of waiting for input; in a terminal it still opens your thread.
+- When no provider is set up, xcb suggests `xcb setup <provider>`, and
+  `xcb doctor` ends with a count of what it checked.
+
 ## 0.9.0 - 2026-09-26
 
 Plain `xcb` opens one thread for all your projects from any directory, and xcb
