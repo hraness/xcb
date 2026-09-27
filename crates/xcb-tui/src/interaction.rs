@@ -379,7 +379,7 @@ impl App {
                         | PickAction::Schedule(_)
                         | PickAction::Project(_)
                 ) {
-                    self.modal = Some(next.unwrap_or(Modal::Inspect { title: "Outside current view".into(), lines: vec!["This record is outside the bounded view. Reopen its list to refresh.".into()], scroll: 0 }));
+                    self.modal = Some(next.unwrap_or(Modal::Inspect { title: "No longer listed".into(), lines: vec!["This record is no longer in the recent list. Reopen the list to refresh it.".into()], scroll: 0 }));
                     if let Some(Modal::Inspect {
                         scroll: next,
                         lines,
@@ -450,9 +450,8 @@ impl App {
         ) && !row.deferred
             && !row.status.starts_with("queued")
         {
-            self.notice =
-                "This task is settled. Start new work with /task or recall a prompt from history."
-                    .into();
+            self.notice = "This task is no longer running. Start new work with /task or recall a prompt from history."
+                .into();
             return;
         }
         self.composer_target = Some(ComposerTarget {
@@ -462,7 +461,7 @@ impl App {
         });
         self.modal = None;
         self.live_inspect = None;
-        self.notice = if answer { "Answer the displayed question. A changed question rejects the reply." } else { "Enter guides this task at its next authorized turn. Tab queues a new task. /task returns to new work." }.into();
+        self.notice = if answer { "Answer the displayed question. A changed question rejects the reply." } else { "Enter guides this task at its next allowed turn. Tab queues a new task; /task returns to new work." }.into();
     }
 
     pub(super) fn targeted_submit(
@@ -481,12 +480,12 @@ impl App {
         }
         if !self.attachments.is_empty() || self.pending_image {
             self.composer.set_text(&text);
-            self.notice = "This control accepts text only; attachments and draft are retained. Use /task for ordinary submission.".into();
+            self.notice = "Guidance and answers are text only; your draft and attachments are kept. Use /task to send them as new work.".into();
             return;
         }
         if self.pending_habitat.len() >= 16 || !self.recovery_capacity_available() {
             self.composer.set_text(&text);
-            self.notice = "Waiting for earlier input acknowledgements; draft retained.".into();
+            self.notice = "Waiting for earlier input to be saved; your draft is kept.".into();
             return;
         }
         let key = format!(
@@ -605,7 +604,7 @@ impl App {
                 target.answer_revision = None;
             }
             self.notice = if task.is_some() {
-                "Input saved. /inbox shows when it enters an authorized turn."
+                "Input saved. /inbox shows when a worker turn picks it up."
             } else {
                 "Task queued. /backlog shows its progress."
             }
@@ -638,7 +637,7 @@ impl App {
             );
         }
         self.notice =
-            "Input was not admitted. Draft retained; inspect the task before retrying.".into();
+            "Input was not accepted. Your draft is kept; check the task before retrying.".into();
     }
 
     pub(super) fn cancel_selected(&mut self, id: Id, revision: u64, output: &SyncSender<Intent>) {
@@ -650,8 +649,8 @@ impl App {
             }),
         ) {
             self.modal = None;
-            self.notice =
-                "Cancellation requested. The task remains held until its worker settles.".into();
+            self.notice = "Cancellation requested. It stays pending until the worker stops and xcb records the result."
+                .into();
         }
     }
 
@@ -673,7 +672,9 @@ impl App {
             if let Some((id, revision)) = task {
                 self.cancel_selected(id, revision, output);
             } else {
-                self.notice = "The selected task is outside the current view. Reopen /agents before cancelling it.".into();
+                self.notice =
+                    "The selected task is no longer listed. Reopen /agents before cancelling it."
+                        .into();
             }
             return;
         }
@@ -867,8 +868,8 @@ impl App {
             "/vim  Vim editing: Esc enters Normal mode (hjkl w/b/e f/t d/c/y p u r)".into(),
             String::new(),
             "Session and transcript".into(),
-            "Esc  Close surface / return to latest / interrupt".into(),
-            "Ctrl-C  Close surface / clear draft / stop work / quit".into(),
+            "Esc  Close the open view / jump to latest / stop work".into(),
+            "Ctrl-C  Close the open view / clear draft / stop work / quit".into(),
             "Ctrl-D  Delete forward; quit only with an empty composer".into(),
             "Ctrl-T  Transcript     F3  Find text     Ctrl-O  Copy last answer".into(),
             "PgUp/PgDn  Scroll     Ctrl-Home/End  Top/latest".into(),

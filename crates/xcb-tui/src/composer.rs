@@ -108,7 +108,7 @@ impl Composer {
                 bytes -= self
                     .history
                     .pop_back()
-                    .expect("nonempty bounded history")
+                    .expect("history over its byte limit is nonempty")
                     .len();
             }
             self.reset_history();

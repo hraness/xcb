@@ -309,14 +309,21 @@ fn ctrl_c_notices_name_what_the_next_press_does() {
         "Dialog closed. Press Ctrl-C again to stop the current turn."
     );
 
-    // Managed work: the second press requests cancellation.
+    // Managed work: after the draft, one press arms and a second cancels,
+    // so a stray key never cancels a task that outlives the terminal.
     let (tx, rx) = sync_channel(4);
     let mut app = managed_fixture(State::Working);
     app.composer.set_text("draft");
     assert!(app.handle(ctrl_c(), &tx));
     assert_eq!(
         app.notice,
-        "Draft cleared (Ctrl-R restores). Press Ctrl-C again to cancel running work."
+        "Draft cleared (Ctrl-R restores). Press Ctrl-C twice to cancel running work."
+    );
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(rx.try_recv().is_err());
+    assert!(
+        app.notice
+            .starts_with("Press again to cancel the running task.")
     );
     assert!(app.handle(ctrl_c(), &tx));
     assert!(matches!(
@@ -1508,11 +1515,13 @@ fn managed_cancellation_reports_an_exact_task_request_not_settlement() {
     let (tx, rx) = sync_channel(1);
     let mut app = managed_fixture(xcb_core::session::State::Working);
     picker_key(&mut app, &tx, KeyCode::Esc);
+    assert!(rx.try_recv().is_err(), "one Esc only arms cancellation");
+    picker_key(&mut app, &tx, KeyCode::Esc);
     assert!(
         matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::CancelTask { id, expected_revision: 7 })) if id.as_str() == "task_one")
     );
     assert!(app.notice.contains("Cancellation requested"));
-    assert!(app.notice.contains("held"));
+    assert!(app.notice.contains("pending until the worker stops"));
 }
 
 #[test]
@@ -1537,6 +1546,7 @@ fn managed_task_waiting_for_input_can_be_cancelled_without_losing_the_draft() {
     let (tx, rx) = sync_channel(2);
     let mut app = managed_fixture(xcb_core::session::State::NeedsAnswer);
     app.composer.set_text("keep this draft");
+    picker_key(&mut app, &tx, KeyCode::Esc);
     picker_key(&mut app, &tx, KeyCode::Esc);
     assert!(
         matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::CancelTask { id, expected_revision: 7 })) if id.as_str() == "task_one")
@@ -1916,6 +1926,7 @@ fn ambiguous_managed_cancel_requires_selecting_an_exact_task() {
     second.revision = 11;
     app.view.backlog.push(second);
     picker_key(&mut app, &tx, KeyCode::Esc);
+    picker_key(&mut app, &tx, KeyCode::Esc);
     assert!(matches!(app.modal, Some(Modal::Picker { .. })));
     assert!(rx.try_recv().is_err());
     picker_key(&mut app, &tx, KeyCode::Down);
@@ -2031,6 +2042,7 @@ fn disappearing_selected_task_never_redirects_cancellation_to_another_task() {
     picker_key(&mut app, &tx, KeyCode::Enter);
     app.view.backlog.retain(|row| row.id.as_str() == "task_two");
     picker_key(&mut app, &tx, KeyCode::Esc);
+    picker_key(&mut app, &tx, KeyCode::Esc);
     assert!(
         rx.try_recv().is_err(),
         "an explicit stale target must not fall back to the remaining task"
@@ -2039,7 +2051,7 @@ fn disappearing_selected_task_never_redirects_cancellation_to_another_task() {
         app.composer_target_label()
             .is_some_and(|label| label.contains("task_one"))
     );
-    assert!(app.notice.contains("outside") || app.notice.contains("changed"));
+    assert!(app.notice.contains("no longer listed"), "{}", app.notice);
 }
 
 #[test]
@@ -2504,7 +2516,7 @@ fn ask_keeps_draft_and_resubmits_after_pick() {
     match &app.modal {
         Some(Modal::Picker { title, items, .. }) => {
             assert_eq!(title, "Which project?");
-            assert_eq!(items[0].label, "new — add · /three");
+            assert_eq!(items[0].label, "new · add /three");
         }
         _ => panic!("project picker"),
     }

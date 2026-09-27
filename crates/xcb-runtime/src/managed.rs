@@ -2558,7 +2558,7 @@ impl ManagedStore {
             } else {
                 format!(
                     "Started **{}**. I’ll keep it moving in the background and bring back results or a specific question.",
-                    task.title
+                    task.title.trim_end_matches(['.', '!', '?'])
                 )
             },
             Some(&task.id),

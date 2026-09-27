@@ -157,35 +157,35 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/cancel",
         alias: "",
         args: "[task-id]",
-        summary: "cancel an explicitly observed task",
+        summary: "request cancellation of a task",
         needs_args: false,
     },
     SlashCommand {
         name: "/steer",
         alias: "",
         args: "<task-id> <guidance>",
-        summary: "queue guidance for the next authorized task turn",
+        summary: "queue guidance for a task's next allowed turn",
         needs_args: true,
     },
     SlashCommand {
         name: "/watch",
         alias: "",
         args: "<target-task> <source-task>",
-        summary: "request another task's terminal report in the target inbox",
+        summary: "send one task's final report to another task's inbox",
         needs_args: true,
     },
     SlashCommand {
         name: "/inbox",
         alias: "",
         args: "[all|task-id]",
-        summary: "inspect durable guidance and delivery receipts",
+        summary: "see saved guidance and when it reached a worker",
         needs_args: false,
     },
     SlashCommand {
         name: "/project",
         alias: "",
         args: "[all|grant [project] <tasks> <hours> <goal>|pause|resume [project]]",
-        summary: "bounded automatic project work and remaining budget",
+        summary: "automatic follow-up work within a task and hour budget",
         needs_args: false,
     },
     SlashCommand {
@@ -199,7 +199,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/memory",
         alias: "",
         args: "[project] search <query>",
-        summary: "search the project's bound Wordcell vault",
+        summary: "search the project's Wordcell vault",
         needs_args: true,
     },
     SlashCommand {
@@ -353,8 +353,8 @@ pub enum PickAction {
     NewConversation,
     /// Open a new project view for this directory from the thread.
     NewProjectView(String),
-    /// Focus the thread on a project; `new` admits it first and `resubmit`
-    /// sends the retained draft once focused.
+    /// Focus the thread on a project; `new` registers it first and
+    /// `resubmit` sends the kept draft once focused.
     Workspace {
         path: String,
         new: bool,
@@ -443,6 +443,8 @@ const MAX_DRAFT_SESSIONS: usize = 64;
 /// How long a notice stays on screen without any key press before it clears
 /// itself.
 pub const NOTICE_TTL: Duration = Duration::from_secs(8);
+/// How long a first cancel press waits for its confirming second press.
+const CANCEL_CONFIRM: Duration = Duration::from_secs(3);
 
 /// Byte bound of the Prompt/Pane editor dialog.
 const EDITOR_MAX: usize = 64 * 1024;
@@ -568,10 +570,10 @@ fn inspect_inbox(event: &xcb_core::ui::InboxRow) -> Modal {
             "Content".into(),
             event.text.clone(),
             String::new(),
-            "Delivery receipt".into(),
-            event.receipt.clone().unwrap_or_else(|| "No settled delivery receipt yet.".into()),
+            "Delivery record".into(),
+            event.receipt.clone().unwrap_or_else(|| "Not in a worker turn yet.".into()),
             String::new(),
-            "Delivery records inclusion in a worker turn, not proof the model followed the guidance. Guidance cannot grant approval or change project authority.".into(),
+            "Delivery means a worker turn included this guidance; it does not show the model followed it. Guidance cannot approve actions or change a project grant.".into(),
         ],
         scroll: 0,
     }
@@ -619,8 +621,8 @@ fn inspect_program(program: &xcb_core::ui::ProgramRow) -> Modal {
     lines.extend([
         String::new(),
         format!(
-            "receipt  {}",
-            program.receipt.as_deref().unwrap_or("no checkpoint yet")
+            "checkpoint  {}",
+            program.receipt.as_deref().unwrap_or("none yet")
         ),
         format!("xcb backlog program-status {} --json", program.parent),
     ]);
@@ -705,7 +707,7 @@ fn resolve_project(view: &View, value: &str) -> Result<String, String> {
     match hits.as_slice() {
         [row] => Ok(row.path.clone()),
         [] => Err(format!(
-            "no known project is named `{value}`; /workspace add <dir> admits one"
+            "no known project is named `{value}`; /workspace add <dir> registers one"
         )),
         _ => Err(format!(
             "`{value}` names several projects: {}",
@@ -757,12 +759,12 @@ pub(crate) fn conversation_items(view: &View) -> Vec<PickItem> {
 }
 
 /// Picker rows for project directories. `new` rows are prompt roots the
-/// registry has not admitted; picking one adds it first.
+/// registry does not know yet; picking one adds it first.
 fn workspace_items(rows: &[xcb_core::ui::WorkspaceRow], resubmit: bool) -> Vec<PickItem> {
     rows.iter()
         .map(|row| PickItem {
             label: if row.new {
-                format!("new — add · {}", row.path)
+                format!("new · add {}", row.path)
             } else {
                 format!(
                     "{} · {}{}",
@@ -1085,6 +1087,9 @@ pub struct App {
     /// Notice text last observed and when it appeared; drives expiry.
     notice_seen: String,
     notice_since: Option<Instant>,
+    /// When a first Esc or Ctrl-C asked to cancel managed work. A second
+    /// press within [`CANCEL_CONFIRM`] cancels; tasks survive a stray key.
+    cancel_armed: Option<Instant>,
     composer_target: Option<interaction::ComposerTarget>,
     /// The last thread task this terminal submitted; `/workspace <name>`
     /// moves it while it is still queued and undispatched.
@@ -1174,7 +1179,7 @@ impl App {
         if !self.can_cancel_work() {
             "Press Ctrl-C again to quit."
         } else if self.managed_mode() {
-            "Press Ctrl-C again to cancel running work."
+            "Press Ctrl-C twice to cancel running work."
         } else if self.view.remote_active {
             "The turn is running in another terminal; Ctrl-D quits."
         } else {
@@ -1556,7 +1561,7 @@ impl App {
                             self.modal = Some(Modal::Inspect {
                                 title: expected,
                                 lines: vec![format!(
-                                    "Outside the current bounded view. Use xcb backlog program-status {id} --json for current state."
+                                    "No longer in the recent list. Run xcb backlog program-status {id} --json for its state."
                                 )],
                                 scroll: 0,
                             });
@@ -1789,7 +1794,21 @@ impl App {
     }
     fn request_cancel(&mut self, output: &SyncSender<Intent>) {
         if self.managed_mode() {
-            self.managed_cancel(output);
+            // Managed tasks keep running after the terminal closes, so one
+            // stray key must not cancel them.
+            let now = Instant::now();
+            if self
+                .cancel_armed
+                .is_some_and(|armed| now.duration_since(armed) < CANCEL_CONFIRM)
+            {
+                self.cancel_armed = None;
+                self.managed_cancel(output);
+            } else {
+                self.cancel_armed = Some(now);
+                self.notice =
+                    "Press again to cancel the running task. Tasks keep running if you quit."
+                        .into();
+            }
             return;
         }
         if self.try_send(output, Intent::Cancel) {
@@ -1824,7 +1843,7 @@ impl App {
             && (self.pending_habitat.len() >= 16 || !self.recovery_capacity_available())
         {
             self.composer.set_text(&format!("{command} {arguments}"));
-            self.notice = "Waiting for earlier input acknowledgements; command retained.".into();
+            self.notice = "Waiting for earlier input to be saved; your command is kept.".into();
             return false;
         }
         let tracked = pending.is_some();
@@ -1912,11 +1931,12 @@ impl App {
                     return;
                 };
                 let items = scope.items(&self.view);
-                if items.is_empty() {
-                    self.notice = "No matching events in the current bounded inbox view. Use xcb inbox --task <task-id> to inspect task history.".into();
+                self.notice = if items.is_empty() {
+                    "No recent inbox events match. Run xcb inbox --task <task-id> for a task's full history."
                 } else {
-                    self.notice = "Showing a recent global inbox snapshot. Use xcb inbox --task <task-id> for paged history beyond this bounded view.".into();
+                    "Showing recent events. Run xcb inbox --task <task-id> for older history."
                 }
+                .into();
                 self.picker(scope.title(), items);
                 self.inbox_scope = Some(scope);
             }
@@ -1986,7 +2006,7 @@ impl App {
                     }), command, arguments) {
                         self.notice = format!("Granting `{workspace}`");
                     }
-                } else { self.notice = "Use /project grant [project] <1–100 tasks> <1–720 hours> <goal>. This authorizes automatic follow-up work.".into(); }
+                } else { self.notice = "Use /project grant [project] <1–100 tasks> <1–720 hours> <goal>. A grant lets xcb start follow-up work on its own.".into(); }
             }
             "/project" => self.notice = "Use /project [all], /project grant [project] <tasks> <hours> <goal>, or /project pause|resume [project].".into(),
             "/memory" if (action == "search" && !tail.is_empty()) || tail.starts_with("search ") => {
@@ -2017,7 +2037,7 @@ impl App {
             "/backlog" if action == "reconcile" => {
                 if let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == tail) {
                     self.send_habitat(output, Intent::Habitat(HabitatCommand::ReconcileTask { id: task.id.clone(), expected_revision: task.revision }), command, arguments);
-                } else { self.notice = "Use /backlog reconcile <task-id>; retained run evidence must prove the outcome.".into(); }
+                } else { self.notice = "Use /backlog reconcile <task-id>; it works only when the saved run record shows how the run ended.".into(); }
             }
             "/attention" | "/backlog" if command == "/attention" || arguments.is_empty() || arguments == "all" => {
                 let attention = command == "/attention";
@@ -2074,7 +2094,7 @@ impl App {
                     self.modal = Some(inspect_program(program));
                     self.program_inspect = Some(program.parent.clone());
                 } else {
-                    self.notice = "Program is outside the current view. Use xcb backlog program-status <id> --json. Create a pinned program with xcb backlog program or xcb schedules program.".into();
+                    self.notice = "That program is not in the recent list. Run xcb backlog program-status <id> --json, or start one with xcb backlog program or xcb schedules program.".into();
                 }
             }
             "/schedule" if arguments.is_empty() || arguments == "all" => {
@@ -2105,7 +2125,7 @@ impl App {
                 } else { self.notice = "Schedule not in the current view. /schedule all lists schedule ids.".into(); }
             }
             "/schedule" => self.notice = "Use /schedule [all], /schedule every <seconds> <prompt>, or /schedule pause|resume <id>.".into(),
-            "/reply" => self.notice = "Use /reply <task-id> <answer>. Approvals still use the existing permission gate.".into(),
+            "/reply" => self.notice = "Use /reply <task-id> <answer>. A reply cannot approve a permission request.".into(),
             _ => self.notice = "Use /backlog [all], /backlog add <prompt>, /backlog edit <id> [prompt], or /backlog run <id>.".into(),
         }
     }
@@ -2222,7 +2242,7 @@ impl App {
                             if account.busy { " · busy" } else { "" },
                             if account.enabled { "" } else { " · disabled" },
                             if account.authentication_required {
-                                " · reconnect required"
+                                " · sign in again"
                             } else {
                                 ""
                             }
@@ -2948,7 +2968,10 @@ impl App {
             // is open. Check the latest view before dispatching the selection.
             match self.view.accounts.iter().find(|account| &account.id == id) {
                 Some(account) if account.authentication_required => {
-                    self.notice = "This account needs reconnection before it can run tasks.".into();
+                    self.notice = format!(
+                        "Sign in to this account again before it runs tasks: /quit, then run xcb accounts login {}.",
+                        account.id
+                    );
                     return true;
                 }
                 Some(account) if !account.enabled => {
@@ -3010,7 +3033,7 @@ impl App {
                         self.modal = Some(inspect_inbox(event));
                         self.inbox_inspect = Some(id);
                     } else {
-                        self.notice = "This event is outside the current bounded inbox view. Use xcb inbox --task <task-id> to inspect its history.".into();
+                        self.notice = "This event is no longer in the recent inbox. Run xcb inbox --task <task-id> for its history.".into();
                     }
                 }
                 PickAction::Backlog(id) => {
@@ -3042,7 +3065,7 @@ impl App {
                             task.state,
                             State::NeedsApproval | State::NeedsAction | State::Uncertain
                         ) {
-                            lines.push("Review the gated action or recovery detail above. A reply cannot grant host or provider permission.".into());
+                            lines.push("Review the waiting action or recovery detail above. A reply cannot grant permission.".into());
                         }
                         self.modal = Some(Modal::Inspect {
                             title: format!("{} · {}", task.id, task.status),
@@ -3068,7 +3091,7 @@ impl App {
                                 format!("Grant expires {}", due_label(project.expires_at_ms)),
                                 format!("Required provider: {}", project.required_provider.map_or("automatic".into(), |p| p.to_string())),
                                 String::new(), format!("/project {} {}", if project.enabled { "pause" } else { "resume" }, project.workspace),
-                                "Pause stops automatic dispatch; running work settles. Resume does not renew the grant.".into()],
+                                "Pause stops new automatic work; running work finishes. Resume does not renew the grant.".into()],
                             scroll: 0,
                         });
                     }
@@ -3453,7 +3476,7 @@ mod habitat_surface_tests {
         next.programs.clear();
         app.apply(Update::View(Box::new(next)));
         assert!(
-            matches!(&app.modal, Some(Modal::Inspect { lines, .. }) if lines[0].contains("Outside the current bounded view"))
+            matches!(&app.modal, Some(Modal::Inspect { lines, .. }) if lines[0].contains("xcb backlog program-status program_a --json"))
         );
         assert!(rx.try_recv().is_err());
     }
@@ -3550,8 +3573,8 @@ mod habitat_surface_tests {
             "task_b",
             "project_b",
             "prepared",
-            "No settled delivery receipt yet.",
-            "not proof the model followed",
+            "Not in a worker turn yet.",
+            "does not show the model followed it",
         ] {
             assert!(content.contains(expected), "{content}");
         }
@@ -3560,20 +3583,16 @@ mod habitat_surface_tests {
             "inspection cannot acknowledge or authorize work"
         );
         let mut view = app.view.clone();
-        view.inbox[1].status = "settled delivery".into();
-        view.inbox[1].receipt = Some("turn_123: exact batch receipt".into());
+        view.inbox[1].status = "delivered".into();
+        view.inbox[1].receipt = Some("turn_123: batch 4".into());
         app.take_dirty();
         app.apply(Update::View(Box::new(view)));
         assert!(app.take_dirty(), "delivery changes repaint");
         let Some(Modal::Inspect { lines, .. }) = &app.modal else {
             panic!("inbox inspector")
         };
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("turn_123: exact batch receipt"))
-        );
-        assert!(lines.iter().any(|line| line.contains("settled delivery")));
+        assert!(lines.iter().any(|line| line.contains("turn_123: batch 4")));
+        assert!(lines.iter().any(|line| line.contains("delivered")));
     }
 
     #[test]
