@@ -433,7 +433,7 @@ xcb update disable`}</Code>
         <li>If you use the command runner, <a href="/docs/workspace#refresh">refresh it</a> from the matching source version.</li>
       </ol>
       <p>If you’re upgrading from an 0.8 release, the first newer build to open your state moves project grants and Wordcell bindings from conversations to folders. Follow the <Ext href={`${repositoryDocs}/project-agents.md#upgrading-from-an-08-release`}>upgrade steps</Ext> first.</p>
-      <p>To go back to an earlier release, run <code>xcb upgrade &lt;version&gt;</code>. An older build may refuse state written by a newer one, so keep your state folder and read the <Ext href={`${repository}/blob/main/CHANGELOG.md`}>changelog</Ext> first.</p>
+      <p>To go back to an earlier release, run <code>xcb upgrade &lt;version&gt; --allow-downgrade</code>. An older build may refuse state written by a newer one, so keep your state folder and read the <Ext href={`${repository}/blob/main/CHANGELOG.md`}>changelog</Ext> first.</p>
       <h2 id="uninstall">Uninstall</h2>
       <p>Let running tasks finish or cancel them, then remove the login items and the binary:</p>
       <Code>{`xcb service uninstall   # macOS: stop starting the supervisor at login

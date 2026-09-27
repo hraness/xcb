@@ -10,6 +10,41 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.10.0 - 2026-09-27
+
+Devin now finishes the tasks xcb routes to it, and xcb reports a turn that ends
+without a reply instead of counting it as done. xcb also installs with one
+command.
+
+- Devin: when Devin tries one of its own tools that xcb blocks, it now gets a
+  one-time refusal and carries on with xcb's file tools instead of ending the
+  turn. Devin also gets a short guide to xcb's tools and a tool list short
+  enough to read in full. With the tested account, Devin completed a coding
+  task on macOS with Devin CLI 3000.11.3.
+- A turn that completes with no reply and no file changes now reports
+  `failure: no_reply`. `xcb --json route` returns `provider_error`, `xcb run`
+  exits 1 and names the next step, and a managed task waits for your reply
+  instead of showing as finished.
+- `curl -fsSL https://xcb.sh/install.sh | sh` installs the latest release.
+  The Linux binary now runs on glibc 2.34 or newer (Ubuntu 22.04, Debian 12,
+  RHEL 9, and later); 0.9.1 needed glibc 2.39.
+- `xcb doctor` reports each account's health with one next step, and no
+  longer says every check passed while an enabled account needs attention.
+  `xcb accounts` columns line up.
+- `xcb update enable` and `xcb update disable` work on Linux, and
+  `xcb upgrade <version>` refuses to install an older release unless you add
+  `--allow-downgrade`.
+- In the terminal, one Esc or Ctrl-C no longer cancels a managed task: press
+  it again within three seconds. Notices clear on time, and help, notices,
+  and dialogs use plain words.
+- Route reasons say how xcb classified the task, its capability tier, and
+  the model's relative quality, cost, and speed. A public pricing promotion is
+  named but never changes which route wins.
+- The background supervisor records why it failed to start, keeps
+  dispatching when one saved record can't be read, and shuts down within a
+  deadline.
+- The TypeScript SDK installs from npm: `npm install @hraness/xcb`.
+
 ## 0.9.1 - 2026-09-27
 
 Every command's help fits on one screen and errors say what to run next,
