@@ -35,6 +35,7 @@ ${releaseDetails === "" ? "" : `## Verified release\n\n${releaseDetails}\n\n`}##
 - [Overview](https://xcb.sh/): the router, the JSON command and SDK, how routes are chosen, and source installation.
 - [Download](https://xcb.sh/download): latest verified native release, per-platform archives, and the source build.
 - [Compare](https://xcb.sh/compare): how xcb compares with request routers, agent workspaces, provider coding tools, and managed task environments, with links to each product's own site or documentation. xcb is a local router around coding-agent accounts, not a general-purpose multi-agent task graph.
+- [xcb compared with OpenRouter](https://xcb.sh/compare/openrouter): OpenRouter is one metered API over hundreds of models; xcb routes whole coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.
 - [Documentation](https://xcb.sh/docs): task-oriented guides and current readiness.
 - [Getting started](https://xcb.sh/docs/getting-started): build native xcb and connect an account.
 - [Route tasks](https://xcb.sh/docs/route): the JSON route command for agents and the TypeScript SDK entry point.

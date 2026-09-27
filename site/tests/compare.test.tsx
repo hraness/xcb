@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import Compare, { metadata } from "../app/compare/page";
+import CompareOpenRouter, { metadata as openRouterMetadata } from "../app/compare/openrouter/page";
 
 test("comparison has an addressable accessible table and active navigation", () => {
   const html = renderToStaticMarkup(<Compare />);
@@ -19,7 +20,7 @@ test("comparison has an addressable accessible table and active navigation", () 
     .on("time", { element(element) { reviewedDates.push(element.getAttribute("datetime") ?? ""); } })
     .transform(html);
   expect(headings).toEqual(["compare-title"]);
-  expect(rows).toHaveLength(11);
+  expect(rows).toHaveLength(12);
   expect(columns).toHaveLength(3);
   expect(currentCompare).toBe(true);
   expect(scrollRegion).toBe(true);
@@ -37,6 +38,8 @@ test("comparison attaches official evidence and retains current support boundari
     "https://opencode.ai/docs/agents/",
     "https://docs.devin.ai/enterprise/deployment/overview",
     "https://docs.devin.ai/use-cases/gallery/batch-3-agents-best-solution",
+    "https://openrouter.ai",
+    "https://openrouter.ai/blog/insights/model-routing",
   ]) expect(html).toContain(`href="${source}"`);
   expect(html).toContain("Native xcb is a source preview");
   expect(html).toContain("signed-in Devin account hasn’t been confirmed");
@@ -54,5 +57,43 @@ test("comparison metadata and Ask AI target its canonical public URL", () => {
   expect(metadata.twitter).toMatchObject({ card: "summary_large_image" });
   const html = renderToStaticMarkup(<Compare />);
   expect(html).toContain(encodeURIComponent("https://xcb.sh/compare"));
+  expect(html.match(/<footer\b/gu)).toBeNull();
+});
+
+test("the OpenRouter comparison stays honest about the two layers", () => {
+  const html = renderToStaticMarkup(<CompareOpenRouter />);
+  const headings: string[] = [];
+  const rows: string[] = [];
+  const columns: string[] = [];
+  let currentCompare = false;
+  let scrollRegion = false;
+  const reviewedDates: string[] = [];
+  new HTMLRewriter()
+    .on("h1", { element(element) { headings.push(element.getAttribute("id") ?? ""); } })
+    .on('tbody th[scope="row"]', { element() { rows.push("row"); } })
+    .on('thead th[scope="col"]', { element() { columns.push("column"); } })
+    .on('a[href="/compare"][aria-current="page"]', { element() { currentCompare = true; } })
+    .on('[role="region"][tabindex="0"][aria-labelledby="openrouter-comparison-caption"]', { element() { scrollRegion = true; } })
+    .on("time", { element(element) { reviewedDates.push(element.getAttribute("datetime") ?? ""); } })
+    .transform(html);
+  expect(headings).toEqual(["compare-openrouter-title"]);
+  expect(rows).toHaveLength(7);
+  expect(columns).toHaveLength(3);
+  expect(currentCompare).toBe(true);
+  expect(scrollRegion).toBe(true);
+  expect(html).toContain('<caption id="openrouter-comparison-caption">');
+  expect(reviewedDates).toEqual(["2026-09-26"]);
+  for (const source of [
+    "https://openrouter.ai",
+    "https://openrouter.ai/pricing",
+    "https://openrouter.ai/blog/insights/model-routing",
+  ]) expect(html).toContain(`href="${source}"`);
+  expect(html).toContain("September 26, 2026");
+  expect(html).toContain("never proxies or rewrites API traffic");
+  expect(html).not.toContain("npm install");
+  expect(openRouterMetadata.alternates).toEqual({ canonical: "/compare/openrouter" });
+  expect(openRouterMetadata.openGraph).toMatchObject({ url: "/compare/openrouter", siteName: "xcb", type: "article" });
+  expect(openRouterMetadata.twitter).toMatchObject({ card: "summary_large_image" });
+  expect(html).toContain(encodeURIComponent("https://xcb.sh/compare/openrouter"));
   expect(html.match(/<footer\b/gu)).toBeNull();
 });

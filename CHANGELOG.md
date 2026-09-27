@@ -14,8 +14,7 @@ version bump pull request by renaming `## Unreleased` to the version.
 
 Plain `xcb` opens one thread for all your projects from any directory, and xcb
 picks each task's project directory and says why. Projects are directories, so
-a grant for one directory never authorizes work in another. The first run is
-shorter and every error says what to do next.
+a grant for one directory never authorizes work in another.
 
 - Plain `xcb` and `xcb chat` open your thread, one conversation per machine
   whose tasks can run in any project directory. Each prompt is bound to a
@@ -81,10 +80,15 @@ shorter and every error says what to do next.
   back. The upgrade writes `managed/managed.pre-v7.<time>.sqlite` in the state
   root first when there is room.
 
+## 0.8.14 - 2026-09-26
+
+The first run is shorter and every error says what to do next.
+
 - `xcb accounts login` and `xcb accounts refresh` check the provider
   themselves the first time, so the `Next:` step after `xcb accounts add`
-  works without a separate `xcb doctor` run. Account commands accept the shortened id the accounts
-  table shows, and say whether no account or several accounts matched.
+  works without a separate `xcb doctor` run. Account commands accept the
+  shortened id the accounts table shows, and say whether no account or
+  several accounts matched.
 - `xcb setup <provider>` adds an account (or reuses one), checks the
   provider, signs in, and loads models, printing ✓ for each step.
 - `xcb --help` groups commands under Start here, Accounts and models,
@@ -97,6 +101,16 @@ shorter and every error says what to do next.
   (`✗ No account matches "x".` then `→ xcb accounts`). With `--json`, or
   when an agent runs xcb, errors are a JSON object on stdout. Symbols fall
   back to ASCII when `TERM=dumb` or the locale isn't UTF-8.
+- `xcb service install` and `xcb update enable` say, before macOS shows
+  its login-item notice, what will open at login and how to turn it off.
+- The login service now writes its log to
+  `~/Library/Logs/xcb/<label>.log`, and `xcb service` shows that path.
+  When the service's latest run ended with macOS refusing access,
+  `xcb service` names the Files & Folders setting to turn on for
+  Documents, Desktop or Downloads. A service installed by an earlier
+  version keeps working; reinstall it to turn on the log.
+- The terminal UI honors `NO_COLOR`, and with no accounts it says to
+  `/quit` and run `xcb setup claude`.
 
 ## 0.8.13 - 2026-09-26
 

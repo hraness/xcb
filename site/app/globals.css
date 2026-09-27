@@ -7,6 +7,7 @@
 @import "@hraness/design-kit/plain-site.css";
 @import "@hraness/design-kit/plain-publication.css";
 @import "@hraness/design-kit/typography.css";
+@import "@hraness/design-kit/status-page.css";
 
 @import "../vendor/paper-theme/paper-theme.css";
 @import "@hraness/design-kit/palette-system.css";
@@ -279,6 +280,27 @@ a { text-underline-offset: 0.2em; }
   --hraness-marketing-surface: var(--hraness-material-plane);
   box-shadow: var(--hraness-material-lift);
 }
+
+/* A framed component already draws its own boundary; a ruled section directly
+   after it would stack a second hairline on the card edge. */
+:is(
+  .hraness-marketing-install,
+  .hraness-marketing-proof,
+  .hraness-marketing-proof-frame
+) + :is(
+  .hraness-marketing-section,
+  .hraness-marketing-primitives,
+  .hraness-marketing-interfaces,
+  .hraness-marketing-trust,
+  .hraness-marketing-quotes,
+  .hraness-marketing-pricing,
+  .hraness-marketing-questions,
+  .hraness-marketing-maker,
+  .hraness-marketing-related,
+  .hraness-marketing-cta
+) {
+  border-block-start: 0;
+}
 [data-hraness-material="lantern"] .hraness-marketing-question[open] > summary {
   background-color: var(--hraness-material-warm-plane);
   color: var(--hraness-material-ink);
@@ -334,10 +356,13 @@ a { text-underline-offset: 0.2em; }
 .xcb-example-usage dd { margin-left: auto; color: var(--hraness-marketing-terminal-command); }
 .xcb-preview-note { color: var(--hraness-marketing-terminal-muted); font-size: .75rem; margin-block: .8rem 1rem; max-width: 58ch; }
 .xcb-opening { position: relative; overflow: clip; }
+/* The shared backdrop is measured against the hero column; this opening lets
+   the field span the full wall so the haze dies at the viewport edges. */
+.xcb-opening .hraness-marketing-hero-backdrop { margin-inline: calc(50% - 50vw); }
 .xcb-marketing-hero { position: relative; z-index: 1; }
 .xcb-marketing-hero::before { content: ""; position: absolute; inset: -2rem -4rem; z-index: -1; pointer-events: none; background: radial-gradient(ellipse 72% 64% at 50% 55%, color-mix(in srgb, var(--background) 82%, transparent), color-mix(in srgb, var(--background) 50%, transparent) 58%, transparent); }
 .xcb-field { pointer-events: none; z-index: 0; position: absolute; inset: 0; overflow: clip; }
-.xcb-field::after { content: ""; pointer-events: none; position: absolute; inset: 0; background: linear-gradient(to right, var(--background), transparent 14%, transparent 86%, var(--background)), linear-gradient(to bottom, var(--background), transparent 20%, transparent 84%, var(--background)); }
+.xcb-field::after { content: ""; pointer-events: none; position: absolute; inset: 0; background: linear-gradient(to right, var(--background), color-mix(in srgb, var(--background) 78%, transparent) 5%, color-mix(in srgb, var(--background) 42%, transparent) 11%, color-mix(in srgb, var(--background) 15%, transparent) 18%, transparent 25%, transparent 75%, color-mix(in srgb, var(--background) 15%, transparent) 82%, color-mix(in srgb, var(--background) 42%, transparent) 89%, color-mix(in srgb, var(--background) 78%, transparent) 95%, var(--background)), linear-gradient(to bottom, var(--background), transparent 20%, transparent 84%, var(--background)); }
 .xcb-edges { position: absolute; inset: 0; inline-size: 100%; block-size: 100%; }
 .xcb-edge { fill: none; stroke: var(--xcb-edge-color, color-mix(in srgb, var(--muted) 55%, transparent)); stroke-width: 1.1px; stroke-dasharray: 3 4; vector-effect: non-scaling-stroke; opacity: calc(.3 + var(--hraness-hero-proximity, 0) * .7); transition: opacity .45s; }
 .xcb-edge--pulse { stroke-dasharray: 5 55; stroke-dashoffset: calc(var(--hraness-hero-proximity, 0) * -24px); }
