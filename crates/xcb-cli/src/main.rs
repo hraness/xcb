@@ -953,7 +953,7 @@ fn doctor_line(style: ux::Style, provider: Provider, version: &str, native: bool
     if !native {
         return format!(
             "{} {provider} {version}: found, but xcb can't run this build yet",
-            style.sym(ux::Symbol::Warn)
+            style.symbol(ux::Symbol::Warn)
         );
     }
     let detail = if provider == Provider::Devin {
@@ -963,7 +963,7 @@ fn doctor_line(style: ux::Style, provider: Provider, version: &str, native: bool
     };
     format!(
         "{} {provider} {version}: {detail}",
-        style.sym(ux::Symbol::Ok)
+        style.symbol(ux::Symbol::Ok)
     )
 }
 
@@ -972,17 +972,17 @@ fn doctor_line(style: ux::Style, provider: Provider, version: &str, native: bool
 fn service_text(status: &xcb_runtime::habitat_service::Status, style: ux::Style) -> String {
     let mut out = String::new();
     let login = match (status.installed, status.registered) {
-        (true, true) => format!("{} Starts at login", style.sym(ux::Symbol::Ok)),
+        (true, true) => format!("{} Starts at login", style.symbol(ux::Symbol::Ok)),
         (true, false) => format!(
             "{} Installed, but macOS hasn't loaded it",
-            style.sym(ux::Symbol::Warn)
+            style.symbol(ux::Symbol::Warn)
         ),
-        (false, _) => format!("{} Doesn't start at login", style.sym(ux::Symbol::Off)),
+        (false, _) => format!("{} Doesn't start at login", style.symbol(ux::Symbol::Off)),
     };
     let supervisor = if status.supervisor_running {
-        format!("{} supervisor running", style.sym(ux::Symbol::On))
+        format!("{} supervisor running", style.symbol(ux::Symbol::On))
     } else {
-        format!("{} supervisor idle", style.sym(ux::Symbol::Off))
+        format!("{} supervisor idle", style.symbol(ux::Symbol::Off))
     };
     out.push_str(&format!("{login} · {supervisor}\n"));
     if let Some(service) = &status.service {
@@ -1022,7 +1022,7 @@ async fn ensure_pin(root: &std::path::Path, provider: Provider) -> Result<Pin> {
     let name = provider_name(provider);
     eprintln!(
         "{} Checking {name} first (the same check as xcb doctor --provider {provider}).",
-        ux::Style::stderr().sym(ux::Symbol::Next)
+        ux::Style::stderr().symbol(ux::Symbol::Next)
     );
     let home = private::directory(&root.join("metadata-home"))?;
     private::directory(&home.join("tmp"))?;
@@ -1100,7 +1100,7 @@ fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
     }
     if view.accounts.is_empty() {
         println!("No accounts yet.");
-        ux::next("xcb accounts add claude");
+        ux::next("xcb setup <provider>");
         return Ok(());
     }
     println!(
@@ -1521,7 +1521,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         print_json(public)?;
                     } else {
                         let (added, next) = public.added_message();
-                        println!("{} {added}", ux::Style::stdout().sym(ux::Symbol::Ok));
+                        println!("{} {added}", ux::Style::stdout().symbol(ux::Symbol::Ok));
                         ux::next(&next);
                     }
                 }
@@ -1537,7 +1537,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         Provider::Claude => {
                             eprintln!(
                                 "{} Opening your browser to sign in to Claude for xcb. xcb keeps the token in its own state folder, never in your keychain.",
-                                ux::Style::stderr().sym(ux::Symbol::Next)
+                                ux::Style::stderr().symbol(ux::Symbol::Next)
                             );
                             let (cancel, receiver) = tokio::sync::watch::channel(false);
                             let mut interrupt = tokio::signal::unix::signal(
@@ -1558,7 +1558,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         Provider::Codex => {
                             eprintln!(
                                 "{} Codex will print a sign-in page and a code. Open the page and enter the code to connect this account to xcb.",
-                                ux::Style::stderr().sym(ux::Symbol::Next)
+                                ux::Style::stderr().symbol(ux::Symbol::Next)
                             );
                             runner::login_codex(&store, &account.id, &pin).await?
                         }
@@ -1572,7 +1572,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         // the account's display identity after sign-in.
                         println!(
                             "{} Signed in to {}.",
-                            ux::Style::stdout().sym(ux::Symbol::Ok),
+                            ux::Style::stdout().symbol(ux::Symbol::Ok),
                             account.name()
                         );
                         ux::next(&format!("xcb accounts refresh {}", account.id));
@@ -1678,7 +1678,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     format!("xcb --json accounts add {provider}"),
                 ));
             }
-            let ok = ux::Style::stdout().sym(ux::Symbol::Ok);
+            let ok = ux::Style::stdout().symbol(ux::Symbol::Ok);
             let name = provider_name(provider);
             // 1. One account for this provider: reuse the first, or add one.
             let accounts: Vec<_> = store
@@ -1769,6 +1769,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             let style = ux::Style::stdout();
             let mut ready: Option<Provider> = None;
             let mut missing: Vec<Provider> = vec![];
+            // Checks that passed and ones that need attention, for the
+            // count line at the end.
+            let (mut passed, mut warnings) = (0usize, 0usize);
             for provider in
                 provider.map_or_else(|| Provider::ALL.to_vec(), |provider| vec![provider])
             {
@@ -1789,6 +1792,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         }
                         if native {
                             ready.get_or_insert(provider);
+                            passed += 1;
+                        } else {
+                            warnings += 1;
                         }
                         found += 1;
                         // Devin catalog discovery requires explicit account-owned
@@ -1796,12 +1802,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         if native && provider != Provider::Devin {
                             match runner::probe(&store, &pin, None).await {
                                 Ok(models) => store.set_models(provider, &models)?,
-                                Err(error) => eprintln!(
-                                    "{} xcb couldn't list {} models: {}",
-                                    ux::Style::stderr().sym(ux::Symbol::Warn),
-                                    provider_name(provider),
-                                    ux::sentence(&error)
-                                ),
+                                Err(error) => {
+                                    warnings += 1;
+                                    eprintln!(
+                                        "{} xcb couldn't list {} models: {}",
+                                        ux::Style::stderr().symbol(ux::Symbol::Warn),
+                                        provider_name(provider),
+                                        ux::sentence(&error)
+                                    )
+                                }
                             }
                         }
                     }
@@ -1823,6 +1832,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             }
                             if native {
                                 ready.get_or_insert(provider);
+                                passed += 1;
+                            } else {
+                                warnings += 1;
                             }
                             found += 1;
                         }
@@ -1831,7 +1843,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             if !cli.json {
                                 println!(
                                     "{} {provider}: {}",
-                                    style.sym(ux::Symbol::Fail),
+                                    style.symbol(ux::Symbol::Fail),
                                     ux::sentence(&error)
                                 );
                             }
@@ -1922,7 +1934,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 match remote_status.get("linked").and_then(|v| v.as_bool()) {
                     Some(true) => println!(
                         "{} remote: linked · device {} · relay {}{}",
-                        style.sym(ux::Symbol::On),
+                        style.symbol(ux::Symbol::On),
                         remote_status["device"].as_str().unwrap_or("?"),
                         remote_status["relay"].as_str().unwrap_or("?"),
                         if remote_status["admitted"].as_bool().unwrap_or(false) {
@@ -1933,7 +1945,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     ),
                     _ => println!(
                         "{} remote: not linked (xcb link connects this machine)",
-                        style.sym(ux::Symbol::Off)
+                        style.symbol(ux::Symbol::Off)
                     ),
                 }
                 let catalog_age = match catalog_status.age_secs {
@@ -1944,7 +1956,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 };
                 println!(
                     "{} catalog: {} reviewed builds{} · {catalog_age}",
-                    style.sym(ux::Symbol::On),
+                    style.symbol(ux::Symbol::On),
                     catalog_status.builds,
                     if catalog_status.denied > 0 {
                         format!(" · {} denied", catalog_status.denied)
@@ -1952,10 +1964,11 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         String::new()
                     },
                 );
+                warnings += pending_admissions.len();
                 for pending in &pending_admissions {
                     println!(
                         "{} {}: {} is waiting for review before xcb runs it",
-                        style.sym(ux::Symbol::Warn),
+                        style.symbol(ux::Symbol::Warn),
                         pending["provider"].as_str().unwrap_or("provider"),
                         pending["version"].as_str().unwrap_or("discovered build"),
                     );
@@ -1986,9 +1999,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 println!(
                     "{} judge: {} · key {judge_key_name} · {judge_endpoint}",
                     if config.extensions.judge.enabled {
-                        style.sym(ux::Symbol::On)
+                        style.symbol(ux::Symbol::On)
                     } else {
-                        style.sym(ux::Symbol::Off)
+                        style.symbol(ux::Symbol::Off)
                     },
                     if config.extensions.judge.enabled {
                         "enabled"
@@ -1999,7 +2012,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 if sweep.reclaimed > 0 {
                     println!(
                         "{} launch folders: removed {} finished {} ({})",
-                        style.sym(ux::Symbol::Ok),
+                        style.symbol(ux::Symbol::Ok),
                         sweep.reclaimed,
                         if sweep.reclaimed == 1 {
                             "directory"
@@ -2010,9 +2023,10 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     );
                 }
                 if !sweep.unprovable.is_empty() {
+                    warnings += 1;
                     println!(
                         "{} launch folders: kept {} {} ({}) because xcb can't yet prove their runs finished.",
-                        style.sym(ux::Symbol::Warn),
+                        style.symbol(ux::Symbol::Warn),
                         sweep.unprovable.len(),
                         if sweep.unprovable.len() == 1 {
                             "directory"
@@ -2024,13 +2038,18 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     println!("  Inspect the recorded runs with xcb recover before removing them.");
                 }
                 let unsettled = store.unsettled_runs()?;
+                warnings += unsettled.len();
                 for run in &unsettled {
                     println!(
                         "{} run {} hasn't finished cleanly; xcb keeps its account until it does",
-                        style.sym(ux::Symbol::Warn),
+                        style.symbol(ux::Symbol::Warn),
                         run.id
                     );
                 }
+                println!(
+                    "\n{}",
+                    hraness_cli_kit::style::check_summary(passed, warnings, missing.len())
+                );
                 // One next step, in order of what blocks the first task.
                 if let Some(provider) =
                     ready.filter(|_| store.accounts().is_ok_and(|a| a.is_empty()))
@@ -2620,8 +2639,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         .is_ok_and(|status| status.registered);
                     if cfg!(target_os = "macos") && !loaded {
                         ux::login_item_notice(
-                            "It resumes your conversations' background work after you log in.",
-                            "xcb service uninstall",
+                            "It resumes your conversations' background work after you log in, until you run xcb service uninstall.",
                         );
                     }
                     xcb_runtime::habitat_service::install(store.root(), &executable, &home)?
@@ -3031,8 +3049,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 UpdateCommand::Enable { policy } => {
                     if cfg!(target_os = "macos") {
                         ux::login_item_notice(
-                            "It checks once a day for a verified xcb release.",
-                            "xcb update disable",
+                            "It checks once a day for a verified xcb release, until you run xcb update disable.",
                         );
                     }
                     xcb_runtime::update::configure_scheduler(&std::env::current_exe()?, true)?;
@@ -3285,7 +3302,11 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         }) => egress_forward(&socket, port, &lo_up, &env_file, target_port, &child).await,
         Some(Commands::BrokerStdio) => broker_stdio().await,
         Some(Commands::Completions { shell }) => {
-            clap_complete::generate(shell, &mut Cli::command(), "xcb", &mut io::stdout());
+            // `clap_complete` panics on a closed pipe, so render into a buffer
+            // and write it through the pipe-tolerant stdout helper.
+            let mut script = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "xcb", &mut script);
+            ux::write_stdout(std::str::from_utf8(&script).unwrap_or_default());
             Ok(0)
         }
     }
@@ -3520,8 +3541,32 @@ async fn direct_chat(
 #[tokio::main]
 async fn main() {
     ux::restore_sigpipe();
-    let cli = Cli::parse();
+    let args: Vec<String> = std::env::args().collect();
+    let words: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
+    if matches!(
+        words.as_slice(),
+        ["help", "advanced"] | ["advanced", "--help"]
+    ) {
+        hraness_cli_kit::style::write_stdout(ux::ADVANCED);
+        return;
+    }
+    let root = ux::command();
+    let parsed = root
+        .clone()
+        .try_get_matches_from(&args)
+        .and_then(|matches| <Cli as clap::FromArgMatches>::from_arg_matches(&matches));
+    let cli = match parsed {
+        Ok(cli) => cli,
+        Err(error) => std::process::exit(ux::clap_failure(error, &root, &args)),
+    };
     let json = cli.json;
+    // Plain `xcb` opens the chat on a terminal. Anywhere else (a pipe, a
+    // script, an agent's shell) it says where to start instead of failing.
+    if cli.command.is_none() && !json && !(io::stdin().is_terminal() && io::stdout().is_terminal())
+    {
+        hraness_cli_kit::style::write_stdout(&ux::start_text());
+        return;
+    }
     // Internal helpers speak a protocol on stdout; their errors stay on
     // stderr whoever runs them.
     let protocol = matches!(
@@ -3530,10 +3575,7 @@ async fn main() {
     );
     let code = match dispatch(cli).await {
         Ok(code) => code,
-        Err(error) => {
-            ux::report_error(&error, json, protocol);
-            1
-        }
+        Err(error) => ux::report_error(&error, json, protocol),
     };
     std::process::exit(code);
 }
@@ -3762,16 +3804,17 @@ mod help_tests {
     #[test]
     fn root_help_lists_every_visible_command() {
         use clap::CommandFactory as _;
+        let listed = format!("{}{}", super::ux::ROOT_HELP, super::ux::ADVANCED);
         for command in super::Cli::command().get_subcommands() {
             if command.is_hide_set() || command.get_name() == "help" {
                 continue;
             }
             let name = command.get_name();
             assert!(
-                super::ux::ROOT_HELP
+                listed
                     .lines()
                     .any(|line| line.split_whitespace().next() == Some(name)),
-                "{name} is missing from xcb --help"
+                "{name} is missing from xcb --help and xcb help advanced"
             );
         }
     }
