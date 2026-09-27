@@ -255,7 +255,7 @@ jobs:
           bun run ./scripts/package-smoke.ts artifacts/*.tgz
 
   native_artifact:
-    name: Native binary (${{ matrix.os }})
+    name: Native binary (${{ matrix.platform }})
     needs: identity
     permissions:
       attestations: write
@@ -266,7 +266,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        include:
+          # Linux links against the runner's glibc: Ubuntu 22.04 has 2.35,
+          # and the floor check below admits nothing newer than 2.34 (see
+          # docs/publishing.md). GitHub retires this image on 2027-04-17.
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+          - os: macos-15
+            platform: darwin-aarch64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -286,6 +293,9 @@ jobs:
         env:
           XCB_VERSION: ${{ needs.identity.outputs.verified_tag }}
         run: ./scripts/check-native-archive.sh "$XCB_VERSION" artifacts/*.tar.gz
+      - name: Enforce the Linux glibc floor
+        if: runner.os == 'Linux'
+        run: python3 -I scripts/check-glibc-floor.py artifacts/*.tar.gz
       - name: Attest native release tarball provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -293,7 +303,7 @@ jobs:
       - name: Preserve the exact native release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: xcb-native-${{ matrix.os }}-${{ github.run_attempt }}
+          name: xcb-native-${{ matrix.platform }}-${{ github.run_attempt }}
           path: artifacts/
           if-no-files-found: error
           retention-days: 30
@@ -330,15 +340,15 @@ jobs:
           artifact-ids: ${{ needs.verify.outputs.github_writer_artifact_id }}
           merge-multiple: true
           path: github-release-writer
-      - name: Download the exact Ubuntu native assets by run-bound name
+      - name: Download the exact Linux native assets by run-bound name
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: xcb-native-ubuntu-24.04-${{ github.run_attempt }}
+          name: xcb-native-linux-x86_64-${{ github.run_attempt }}
           path: native-artifacts
       - name: Download the exact macOS native assets by run-bound name
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: xcb-native-macos-15-${{ github.run_attempt }}
+          name: xcb-native-darwin-aarch64-${{ github.run_attempt }}
           path: native-artifacts
       - name: Re-verify the downloaded native asset checksums
         run: |
@@ -411,15 +421,15 @@ jobs:
           artifact-ids: ${{ needs.verify.outputs.release_artifact_id }}
           merge-multiple: true
           path: artifacts
-      - name: Download the exact Ubuntu native assets by run-bound name
+      - name: Download the exact Linux native assets by run-bound name
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: xcb-native-ubuntu-24.04-${{ github.run_attempt }}
+          name: xcb-native-linux-x86_64-${{ github.run_attempt }}
           path: native-artifacts
       - name: Download the exact macOS native assets by run-bound name
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: xcb-native-macos-15-${{ github.run_attempt }}
+          name: xcb-native-darwin-aarch64-${{ github.run_attempt }}
           path: native-artifacts
       - name: Prove immutable Latest GitHub Release exact-byte parity
         run: bun run ./scripts/check-github-release.ts artifacts/*.tgz artifacts/SHA256SUMS package.json native-artifacts

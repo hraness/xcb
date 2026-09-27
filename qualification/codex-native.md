@@ -35,6 +35,17 @@ the Rust replay test. Also compare `codex features list` against
 must be reviewed, and the manifest checks show whether it changes what the
 model can call.
 
+Each inventory run writes `verdict.json` beside its evidence. The outcome is
+`passed` (exit status 0), `failed` when a case fails (exit status 1), or
+`incompatible` (exit status 3) when the generated app-server schema differs
+from `SCHEMA_SHA256`, a qualified model is missing from the bundled catalog, or
+that catalog cannot be found. Only an xcb release can adopt an incompatible
+build. A run that stops without `verdict.json` is broken, not a verdict. The
+Codex catalog workflow (`.github/workflows/codex-catalog.yml`) runs the
+inventory daily against the npm `latest` darwin-arm64 build when
+`qualified-builds.json` does not list it, and reports the verdict in a tracking
+issue; a passing build's issue carries the entry to add.
+
 On hosts using a resource scheduler, run both through its Mac-native lane. Each
 invocation creates a unique disposable fixture directory and retains a JSON
 receipt. The provider fixture reads the model catalog from the hash-checked

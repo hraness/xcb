@@ -118,6 +118,8 @@ jobs:
           python3 -I crates/xcb-runtime/src/command/test_git_projection.py
           python3 -I crates/xcb-runtime/src/command/test_public_cache.py
           python3 -I scripts/prepare-command-dependencies.test.py
+          python3 -I .github/scripts/codex-catalog.test.py
+          python3 -I scripts/check-glibc-floor.test.py
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
         if: runner.os == 'Linux'
@@ -171,6 +173,8 @@ jobs:
       - run: bun run test
 
   native-build:
+    # The same runners as the release build, so every change proves the
+    # release binaries build and the Linux one stays within the glibc floor.
     name: Native build (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -179,7 +183,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        include:
+          # rust-cache keys by OS family, not image: without its own key the
+          # 22.04 leg would restore objects compiled against glibc 2.39.
+          - os: ubuntu-22.04
+            cache-key: glibc-2.35
+          - os: macos-15
+            cache-key: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
@@ -187,8 +197,12 @@ jobs:
           toolchain: 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          key: ${{ matrix.cache-key }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: ./scripts/build-native.sh
+      - name: Enforce the Linux glibc floor
+        if: runner.os == 'Linux'
+        run: python3 -I scripts/check-glibc-floor.py artifacts/*.tar.gz
       - name: Isolated inbox operator acceptance
         run: python3 -I qualification/inbox-acceptance.py target/release/xcb --evidence-dir "$RUNNER_TEMP"
       - name: Preserve inbox acceptance evidence
