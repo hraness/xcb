@@ -1,7 +1,10 @@
 mod application;
+mod doctor;
 mod habitat;
+mod health;
 mod remote;
 mod route;
+mod table;
 mod ux;
 mod workspaces;
 
@@ -348,12 +351,16 @@ enum Commands {
         #[command(subcommand)]
         command: Option<JudgeCommand>,
     },
-    /// Check provider binaries, accounts, and recent unsettled runs.
+    /// Check provider builds, accounts, and unfinished runs.
+    ///
+    /// Exits 0 when an account can take a task and nothing needs your
+    /// attention, and 1 when a check failed or needs attention; the output
+    /// names the one next step.
     Doctor {
         /// Check only this provider (claude, codex, or devin).
         #[arg(long)]
         provider: Option<Provider>,
-        /// Provider binary to qualify instead of the discovered one;
+        /// Provider binary to check instead of the one found on PATH;
         /// requires --provider.
         #[arg(long)]
         executable: Option<PathBuf>,
@@ -787,17 +794,11 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-/// One table cell: control characters stripped, then cut to `width` display
-/// columns. A cut cell ends with `…` so truncation is visible instead of a
-/// silent drop.
+/// One table cell: control characters stripped, cut to `width` display
+/// columns and padded to exactly that width. A cut cell ends with `…` so
+/// truncation is visible instead of a silent drop.
 fn cell(value: &str, width: usize) -> String {
-    let clean = xcb_core::display_text(value, usize::MAX);
-    if clean.chars().count() <= width {
-        return clean;
-    }
-    let mut text: String = clean.chars().take(width.saturating_sub(1)).collect();
-    text.push('…');
-    text
+    table::cell(value, width)
 }
 
 /// Relative time like "3h ago" for table output; 0 ms renders as "never".
@@ -948,25 +949,6 @@ impl PublicAccount<'_> {
     }
 }
 
-/// One provider line in `xcb doctor`.
-fn doctor_line(style: ux::Style, provider: Provider, version: &str, native: bool) -> String {
-    if !native {
-        return format!(
-            "{} {provider} {version}: found, but xcb can't run this build yet",
-            style.symbol(ux::Symbol::Warn)
-        );
-    }
-    let detail = if provider == Provider::Devin {
-        "ready · after importing credentials, xcb accounts refresh <account> loads its models"
-    } else {
-        "ready"
-    };
-    format!(
-        "{} {provider} {version}: {detail}",
-        style.symbol(ux::Symbol::Ok)
-    )
-}
-
 /// `xcb service` status: what starts at login, whether the supervisor runs,
 /// where it logs, and a Files & Folders denial found in that log.
 fn service_text(status: &xcb_runtime::habitat_service::Status, style: ux::Style) -> String {
@@ -1092,84 +1074,34 @@ fn catalog_account(
 }
 
 fn accounts(store: &Store, config: &Config, as_json: bool) -> Result<()> {
-    let view = summary::snapshot(store, None, config, now_ms())?;
+    let now = now_ms();
     if as_json {
+        let view = summary::snapshot(store, None, config, now)?;
         return print_json(
             json!({"version":1,"accounts":view.accounts.iter().map(|account| json!({"id":account.id,"name":account.name,"email":account.email,"provider":account.provider,"subscription":account.subscription,"remainingPercent":account.remaining_percent,"resetsAtMs":account.resets_at_ms,"quotaBlockedUntilMs":account.quota_blocked_until_ms,"runway":account.runway,"busy":account.busy,"enabled":account.enabled,"authenticationRequired":account.authentication_required})).collect::<Vec<_>>(),"estimatedPoolSeconds":view.total_runway_seconds,"measuredPools":view.runway_coverage.0,"totalPools":view.runway_coverage.1,"localOnly":true}),
         );
     }
-    if view.accounts.is_empty() {
+    let loaded = health::load(store, config, now)?;
+    if loaded.accounts.is_empty() {
         println!("No accounts yet.");
         ux::next("xcb setup <provider>");
         return Ok(());
     }
-    println!(
-        "  ID          ACCOUNT                             PROVIDER  PLAN                REMAINING              EST. RUNWAY"
+    // codeql[rust/cleartext-logging]: the account name is the user's own
+    // provider email rendered as the account's display identity, which is
+    // the documented purpose of this local status table.
+    print!(
+        "{}",
+        health::table(&loaded.accounts, config.default_account.as_ref(), now)
     );
-    let now = now_ms();
-    for account in view.accounts {
-        let reset = account
-            .resets_at_ms
-            .filter(|at| *at > now)
-            .map(|at| {
-                let minutes = (at - now).div_ceil(60_000);
-                if minutes >= 60 * 24 {
-                    format!(" · resets in ~{}d", minutes / (60 * 24))
-                } else if minutes >= 60 {
-                    format!(" · resets in ~{}h{}m", minutes / 60, minutes % 60)
-                } else {
-                    format!(" · resets in ~{minutes}m")
-                }
-            })
-            .unwrap_or_default();
-        let remaining = account
-            .remaining_percent
-            .map(|percent| format!("{percent:.0}% left{reset}"))
-            .unwrap_or_else(|| "unmeasured".into());
-        let runway = account
-            .runway
-            .seconds()
-            .map(|seconds| format!("~{:.1}h", seconds / 3600.0))
-            .unwrap_or_else(|| "unmeasured".into());
-        // codeql[rust/cleartext-logging]: the account name is the user's own
-        // provider email rendered as the account's display identity, which is
-        // the documented purpose of this local status table.
+    if let Some((seconds, measured, pools)) = loaded.runway {
         println!(
-            "{} {:<11} {:<35} {:<9} {:<19} {:<22} {}{}{}{}{}",
-            if config.default_account.as_ref() == Some(&account.id) {
-                ">"
-            } else {
-                " "
-            },
-            cell(account.id.as_str(), 11),
-            cell(&account.name, 35),
-            account.provider,
-            cell(&account.subscription, 19),
-            remaining,
-            runway,
-            if account.busy { " · busy" } else { "" },
-            if account.enabled { "" } else { " · disabled" },
-            if account.authentication_required {
-                " · reconnect required"
-            } else {
-                ""
-            },
-            account
-                .quota_block_label(now)
-                .map(|label| format!(" · {label}"))
-                .unwrap_or_default()
+            "Estimated use left at the current pace: ~{:.1}h ({measured} of {pools} usage pools measured; not a billing statement)",
+            seconds / 3600.0,
         );
     }
-    println!(
-        "\n> marks the default account · a shortened id works in any accounts command; xcb accounts --json prints full ids"
-    );
-    if let Some(seconds) = view.total_runway_seconds {
-        println!(
-            "Measured pool runway: ~{:.1}h ({}/{} pools; estimate, not a billing statement)",
-            seconds / 3600.0,
-            view.runway_coverage.0,
-            view.runway_coverage.1
-        );
+    if let Some(step) = health::first_sign_in(&loaded.accounts, config.default_account.as_ref()) {
+        ux::next(&step);
     }
     Ok(())
 }
@@ -1759,318 +1691,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             executable,
             upgrade_plan: _,
         }) => {
-            if executable.is_some() && provider.is_none() {
-                return Err(Error::Unavailable("--executable requires --provider"));
-            }
-            let home = private::directory(&root.join("metadata-home"))?;
-            private::directory(&home.join("tmp"))?;
-            let mut found = 0;
-            let mut reports = vec![];
-            let style = ux::Style::stdout();
-            let mut ready: Option<Provider> = None;
-            let mut missing: Vec<Provider> = vec![];
-            // Checks that passed and ones that need attention, for the
-            // count line at the end.
-            let (mut passed, mut warnings) = (0usize, 0usize);
-            for provider in
-                provider.map_or_else(|| Provider::ALL.to_vec(), |provider| vec![provider])
-            {
-                match process::inspect(provider, executable.as_deref(), &home).await {
-                    Ok(mut pin) => {
-                        pin.save(&root)?;
-                        let native = runner::provider_admitted(store.root(), &pin);
-                        let detail = if native && provider == Provider::Devin {
-                            "pinned · accounts refresh <account> loads the catalog after credential import"
-                        } else if native {
-                            "pinned · per-run boundary verification required"
-                        } else {
-                            "metadata pin only · native execution unavailable"
-                        };
-                        reports.push(json!({"provider":provider,"version":pin.version,"sha256":pin.sha256,"nativeCandidate":native,"detail":detail}));
-                        if !cli.json {
-                            println!("{}", doctor_line(style, provider, &pin.version, native));
-                        }
-                        if native {
-                            ready.get_or_insert(provider);
-                            passed += 1;
-                        } else {
-                            warnings += 1;
-                        }
-                        found += 1;
-                        // Devin catalog discovery requires explicit account-owned
-                        // credentials; doctor only pins its executable.
-                        if native && provider != Provider::Devin {
-                            match runner::probe(&store, &pin, None).await {
-                                Ok(models) => store.set_models(provider, &models)?,
-                                Err(error) => {
-                                    warnings += 1;
-                                    eprintln!(
-                                        "{} xcb couldn't list {} models: {}",
-                                        ux::Style::stderr().symbol(ux::Symbol::Warn),
-                                        provider_name(provider),
-                                        ux::sentence(&error)
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    Err(error) => match process::Pin::load(&root, provider) {
-                        Ok(pin) => {
-                            let native = runner::provider_admitted(store.root(), &pin);
-                            let detail = if native {
-                                "pinned · per-run boundary verification required"
-                            } else {
-                                "metadata pin only · native execution unavailable"
-                            };
-                            reports.push(json!({"provider":provider,"version":pin.version,"sha256":pin.sha256,"nativeCandidate":native,"storedPin":true,"detail":detail}));
-                            if !cli.json {
-                                println!(
-                                    "{} (last checked build; {name} didn't answer now)",
-                                    doctor_line(style, provider, &pin.version, native),
-                                    name = provider_name(provider)
-                                );
-                            }
-                            if native {
-                                ready.get_or_insert(provider);
-                                passed += 1;
-                            } else {
-                                warnings += 1;
-                            }
-                            found += 1;
-                        }
-                        Err(_) => {
-                            reports.push(json!({"provider":provider,"error":error.to_string()}));
-                            if !cli.json {
-                                println!(
-                                    "{} {provider}: {}",
-                                    style.symbol(ux::Symbol::Fail),
-                                    ux::sentence(&error)
-                                );
-                            }
-                            missing.push(provider);
-                        }
-                    },
-                }
-            }
-            // Reviewed-builds catalog state and builds parked on it.
-            let catalog_status = xcb_runtime::catalog::status(&root);
-            let pending_admissions: Vec<_> = Provider::ALL
-                .iter()
-                .filter_map(|provider| {
-                    process::pending_build(&root, *provider).map(|build| {
-                        json!({"provider":provider,"version":build.version,"sha256":build.sha256})
-                    })
-                })
-                .collect();
-            let judge_key = judge::judge_token(store.root())?.map(|(_, source)| source);
-            if let Some(source) = judge_key {
-                judge::check_key_target(source, &config.extensions.judge)?;
-            }
-            let judge_key_name = match judge_key {
-                Some(judge::JudgeKeySource::Env) => "env",
-                Some(judge::JudgeKeySource::Vault) => "vault",
-                None => "none",
-            };
-            // Reclaim only snapshots already marked disposable after safe
-            // settlement; parent exit alone cannot release provider custody.
-            let sweep = runner::reclaim_launch_artifacts(&root, true)?;
-            let (judge_model, judge_endpoint) =
-                xcb_runtime::jev::effective_target(&config.extensions.judge)?;
-            let judge_status = json!({
-                "enabled": config.extensions.judge.enabled,
-                "key": judge_key_name,
-                "model": judge_model,
-                "endpoint": judge_endpoint,
-            });
-            // Custody-level relay state; reachability belongs to `xcb fleet`.
-            let remote_status = {
-                use xcb_runtime::cloud::custody;
-                match (custody::load_device(&root)?, custody::load_link(&root)?) {
-                    (Some(device), Some(link)) => {
-                        let session = custody::load_session(&root)?;
-                        let admitted = custody::load_account_key(&root)?.is_some();
-                        json!({
-                            "linked": true,
-                            "device": device.device,
-                            "relay": link.deployment_url,
-                            "admitted": admitted,
-                            "sessionDueForRefresh": session
-                                .as_ref()
-                                .map(|session| session.due_for_refresh(now_ms()))
-                                .unwrap_or(true),
-                        })
-                    }
-                    _ => json!({"linked": false}),
-                }
-            };
-            if cli.json {
-                let mut report = json!({"version":1,"providers":reports,"unsettledRuns":store.unsettled_runs()?});
-                report["judge"] = judge_status;
-                report["remote"] = remote_status;
-                report["catalog"] = json!({
-                    "reviewedBuilds": catalog_status.builds,
-                    "denied": catalog_status.denied,
-                    "ageSeconds": catalog_status.age_secs,
-                    "pendingAdmissions": pending_admissions,
-                });
-                report["launchArtifacts"] = json!({
-                    "reclaimed": sweep.reclaimed,
-                    "reclaimedBytes": sweep.reclaimed_bytes,
-                    "liveHeld": sweep.live,
-                    "unreclaimable": sweep.unprovable.len(),
-                    "unreclaimableBytes": sweep.unprovable_bytes,
-                    "remedy": if sweep.unprovable.is_empty() {
-                        serde_json::Value::Null
-                    } else {
-                        json!("retained because independent provider-join and settled-effect evidence is missing; --yes does not override custody")
-                    },
-                });
-                if cfg!(target_os = "linux") {
-                    let status = xcb_runtime::sandbox::linux_sandbox(&root);
-                    report["sandbox"] = json!({"backend":"bwrap","candidate":status.candidate,"admitted":status.admitted,"unprivilegedUsernsClone":status.unprivileged_userns_clone,"maxUserNamespaces":status.max_user_namespaces,"qualified":status.qualified});
-                }
-                print_json(report)?;
-            } else {
-                match remote_status.get("linked").and_then(|v| v.as_bool()) {
-                    Some(true) => println!(
-                        "{} remote: linked · device {} · relay {}{}",
-                        style.symbol(ux::Symbol::On),
-                        remote_status["device"].as_str().unwrap_or("?"),
-                        remote_status["relay"].as_str().unwrap_or("?"),
-                        if remote_status["admitted"].as_bool().unwrap_or(false) {
-                            ""
-                        } else {
-                            " · awaiting admit"
-                        },
-                    ),
-                    _ => println!(
-                        "{} remote: not linked (xcb link connects this machine)",
-                        style.symbol(ux::Symbol::Off)
-                    ),
-                }
-                let catalog_age = match catalog_status.age_secs {
-                    Some(secs) if secs < 120 => format!("refreshed {secs}s ago"),
-                    Some(secs) if secs < 7200 => format!("refreshed {}m ago", secs / 60),
-                    Some(secs) => format!("refreshed {}h ago", secs / 3600),
-                    None => "not fetched yet".to_owned(),
-                };
-                println!(
-                    "{} catalog: {} reviewed builds{} · {catalog_age}",
-                    style.symbol(ux::Symbol::On),
-                    catalog_status.builds,
-                    if catalog_status.denied > 0 {
-                        format!(" · {} denied", catalog_status.denied)
-                    } else {
-                        String::new()
-                    },
-                );
-                warnings += pending_admissions.len();
-                for pending in &pending_admissions {
-                    println!(
-                        "{} {}: {} is waiting for review before xcb runs it",
-                        style.symbol(ux::Symbol::Warn),
-                        pending["provider"].as_str().unwrap_or("provider"),
-                        pending["version"].as_str().unwrap_or("discovered build"),
-                    );
-                }
-                if cfg!(target_os = "linux") {
-                    let status = xcb_runtime::sandbox::linux_sandbox(&root);
-                    let detail = match &status.candidate {
-                        Some(path) if status.admitted => {
-                            format!("bwrap candidate {} admitted", path.display())
-                        }
-                        Some(path) => {
-                            format!("bwrap candidate {} fails admission", path.display())
-                        }
-                        None => "bwrap unavailable".to_owned(),
-                    };
-                    let userns =
-                        match (status.unprivileged_userns_clone, status.max_user_namespaces) {
-                            (Some(false), _) | (_, Some(0)) => " · user namespaces restricted",
-                            _ => "",
-                        };
-                    let qual = if status.qualified {
-                        "qualified"
-                    } else {
-                        "unqualified · place a current qualification receipt"
-                    };
-                    println!("sandbox: {detail}{userns} · {qual}");
-                }
-                println!(
-                    "{} judge: {} · key {judge_key_name} · {judge_endpoint}",
-                    if config.extensions.judge.enabled {
-                        style.symbol(ux::Symbol::On)
-                    } else {
-                        style.symbol(ux::Symbol::Off)
-                    },
-                    if config.extensions.judge.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    },
-                );
-                if sweep.reclaimed > 0 {
-                    println!(
-                        "{} launch folders: removed {} finished {} ({})",
-                        style.symbol(ux::Symbol::Ok),
-                        sweep.reclaimed,
-                        if sweep.reclaimed == 1 {
-                            "directory"
-                        } else {
-                            "directories"
-                        },
-                        human_bytes(sweep.reclaimed_bytes),
-                    );
-                }
-                if !sweep.unprovable.is_empty() {
-                    warnings += 1;
-                    println!(
-                        "{} launch folders: kept {} {} ({}) because xcb can't yet prove their runs finished.",
-                        style.symbol(ux::Symbol::Warn),
-                        sweep.unprovable.len(),
-                        if sweep.unprovable.len() == 1 {
-                            "directory"
-                        } else {
-                            "directories"
-                        },
-                        human_bytes(sweep.unprovable_bytes),
-                    );
-                    println!("  Inspect the recorded runs with xcb recover before removing them.");
-                }
-                let unsettled = store.unsettled_runs()?;
-                warnings += unsettled.len();
-                for run in &unsettled {
-                    println!(
-                        "{} run {} hasn't finished cleanly; xcb keeps its account until it does",
-                        style.symbol(ux::Symbol::Warn),
-                        run.id
-                    );
-                }
-                println!(
-                    "\n{}",
-                    hraness_cli_kit::style::check_summary(passed, warnings, missing.len())
-                );
-                // One next step, in order of what blocks the first task.
-                if let Some(provider) =
-                    ready.filter(|_| store.accounts().is_ok_and(|a| a.is_empty()))
-                {
-                    ux::next(&format!("xcb setup {provider}"));
-                } else if !unsettled.is_empty() {
-                    ux::next("xcb recover");
-                } else if found == 0 {
-                    // Suggest the most common provider first.
-                    let suggested = [Provider::Claude, Provider::Codex, Provider::Devin]
-                        .into_iter()
-                        .find(|provider| missing.contains(provider));
-                    if let Some(provider) = suggested {
-                        ux::next(&format!(
-                            "install {}, or run xcb doctor --provider {provider} --executable <absolute path>",
-                            provider_name(provider)
-                        ));
-                    }
-                }
-            }
-            Ok(if found > 0 { 0 } else { 1 })
+            doctor::run(
+                &root,
+                &store,
+                &config,
+                provider,
+                executable.as_deref(),
+                cli.json,
+            )
+            .await
         }
         Some(Commands::Models { command }) => {
             match command {
@@ -2196,20 +1825,20 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             if cli.json {
                 print_json(choices)?;
             } else {
-                println!("  MODEL                                                 LABEL · MODE");
+                println!("  {} LABEL · MODE", cell("MODEL", 56));
                 // choose_model defaults each provider to its first row in this
                 // ordering, so mark those rows.
                 let mut defaulted = std::collections::BTreeSet::new();
                 for choice in choices {
                     println!(
-                        "{} {:<56} {} · {:?}",
+                        "{} {} {} · {:?}",
                         if defaulted.insert(choice.provider) {
                             "*"
                         } else {
                             " "
                         },
-                        choice.key(),
-                        cell(&choice.label, 56),
+                        cell(&choice.key(), 56),
+                        table::fit(&choice.label, 56),
                         choice.mode
                     );
                 }
@@ -2474,19 +2103,23 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         ux::next("xcb");
                     } else {
                         println!(
-                            "{:<34}  {:<8} {:<24} {:<15} {:<9} TITLE",
-                            "SESSION ID", "PROVIDER", "MODEL", "STATE", "ACTIVE"
+                            "{}  {} {} {} {} TITLE",
+                            cell("SESSION ID", 34),
+                            cell("PROVIDER", 8),
+                            cell("MODEL", 24),
+                            cell("STATE", 15),
+                            cell("ACTIVE", 9)
                         );
                         let now = now_ms();
                         for session in sessions {
                             println!(
-                                "{:<34}  {:<8} {:<24} {:<15} {:<9} {}",
-                                session.id.as_str(),
-                                session.model.provider,
+                                "{}  {} {} {} {} {}",
+                                cell(session.id.as_str(), 34),
+                                cell(session.model.provider.as_str(), 8),
                                 cell(&session.model.label, 24),
-                                session.state.label(),
-                                human_age(now, session.last_active_at_ms),
-                                cell(&session.title, 60)
+                                cell(session.state.label(), 15),
+                                cell(&human_age(now, session.last_active_at_ms), 9),
+                                table::fit(&session.title, 60)
                             );
                         }
                     }

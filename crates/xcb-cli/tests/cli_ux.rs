@@ -45,10 +45,38 @@ impl Sandbox {
         self.command(args, env).output().unwrap()
     }
     fn add_claude(&self) -> String {
-        let output = self.run(&["--json", "accounts", "add", "claude"], &[]);
+        self.add(&["claude"])
+    }
+    /// `xcb accounts add <args>`; returns the new account id.
+    fn add(&self, args: &[&str]) -> String {
+        let mut all = vec!["--json", "accounts", "add"];
+        all.extend_from_slice(args);
+        let output = self.run(&all, &[]);
         assert!(output.status.success(), "{output:?}");
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         value["id"].as_str().unwrap().to_owned()
+    }
+    /// Run with `input` piped on stdin.
+    fn run_with_input(&self, args: &[&str], input: &[u8]) -> Output {
+        use std::io::Write as _;
+        let mut child = self
+            .command(args, &[])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        child.wait_with_output().unwrap()
+    }
+    /// A provider on the sandbox PATH that answers `--version` with
+    /// `version_line`. xcb finds it, but it is not a build xcb supports, so
+    /// nothing ever runs it.
+    fn fake_provider(&self, name: &str, version_line: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = self.root.join("bin").join(name);
+        std::fs::write(&path, format!("#!/bin/sh\necho '{version_line}'\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
 
@@ -300,11 +328,170 @@ fn doctor_marks_each_provider_and_names_one_next_step() {
         "{stdout}"
     );
     assert!(!stdout.contains("custody"), "{stdout}");
-    // The checks end with a count line.
-    assert!(stdout.ends_with("\n\n3 problems.\n"), "{stdout}");
+    // The checks end with a count line. On Linux a missing sandbox is one
+    // more warning: xcb starts no provider there without it.
+    let summary = stdout.rsplit_once("\n\n").map(|(_, last)| last);
+    if cfg!(target_os = "linux") {
+        assert!(
+            matches!(summary, Some("3 problems.\n" | "3 problems, 1 warning.\n")),
+            "{stdout}"
+        );
+    } else {
+        assert_eq!(summary, Some("3 problems.\n"), "{stdout}");
+    }
     assert!(
         text(&output.stderr).ends_with("Next: install Claude Code, or run xcb doctor --provider claude --executable <absolute path>\n"),
         "{output:?}"
+    );
+}
+
+/// The live report behind this: doctor said "All 3 checks passed" while
+/// accounts needed attention. Accounts show under their provider, a provider
+/// that isn't installed and has no accounts is optional, and doctor exits 1
+/// until an account can take a task.
+#[test]
+fn doctor_reports_accounts_under_their_provider_and_exits_nonzero() {
+    let sandbox = Sandbox::new("doctor-accounts");
+    sandbox.fake_provider("codex", "codex-cli 0.0.1");
+    sandbox.add(&["codex"]);
+    let off = sandbox.add(&["codex"]);
+    assert!(
+        sandbox
+            .run(&["accounts", "disable", &off], &[])
+            .status
+            .success()
+    );
+    let output = sandbox.run(&["doctor"], &[("HRANESS_AUDIENCE", "human")]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = text(&output.stdout);
+    assert!(
+        stdout.contains(
+            "⚠ codex 0.0.1: found, but xcb can't run this build yet\n  ○ 2 accounts can't take tasks until xcb can run Codex\n"
+        ),
+        "{stdout}"
+    );
+    // Claude and Devin have no accounts and another provider was found.
+    assert!(
+        stdout.starts_with("○ claude: xcb can't find `claude` on your PATH."),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\n○ devin: "), "{stdout}");
+    assert!(!stdout.contains("passed"), "{stdout}");
+    assert!(
+        text(&output.stderr).ends_with(
+            "Next: install a supported Codex build (xcb.sh/docs/providers lists them), then run xcb doctor\n"
+        ),
+        "{output:?}"
+    );
+    let json = sandbox.run(&["--json", "doctor"], &[]);
+    assert_eq!(json.status.code(), Some(1), "{json:?}");
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let codex = report["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["provider"] == "codex")
+        .unwrap();
+    assert_eq!(codex["needsSignIn"], 1, "{report}");
+    assert_eq!(codex["off"], 1, "{report}");
+    assert_eq!(report["checks"]["accountsReady"], 0, "{report}");
+    assert_eq!(report["checks"]["problems"], 0, "{report}");
+    assert!(
+        report["next"].as_str().unwrap().contains("Codex"),
+        "{report}"
+    );
+    // Nothing installed and nothing set up: every provider is a problem.
+    let empty = Sandbox::new("doctor-empty-json");
+    let report: serde_json::Value =
+        serde_json::from_slice(&empty.run(&["--json", "doctor"], &[]).stdout).unwrap();
+    assert_eq!(report["checks"]["problems"], 3, "{report}");
+}
+
+#[test]
+fn accounts_table_lines_up_and_names_the_account_to_sign_in() {
+    let sandbox = Sandbox::new("accounts-table");
+    let claude = sandbox.add(&["claude", "--plan", "Max"]);
+    let codex = sandbox.add(&["codex", "--plan", "ChatGPT subscription"]);
+    let devin = sandbox.add(&["devin", "--plan", "Imported subscription"]);
+    assert!(
+        sandbox
+            .run(&["accounts", "disable", &codex], &[])
+            .status
+            .success()
+    );
+    let stored = sandbox.run_with_input(&["accounts", "token", &devin], b"synthetic-devin-token");
+    assert!(stored.status.success(), "{stored:?}");
+    let output = sandbox.run(&["accounts"], &[("HRANESS_AUDIENCE", "human")]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = text(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    let status_at = lines[0].find("STATUS").unwrap();
+    assert!(lines[0].starts_with("  ID  "), "{stdout}");
+    let short = |id: &str| format!("{}…", &id[..10]);
+    // Claude, Codex, Devin order; the first account added is the default.
+    for (line, id, provider, plan, status) in [
+        (lines[1], &claude, "claude", "Max", "needs sign-in"),
+        (lines[2], &codex, "codex", "ChatGPT", "off"),
+        (lines[3], &devin, "devin", "Imported", "ready"),
+    ] {
+        assert!(line.contains(&short(id)), "{line}");
+        assert!(line.contains(&format!("  {provider}  ")), "{line}");
+        assert!(line.contains(&format!("  {plan}  ")), "{line}");
+        // Every character here is one column wide, `…` included.
+        let column = line[..line.find(status).unwrap()].chars().count();
+        assert_eq!(column, status_at, "{stdout}");
+        assert!(line.chars().count() <= 100, "{line}");
+    }
+    assert!(lines[1].starts_with("> "), "{stdout}");
+    assert!(!stdout.contains("unmeasured"), "{stdout}");
+    assert!(!stdout.contains("subscripti"), "{stdout}");
+    assert_eq!(
+        text(&output.stderr),
+        format!("Next: xcb accounts login {claude}\n")
+    );
+    // --json keeps its documented shape.
+    let json = sandbox.run(&["--json", "accounts"], &[]);
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let keys = |value: &serde_json::Value| {
+        let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(
+        keys(&value),
+        [
+            "accounts",
+            "estimatedPoolSeconds",
+            "localOnly",
+            "measuredPools",
+            "totalPools",
+            "version"
+        ]
+    );
+    assert_eq!(
+        keys(&value["accounts"][0]),
+        [
+            "authenticationRequired",
+            "busy",
+            "email",
+            "enabled",
+            "id",
+            "name",
+            "provider",
+            "quotaBlockedUntilMs",
+            "remainingPercent",
+            "resetsAtMs",
+            "runway",
+            "subscription"
+        ]
+    );
+    assert!(
+        value["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["subscription"] == "ChatGPT subscription"),
+        "{value}"
     );
 }
 
