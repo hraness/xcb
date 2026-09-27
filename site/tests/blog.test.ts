@@ -8,8 +8,8 @@ import {
   assertArticleAdmissions,
 } from "@hraness/design-kit";
 import { portfolioRelations } from "@hraness/design-kit/portfolio";
-import { createBlogSitemapPaths } from "@hraness/web-discovery";
-import { blogArticleDiscovery, blogRelatedProducts } from "../app/blog/discovery";
+import { articleJsonLd, createBlogSitemapPaths } from "@hraness/web-discovery";
+import { blogArticleDiscovery, blogRelatedProducts, blogSite } from "../app/blog/discovery";
 import { blogAtomFeed } from "../app/blog/feed";
 import { blogBodies, blogStatusLabel } from "../app/blog/posts.generated";
 import { blogPath, blogPostPath, blogPosts, indexableBlogPosts } from "../app/blog/posts";
@@ -38,6 +38,18 @@ describe("xcb blog", () => {
         expect(blogRelatedProducts(entry)).toEqual([]);
       }
     }
+  });
+
+  test("resolves the Hraness party to a real entity in article JSON-LD", () => {
+    const party = {
+      "@type": "Organization" as const,
+      name: "Hraness",
+      url: "https://hraness.com",
+      sameAs: ["https://github.com/hraness"],
+    };
+    const jsonLd = articleJsonLd(blogSite, blogArticleDiscovery(blogPosts[0]!));
+    expect(jsonLd.author).toEqual([party]);
+    expect(jsonLd.publisher).toEqual(party);
   });
 
   test("names the AI review as AI and never as human", () => {

@@ -1,5 +1,5 @@
 import { relatedFor } from "@hraness/design-kit/portfolio";
-import type { ArticleDiscovery, FeedDiscovery, SearchSite } from "@hraness/web-discovery";
+import type { ArticleDiscovery, ArticleParty, FeedDiscovery, SearchSite } from "@hraness/web-discovery";
 import { socialImageAlt } from "../social";
 import { blogAuthor, blogDescription, blogFeedPath, blogPath, blogPostPath, blogTimestamp, blogTitle, type BlogPost } from "./posts";
 
@@ -13,7 +13,13 @@ export const blogSite: SearchSite = {
   publisher: "Hraness",
 };
 
-export const blogPublisher = { kind: "Organization", name: blogAuthor.name } as const;
+// The Hraness party resolves to its canonical site and GitHub organization.
+export const blogPublisher: ArticleParty = {
+  kind: "Organization",
+  name: blogAuthor.name,
+  url: "https://hraness.com",
+  sameAs: ["https://github.com/hraness"],
+};
 
 export function blogArticleDiscovery(entry: BlogPost): ArticleDiscovery {
   return {
