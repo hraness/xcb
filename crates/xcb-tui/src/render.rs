@@ -818,12 +818,13 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     .or_else(|| lowest.map(|p| format!(" · quota {}%", p.round() as u32)))
                     .unwrap_or_default();
                 format!(
-                    "{running} running{} · {waiting} needs you (/attention) · {}{}{}{}",
+                    "{running} running{} · {waiting} {} you (/attention) · {}{}{}{}",
                     if queued > 0 {
                         format!(" · {queued} queued")
                     } else {
                         String::new()
                     },
+                    if waiting == 1 { "needs" } else { "need" },
                     if crate::in_thread(&app.view) {
                         format!("{} projects", app.view.workspaces.len())
                     } else {
@@ -1367,7 +1368,7 @@ fn render_source(frame: &mut Frame<'_>, source: Source, area: Rect, app: &App) {
                     account.provider,
                     if account.enabled { "" } else { " · disabled" },
                     if account.authentication_required {
-                        " · reconnect required"
+                        " · sign in again"
                     } else {
                         ""
                     }

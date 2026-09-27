@@ -157,35 +157,35 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/cancel",
         alias: "",
         args: "[task-id]",
-        summary: "cancel an explicitly observed task",
+        summary: "request cancellation of a task",
         needs_args: false,
     },
     SlashCommand {
         name: "/steer",
         alias: "",
         args: "<task-id> <guidance>",
-        summary: "queue guidance for the next authorized task turn",
+        summary: "queue guidance for a task's next allowed turn",
         needs_args: true,
     },
     SlashCommand {
         name: "/watch",
         alias: "",
         args: "<target-task> <source-task>",
-        summary: "request another task's terminal report in the target inbox",
+        summary: "send one task's final report to another task's inbox",
         needs_args: true,
     },
     SlashCommand {
         name: "/inbox",
         alias: "",
         args: "[all|task-id]",
-        summary: "inspect durable guidance and delivery receipts",
+        summary: "see saved guidance and when it reached a worker",
         needs_args: false,
     },
     SlashCommand {
         name: "/project",
         alias: "",
         args: "[all|grant [project] <tasks> <hours> <goal>|pause|resume [project]]",
-        summary: "bounded automatic project work and remaining budget",
+        summary: "automatic follow-up work within a task and hour budget",
         needs_args: false,
     },
     SlashCommand {
@@ -199,7 +199,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/memory",
         alias: "",
         args: "[project] search <query>",
-        summary: "search the project's bound Wordcell vault",
+        summary: "search the project's Wordcell vault",
         needs_args: true,
     },
     SlashCommand {
@@ -353,8 +353,8 @@ pub enum PickAction {
     NewConversation,
     /// Open a new project view for this directory from the thread.
     NewProjectView(String),
-    /// Focus the thread on a project; `new` admits it first and `resubmit`
-    /// sends the retained draft once focused.
+    /// Focus the thread on a project; `new` registers it first and
+    /// `resubmit` sends the kept draft once focused.
     Workspace {
         path: String,
         new: bool,
@@ -440,9 +440,11 @@ struct SessionDraft {
 /// Bound on remembered per-context drafts; the least recently used is evicted.
 const MAX_DRAFT_SESSIONS: usize = 64;
 
-/// How long a notice stays on screen without any key press before it is
-/// dropped on the next refresh.
-const NOTICE_TTL: Duration = Duration::from_secs(8);
+/// How long a notice stays on screen without any key press before it clears
+/// itself.
+pub const NOTICE_TTL: Duration = Duration::from_secs(8);
+/// How long a first cancel press waits for its confirming second press.
+const CANCEL_CONFIRM: Duration = Duration::from_secs(3);
 
 /// Byte bound of the Prompt/Pane editor dialog.
 const EDITOR_MAX: usize = 64 * 1024;
@@ -568,10 +570,10 @@ fn inspect_inbox(event: &xcb_core::ui::InboxRow) -> Modal {
             "Content".into(),
             event.text.clone(),
             String::new(),
-            "Delivery receipt".into(),
-            event.receipt.clone().unwrap_or_else(|| "No settled delivery receipt yet.".into()),
+            "Delivery record".into(),
+            event.receipt.clone().unwrap_or_else(|| "Not in a worker turn yet.".into()),
             String::new(),
-            "Delivery records inclusion in a worker turn, not proof the model followed the guidance. Guidance cannot grant approval or change project authority.".into(),
+            "Delivery means a worker turn included this guidance; it does not show the model followed it. Guidance cannot approve actions or change a project grant.".into(),
         ],
         scroll: 0,
     }
@@ -619,8 +621,8 @@ fn inspect_program(program: &xcb_core::ui::ProgramRow) -> Modal {
     lines.extend([
         String::new(),
         format!(
-            "receipt  {}",
-            program.receipt.as_deref().unwrap_or("no checkpoint yet")
+            "checkpoint  {}",
+            program.receipt.as_deref().unwrap_or("none yet")
         ),
         format!("xcb backlog program-status {} --json", program.parent),
     ]);
@@ -705,7 +707,7 @@ fn resolve_project(view: &View, value: &str) -> Result<String, String> {
     match hits.as_slice() {
         [row] => Ok(row.path.clone()),
         [] => Err(format!(
-            "no known project is named `{value}`; /workspace add <dir> admits one"
+            "no known project is named `{value}`; /workspace add <dir> registers one"
         )),
         _ => Err(format!(
             "`{value}` names several projects: {}",
@@ -757,12 +759,12 @@ pub(crate) fn conversation_items(view: &View) -> Vec<PickItem> {
 }
 
 /// Picker rows for project directories. `new` rows are prompt roots the
-/// registry has not admitted; picking one adds it first.
+/// registry does not know yet; picking one adds it first.
 fn workspace_items(rows: &[xcb_core::ui::WorkspaceRow], resubmit: bool) -> Vec<PickItem> {
     rows.iter()
         .map(|row| PickItem {
             label: if row.new {
-                format!("new — add · {}", row.path)
+                format!("new · add {}", row.path)
             } else {
                 format!(
                     "{} · {}{}",
@@ -1063,7 +1065,7 @@ pub struct App {
     slash_selected: Cell<usize>,
     /// Esc closes the menu without canceling the turn; typing reopens it.
     slash_dismissed: Cell<bool>,
-    /// Composer text the menu state belongs to; any edit resets selection.
+    /// Command token the menu state belongs to; any edit resets selection.
     slash_text: std::cell::RefCell<String>,
     /// Per-frame render state: wrapped transcript rows per message, the
     /// streaming tail's last wrap, and textarea viewport mirrors. Interior
@@ -1085,6 +1087,9 @@ pub struct App {
     /// Notice text last observed and when it appeared; drives expiry.
     notice_seen: String,
     notice_since: Option<Instant>,
+    /// When a first Esc or Ctrl-C asked to cancel managed work. A second
+    /// press within [`CANCEL_CONFIRM`] cancels; tasks survive a stray key.
+    cancel_armed: Option<Instant>,
     composer_target: Option<interaction::ComposerTarget>,
     /// The last thread task this terminal submitted; `/workspace <name>`
     /// moves it while it is still queued and undispatched.
@@ -1115,25 +1120,32 @@ impl App {
     pub fn take_mouse_toggle(&mut self) -> Option<bool> {
         std::mem::take(&mut self.mouse_toggled).then_some(self.mouse_capture)
     }
-    /// Notices are transient: any key press dismisses one, and the periodic
-    /// view refresh drops one that has been on screen for `NOTICE_TTL`.
-    fn track_notice(&mut self) {
+    /// Notices are transient: any key press dismisses one, and one that has
+    /// been on screen for `NOTICE_TTL` clears itself.
+    fn track_notice(&mut self, now: Instant) {
         if self.notice != self.notice_seen {
             self.notice_seen.clone_from(&self.notice);
-            self.notice_since = (!self.notice.is_empty()).then(Instant::now);
+            self.notice_since = (!self.notice.is_empty()).then_some(now);
         }
     }
-    fn expire_notice(&mut self) {
-        self.track_notice();
+    fn expire_notice(&mut self, now: Instant) {
+        self.track_notice(now);
         if self
             .notice_since
-            .is_some_and(|since| since.elapsed() >= NOTICE_TTL)
+            .is_some_and(|since| now.saturating_duration_since(since) >= NOTICE_TTL)
         {
             self.notice.clear();
             self.notice_seen.clear();
             self.notice_since = None;
             self.dirty = true;
         }
+    }
+    /// Apply changes that depend only on time. The terminal loop calls this
+    /// on every pass (it already wakes at least every 50 ms to poll input),
+    /// so a notice clears at its deadline and repaints without a key press
+    /// or view update, and an idle terminal gains no extra wakeups.
+    pub fn tick(&mut self, now: Instant) {
+        self.expire_notice(now);
     }
     fn open_help(&mut self, via_question: bool) {
         self.modal = Some(Modal::Help { scroll: 0 });
@@ -1159,6 +1171,19 @@ impl App {
             self.view.managed_cancel_available
         } else {
             self.has_live_work()
+        }
+    }
+    /// What Ctrl-C on an empty prompt does now, for notices that say what a
+    /// second press will do.
+    fn next_ctrl_c(&self) -> &'static str {
+        if !self.can_cancel_work() {
+            "Press Ctrl-C again to quit."
+        } else if self.managed_mode() {
+            "Press Ctrl-C twice to cancel running work."
+        } else if self.view.remote_active {
+            "The turn is running in another terminal; Ctrl-D quits."
+        } else {
+            "Press Ctrl-C again to stop the current turn."
         }
     }
     /// Absolute top line index rendered last frame; used to anchor PageUp.
@@ -1205,13 +1230,20 @@ impl App {
     pub fn take_dirty(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
     }
+    /// The draft while it can still be a command name: one line of at most
+    /// 64 bytes, starting with `/` and holding no whitespace. Reading only
+    /// that much keeps the per-key menu check cheap for a large draft.
+    fn slash_token(&self) -> Option<&str> {
+        self.composer
+            .short_text(64)
+            .filter(|text| text.starts_with('/') && !text.contains(char::is_whitespace))
+    }
     /// Commands matching the composer's current `/` prefix, in menu order. The
     /// menu only covers the command token — typing a space closes it.
     pub fn slash_matches(&self) -> Vec<&'static SlashCommand> {
-        let text = self.composer.text();
-        if !text.starts_with('/') || text.contains(char::is_whitespace) || text.len() > 64 {
+        let Some(text) = self.slash_token() else {
             return Vec::new();
-        }
+        };
         const MANAGED: &[&str] = &[
             "/detach",
             "/resume",
@@ -1263,28 +1295,25 @@ impl App {
         let mut matches: Vec<_> = SLASH_COMMANDS
             .iter()
             .filter(|command| available(command))
-            .filter(|command| command.name.starts_with(&text))
+            .filter(|command| command.name.starts_with(text))
             .collect();
         matches.sort_by_key(|command| command.name);
         matches
     }
     /// The open typeahead menu as `(matches, selected)`, if any. Lazily resyncs
-    /// menu state against the live composer text so any edit — typed, pasted,
+    /// menu state against the live command token so any edit — typed, pasted,
     /// or a restored draft — resets selection and un-dismisses the menu.
     pub fn slash_menu(&self) -> Option<(Vec<&'static SlashCommand>, usize)> {
-        let text = self.composer.text();
-        if *self.slash_text.borrow() != text {
-            *self.slash_text.borrow_mut() = text;
+        let token = self.slash_token().unwrap_or_default();
+        if *self.slash_text.borrow() != token {
+            *self.slash_text.borrow_mut() = token.to_owned();
             self.slash_selected.set(0);
             self.slash_dismissed.set(false);
         }
-        let matches = self.slash_matches();
-        if self.slash_dismissed.get()
-            || !self.composer.text().starts_with('/')
-            || self.composer.text().contains(char::is_whitespace)
-        {
+        if token.is_empty() || self.slash_dismissed.get() {
             return None;
         }
+        let matches = self.slash_matches();
         Some((
             matches.clone(),
             self.slash_selected
@@ -1331,7 +1360,7 @@ impl App {
     fn restore_draft(&mut self, text: String, attachments: Vec<Attachment>) {
         // A composer the user already started typing into is never clobbered;
         // the rejected text stays recoverable from prompt history.
-        if self.composer.text().is_empty() {
+        if self.composer.is_empty() {
             self.composer.set_text(&text);
         }
         for attachment in attachments {
@@ -1370,7 +1399,7 @@ impl App {
                         .or(pending.session);
                     self.composer.remember(&text);
                     if context == view_context(&self.view)
-                        && self.composer.text().is_empty()
+                        && self.composer.is_empty()
                         && self.attachments.is_empty()
                         && self.composer_target.is_none()
                         && !self.pending_image
@@ -1430,7 +1459,7 @@ impl App {
             } => self.accept_queued_draft(context, id, operation, text),
             Update::View(mut view) => {
                 self.initial_view_pending = false;
-                self.expire_notice();
+                self.expire_notice(Instant::now());
                 if view.pane_error.is_some() {
                     view.pane = self.view.pane.clone();
                     view.pane_revision = self.view.pane_revision.clone();
@@ -1449,7 +1478,7 @@ impl App {
                     // the context being opened. A delayed initial view must not
                     // erase part of a command or an attachment typed meanwhile.
                     let preserve_unbound_input = previous.is_none()
-                        && (!self.composer.text().is_empty() || !self.attachments.is_empty());
+                        && (!self.composer.is_empty() || !self.attachments.is_empty());
                     // The draft belongs to the conversation or session it was typed in:
                     // stash it and restore the target context's own draft.
                     if let Some(previous) = previous {
@@ -1532,7 +1561,7 @@ impl App {
                             self.modal = Some(Modal::Inspect {
                                 title: expected,
                                 lines: vec![format!(
-                                    "Outside the current bounded view. Use xcb backlog program-status {id} --json for current state."
+                                    "No longer in the recent list. Run xcb backlog program-status {id} --json for its state."
                                 )],
                                 scroll: 0,
                             });
@@ -1765,13 +1794,25 @@ impl App {
     }
     fn request_cancel(&mut self, output: &SyncSender<Intent>) {
         if self.managed_mode() {
-            self.managed_cancel(output);
+            // Managed tasks keep running after the terminal closes, so one
+            // stray key must not cancel them.
+            let now = Instant::now();
+            if self
+                .cancel_armed
+                .is_some_and(|armed| now.duration_since(armed) < CANCEL_CONFIRM)
+            {
+                self.cancel_armed = None;
+                self.managed_cancel(output);
+            } else {
+                self.cancel_armed = Some(now);
+                self.notice =
+                    "Press again to cancel the running task. Tasks keep running if you quit."
+                        .into();
+            }
             return;
         }
         if self.try_send(output, Intent::Cancel) {
-            self.notice = if self.managed_mode() {
-                "Cancellation requested for this conversation; check the task status for settlement."
-            } else if self.view.remote_active {
+            self.notice = if self.view.remote_active {
                 "This turn is running in another terminal; cancel it there."
             } else {
                 "Stopping the current turn and queued follow-ups."
@@ -1802,7 +1843,7 @@ impl App {
             && (self.pending_habitat.len() >= 16 || !self.recovery_capacity_available())
         {
             self.composer.set_text(&format!("{command} {arguments}"));
-            self.notice = "Waiting for earlier input acknowledgements; command retained.".into();
+            self.notice = "Waiting for earlier input to be saved; your command is kept.".into();
             return false;
         }
         let tracked = pending.is_some();
@@ -1890,11 +1931,12 @@ impl App {
                     return;
                 };
                 let items = scope.items(&self.view);
-                if items.is_empty() {
-                    self.notice = "No matching events in the current bounded inbox view. Use xcb inbox --task <task-id> to inspect task history.".into();
+                self.notice = if items.is_empty() {
+                    "No recent inbox events match. Run xcb inbox --task <task-id> for a task's full history."
                 } else {
-                    self.notice = "Showing a recent global inbox snapshot. Use xcb inbox --task <task-id> for paged history beyond this bounded view.".into();
+                    "Showing recent events. Run xcb inbox --task <task-id> for older history."
                 }
+                .into();
                 self.picker(scope.title(), items);
                 self.inbox_scope = Some(scope);
             }
@@ -1964,7 +2006,7 @@ impl App {
                     }), command, arguments) {
                         self.notice = format!("Granting `{workspace}`");
                     }
-                } else { self.notice = "Use /project grant [project] <1–100 tasks> <1–720 hours> <goal>. This authorizes automatic follow-up work.".into(); }
+                } else { self.notice = "Use /project grant [project] <1–100 tasks> <1–720 hours> <goal>. A grant lets xcb start follow-up work on its own.".into(); }
             }
             "/project" => self.notice = "Use /project [all], /project grant [project] <tasks> <hours> <goal>, or /project pause|resume [project].".into(),
             "/memory" if (action == "search" && !tail.is_empty()) || tail.starts_with("search ") => {
@@ -1995,7 +2037,7 @@ impl App {
             "/backlog" if action == "reconcile" => {
                 if let Some(task) = self.view.backlog.iter().find(|task| task.id.as_str() == tail) {
                     self.send_habitat(output, Intent::Habitat(HabitatCommand::ReconcileTask { id: task.id.clone(), expected_revision: task.revision }), command, arguments);
-                } else { self.notice = "Use /backlog reconcile <task-id>; retained run evidence must prove the outcome.".into(); }
+                } else { self.notice = "Use /backlog reconcile <task-id>; it works only when the saved run record shows how the run ended.".into(); }
             }
             "/attention" | "/backlog" if command == "/attention" || arguments.is_empty() || arguments == "all" => {
                 let attention = command == "/attention";
@@ -2052,7 +2094,7 @@ impl App {
                     self.modal = Some(inspect_program(program));
                     self.program_inspect = Some(program.parent.clone());
                 } else {
-                    self.notice = "Program is outside the current view. Use xcb backlog program-status <id> --json. Create a pinned program with xcb backlog program or xcb schedules program.".into();
+                    self.notice = "That program is not in the recent list. Run xcb backlog program-status <id> --json, or start one with xcb backlog program or xcb schedules program.".into();
                 }
             }
             "/schedule" if arguments.is_empty() || arguments == "all" => {
@@ -2083,7 +2125,7 @@ impl App {
                 } else { self.notice = "Schedule not in the current view. /schedule all lists schedule ids.".into(); }
             }
             "/schedule" => self.notice = "Use /schedule [all], /schedule every <seconds> <prompt>, or /schedule pause|resume <id>.".into(),
-            "/reply" => self.notice = "Use /reply <task-id> <answer>. Approvals still use the existing permission gate.".into(),
+            "/reply" => self.notice = "Use /reply <task-id> <answer>. A reply cannot approve a permission request.".into(),
             _ => self.notice = "Use /backlog [all], /backlog add <prompt>, /backlog edit <id> [prompt], or /backlog run <id>.".into(),
         }
     }
@@ -2200,7 +2242,7 @@ impl App {
                             if account.busy { " · busy" } else { "" },
                             if account.enabled { "" } else { " · disabled" },
                             if account.authentication_required {
-                                " · reconnect required"
+                                " · sign in again"
                             } else {
                                 ""
                             }
@@ -2337,7 +2379,7 @@ impl App {
             || matches!(&event, Event::Paste(_))
         {
             self.notice.clear();
-            self.track_notice();
+            self.track_notice(Instant::now());
         }
         if self.modal.is_some() {
             return self.modal_event(event, output);
@@ -2436,10 +2478,10 @@ impl App {
             if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                 // Clear a draft before interrupting work; quit only
                 // after the composer is empty and no work can stop.
-                if !self.composer.text().is_empty() {
+                if !self.composer.is_empty() {
                     self.composer.clear_to_history();
                     self.notice =
-                        "Draft cleared (Ctrl-R restores). Press Ctrl-C again to quit.".into();
+                        format!("Draft cleared (Ctrl-R restores). {}", self.next_ctrl_c());
                 } else if self.can_cancel_work() {
                     self.request_cancel(output);
                 } else {
@@ -2450,7 +2492,7 @@ impl App {
             }
             match key.code {
                 KeyCode::Char('?')
-                    if self.composer.text().is_empty()
+                    if self.composer.is_empty()
                         && !key
                             .modifiers
                             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -2481,13 +2523,13 @@ impl App {
                     if key
                         .modifiers
                         .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL)
-                        || self.composer.text().is_empty() =>
+                        || self.composer.is_empty() =>
                 {
                     self.paused.set(false);
                     self.scroll.set(0);
                     return true;
                 }
-                KeyCode::Tab if self.composer.text().starts_with('/') => {
+                KeyCode::Tab if self.composer.first_line().starts_with('/') => {
                     // The menu is open iff matches exist and it is not
                     // dismissed; a dismissed menu leaves Tab a no-op.
                     return true;
@@ -2671,9 +2713,9 @@ impl App {
         if self.inspector_action(&event, output) {
             return true;
         }
-        // Ctrl-C inside a dialog keeps the composer's ordering: cancel a live
-        // run first; idle, it closes the dialog and warns, so a second press
-        // is what quits. Esc still only closes the dialog.
+        // Ctrl-C inside a dialog only closes it and says what a second press
+        // does: clear the draft, stop live work, or quit. Esc still only
+        // closes the dialog.
         if let Event::Key(key) = &event
             && key.kind != KeyEventKind::Release
             && key.code == KeyCode::Char('c')
@@ -2693,12 +2735,11 @@ impl App {
                     self.composer.set_text(&text);
                 }
             }
-            self.notice = if self.composer.text().is_empty() {
-                "Dialog closed. Press Ctrl-C again to quit."
+            self.notice = if self.composer.is_empty() {
+                format!("Dialog closed. {}", self.next_ctrl_c())
             } else {
-                "Dialog closed; draft kept. Ctrl-C again clears it (Ctrl-R restores)."
-            }
-            .into();
+                "Dialog closed; draft kept. Ctrl-C again clears it (Ctrl-R restores).".into()
+            };
             return true;
         }
         if let (Some(Modal::Help { .. }), Event::Key(key)) = (&self.modal, &event)
@@ -2708,7 +2749,7 @@ impl App {
             self.modal = None;
             // `?` opened help from an empty composer, so a second `?` means
             // the character itself was wanted.
-            if std::mem::take(&mut self.help_via_question) && self.composer.text().is_empty() {
+            if std::mem::take(&mut self.help_via_question) && self.composer.is_empty() {
                 self.composer.handle(Event::Paste("?".into()));
             }
             return true;
@@ -2927,7 +2968,10 @@ impl App {
             // is open. Check the latest view before dispatching the selection.
             match self.view.accounts.iter().find(|account| &account.id == id) {
                 Some(account) if account.authentication_required => {
-                    self.notice = "This account needs reconnection before it can run tasks.".into();
+                    self.notice = format!(
+                        "Sign in to this account again before it runs tasks: /quit, then run xcb accounts login {}.",
+                        account.id
+                    );
                     return true;
                 }
                 Some(account) if !account.enabled => {
@@ -2989,7 +3033,7 @@ impl App {
                         self.modal = Some(inspect_inbox(event));
                         self.inbox_inspect = Some(id);
                     } else {
-                        self.notice = "This event is outside the current bounded inbox view. Use xcb inbox --task <task-id> to inspect its history.".into();
+                        self.notice = "This event is no longer in the recent inbox. Run xcb inbox --task <task-id> for its history.".into();
                     }
                 }
                 PickAction::Backlog(id) => {
@@ -3021,7 +3065,7 @@ impl App {
                             task.state,
                             State::NeedsApproval | State::NeedsAction | State::Uncertain
                         ) {
-                            lines.push("Review the gated action or recovery detail above. A reply cannot grant host or provider permission.".into());
+                            lines.push("Review the waiting action or recovery detail above. A reply cannot grant permission.".into());
                         }
                         self.modal = Some(Modal::Inspect {
                             title: format!("{} · {}", task.id, task.status),
@@ -3047,7 +3091,7 @@ impl App {
                                 format!("Grant expires {}", due_label(project.expires_at_ms)),
                                 format!("Required provider: {}", project.required_provider.map_or("automatic".into(), |p| p.to_string())),
                                 String::new(), format!("/project {} {}", if project.enabled { "pause" } else { "resume" }, project.workspace),
-                                "Pause stops automatic dispatch; running work settles. Resume does not renew the grant.".into()],
+                                "Pause stops new automatic work; running work finishes. Resume does not renew the grant.".into()],
                             scroll: 0,
                         });
                     }
@@ -3181,9 +3225,10 @@ pub fn run_with_options(
             }
         }
         app.flush_recovery(false);
+        app.tick(Instant::now());
         needs_draw |= app.take_dirty();
-        // The attention blink and the working spinner/elapsed badge are the
-        // only states that change with time alone.
+        // Besides notice expiry above, the attention blink and the working
+        // spinner/elapsed badge are the only states that change with time.
         let phase = (ticks / 16) % 2;
         if !needs_draw && app.view.state.attention() && !app.view.reduced_motion && phase != blink {
             needs_draw = true;
@@ -3431,7 +3476,7 @@ mod habitat_surface_tests {
         next.programs.clear();
         app.apply(Update::View(Box::new(next)));
         assert!(
-            matches!(&app.modal, Some(Modal::Inspect { lines, .. }) if lines[0].contains("Outside the current bounded view"))
+            matches!(&app.modal, Some(Modal::Inspect { lines, .. }) if lines[0].contains("xcb backlog program-status program_a --json"))
         );
         assert!(rx.try_recv().is_err());
     }
@@ -3528,8 +3573,8 @@ mod habitat_surface_tests {
             "task_b",
             "project_b",
             "prepared",
-            "No settled delivery receipt yet.",
-            "not proof the model followed",
+            "Not in a worker turn yet.",
+            "does not show the model followed it",
         ] {
             assert!(content.contains(expected), "{content}");
         }
@@ -3538,20 +3583,16 @@ mod habitat_surface_tests {
             "inspection cannot acknowledge or authorize work"
         );
         let mut view = app.view.clone();
-        view.inbox[1].status = "settled delivery".into();
-        view.inbox[1].receipt = Some("turn_123: exact batch receipt".into());
+        view.inbox[1].status = "delivered".into();
+        view.inbox[1].receipt = Some("turn_123: batch 4".into());
         app.take_dirty();
         app.apply(Update::View(Box::new(view)));
         assert!(app.take_dirty(), "delivery changes repaint");
         let Some(Modal::Inspect { lines, .. }) = &app.modal else {
             panic!("inbox inspector")
         };
-        assert!(
-            lines
-                .iter()
-                .any(|line| line.contains("turn_123: exact batch receipt"))
-        );
-        assert!(lines.iter().any(|line| line.contains("settled delivery")));
+        assert!(lines.iter().any(|line| line.contains("turn_123: batch 4")));
+        assert!(lines.iter().any(|line| line.contains("delivered")));
     }
 
     #[test]
@@ -3737,5 +3778,38 @@ mod quota_display_tests {
         let healthy = fingerprint_at(&view, 0);
         view.accounts[0].authentication_required = true;
         assert_ne!(healthy, fingerprint_at(&view, 0));
+    }
+}
+
+#[cfg(test)]
+mod keystroke_tests {
+    use super::*;
+    use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn keys_and_frames_on_a_full_draft_never_join_it() {
+        let (tx, _rx) = sync_channel(4);
+        let mut app = App::default();
+        let row = format!("{}\n", "word ".repeat(12).trim_end());
+        app.composer
+            .set_text(&row.repeat((composer::MAX_INPUT - 64) / row.len()));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        composer::JOINS.with(|joins| joins.set(0));
+        for code in [
+            KeyCode::Char('/'),
+            KeyCode::Char('x'),
+            KeyCode::Backspace,
+            KeyCode::Backspace,
+            KeyCode::Left,
+            KeyCode::End,
+            KeyCode::Up,
+        ] {
+            app.handle(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)), &tx);
+            terminal
+                .draw(|frame| render::draw(frame, &mut app, 0))
+                .unwrap();
+        }
+        assert_eq!(composer::JOINS.with(std::cell::Cell::get), 0);
     }
 }

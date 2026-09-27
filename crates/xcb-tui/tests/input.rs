@@ -284,6 +284,89 @@ fn ctrl_c_moves_the_draft_to_ctrl_r_history() {
 }
 
 #[test]
+fn ctrl_c_notices_name_what_the_next_press_does() {
+    use xcb_core::session::State;
+    let ctrl_c = || Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    // A direct session's live turn: the second press stops it; it does not quit.
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    let mut view = view_for("s_one");
+    view.state = State::Working;
+    app.apply(Update::View(Box::new(view)));
+    app.composer.set_text("draft");
+    assert!(app.handle(ctrl_c(), &tx));
+    assert_eq!(
+        app.notice,
+        "Draft cleared (Ctrl-R restores). Press Ctrl-C again to stop the current turn."
+    );
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(matches!(rx.try_recv(), Ok(Intent::Cancel)));
+    app.modal = Some(Modal::Help { scroll: 0 });
+    assert!(app.handle(ctrl_c(), &tx));
+    assert_eq!(
+        app.notice,
+        "Dialog closed. Press Ctrl-C again to stop the current turn."
+    );
+
+    // Managed work: after the draft, one press arms and a second cancels,
+    // so a stray key never cancels a task that outlives the terminal.
+    let (tx, rx) = sync_channel(4);
+    let mut app = managed_fixture(State::Working);
+    app.composer.set_text("draft");
+    assert!(app.handle(ctrl_c(), &tx));
+    assert_eq!(
+        app.notice,
+        "Draft cleared (Ctrl-R restores). Press Ctrl-C twice to cancel running work."
+    );
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(rx.try_recv().is_err());
+    assert!(
+        app.notice
+            .starts_with("Press again to cancel the running task.")
+    );
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Intent::Habitat(HabitatCommand::CancelTask { .. }))
+    ));
+
+    // A turn owned by another terminal cannot be stopped from here.
+    let (tx, _rx) = sync_channel(4);
+    let mut app = App::default();
+    app.view.remote_active = true;
+    app.view.state = State::Working;
+    app.composer.set_text("draft");
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(app.notice.ends_with("Ctrl-D quits."), "{}", app.notice);
+}
+
+#[test]
+fn a_notice_clears_itself_at_its_deadline_without_input() {
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let mut app = App::default();
+    assert!(app.apply(Update::Notice("Copied the last assistant response.".into())));
+    app.tick(start);
+    app.take_dirty();
+    app.tick(start + xcb_tui::NOTICE_TTL - Duration::from_millis(1));
+    assert_eq!(app.notice, "Copied the last assistant response.");
+    assert!(!app.take_dirty(), "waiting alone does not repaint");
+    app.tick(start + xcb_tui::NOTICE_TTL);
+    assert!(app.notice.is_empty());
+    assert!(app.take_dirty(), "clearing the notice repaints");
+
+    // A newer notice gets its own full time.
+    app.notice = "Second notice".into();
+    let later = start + xcb_tui::NOTICE_TTL * 2;
+    app.tick(later);
+    app.tick(later + xcb_tui::NOTICE_TTL / 2);
+    assert_eq!(app.notice, "Second notice");
+    app.tick(later + xcb_tui::NOTICE_TTL);
+    assert!(app.notice.is_empty());
+}
+
+#[test]
 fn mouse_capture_is_off_until_slash_mouse_toggles_it() {
     let (tx, _rx) = sync_channel(4);
     let mut app = App::default();
@@ -1432,11 +1515,13 @@ fn managed_cancellation_reports_an_exact_task_request_not_settlement() {
     let (tx, rx) = sync_channel(1);
     let mut app = managed_fixture(xcb_core::session::State::Working);
     picker_key(&mut app, &tx, KeyCode::Esc);
+    assert!(rx.try_recv().is_err(), "one Esc only arms cancellation");
+    picker_key(&mut app, &tx, KeyCode::Esc);
     assert!(
         matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::CancelTask { id, expected_revision: 7 })) if id.as_str() == "task_one")
     );
     assert!(app.notice.contains("Cancellation requested"));
-    assert!(app.notice.contains("held"));
+    assert!(app.notice.contains("pending until the worker stops"));
 }
 
 #[test]
@@ -1461,6 +1546,7 @@ fn managed_task_waiting_for_input_can_be_cancelled_without_losing_the_draft() {
     let (tx, rx) = sync_channel(2);
     let mut app = managed_fixture(xcb_core::session::State::NeedsAnswer);
     app.composer.set_text("keep this draft");
+    picker_key(&mut app, &tx, KeyCode::Esc);
     picker_key(&mut app, &tx, KeyCode::Esc);
     assert!(
         matches!(rx.try_recv(), Ok(Intent::Habitat(HabitatCommand::CancelTask { id, expected_revision: 7 })) if id.as_str() == "task_one")
@@ -1840,6 +1926,7 @@ fn ambiguous_managed_cancel_requires_selecting_an_exact_task() {
     second.revision = 11;
     app.view.backlog.push(second);
     picker_key(&mut app, &tx, KeyCode::Esc);
+    picker_key(&mut app, &tx, KeyCode::Esc);
     assert!(matches!(app.modal, Some(Modal::Picker { .. })));
     assert!(rx.try_recv().is_err());
     picker_key(&mut app, &tx, KeyCode::Down);
@@ -1955,6 +2042,7 @@ fn disappearing_selected_task_never_redirects_cancellation_to_another_task() {
     picker_key(&mut app, &tx, KeyCode::Enter);
     app.view.backlog.retain(|row| row.id.as_str() == "task_two");
     picker_key(&mut app, &tx, KeyCode::Esc);
+    picker_key(&mut app, &tx, KeyCode::Esc);
     assert!(
         rx.try_recv().is_err(),
         "an explicit stale target must not fall back to the remaining task"
@@ -1963,7 +2051,7 @@ fn disappearing_selected_task_never_redirects_cancellation_to_another_task() {
         app.composer_target_label()
             .is_some_and(|label| label.contains("task_one"))
     );
-    assert!(app.notice.contains("outside") || app.notice.contains("changed"));
+    assert!(app.notice.contains("no longer listed"), "{}", app.notice);
 }
 
 #[test]
@@ -2428,7 +2516,7 @@ fn ask_keeps_draft_and_resubmits_after_pick() {
     match &app.modal {
         Some(Modal::Picker { title, items, .. }) => {
             assert_eq!(title, "Which project?");
-            assert_eq!(items[0].label, "new — add · /three");
+            assert_eq!(items[0].label, "new · add /three");
         }
         _ => panic!("project picker"),
     }

@@ -648,28 +648,32 @@ fn open_line(c: &mut Composer, v: &mut Vim, below: bool) -> ComposerAction {
 /// Normal mode's caret sits on a grapheme like a block cursor, never in the
 /// virtual slot after a line's last character or on the newline itself.
 fn snap_block(c: &mut Composer) {
-    let text = c.text();
-    let at = c.cursor_offset();
-    if at == line_end(&text, at) && at > line_start(&text, at) {
-        c.move_to(previous_grapheme_offset(&text, at));
+    let (row, byte) = c.pos();
+    if byte > 0 && byte == c.line(row).len() {
+        c.jump(c.previous_grapheme_pos((row, byte)));
     }
 }
 
-pub(super) fn key(c: &mut Composer, key: KeyEvent, before: &str, at: usize) -> ComposerAction {
+/// One key at the snapped cursor position `at`.
+pub(super) fn key(c: &mut Composer, key: KeyEvent, at: super::Pos) -> ComposerAction {
     let mut v = c.vim.expect("vim routing checked by caller");
     if v.mode == Mode::Insert {
         if key.code == KeyCode::Esc && key.modifiers.is_empty() {
             v.mode = Mode::Normal;
             c.vim = Some(v);
             // Esc lands the caret on the last typed character, like Vim.
-            if at > line_start(before, at) {
-                c.move_to(previous_grapheme_offset(before, at));
+            if at.1 > 0 {
+                c.jump(c.previous_grapheme_pos(at));
             }
             return ComposerAction::None;
         }
-        return c.emacs_key(key, before, at);
+        return c.emacs_key(key, at);
     }
-    let action = normal(c, &mut v, key, before, at);
+    // Normal-mode commands read the joined draft once per command; typing
+    // in Insert mode never does.
+    let before = c.text();
+    let at = c.cursor_offset();
+    let action = normal(c, &mut v, key, &before, at);
     c.vim = Some(v);
     if v.mode == Mode::Normal {
         snap_block(c);
@@ -807,7 +811,7 @@ fn normal(c: &mut Composer, v: &mut Vim, key: KeyEvent, before: &str, at: usize)
         KeyCode::Enter if plain => {
             // Sends land back in a clean Insert state.
             v.sent();
-            c.submit(before)
+            c.submit()
         }
         // Composer-level services that stay live in normal mode.
         KeyCode::Char('v') if ctrl => ComposerAction::Clipboard,
@@ -985,7 +989,7 @@ fn normal(c: &mut Composer, v: &mut Vim, key: KeyEvent, before: &str, at: usize)
         KeyCode::Char('/') if plain => {
             v.clear_command();
             v.mode = Mode::Insert;
-            c.emacs_key(key, before, at)
+            c.emacs_key(key, c.pos())
         }
         _ => {
             v.clear_command();
