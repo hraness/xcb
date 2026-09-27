@@ -454,7 +454,8 @@ jobs:
       contents: none
       id-token: write
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # npm publish (2 minutes) plus the 15-minute visibility window.
+    timeout-minutes: 25
     outputs:
       npm_completion: ${{ steps.npm_publish.outputs.npm_completion }}
       npm_completion_run_attempt: ${{ steps.npm_publish.outputs.npm_completion_run_attempt }}
