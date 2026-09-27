@@ -100,6 +100,10 @@ mod resolve_tests;
 #[path = "managed_ui_tests.rs"]
 mod ui_tests;
 
+#[cfg(test)]
+#[path = "managed_supervisor_tests.rs"]
+mod supervisor_tests;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
@@ -716,6 +720,52 @@ fn managed_migration_guard_until(
 impl ManagedStore {
     pub fn open(root: &Path) -> Result<Self> {
         Self::open_with(root, true)
+    }
+
+    /// A reader for `Store::open_read_only`: never creates, migrates or
+    /// cleans the database, never waits on the supervisor lock, and refuses
+    /// any schema but the current one (an older layout could hide active
+    /// sessions from a decoder that expects the current one). `Ok(None)`:
+    /// the file exists but holds no managed schema yet, so no managed task
+    /// can reference a session.
+    pub(crate) fn open_read_only(root: &Path) -> Result<Option<Self>> {
+        let root = private::check_directory(&root.join("managed"))?;
+        let path = root.join("managed.sqlite");
+        let database = private::open_file(&path, MAX_DB_OPEN_BYTES)?;
+        for suffix in ["sqlite-wal", "sqlite-shm", "sqlite-journal"] {
+            private::open_file_maybe_vanished(&path.with_extension(suffix), MAX_DB_OPEN_BYTES)?;
+        }
+        let connection = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        private::same_file(&path, &database)?;
+        connection.busy_timeout(Duration::from_secs(2))?;
+        connection.pragma_update(None, "query_only", true)?;
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        match version {
+            0 => return Ok(None),
+            version if version > workspace::SCHEMA_VERSION => {
+                return Err(Error::Unavailable(
+                    "managed state was written by a newer xcb",
+                ));
+            }
+            version if version < workspace::SCHEMA_VERSION => {
+                return Err(Error::Unavailable(
+                    "managed state is from an older xcb; open xcb once to upgrade it, then retry",
+                ));
+            }
+            _ => (),
+        }
+        Ok(Some(Self {
+            root,
+            connection: Mutex::new(connection),
+            unreadable: Mutex::new(BTreeSet::new()),
+            read_only: true,
+            active_scans: std::sync::atomic::AtomicU64::new(0),
+            mailbox_migrations: std::sync::atomic::AtomicU64::new(0),
+            workspace_checks: Mutex::new(BTreeMap::new()),
+        }))
     }
 
     /// Every schema step in order; returns how many mailbox tables it had
@@ -4751,8 +4801,27 @@ struct PendingUncertain {
 
 const SUPERVISOR_FAULT_FILE: &str = "supervisor.fault.json";
 const MAX_FAULT_BYTES: usize = 4096;
+/// An unchanged fault is rewritten at most this often, so a row that fails
+/// on every 250 ms tick costs one small write a minute, not four a second.
+const FAULT_REPEAT_MS: u64 = 60_000;
+/// Prefix of a fault written by a supervisor that exited before it could
+/// hold its lock; `ensure_daemon` reports it to the client that spawned it.
+const STARTUP_FAULT_PREFIX: &str = "startup failed: ";
 const MAX_TICK_FAULTS: u32 = 40;
 const MAX_RECORD_FAILURES: u32 = 6;
+/// How long shutdown waits for cancelled workers to settle. Past it the
+/// supervisor exits anyway: task and run records are durable, the accounts
+/// of unsettled workers stay held, and the next start reconciles them.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+/// How long a client waits for a supervisor it spawned to register or exit.
+/// Most starts register in well under a second; a slower start (an upgrade
+/// backup or daily cleanup) keeps running and is checked by the next probe.
+const DAEMON_CONFIRM: Duration = Duration::from_millis(1500);
+const DAEMON_CONFIRM_POLL: Duration = Duration::from_millis(20);
+/// Remote-command lane shutdown bound: an in-flight pass gets this long to
+/// finish before it is dropped (the relay closes an interrupted command as
+/// ambiguous on the next boot, never as applied).
+const RELAY_SHUTDOWN: Duration = Duration::from_secs(5);
 /// Detail prefix for a queued task no connected account can serve; the UI
 /// shows it as needing action instead of an endless spinner.
 const NO_ACCOUNT_DETAIL: &str = "no eligible account: add or reconnect one (xcb accounts add <provider>, xcb doctor --provider <provider>, xcb accounts login <account>)";
@@ -4768,24 +4837,90 @@ struct SupervisorFault {
 /// Records the last supervisor fault in the managed state directory so a
 /// client can show why the detached process stopped or what it skipped.
 /// Only bounded, host-selected text is written: no paths, secrets or stderr.
+/// The same fault repeated within `FAULT_REPEAT_MS` is not rewritten.
 pub(crate) fn record_supervisor_fault(root: &Path, message: &str) {
+    write_supervisor_fault(root, message, true);
+}
+
+fn write_supervisor_fault(root: &Path, message: &str, coalesce: bool) {
+    let now = now_ms();
+    let message = xcb_core::display_text(message, 512);
+    let path = root.join(SUPERVISOR_FAULT_FILE);
+    let previous = private::read(&path, MAX_FAULT_BYTES).ok();
+    // Skipped: the file already holds this fault from moments ago, or this
+    // process wrote it moments ago while other faults interleaved (two rows
+    // failing every tick would otherwise rewrite the file 8 times a second).
+    // A cleared file is always written again.
+    if coalesce {
+        let recent = recently_recorded(root, &message, now);
+        if let Some(bytes) = previous.as_deref()
+            && (recent
+                || serde_json::from_slice::<SupervisorFault>(bytes).is_ok_and(|fault| {
+                    fault.message == message
+                        && fault.at_ms <= now
+                        && now - fault.at_ms < FAULT_REPEAT_MS
+                }))
+        {
+            return;
+        }
+    }
     let fault = SupervisorFault {
         version: 1,
-        at_ms: now_ms(),
-        message: xcb_core::display_text(message, 512),
+        at_ms: now,
+        message,
     };
     let Ok(bytes) = serde_json::to_vec(&fault) else {
         return;
     };
-    let path = root.join(SUPERVISOR_FAULT_FILE);
-    let _ = match private::read(&path, MAX_FAULT_BYTES) {
-        Ok(previous) => private::replace(&path, &bytes, &digest(previous)),
-        Err(_) => private::create(&path, &bytes),
+    let _ = match previous {
+        Some(previous) => private::replace(&path, &bytes, &digest(previous)),
+        None => private::create(&path, &bytes),
     };
+}
+
+/// Whether this process recorded `message` under `root` within
+/// `FAULT_REPEAT_MS`; otherwise notes it now. Bounded to a few recent
+/// faults per process.
+fn recently_recorded(root: &Path, message: &str, now: u64) -> bool {
+    const MAX_RECENT: usize = 64;
+    static RECENT: Mutex<BTreeMap<(PathBuf, String), u64>> = Mutex::new(BTreeMap::new());
+    let Ok(mut recent) = RECENT.lock() else {
+        return false;
+    };
+    let key = (root.to_path_buf(), message.to_owned());
+    if let Some(at) = recent.get(&key)
+        && *at <= now
+        && now - *at < FAULT_REPEAT_MS
+    {
+        return true;
+    }
+    if recent.len() >= MAX_RECENT {
+        recent.retain(|_, at| *at <= now && now - *at < FAULT_REPEAT_MS);
+        if recent.len() >= MAX_RECENT {
+            recent.clear();
+        }
+    }
+    recent.insert(key, now);
+    false
 }
 
 fn clear_supervisor_fault(root: &Path) {
     let _ = fs::remove_file(root.join(SUPERVISOR_FAULT_FILE));
+}
+
+/// A supervisor that fails before it holds its lock exits with stderr going
+/// nowhere, so the reason is written where clients look for faults. Each
+/// attempt writes a fresh record (never coalesced), because the client that
+/// spawned it only trusts a record written after the spawn. Nothing is
+/// written when the managed directory itself is unusable.
+fn record_startup_fault(state_root: &Path, error: &Error) {
+    if let Ok(managed) = private::check_directory(&state_root.join("managed")) {
+        write_supervisor_fault(
+            &managed,
+            &format!("{STARTUP_FAULT_PREFIX}{}", fault_text(error)),
+            false,
+        );
+    }
 }
 
 /// Ephemeral worker heartbeats live outside the managed database: a progress
@@ -4856,10 +4991,16 @@ fn read_progress(root: &Path) -> BTreeMap<Id, ProgressBeat> {
 
 /// The last recorded supervisor fault under a managed state directory.
 pub fn supervisor_fault(root: &Path) -> Option<String> {
+    supervisor_fault_record(root).map(|(_, message)| message)
+}
+
+/// The last recorded supervisor fault with the wall-clock time it was
+/// written.
+pub(crate) fn supervisor_fault_record(root: &Path) -> Option<(u64, String)> {
     let bytes = private::read(&root.join(SUPERVISOR_FAULT_FILE), MAX_FAULT_BYTES).ok()?;
     let fault: SupervisorFault = serde_json::from_slice(&bytes).ok()?;
     (fault.version == 1 && !fault.message.is_empty())
-        .then(|| xcb_core::display_text(&fault.message, 512))
+        .then(|| (fault.at_ms, xcb_core::display_text(&fault.message, 512)))
 }
 
 pub(crate) fn fault_text(error: &Error) -> String {
@@ -4977,6 +5118,16 @@ impl Supervisor {
             .entry(id.clone())
             .or_insert_with(|| LaunchAttempt::new(revision))
             .miss(revision);
+    }
+
+    fn upkeep_fault(&self, what: &str, error: &Error) {
+        record_supervisor_fault(
+            self.managed.root(),
+            &format!(
+                "{what} upkeep skipped this pass: {}; other work continues",
+                fault_text(error)
+            ),
+        );
     }
 
     /// A per-task supervisor failure: keep the task queued with a bounded
@@ -5141,11 +5292,24 @@ impl Supervisor {
                 &format!("{unreadable} task rows could not be decoded and were skipped"),
             );
         }
-        self.managed.tick_programs(&self.store, !draining).await?;
-        self.managed.tick_daemons(&self.store, !draining).await?;
+        // Program, daemon, project and schedule upkeep fault per item inside
+        // each pass. A pass that still fails as a whole is recorded here and
+        // never skips dispatch or counts toward the supervisor's own fault
+        // limit: one damaged row must not stop every other task, or restart
+        // the supervisor into the same failure.
+        if let Err(error) = self.managed.tick_programs(&self.store, !draining).await {
+            self.upkeep_fault("program", &error);
+        }
+        if let Err(error) = self.managed.tick_daemons(&self.store, !draining).await {
+            self.upkeep_fault("daemon", &error);
+        }
         if !draining {
-            self.managed.tick_projects(now_ms()).await?;
-            self.managed.tick_schedules(now_ms()).await?;
+            if let Err(error) = self.managed.tick_projects(now_ms()).await {
+                self.upkeep_fault("project", &error);
+            }
+            if let Err(error) = self.managed.tick_schedules(now_ms()).await {
+                self.upkeep_fault("schedule", &error);
+            }
         }
         if let Err(error) = self.managed.tick_workspace_identity(now_ms()) {
             record_supervisor_fault(
@@ -5600,18 +5764,41 @@ impl Supervisor {
         Ok(Dispatch::Started)
     }
 
-    /// Cancel every worker and record each settlement before exit.
+    /// Cancel every worker and record each settlement before exit, waiting
+    /// at most `SHUTDOWN_GRACE` for the workers to finish.
     async fn shutdown(&mut self) {
+        self.shutdown_within(SHUTDOWN_GRACE).await;
+    }
+
+    /// A worker wedged past `grace` (a hung filesystem call, a planner that
+    /// never returns) no longer keeps the supervisor, and its lock, alive.
+    /// Nothing is released for it: its task and run records stay as they
+    /// are, its account stays held, and the next supervisor start reconciles
+    /// the task from that durable evidence.
+    async fn shutdown_within(&mut self, grace: Duration) {
         for cancel in self.active.values() {
             let _ = cancel.send(true);
         }
-        while let Some(joined) = self.joins.join_next().await {
-            match joined {
-                Ok(completion) => self.record(completion, 0).await,
-                Err(_) => record_supervisor_fault(
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            match tokio::time::timeout_at(deadline, self.joins.join_next()).await {
+                Ok(Some(Ok(completion))) => self.record(completion, 0).await,
+                Ok(Some(Err(_))) => record_supervisor_fault(
                     self.managed.root(),
                     "a managed worker task ended without a completion record",
                 ),
+                Ok(None) => break,
+                Err(_) => {
+                    record_supervisor_fault(
+                        self.managed.root(),
+                        &format!(
+                            "{} worker(s) did not stop within {} s of shutdown; the supervisor exited without them, their accounts stay held, and their tasks are checked again at the next start",
+                            self.joins.len(),
+                            grace.as_secs()
+                        ),
+                    );
+                    break;
+                }
             }
         }
         let pending = std::mem::take(&mut self.unrecorded);
@@ -5627,27 +5814,68 @@ impl Supervisor {
     }
 }
 
-pub async fn daemon(root: PathBuf) -> Result<i32> {
-    let managed = Arc::new(ManagedStore::open(&root)?);
-    let lock_path = managed.root().join("supervisor.lock");
+/// Everything a supervisor needs before it may dispatch.
+struct Startup {
+    managed: Arc<ManagedStore>,
+    store: Arc<Store>,
+    lock: private::ExclusiveLock,
+    identity: crate::managed_supervisor::SupervisorIdentity,
+}
+
+/// Open both stores and verify this process's image, then take the
+/// supervisor lock and publish the identity. Every step that can fail runs
+/// before the lock, so a start that fails never looks registered to the
+/// client waiting for it. `Ok(None)`: another supervisor holds the lock.
+fn start_supervisor(root: &Path) -> Result<Option<Startup>> {
+    // The upgrade guard shares the lock file, so the managed store migrates
+    // before this process competes for dispatch ownership.
+    let managed = Arc::new(ManagedStore::open(root)?);
+    let store = Arc::new(Store::open(root)?);
+    let prepared = crate::managed_supervisor::SupervisorIdentity::prepare()?;
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(&lock_path)?;
+        .open(managed.root().join("supervisor.lock"))?;
     private::check_file(&lock, 4096)?;
     match lock.try_lock() {
         Ok(()) => (),
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(0),
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
     }
-    let _lock = private::ExclusiveLock::held(lock);
-    let mut identity = crate::managed_supervisor::SupervisorIdentity::register(&root)?;
-    let store = Arc::new(Store::open(&root)?);
-    // Lock, identity and store failures above are the only fatal startup
-    // errors. Everything after this point is recorded and isolated.
+    let lock = private::ExclusiveLock::held(lock);
+    let identity = prepared.publish(root)?;
+    Ok(Some(Startup {
+        managed,
+        store,
+        lock,
+        identity,
+    }))
+}
+
+pub async fn daemon(root: PathBuf) -> Result<i32> {
+    // A detached supervisor's stderr goes nowhere: every startup failure is
+    // written where the client that spawned it looks.
+    let started = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(Error::from)
+        .and_then(|interrupt| Ok(start_supervisor(&root)?.map(|startup| (interrupt, startup))));
+    let (mut interrupt, startup) = match started {
+        Ok(Some(started)) => started,
+        Ok(None) => return Ok(0),
+        Err(error) => {
+            record_startup_fault(&root, &error);
+            return Err(error);
+        }
+    };
+    let Startup {
+        managed,
+        store,
+        lock: _lock,
+        mut identity,
+    } = startup;
+    // Everything after this point is recorded and isolated.
     clear_supervisor_fault(managed.root());
     // Stale heartbeats from a previous supervisor are meaningless; the merge
     // filter would ignore them anyway, but do not leave them on disk.
@@ -5667,7 +5895,11 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
             let _ = crate::offers::refresh_if_due(&root, now_ms());
         })
     };
+    // Provider refresh faults belong beside every other supervisor fault in
+    // the managed directory, where clients read them.
+    let fault_root = managed.root().to_path_buf();
     let spawn_pins = |root: PathBuf| {
+        let fault_root = fault_root.clone();
         tokio::spawn(async move {
             let home = root.join("metadata-home");
             let catalog_root = root.clone();
@@ -5676,7 +5908,7 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
             for provider in xcb_core::Provider::ALL {
                 let report = crate::process::refresh_provider(&root, provider, None, &home).await;
                 if let Some(detail) = report.detail {
-                    record_supervisor_fault(&root, &format!("{provider} refresh: {detail}"));
+                    record_supervisor_fault(&fault_root, &format!("{provider} refresh: {detail}"));
                 }
             }
         })
@@ -5687,17 +5919,21 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
     let mut offer_check = Instant::now();
     let mut pin_check = Instant::now();
     let mut tick_faults = 0u32;
+    let mut heartbeat_noted = false;
     let mut interval = tokio::time::interval(Duration::from_millis(250));
-    let mut relay = crate::managed_relay::RelayHost::new(&root);
-    let mut relay_poll = tokio::time::interval(relay.poll_interval());
-    relay_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    loop {
+    // Remote commands run in their own task: a relay call that waits on the
+    // network (up to 30 s each) never holds up dispatch or the heartbeat.
+    let relay = crate::managed_relay::RelayTask::spawn(&root, managed.clone());
+    let outcome = loop {
         tokio::select! {
-            _ = relay_poll.tick() => {
-                relay.tick(&managed).await;
-            }
             _ = interval.tick() => {
+                if !identity.heartbeat() && !heartbeat_noted {
+                    heartbeat_noted = true;
+                    record_supervisor_fault(
+                        managed.root(),
+                        "the supervisor heartbeat could not be refreshed; clients may report this supervisor as not responding",
+                    );
+                }
                 if offer_check.elapsed() >= Duration::from_secs(60 * 60)
                     && offer_refresh.as_ref().is_none_or(tokio::task::JoinHandle::is_finished)
                 {
@@ -5727,12 +5963,12 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                         );
                         if tick_faults >= MAX_TICK_FAULTS {
                             supervisor.shutdown().await;
-                            return Err(error);
+                            break Err(error);
                         }
                     }
                 }
                 let nonterminal = managed.has_habitat_work().unwrap_or(true);
-                if supervisor.active.is_empty() && draining { break; }
+                if supervisor.active.is_empty() && draining { break Ok(0); }
                 // A live relay lane means this machine serves remote
                 // commands — idle-exit would strand the fleet.
                 if supervisor.active.is_empty() && !nonterminal && !relay.live() {
@@ -5744,7 +5980,7 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                             let _ = handle.await;
                         }
                         match managed.has_habitat_work() {
-                            Ok(false) => break,
+                            Ok(false) => break Ok(0),
                             _ => idle_since = Instant::now(),
                         }
                     }
@@ -5752,18 +5988,29 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
             }
             _ = interrupt.recv() => {
                 supervisor.shutdown().await;
-                break;
+                break Ok(0);
             }
         }
-    }
-    relay.shutdown().await;
+    };
+    relay.shutdown(RELAY_SHUTDOWN).await;
     if let Some(handle) = offer_refresh.take() {
-        let _ = handle.await;
+        // Bounded: a refresh stuck on the network must not hold the lock.
+        let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
     }
-    Ok(0)
+    outcome
 }
 
+/// Probe for a running supervisor and start one when none holds the lock.
+///
+/// A spawned supervisor is watched for up to `DAEMON_CONFIRM`: it either
+/// registers its identity (running), exits cleanly (another supervisor won
+/// the lock), or exits with a failure, which is returned with the reason it
+/// recorded instead of reporting a start that never happened.
 pub fn ensure_daemon(root: &Path, executable: &Path) -> Result<()> {
+    ensure_daemon_within(root, executable, DAEMON_CONFIRM)
+}
+
+fn ensure_daemon_within(root: &Path, executable: &Path, confirm: Duration) -> Result<()> {
     if !executable.is_absolute() || !root.is_absolute() {
         return Err(Error::PrivateState);
     }
@@ -5793,8 +6040,74 @@ pub fn ensure_daemon(root: &Path, executable: &Path) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .process_group(0);
-    command.spawn().map_err(Error::LaunchNotStarted)?;
-    Ok(())
+    let spawned_ms = now_ms();
+    let mut child = command.spawn().map_err(Error::LaunchNotStarted)?;
+    let confirmed = confirm_daemon(&directory, &mut child, spawned_ms, confirm);
+    if matches!(child.try_wait(), Ok(None)) {
+        // Collect the detached supervisor's exit status when it ends, so it
+        // never lingers as a zombie of this client.
+        let _ = std::thread::Builder::new()
+            .name("xcb-supervisor-wait".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+    }
+    confirmed
+}
+
+/// Watch a just-spawned supervisor until it registers, exits, or `window`
+/// passes. Only a failed exit is an error; a supervisor still starting when
+/// the window closes is left running and checked by the next probe.
+fn confirm_daemon(
+    managed_root: &Path,
+    child: &mut std::process::Child,
+    spawned_ms: u64,
+    window: Duration,
+) -> Result<()> {
+    let state_root = managed_root.parent().ok_or(Error::PrivateState)?;
+    let deadline = Instant::now() + window;
+    loop {
+        match child.try_wait() {
+            // A clean exit means another supervisor holds the lock.
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(startup_failure(managed_root, spawned_ms, status)),
+            Ok(None) if crate::managed_supervisor::registered(state_root, child.id()) => {
+                return Ok(());
+            }
+            // Its status cannot be read; no failure was observed.
+            Err(_) => return Ok(()),
+            Ok(None) => (),
+        }
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(DAEMON_CONFIRM_POLL);
+    }
+}
+
+/// The error for a supervisor that exited during startup: the reason it
+/// recorded after this client spawned it, or its exit status.
+fn startup_failure(
+    managed_root: &Path,
+    spawned_ms: u64,
+    status: std::process::ExitStatus,
+) -> Error {
+    let recorded = supervisor_fault_record(managed_root)
+        .filter(|(at_ms, _)| *at_ms >= spawned_ms)
+        .and_then(|(_, message)| {
+            message
+                .strip_prefix(STARTUP_FAULT_PREFIX)
+                .map(str::to_owned)
+        });
+    let reason = match (recorded, status.code()) {
+        (Some(reason), _) => reason,
+        (None, Some(code)) => format!("it exited with status {code} before recording a reason"),
+        (None, None) => "it was stopped by a signal before recording a reason".into(),
+    };
+    Error::Guided {
+        message: format!("the background supervisor stopped while starting: {reason}"),
+        next: None,
+    }
 }
 
 fn managed_view(
@@ -6051,14 +6364,24 @@ pub async fn serve_ui(
             ))
             .ok();
     }
-    ensure_daemon(store.root(), &executable)?;
+    // A supervisor that cannot start does not keep the chat from opening:
+    // saved work stays visible, and the notice says why nothing runs yet.
+    let mut last_ensure_error = ensure_daemon(store.root(), &executable)
+        .err()
+        .map(|error| error.to_string());
+    if let Some(error) = &last_ensure_error {
+        output
+            .try_send(Update::Notice(format!(
+                "The background supervisor could not start: {error}"
+            )))
+            .ok();
+    }
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     let mut quit = false;
     let mut last_stamp: Option<ViewStamp> = None;
     let mut session_liveness = SessionLiveness::default();
     let mut stamp_fault_noted = false;
     let mut last_ensure = Instant::now();
-    let mut last_ensure_error: Option<String> = None;
     let mut dispatch_pending = false;
     // Preserve durable acknowledgements and draft recovery under UI backpressure.
     let mut pending_updates = std::collections::VecDeque::new();

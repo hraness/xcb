@@ -9,21 +9,23 @@
 //! the retry cadence unless custody itself is gone. A revoked device is
 //! auth-fatal — the host disables rather than retrying forever.
 
-use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use tokio::sync::watch;
 use xcb_core::Id;
 
 use crate::cloud::commands::{self, CommandBody};
 use crate::cloud::lane::{self, CommandOutcome, OpenedCommand, RelayLane};
 use crate::managed::{
     Intake, IntakeCues, ManagedStore, Origin, fault_text, record_supervisor_fault,
+    supervisor_fault_record,
 };
-use crate::{Error, Result, digest};
+use crate::{Error, Result, digest, now_ms};
 
 /// Remote commands land at most this long after a controller posts them.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -45,6 +47,108 @@ const PROJECTION_TASK_ROWS: usize = 64;
 const PROJECTION_FIELD_CHARS: usize = 200;
 /// The projection scope controllers read for fleet state.
 const FLEET_SCOPE: &str = "fleet";
+/// A fault from local work stays the visible supervisor fault for this long
+/// before relay retry noise may replace it.
+const LOCAL_FAULT_PRIORITY_MS: u64 = 60 * 60 * 1000;
+
+/// Relay faults are advisory — the lane is optional infrastructure that
+/// retries on its own — so a recent fault from local work is never replaced
+/// by one. Repeats of the same relay fault are coalesced by the recorder.
+fn relay_fault(root: &Path, message: &str) {
+    if let Some((at_ms, current)) = supervisor_fault_record(root)
+        && !is_relay_fault(&current)
+        && now_ms().saturating_sub(at_ms) < LOCAL_FAULT_PRIORITY_MS
+    {
+        return;
+    }
+    record_supervisor_fault(root, message);
+}
+
+fn is_relay_fault(message: &str) -> bool {
+    message.starts_with("relay ") || message.starts_with("fleet projection ")
+}
+
+/// The relay lane on its own thread and runtime beside the supervisor loop.
+/// Relay calls wait on the network (each bounded at 30 s), so running them
+/// inline would stall dispatch, worker settlement and the supervisor
+/// heartbeat whenever the relay is slow.
+pub(crate) struct RelayTask {
+    live: Arc<AtomicBool>,
+    stop: watch::Sender<bool>,
+    done: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+impl RelayTask {
+    pub(crate) fn spawn(root: &Path, managed: Arc<ManagedStore>) -> Self {
+        let live = Arc::new(AtomicBool::new(false));
+        let (stop, stopped) = watch::channel(false);
+        let (finished, done) = tokio::sync::oneshot::channel();
+        let root = root.to_path_buf();
+        let lane_live = live.clone();
+        let spawned = std::thread::Builder::new()
+            .name("xcb-relay".into())
+            .spawn(move || {
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => {
+                        runtime.block_on(relay_loop(&root, &managed, &lane_live, stopped));
+                    }
+                    Err(_) => relay_fault(
+                        managed.root(),
+                        "relay lane could not start its runtime; remote commands are unavailable until the supervisor restarts",
+                    ),
+                }
+                let _ = finished.send(());
+            });
+        Self {
+            live,
+            stop,
+            done: spawned.ok().map(|_| done),
+        }
+    }
+
+    /// True while a lane is live — a linked machine stays resident to serve
+    /// remote commands rather than idle-exiting.
+    pub(crate) fn live(&self) -> bool {
+        self.live.load(Ordering::Relaxed)
+    }
+
+    /// Stop polling and drop the presence row. An in-flight pass gets
+    /// `within` to finish; past that the supervisor exits without it, and
+    /// the relay closes an interrupted command as ambiguous on the next
+    /// boot, never as applied.
+    pub(crate) async fn shutdown(self, within: Duration) {
+        let _ = self.stop.send(true);
+        if let Some(done) = self.done {
+            let _ = tokio::time::timeout(within, done).await;
+        }
+    }
+}
+
+async fn relay_loop(
+    root: &Path,
+    managed: &Arc<ManagedStore>,
+    live: &AtomicBool,
+    mut stopped: watch::Receiver<bool>,
+) {
+    let mut host = RelayHost::new(root);
+    let mut poll = tokio::time::interval(host.poll_interval());
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = stopped.changed() => break,
+            _ = poll.tick() => {
+                host.tick(managed).await;
+                live.store(host.live(), Ordering::Relaxed);
+            }
+        }
+    }
+    host.shutdown().await;
+    live.store(false, Ordering::Relaxed);
+}
 
 /// The relay-lane host owned by the supervisor loop. Holds the lane plus
 /// retry/projection scheduling state; `tick` is the only entry point.
@@ -119,7 +223,7 @@ impl RelayHost {
                             self.disabled = true;
                         }
                         self.boot_delay = (self.boot_delay * 2).min(BOOT_RETRY_MAX);
-                        record_supervisor_fault(
+                        relay_fault(
                             managed.root(),
                             &format!("relay lane boot failed: {}", fault_text(&error)),
                         );
@@ -128,7 +232,7 @@ impl RelayHost {
                 Ok(None) => {}
                 Err(error) => {
                     self.boot_delay = (self.boot_delay * 2).min(BOOT_RETRY_MAX);
-                    record_supervisor_fault(
+                    relay_fault(
                         managed.root(),
                         &format!("relay lane custody failed: {}", fault_text(&error)),
                     );
@@ -141,14 +245,14 @@ impl RelayHost {
             Some(lane) => lane,
             None => return,
         };
-        let refresh = Cell::new(false);
+        let refresh = AtomicBool::new(false);
         let mut handler =
             async |opened: &OpenedCommand| execute_command(managed, opened, &refresh).await;
         if let Err(error) = lane.pump(&mut handler).await {
             if fatal(&error) {
                 self.disabled = true;
             }
-            record_supervisor_fault(
+            relay_fault(
                 managed.root(),
                 &format!("relay lane pump failed: {}", fault_text(&error)),
             );
@@ -160,7 +264,7 @@ impl RelayHost {
         // A full pump without an error proves the lane healthy — reset
         // the reboot delay.
         self.boot_delay = BOOT_RETRY;
-        if refresh.get() {
+        if refresh.load(Ordering::Relaxed) {
             self.projection_due = true;
         }
 
@@ -207,7 +311,7 @@ impl RelayHost {
                         if fatal(&error) {
                             self.disabled = true;
                         }
-                        record_supervisor_fault(
+                        relay_fault(
                             managed.root(),
                             &format!("relay projection failed: {}", fault_text(&error)),
                         );
@@ -216,7 +320,7 @@ impl RelayHost {
                 }
             }
             Err(error) => {
-                record_supervisor_fault(
+                relay_fault(
                     managed.root(),
                     &format!("fleet projection build failed: {}", fault_text(&error)),
                 );
@@ -234,12 +338,13 @@ impl RelayHost {
 }
 
 /// Relay errors that mean the lane can never recover under this custody —
-/// a revoked device or a dead session binding.
+/// a revoked device or a dead session binding. The codes are the relay's
+/// closed vocabulary (`@hraness/relay` `wire/errors.ts`).
 fn fatal(error: &crate::Error) -> bool {
     matches!(
         error,
         crate::Error::Protocol(
-            "relay unauthenticated" | "relay forbidden-device-class" | "relay device-revoked"
+            "relay unauthenticated" | "relay forbidden-device-class" | "relay revoked-device"
         )
     )
 }
@@ -250,7 +355,7 @@ fn fatal(error: &crate::Error) -> bool {
 async fn execute_command(
     managed: &Arc<ManagedStore>,
     opened: &OpenedCommand,
-    refresh: &Cell<bool>,
+    refresh: &AtomicBool,
 ) -> Result<CommandOutcome> {
     let body = match commands::decode(&opened.plaintext) {
         Ok(body) if commands::kind_of(&body) == opened.kind => body,
@@ -291,7 +396,7 @@ async fn execute_command(
             .daemon_send(daemon, text)
             .map(|_| json!({"sent": daemon})),
         CommandBody::ProjectionRefresh => {
-            refresh.set(true);
+            refresh.store(true, Ordering::Relaxed);
             Ok(json!({"refresh": "queued"}))
         }
     };
@@ -845,5 +950,59 @@ mod tests {
             .find(|entry| entry.path == text(&work))
             .unwrap();
         assert_eq!(entry.admitted_by, "dispatch");
+    }
+
+    /// The lane runs beside the supervisor: an unlinked machine never goes
+    /// live, and shutdown returns promptly.
+    #[tokio::test]
+    async fn the_relay_lane_runs_beside_the_supervisor_and_stops_promptly() {
+        let f = fixture();
+        let lane = RelayTask::spawn(&f.base.join("state"), f.store.clone());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!lane.live(), "no custody, no lane");
+        let started = Instant::now();
+        lane.shutdown(Duration::from_secs(5)).await;
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// Relay retry noise never replaces a recent fault from local work, and
+    /// the protocol's revoked-device code disables the lane.
+    #[test]
+    fn relay_faults_never_hide_a_recent_local_fault() {
+        let f = fixture();
+        let root = f.store.root();
+        record_supervisor_fault(root, "worker outcome could not be recorded: synthetic");
+        relay_fault(root, "relay lane pump failed: synthetic");
+        assert_eq!(
+            crate::managed::supervisor_fault(root).as_deref(),
+            Some("worker outcome could not be recorded: synthetic")
+        );
+        // An hour-old local fault gives way.
+        let path = root.join("supervisor.fault.json");
+        let aged = serde_json::to_vec(&json!({
+            "version": 1,
+            "at_ms": now_ms() - LOCAL_FAULT_PRIORITY_MS - 1,
+            "message": "worker outcome could not be recorded: synthetic",
+        }))
+        .unwrap();
+        crate::private::replace(
+            &path,
+            &aged,
+            &digest(crate::private::read(&path, 4096).unwrap()),
+        )
+        .unwrap();
+        relay_fault(root, "relay lane pump failed: synthetic");
+        assert_eq!(
+            crate::managed::supervisor_fault(root).as_deref(),
+            Some("relay lane pump failed: synthetic")
+        );
+        // One relay fault replaces another.
+        relay_fault(root, "relay lane boot failed: synthetic");
+        assert_eq!(
+            crate::managed::supervisor_fault(root).as_deref(),
+            Some("relay lane boot failed: synthetic")
+        );
+        assert!(fatal(&Error::Protocol("relay revoked-device")));
+        assert!(!fatal(&Error::Protocol("relay invalid-argument: device")));
     }
 }

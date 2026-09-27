@@ -146,6 +146,16 @@ pub(crate) struct PendingQuota {
 }
 
 fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
+    if !store_quota(tx, point)? {
+        return Err(Error::Conflict("conflicting quota observation"));
+    }
+    Ok(())
+}
+
+/// Store one quota point unless a different payload already holds the same
+/// (pool, window, instant); returns false for that conflict and writes
+/// nothing. Stored history is never rewritten.
+fn store_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<bool> {
     point.validate()?;
     let json = serde_json::to_string(point)?;
     let prior: Option<String> = tx
@@ -160,7 +170,7 @@ fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
         )
         .optional()?;
     if prior.as_ref().is_some_and(|old| old != &json) {
-        return Err(Error::Conflict("conflicting quota observation"));
+        return Ok(false);
     }
     tx.execute(
         "INSERT OR IGNORE INTO quotas VALUES(?1,?2,?3,?4)",
@@ -172,7 +182,7 @@ fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
         ],
     )?;
     tx.execute("DELETE FROM quotas WHERE pool=?1 AND window=?2 AND observed_at NOT IN (SELECT observed_at FROM quotas WHERE pool=?1 AND window=?2 ORDER BY observed_at DESC LIMIT 128)", params![point.pool.as_str(), point.window.as_str()])?;
-    Ok(())
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +285,8 @@ pub struct RunRecord {
 impl RunRecord {
     /// Recovery is unavailable while the owning host could still be joining
     /// processes or persisting credentials. Unknown identities fail closed.
+    /// A refusal because a recorded process still exists names that process
+    /// and what to check; the account stays held either way.
     pub fn verify_recovery_stop(&self) -> Result<()> {
         if self.phase != "running" {
             return Err(Error::Conflict("run is not in running phase"));
@@ -287,16 +299,39 @@ impl RunRecord {
             .filter(|pid| *pid > 1)
             .and_then(rustix::process::Pid::from_raw)
             .ok_or(Error::Conflict("run owner identity is invalid"))?;
-        if rustix::process::test_kill_process(owner_pid) != Err(rustix::io::Errno::SRCH) {
-            return Err(Error::Conflict(
-                "run owner is still present or its stop is unproven",
-            ));
+        match rustix::process::test_kill_process(owner_pid) {
+            Err(rustix::io::Errno::SRCH) => (),
+            // A number that exists is never proof that this run's owner
+            // exited, even if it now names another program: xcb cannot
+            // tell a reused process number from the owner itself.
+            Ok(()) | Err(rustix::io::Errno::PERM) => {
+                return Err(Error::guided(
+                    format!(
+                        "process {}, which started this run, is still running, so xcb keeps the account held. Check it with `ps -p {}`: if it is xcb, let its turn finish or quit that xcb; if it is another program, the number was reused, so restart your computer to prove the run stopped",
+                        owner.pid, owner.pid
+                    ),
+                    format!("xcb recover {} --yes", self.id),
+                ));
+            }
+            Err(_) => {
+                return Err(Error::Conflict(
+                    "run owner is still present or its stop is unproven",
+                ));
+            }
         }
         let pid = self
             .pid
             .filter(|pid| *pid > 1)
             .ok_or(Error::Conflict("run has no valid recorded process group"))?;
-        crate::process::prove_process_group_absent(pid)
+        match crate::process::prove_process_group_absent(pid) {
+            Err(Error::Conflict(_)) => Err(Error::guided(
+                format!(
+                    "the provider's processes (process group {pid}) are still running, so xcb keeps the account held. Wait until `pgrep -g {pid}` prints nothing, or stop those processes yourself"
+                ),
+                format!("xcb recover {} --yes", self.id),
+            )),
+            proof => proof,
+        }
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -371,6 +406,12 @@ pub struct Store {
     /// `None` means not opened yet — or the managed database absent at the
     /// last check — so a later created managed root is still discovered.
     managed: Mutex<Option<crate::managed::ManagedStore>>,
+    /// Opened by `open_read_only`: the managed store is read the same way,
+    /// never migrated, cleaned or waited on.
+    read_only: bool,
+    /// Telemetry observations the batched recorder dropped because their
+    /// clock or payload contradicted stored telemetry. Diagnostic only.
+    dropped_observations: std::sync::atomic::AtomicU64,
 }
 
 fn decode<T: DeserializeOwned>(text: &str) -> Result<T> {
@@ -506,6 +547,8 @@ impl Store {
             instance: new_id("i").to_string(),
             connection: Mutex::new(connection),
             managed: Mutex::new(None),
+            read_only: true,
+            dropped_observations: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             observation_commits: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -621,6 +664,8 @@ impl Store {
             instance: new_id("i").to_string(),
             connection: Mutex::new(connection),
             managed: Mutex::new(None),
+            read_only: false,
+            dropped_observations: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             observation_commits: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -1861,14 +1906,20 @@ impl Store {
     /// The cached managed handle, opened on first use when
     /// `managed/managed.sqlite` exists. A failed open is retried on the next
     /// call rather than remembered; a still-missing database leaves `None`
-    /// and is re-probed cheaply each call.
+    /// and is re-probed cheaply each call. A read-only store opens a
+    /// read-only reader: no migration, cleanup or wait on the supervisor
+    /// lock, and an unreadable or older schema fails at once.
     fn managed_guard(&self) -> Result<MutexGuard<'_, Option<crate::managed::ManagedStore>>> {
         let mut managed = self
             .managed
             .lock()
             .map_err(|_| Error::Conflict("managed store lock poisoned"))?;
         if managed.is_none() && self.root.join("managed/managed.sqlite").try_exists()? {
-            *managed = Some(crate::managed::ManagedStore::open(&self.root)?);
+            *managed = if self.read_only {
+                crate::managed::ManagedStore::open_read_only(&self.root)?
+            } else {
+                Some(crate::managed::ManagedStore::open(&self.root)?)
+            };
         }
         Ok(managed)
     }
@@ -2034,11 +2085,14 @@ impl Store {
 
     /// Batched observability checkpoint for the streaming path: pending
     /// velocity samples and quota observations land in ONE immediate
-    /// transaction instead of a commit per event. Every check the per-event
-    /// recorders run still applies — monotonicity, bounded history, run
-    /// custody, generation stability and payload compare-and-set — so a
-    /// batch of N events costs one fsync'd commit without weakening
-    /// durability or observation semantics.
+    /// transaction instead of a commit per event. Run custody and credential
+    /// generation checks fail the batch exactly as the per-event recorders
+    /// do. Telemetry that contradicts what is stored — a sample that would
+    /// regress the velocity meter or an observation stamped before its run
+    /// began (a backward clock step), or a different quota payload at an
+    /// instant already recorded — is dropped and counted instead: stored
+    /// rows stay monotonic and are never rewritten, and a meter disagreement
+    /// never decides the outcome of the turn that reported it.
     pub(crate) fn record_observations(
         &self,
         run: &RunRecord,
@@ -2054,6 +2108,7 @@ impl Store {
         if samples.is_empty() && observations.is_empty() {
             return Ok(());
         }
+        let mut dropped = 0u64;
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !samples.is_empty() {
@@ -2062,7 +2117,8 @@ impl Store {
                 if previous.is_some_and(|(at, count)| {
                     at > sample.at_ms as i64 || count > sample.output_tokens as i64
                 }) {
-                    return Err(Error::Conflict("velocity counter regressed"));
+                    dropped += 1;
+                    continue;
                 }
                 tx.execute("INSERT INTO velocity VALUES(?1,?2,?3) ON CONFLICT(session,at_ms) DO UPDATE SET output_total=excluded.output_total", params![session.as_str(), sql(sample.at_ms)?, sql(sample.output_tokens)?])?;
                 previous = Some((sample.at_ms as i64, sample.output_tokens as i64));
@@ -2098,12 +2154,13 @@ impl Store {
                 if point.validate().is_err() {
                     continue;
                 }
-                if observation.observed_at_ms < run.created_at_ms {
-                    return Err(Error::Conflict(
-                        "quota observation predates its account lease",
-                    ));
+                // Stamped before this lease began: freshness for this
+                // account cannot be shown, so it is never attributed to it.
+                // The first payload stored at an instant stays; a different
+                // one at the same instant is dropped.
+                if observation.observed_at_ms < run.created_at_ms || !store_quota(&tx, &point)? {
+                    dropped += 1;
                 }
-                insert_quota(&tx, &point)?;
             }
             if generation_pool(&self.root, &account)? != pool {
                 return Err(Error::Conflict("account credential generation changed"));
@@ -2122,10 +2179,21 @@ impl Store {
             }
         }
         tx.commit()?;
+        if dropped > 0 {
+            self.dropped_observations
+                .fetch_add(dropped, std::sync::atomic::Ordering::Relaxed);
+        }
         #[cfg(test)]
         self.observation_commits
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
+    }
+
+    /// Telemetry observations the batched recorder dropped since this handle
+    /// opened (see `record_observations`).
+    pub fn dropped_observations(&self) -> u64 {
+        self.dropped_observations
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn quota_blocked_until(&self, id: &Id, now: u64) -> Result<Option<u64>> {
@@ -2816,6 +2884,50 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    /// A refusal because a recorded process still exists says which
+    /// process and what to check, and releases nothing.
+    #[test]
+    fn recovery_refusals_name_the_live_process_and_what_to_check() {
+        use std::os::unix::process::CommandExt;
+        let dir = root();
+        let base = dir.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+        let mut provider = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = provider.id();
+        let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
+        let running = store.mark_spawned(&prepared, group).unwrap();
+        // The owner (this process) is alive: the error names it.
+        let owner = std::process::id();
+        let text = running.verify_recovery_stop().unwrap_err().to_string();
+        assert!(text.contains(&format!("process {owner}")), "{text}");
+        assert!(text.contains(&format!("ps -p {owner}")), "{text}");
+        assert!(text.contains("restart your computer"), "{text}");
+        assert!(
+            text.contains(&format!("xcb recover {} --yes", running.id)),
+            "{text}"
+        );
+        // Owner gone, provider group still running: the group is named.
+        let running = orphaned(&store, &running);
+        let text = running.verify_recovery_stop().unwrap_err().to_string();
+        assert!(text.contains(&format!("process group {group}")), "{text}");
+        assert!(text.contains(&format!("pgrep -g {group}")), "{text}");
+        let digest = crate::digest(serde_json::to_string(&running).unwrap());
+        assert!(store.recover_run(&running.id, &digest, 3).is_err());
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+        provider.kill().unwrap();
+        provider.wait().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while running.verify_recovery_stop().is_err() {
+            assert!(std::time::Instant::now() < deadline, "group never left");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -3682,8 +3794,11 @@ mod observation_tests {
         );
     }
 
+    /// A regressing sample or a quota observation stamped before its run
+    /// began (a backward clock step) is dropped, never stored and never an
+    /// error: the turn that reported it still settles on its own outcome.
     #[test]
-    fn a_regressed_observation_batch_is_atomic_and_uncommitted() {
+    fn regressed_or_early_telemetry_is_dropped_without_failing_the_turn() {
         let (_dir, store, run, session) = fixture();
         store
             .record_observations(
@@ -3696,8 +3811,8 @@ mod observation_tests {
                 &[],
             )
             .unwrap();
-        // A later sample under an earlier counter regresses: the whole batch
-        // rolls back, no commit is counted and nothing partial persists.
+        // A later sample under an earlier counter, and one from before the
+        // stored sample, are dropped; the valid sample in the batch lands.
         let regressed = [
             VelocitySample {
                 at_ms: 1_500,
@@ -3707,40 +3822,90 @@ mod observation_tests {
                 at_ms: 1_600,
                 output_tokens: 90,
             },
+            VelocitySample {
+                at_ms: 900,
+                output_tokens: 400,
+            },
         ];
-        assert!(
-            store
-                .record_observations(&run, &session.id, &regressed, &[])
-                .is_err()
-        );
-        assert_eq!(
-            store
-                .observation_commits
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
-        assert_eq!(store.velocities(&session.id, 0).unwrap().len(), 1);
-        // Quota observations predating their lease are rejected the same way.
+        store
+            .record_observations(&run, &session.id, &regressed, &[])
+            .unwrap();
+        let stored = store.velocities(&session.id, 0).unwrap();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored.last().unwrap().output_tokens, 150);
+        assert_eq!(store.dropped_observations(), 2);
+        // A quota observation predating its lease is dropped the same way,
+        // and never attributed to the leased account's pool.
+        store
+            .record_observations(
+                &run,
+                &session.id,
+                &[],
+                &[PendingQuota {
+                    window: Id::new("primary").unwrap(),
+                    used_percent: 50.0,
+                    observed_at_ms: 1,
+                    resets_at_ms: 9_999_999,
+                }],
+            )
+            .unwrap();
+        let account = store.account(&run.account).unwrap();
+        assert!(store.quotas(&account.quota_pool).unwrap().is_empty());
+        assert_eq!(store.dropped_observations(), 3);
+        // Run custody still fails closed: a forged run records nothing.
+        let mut forged = run.clone();
+        forged.revision += 1;
         assert!(
             store
                 .record_observations(
-                    &run,
+                    &forged,
                     &session.id,
                     &[],
                     &[PendingQuota {
                         window: Id::new("primary").unwrap(),
                         used_percent: 50.0,
-                        observed_at_ms: 1,
+                        observed_at_ms: 5_000,
                         resets_at_ms: 9_999_999,
                     }],
                 )
                 .is_err()
         );
-        assert_eq!(
-            store
-                .observation_commits
-                .load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
+        assert!(store.quotas(&account.quota_pool).unwrap().is_empty());
+    }
+
+    /// Two quota events for one window in the same millisecond with
+    /// different resets: the first stays, the second is dropped, and the
+    /// flush that carried them succeeds — within one batch and across two.
+    #[test]
+    fn same_instant_quota_conflicts_keep_the_first_row() {
+        let (_dir, store, run, session) = fixture();
+        let point = |used: f64, reset: u64| PendingQuota {
+            window: Id::new("primary").unwrap(),
+            used_percent: used,
+            observed_at_ms: 5_000,
+            resets_at_ms: reset,
+        };
+        store
+            .record_observations(
+                &run,
+                &session.id,
+                &[],
+                &[point(40.0, 9_000_000), point(41.0, 9_500_000)],
+            )
+            .unwrap();
+        store
+            .record_observations(&run, &session.id, &[], &[point(99.0, 9_900_000)])
+            .unwrap();
+        let account = store.account(&run.account).unwrap();
+        let quotas = store.quotas(&account.quota_pool).unwrap();
+        assert_eq!(quotas.len(), 1);
+        assert_eq!(quotas[0].used_percent, 40.0);
+        assert_eq!(quotas[0].resets_at_ms, 9_000_000);
+        assert_eq!(store.dropped_observations(), 2);
+        // An identical repeat is not a conflict.
+        store
+            .record_observations(&run, &session.id, &[], &[point(40.0, 9_000_000)])
+            .unwrap();
+        assert_eq!(store.dropped_observations(), 2);
     }
 }

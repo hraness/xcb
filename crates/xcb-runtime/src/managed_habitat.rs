@@ -1259,9 +1259,32 @@ impl ManagedStore {
                     continue;
                 }
             }
-            let current = self
-                .conversation(&occurrence.schedule.conversation)?
-                .ok_or(Error::Unavailable("scheduled conversation not found"))?;
+            // An unreadable conversation holds only this schedule; the rest
+            // of the pass, and every other task, continues.
+            let current = match self.conversation(&occurrence.schedule.conversation) {
+                Ok(Some(conversation)) => conversation,
+                Ok(None) => {
+                    record_supervisor_fault(
+                        self.root(),
+                        &format!(
+                            "schedule {} was skipped: its conversation is missing",
+                            occurrence.schedule.id
+                        ),
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    record_supervisor_fault(
+                        self.root(),
+                        &format!(
+                            "schedule {} was skipped: its conversation could not be read ({})",
+                            occurrence.schedule.id,
+                            fault_text(&error)
+                        ),
+                    );
+                    continue;
+                }
+            };
             // The directory was fixed when the schedule was created; an
             // occurrence never infers one.
             let resolved = schedule_workspace(&*self.db()?, &occurrence.schedule);

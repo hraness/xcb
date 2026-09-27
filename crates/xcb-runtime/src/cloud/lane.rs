@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -39,6 +40,45 @@ const CIPHERTEXT_CHARS: usize = 64 * 1024 * 2;
 /// Peer public keys are refreshed at this cadence — not every poll — and
 /// immediately when a command arrives from a requester we do not know.
 const PEER_REFRESH_MS: u64 = 60_000;
+/// Presence is extended when fewer than this many milliseconds remain on
+/// the relay's 45 s presence window.
+const PRESENCE_LEAD_MS: u64 = 30_000;
+/// Presence is also extended after this much monotonic time since the last
+/// refresh, so a local clock that disagrees with the relay's cannot let the
+/// row lapse while the machine is awake.
+const PRESENCE_REFRESH: Duration = Duration::from_secs(15);
+
+/// What keeping presence alive needs on this pump.
+#[derive(Debug, PartialEq, Eq)]
+enum PresenceStep {
+    Fresh,
+    Heartbeat,
+    /// The row already lapsed by the local clock (after a sleep or a long
+    /// stall): the relay only extends live rows, so register it again.
+    Reconnect,
+}
+
+fn presence_step(presence_until: u64, now_ms: u64, since_refresh: Duration) -> PresenceStep {
+    if presence_until <= now_ms {
+        PresenceStep::Reconnect
+    } else if presence_until <= now_ms.saturating_add(PRESENCE_LEAD_MS)
+        || since_refresh >= PRESENCE_REFRESH
+    {
+        PresenceStep::Heartbeat
+    } else {
+        PresenceStep::Fresh
+    }
+}
+
+/// `relayDevices:heartbeat` refuses a presence row that expired or was
+/// swept (`invalid-argument` on `device`). That is not a lane failure: the
+/// same connection registers again through `relayDevices:connect`.
+fn presence_lapsed(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Protocol("relay invalid-argument: device" | "relay invalid-argument")
+    )
+}
 
 /// Everything a boot needs out of custody.
 pub struct LaneKeys {
@@ -130,7 +170,11 @@ pub struct RelayLane {
     peers_fresh_until: u64,
     /// Presence connection this boot owns.
     connection_id: String,
+    /// This boot's presence fingerprint, reused when presence reconnects.
+    fingerprint: String,
     presence_until: u64,
+    /// When presence was last extended, by the monotonic clock.
+    presence_refreshed: Instant,
 }
 
 impl RelayLane {
@@ -158,7 +202,9 @@ impl RelayLane {
             peers: BTreeMap::new(),
             peers_fresh_until: 0,
             connection_id,
+            fingerprint: fingerprint.clone(),
             presence_until: 0,
+            presence_refreshed: Instant::now(),
         };
         // `connect` doubles as the session's liveness probe: a token that
         // fails server-side while locally fresh recovers through one
@@ -183,10 +229,8 @@ impl RelayLane {
             },
         )
         .await?;
-        lane.presence_until = response
-            .get("presenceUntil")
-            .and_then(Value::as_f64)
-            .ok_or(protocol("connect missing presenceUntil"))? as u64;
+        lane.presence_until = presence_until(&response)?;
+        lane.presence_refreshed = Instant::now();
         Ok(lane)
     }
 
@@ -199,31 +243,59 @@ impl RelayLane {
         self.authority.clone()
     }
 
-    /// Refresh the auth session when inside its expiry lead, heartbeat if
-    /// presence is close to expiry, and refresh peer keys.
+    /// Refresh the auth session when inside its expiry lead, keep presence
+    /// alive, and refresh peer keys.
     pub async fn keepalive(&mut self, now_ms: u64) -> Result<()> {
         link::refresh_if_due(&mut self.client, &self.state_root, &mut self.session).await?;
-        if self.presence_until <= now_ms + 30_000 {
-            let response = self
-                .client
-                .mutation(
-                    "relayDevices:heartbeat",
-                    vec![
-                        ("connectionId", json!(self.connection_id)),
-                        ("deviceId", json!(self.device.device)),
-                    ],
-                )
-                .await?;
-            self.presence_until = response
-                .get("presenceUntil")
-                .and_then(Value::as_f64)
-                .ok_or(protocol("heartbeat missing presenceUntil"))?
-                as u64;
+        let response = match presence_step(
+            self.presence_until,
+            now_ms,
+            self.presence_refreshed.elapsed(),
+        ) {
+            PresenceStep::Fresh => None,
+            PresenceStep::Reconnect => Some(self.connect_presence().await?),
+            PresenceStep::Heartbeat => Some(match self.heartbeat().await {
+                // The relay expired the row sooner than the local clock
+                // predicted (clock skew, a stall): register it again.
+                Err(error) if presence_lapsed(&error) => self.connect_presence().await?,
+                other => other?,
+            }),
+        };
+        if let Some(response) = response {
+            self.presence_until = presence_until(&response)?;
+            self.presence_refreshed = Instant::now();
         }
         if self.peers_fresh_until <= now_ms {
             self.refresh_peers(now_ms).await?;
         }
         Ok(())
+    }
+
+    async fn heartbeat(&mut self) -> Result<Value> {
+        self.client
+            .mutation(
+                "relayDevices:heartbeat",
+                vec![
+                    ("connectionId", json!(self.connection_id)),
+                    ("deviceId", json!(self.device.device)),
+                ],
+            )
+            .await
+    }
+
+    /// Register this boot's presence row again under the same connection
+    /// id; the relay patches the existing row or recreates a swept one.
+    async fn connect_presence(&mut self) -> Result<Value> {
+        self.client
+            .mutation(
+                "relayDevices:connect",
+                vec![
+                    ("connectionId", json!(self.connection_id)),
+                    ("deviceId", json!(self.device.device)),
+                    ("fingerprint", json!(self.fingerprint)),
+                ],
+            )
+            .await
     }
 
     /// Re-fetch the device list so envelope verification sees enrollments.
@@ -567,6 +639,15 @@ impl RelayLane {
     }
 }
 
+/// The relay's new presence expiry from a `connect` or `heartbeat` reply.
+fn presence_until(response: &Value) -> Result<u64> {
+    response
+        .get("presenceUntil")
+        .and_then(Value::as_f64)
+        .map(|until| until as u64)
+        .ok_or(protocol("presence reply missing presenceUntil"))
+}
+
 fn opened_clone(command: &CommandRow) -> OpenedCommand {
     OpenedCommand {
         public_id: command.public_id.clone(),
@@ -581,4 +662,56 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// After a sleep or a stall past the relay's 45 s presence window the
+    /// lane re-registers presence instead of heartbeating a lapsed row, the
+    /// heartbeat that failed every pump with `relay invalid-argument`.
+    #[test]
+    fn a_lapsed_presence_row_reconnects_instead_of_failing_the_pump() {
+        let now = 1_800_000_000_000;
+        let fresh = Duration::from_secs(1);
+        assert_eq!(presence_step(now + 40_000, now, fresh), PresenceStep::Fresh);
+        assert_eq!(
+            presence_step(now + 20_000, now, fresh),
+            PresenceStep::Heartbeat
+        );
+        assert_eq!(presence_step(now, now, fresh), PresenceStep::Reconnect);
+        assert_eq!(
+            presence_step(now - 3_600_000, now, fresh),
+            PresenceStep::Reconnect
+        );
+        // A local clock running behind the relay's still heartbeats on the
+        // monotonic cadence, well inside the relay's window.
+        assert_eq!(
+            presence_step(now + 40_000, now, PRESENCE_REFRESH),
+            PresenceStep::Heartbeat
+        );
+        // Only the lapsed-row refusal reconnects; every other relay error
+        // still fails the pump.
+        assert!(presence_lapsed(&Error::Protocol(
+            "relay invalid-argument: device"
+        )));
+        assert!(presence_lapsed(&Error::Protocol("relay invalid-argument")));
+        assert!(!presence_lapsed(&Error::Protocol(
+            "relay invalid-argument: deviceId"
+        )));
+        assert!(!presence_lapsed(&Error::Protocol("relay unauthenticated")));
+        assert!(!presence_lapsed(&Error::Unavailable(
+            "relay request timed out"
+        )));
+    }
+
+    #[test]
+    fn presence_replies_parse_their_expiry() {
+        assert_eq!(
+            presence_until(&json!({"presenceUntil": 1_234_567.0})).unwrap(),
+            1_234_567
+        );
+        assert!(presence_until(&json!({})).is_err());
+    }
 }
