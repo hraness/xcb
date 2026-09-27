@@ -160,11 +160,24 @@ repository, workflow, tag, and run.
 integration on `main`. The site is informational only; it carries no product
 runtime and no release authority.
 
+The site also serves `https://xcb.sh/install.sh`, the one-line installer
+(`curl -fsSL https://xcb.sh/install.sh | sh`). Its body is
+`scripts/install.sh`, copied at build time by `site/scripts/sync-installer.ts`,
+with one placeholder replaced by the `version` in `site/published-release.json`.
+It downloads `scripts/install-native.sh` from that version's immutable tag and
+runs it, so the checksum verification, install manifest, and upgrade helper are
+the installer's own. The route cannot name a version the publication datum does
+not carry, and it serves no binaries.
+
 ## Native binary release
 
 The `native_artifact` job inside `.github/workflows/release.yml` builds `xcb`
-for Ubuntu and macOS from the verified tag commit through
-`scripts/build-native.sh`. Each archive is admitted twice with the installer's
+for Linux x86_64 on `ubuntu-22.04` and macOS ARM64 on `macos-15` from the
+verified tag commit through `scripts/build-native.sh`. The Linux binary links
+against the runner's glibc, so the build image sets the oldest glibc the
+release supports: `scripts/check-glibc-floor.py` fails the release when the
+binary needs a symbol version newer than glibc 2.34 (RHEL 9; Ubuntu 22.04 and
+Debian 12 ship newer), and CI runs the same check on every change. Each archive is admitted twice with the installer's
 own rules — once in `build-native.sh`, once as a separate workflow step through
 `scripts/check-native-archive.sh` — which require exactly one regular `xcb`
 member (no AppleDouble companions or extended attributes), a matching
