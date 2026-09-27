@@ -4,16 +4,15 @@ A project is a workspace directory. Its backlog, work history, autonomy grant,
 schedules, working memory, and Wordcell binding belong to that directory. Your
 thread (plain `xcb`) and every project view over the directory (`xcb chat
 --new`) share them, so the same goal and history follow the project whichever
-conversation you use. Each task routes to an eligible model automatically; large
-prompts prefer known frontier quality, and observed usage limits produce a
-warning when they force a lower-ranked route. Model selection normally needs no
-input from you.
+conversation you use. Each task is routed automatically to an account and model
+that can take it; large prompts get the highest known quality, and a usage limit
+that forces a lower-ranked route produces a warning. Model selection normally
+needs no input from you.
 
 Commands below take `<dir|name>`: a directory path (anything containing `/`,
 or `.` and `..`), a registered project name from `xcb workspaces`, or a
 directory relative to the current one. A project view's conversation ID from
-`xcb conversations`, the form earlier releases used, is accepted as another
-name for that view's directory; the thread's ID is refused, because the thread
+`xcb conversations` is accepted as another name for that view's directory; the thread's ID is refused, because the thread
 spans projects.
 
 ## Work, questions and approvals
@@ -103,13 +102,6 @@ The inbox records context and delivery evidence, not additional execution
 authority. Unknown worker settlement retains custody and prevents an automatic
 retry. See [inbox measurement](inbox-measurement.md) for what event batching can
 demonstrate and how to compare it without assuming token or cost savings.
-
-The additive upgrade preserves the existing mailbox and imports messages for
-open recipients with stable event IDs. Earlier versions did not record prompt
-consumption, so a previously read message may appear in a worker prompt once
-after upgrade. Imported messages have no invented delivery receipt and still
-respect deferred work, attention and custody gates. Migration waits for exclusive
-supervisor custody; provider adapters and their qualification remain unchanged.
 
 ## Bounded autonomy
 
@@ -206,10 +198,9 @@ There are no imports, host effects, transports, or persistent VM store. Cancella
 joins bounded execution before settlement. Restart can replay pure work safely;
 proposal publication retains stable occurrence identity.
 
-The v0.6.0 release adds managed controllers that request ordinary worker tasks
-and resume from their completed reports. Earlier v0.5.0 binaries support pure
-planners only. Explicitly enable managed calls with `--managed-calls`, bounded
-from 1 to 8 calls per run:
+Managed controllers request ordinary worker tasks and resume from their
+completed reports. Enable managed calls with `--managed-calls`, from 1 to 8
+calls per run:
 
 ```sh
 xcb backlog program <dir|name> examples/project-controller.algal.json --managed-calls 2 --title "Inspect and advance the project"
@@ -290,20 +281,21 @@ delivery batches. Use an explicit watch when a task needs another task's termina
 report. Never wait synchronously for another task blocked on the same workspace
 lock.
 
-## Upgrading to 0.9
+## Upgrading from an 0.8 release
 
-xcb 0.9 moves grants and Wordcell bindings from conversations to directories.
-The first 0.9 command that opens your state upgrades it once, after saving a
-copy as `managed/managed.pre-v7.<time>.sqlite` in the state root when there is
-room. That copy is the only way back: 0.8 refuses upgraded state, so rolling
-back means stopping the supervisor, restoring the copy, and reinstalling 0.8.13,
+Grants and Wordcell bindings belong to directories, while 0.8 releases kept
+them on conversations. The first command of a newer build that opens 0.8 state
+upgrades it once, after saving a copy as
+`managed/managed.pre-v7.<time>.sqlite` in the state root when there is room.
+That copy is the only way back: 0.8 refuses upgraded state, so rolling back
+means stopping the supervisor, restoring the copy, and reinstalling 0.8.13,
 which loses activity recorded after the upgrade.
 
 1. Run `xcb doctor --upgrade-plan` with the new binary. It upgrades a private
    copy and lists what would move, pause, or unbind; your state is not changed.
 2. Let running work finish, then quit every xcb terminal on the machine before
-   installing. While a 0.8 supervisor is still running, 0.9 waits up to 20
-   seconds for it to exit and then refuses to open your state.
+   installing. While an 0.8 supervisor is still running, the new build waits
+   up to 20 seconds for it to exit and then refuses to open your state.
 3. After installing, run `xcb workspaces conflicts`, then `xcb projects`.
 4. Resume each grant listed as `paused by upgrade` with `xcb projects resume
    <dir> --revision <n>` once you have checked its goal and budget.

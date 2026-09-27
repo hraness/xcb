@@ -1,11 +1,13 @@
 import type { Metadata } from "next";
 import { AskAiAboutThis } from "@hraness/ui";
 import { publishedRelease } from "../publication";
+import { ReleaseSummary } from "../release-state";
 import { socialImages } from "../social";
 import { DocsShell } from "./docs-shell";
-import { docsTopics } from "./topics";
+import { providerStatus } from "./provider-status";
+import { docsGroups, docsTopics } from "./topics";
 
-const description = "Guides to building xcb from source, connecting Claude, Codex, or Devin accounts, and calling it from the terminal, another agent, or your own app.";
+const description = "Guides to installing xcb, connecting Claude, Codex, or Devin accounts, and sending it work from its terminal, another agent, or your own app.";
 
 export const metadata: Metadata = {
   title: "Documentation · xcb",
@@ -34,29 +36,35 @@ export default function Docs() {
         <header className="xcb-docs-heading">
           <p className="xcb-docs-eyebrow">The field guide</p>
           <h1>Set up xcb and route your first task.</h1>
-          <p className="xcb-docs-lead">These guides take you from a source build to connected accounts, then show how to send xcb work from the terminal, another agent, or your own app.</p>
+          <p className="xcb-docs-lead">xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. Use it as your coding agent from its terminal, or send it tasks from another agent or your own app.</p>
         </header>
-        <p className="xcb-docs-note">{publishedRelease === null
-          ? <>xcb is available from source. No native xcb release or <code>@hraness/xcb</code> npm package is published yet.</>
-          : <>Latest verified release: v{publishedRelease.version}.</>} <a href="/docs/getting-started">Build and get started →</a></p>
-        <div className="xcb-docs-cards">
-          {docsTopics.map((topic, index) => (
-            <a className="xcb-docs-card hraness-material-pane" href={`/docs/${topic.slug}`} key={topic.slug}>
-              <span className="xcb-docs-card-index">0{index + 1}</span>
-              <h2>{topic.title} <span aria-hidden="true">→</span></h2>
-              <p>{topic.description}</p>
-            </a>
-          ))}
+        <div className="xcb-docs-note">
+          <ReleaseSummary release={publishedRelease} />
+          <a href="/docs/getting-started">Install xcb and send your first task →</a>
         </div>
+        {docsGroups.map((group) => (
+          <section aria-label={group.name} key={group.name}>
+            <p className="xcb-docs-eyebrow">{group.name} · {group.reader}</p>
+            <div className="xcb-docs-cards">
+              {docsTopics.filter((topic) => topic.group === group.name).map((topic) => (
+                <a className="xcb-docs-card hraness-material-pane" href={`/docs/${topic.slug}`} key={topic.slug}>
+                  <span className="xcb-docs-card-index">{String(docsTopics.indexOf(topic) + 1).padStart(2, "0")}</span>
+                  <h2>{topic.title} <span aria-hidden="true">→</span></h2>
+                  <p>{topic.description}</p>
+                </a>
+              ))}
+            </div>
+          </section>
+        ))}
         <article className="xcb-docs-body">
           <section aria-labelledby="readiness">
             <h2 id="readiness">What works today</h2>
-            <p>Claude and Codex have each finished a real coding task on macOS ARM64 with the tested accounts and the supported builds: a failing test, a fix, a passing test, and filtered Git status. The supported Devin builds pass xcb’s sandbox checks without signing in, but a coding session on a signed-in Devin account hasn’t been confirmed. xcb checks your account’s model list when a Devin turn starts.</p>
-            <p>xcb is a source preview, and its tools are narrower than the providers’ own CLIs. A model list or a passing <code>doctor</code> check doesn’t prove that a coding session will work on your machine. See <a href="/docs/providers">provider setup</a>, <a href="/docs/workspace">command limits</a>, and the <a href="/docs/reference#readiness">full readiness record</a>.</p>
+            <p>{providerStatus.claude} {providerStatus.codex} {providerStatus.devin}</p>
+            <p>Providers work through xcb’s file tools rather than their own shells and plugins, so a task can do less than in the provider’s own CLI. Codex, Devin, and the <a href="/docs/workspace">command runner</a> need macOS ARM64; on Linux, xcb runs Claude. See <a href="/docs/providers">accounts and models</a> for supported builds.</p>
           </section>
           <section aria-labelledby="standalone-package">
-            <h2 id="standalone-package">Building an application?</h2>
-            <p>The native <a href="/docs/application-api">application API</a> gives your app one model response per call, with no tools, hooks, or saved history. The TypeScript SDK is a separate package with its own setup requirements. Read the <a href="https://github.com/hraness/xcb/blob/main/docs/compatibility.md">compatibility reference</a> or the <a href="/docs/reference#standalone-package">package overview</a>.</p>
+            <h2 id="standalone-package">Building on xcb?</h2>
+            <p>Another agent or a script can hand xcb a task with <a href="/docs/route"><code>xcb --json route</code></a>, which picks the account and model. A TypeScript app can embed the <a href="/docs/sdk">SDK</a>, which runs tasks on the account and model the app names. For one tool-free model response per call, use the <a href="/docs/application-api">application API</a>.</p>
           </section>
         </article>
       </DocsShell>

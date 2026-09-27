@@ -15,17 +15,18 @@ ownership, so a second terminal cannot race a newly recorded exhaustion.
 Configured continuation retains its existing cleanup, effect, checkpoint and
 quota-evidence gates; this change only removes blocked candidates.
 
-Managed tasks apply a second bounded selection stage after admission. xcb derives
-relative quality, cost and latency profiles from observed model identities,
-peels non-dominated models into Pareto layers, then scores them for routine,
-balanced or complex work. Fresh remaining usage, configured favorites and a
+Managed tasks then rank the accounts and models that remain. xcb derives
+relative quality, cost, and latency profiles from observed model identities and
+sorts the models into Pareto layers: a model is in the first layer when no other
+model beats it on all three at once. It then scores the layers for routine,
+balanced, or complex work. Fresh remaining usage, configured favorites and a
 soft workspace-learned provider preference break ties. An explicit opening “Use
 Claude/Codex/Devin” directive remains a hard provider constraint. The optional
 judge classifies capability demand through the ALGAL fitted classifier; route
 selection then follows deterministic policy within already eligible candidates.
 A missing or failed classification uses a deterministic demand estimate without
 widening eligibility. `xcb models tiers --task TEXT` shows the model layers and
-`xcb --cwd WORKSPACE models route --task TEXT` previews the admitted route using
+`xcb --cwd WORKSPACE models route --task TEXT` previews the route using
 the same workspace preferences and provider directive. Preview does not reserve
 an account; availability and optional classification may change before execution. These are relative
 routing heuristics, not provider price guarantees; the SWE-2 capability/cost

@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { articleProvenanceFromAdmission, articleProvenanceSentence } from "@hraness/design-kit";
 
 import { blogPostPath, blogPosts, indexableBlogPosts } from "../app/blog/posts";
+import { comparisons } from "../app/compare/comparisons";
+import { docsTopics } from "../app/docs/topics";
 import { publishedRelease } from "../app/publication";
 
 const site = join(import.meta.dir, "..");
@@ -128,7 +131,11 @@ describe("built xcb site", () => {
 
       // Follow every local link across the actual built public pages. Broken
       // doc routes or fragments must fail before publishing the marketing site.
-      const paths = ["/", "/compare", "/reflexes", "/download", "/docs", "/docs/getting-started", "/docs/providers", "/docs/workspace", "/docs/customization", "/docs/reflexes", "/docs/application-api", "/docs/reference", "/blog", ...indexableBlogPosts.map(blogPostPath)];
+      const paths = ["/", "/install", "/compare", ...comparisons.map((entry) => `/compare/${entry.slug}`), "/reflexes", "/docs", ...docsTopics.map((topic) => `/docs/${topic.slug}`), "/blog", ...indexableBlogPosts.map(blogPostPath)];
+      // Downloads moved to the install page; the old URL keeps working.
+      const download = await fetch(`${server.origin}/download`, { redirect: "manual" });
+      expect(download.status).toBe(308);
+      expect(new URL(download.headers.get("location") ?? "", server.origin).pathname).toBe("/install");
       const documents = new Map<string, string>();
       for (const path of paths) {
         const response = await fetch(`${server.origin}${path}`, { redirect: "manual" });
@@ -167,7 +174,8 @@ describe("built xcb site", () => {
       for (const entry of blogPosts) {
         const path = blogPostPath(entry);
         const body = documents.get(path) ?? await (await fetch(`${server.origin}${path}`)).text();
-        expect(body).toContain("Drafted with AI from the source code and reviewed by");
+        // The visible drafting and review note matches the post's own review record.
+        expect(body).toContain(articleProvenanceSentence(articleProvenanceFromAdmission(entry.admission)));
         const noindex = /<meta name="robots" content="noindex/u.test(body);
         expect(noindex).toBe(entry.admission.lifecycle !== "indexable");
         if (entry.admission.lifecycle !== "indexable") {
@@ -176,6 +184,11 @@ describe("built xcb site", () => {
           expect(documents.get("/blog")).not.toContain(`href="${path}"`);
         }
       }
+
+      // The renamed introduction's old URL redirects permanently to the new post.
+      const retired = await fetch(`${server.origin}/blog/introducing-xcb`, { redirect: "manual" });
+      expect(retired.status).toBe(308);
+      expect(new URL(retired.headers.get("location") ?? "", server.origin).pathname).toBe("/blog/introducing-excalibur");
     } finally {
       await stopBuiltSite(server);
     }

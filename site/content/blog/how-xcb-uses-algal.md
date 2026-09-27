@@ -73,4 +73,4 @@ The same runtime also records managed task transitions and runs the small resuma
 
 xcb's README calls the managed harness experimental, and the reflexes are part of it. A reflex learns one person's preferences and does not measure model quality, so a learned route predicts the tier you would pick, not the tier that would do the work best.
 
-For the rest of the product, start with [Introducing xcb](/blog/introducing-xcb). The full rules, including every reply category and the continuation checks, are in the [reflexes reference](/docs/reflexes).
+For the rest of the product, start with [Introducing Excalibur](/blog/introducing-excalibur). The full rules, including every reply category and the continuation checks, are in the [reflexes reference](/docs/reflexes).

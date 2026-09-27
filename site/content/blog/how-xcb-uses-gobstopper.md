@@ -88,4 +88,4 @@ xcb plugins enable gobstopper
 
 This covers Claude Code and Codex sessions that xcb runs. Devin sessions are sent without elision. The sizes are estimates from byte counts, not the provider's token counts, and xcb reports no measured savings or effect on your bill. A smaller prompt is also not proof that the next turn goes better; Gobstopper's own documentation makes the same point about its compaction. Once an output is elided, the model sees only the marker, so if it needs that text again it has to run the tool again. You can still read the original in xcb's history.
 
-The rest of xcb is covered in [Introducing xcb](/blog/introducing-xcb), and Gobstopper as a standalone tool at [gobstopper.sh](https://gobstopper.sh).
+The rest of xcb is covered in [Introducing Excalibur](/blog/introducing-excalibur), and Gobstopper as a standalone tool at [gobstopper.sh](https://gobstopper.sh).

@@ -37,7 +37,7 @@ export default async function BlogPost({ params }: { params: Promise<{ slug: str
   if (!entry || !body) notFound();
   const related = blogRelatedProducts(entry);
   return (
-    <div data-hraness-marketing-preset="editorial" className="xcb-blog-page">
+    <div data-hraness-marketing-preset="minimal" className="xcb-blog-page">
       <SiteHeader active="blog" />
       <main id="main" tabIndex={-1}>
         <MarketingArticle

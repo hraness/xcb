@@ -21,7 +21,7 @@ const routes = [
   { href: "/", label: "xcb" },
   { href: "/docs", label: "Documentation" },
   { href: "/compare", label: "Compare" },
-  { href: "/download", label: "Download" },
+  { href: "/install", label: "Install" },
   { href: "/reflexes", label: "Routing that learns how you work" },
   ...docsTopics.map((topic) => ({ href: `/docs/${topic.slug}`, label: topic.title })),
   { href: blogPath, label: blogTitle },
@@ -48,7 +48,7 @@ export default function NotFound() {
               description: "Where xcb fits next to Claude Code, Codex, OpenCode, and Devin.",
             },
             {
-              href: "/download",
+              href: "/install",
               label: "Download",
               description: "Release archives with checksums and a public verification run, or the source build.",
             },
