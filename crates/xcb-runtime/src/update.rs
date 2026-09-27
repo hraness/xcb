@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 const API_URL: &str = "https://api.github.com/repos/hraness/xcb/releases?per_page=20";
@@ -53,6 +53,14 @@ pub struct Status {
     pub policy: Policy,
     pub checked_at_ms: u64,
     pub release_available: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UpgradeResult {
+    pub version: u32,
+    pub previous: String,
+    pub current: String,
+    pub changed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -153,7 +161,7 @@ fn release_from_value(value: &Value) -> Option<Release> {
     Some(Release { version, asset })
 }
 
-fn fetch_releases() -> Result<Vec<Release>> {
+fn fetch_release_metadata(url: &str) -> Result<Value> {
     let output = Command::new("curl")
         .args([
             "--fail",
@@ -168,7 +176,7 @@ fn fetch_releases() -> Result<Vec<Release>> {
             "=https",
             "--user-agent",
             concat!("xcb-update/", env!("CARGO_PKG_VERSION")),
-            API_URL,
+            url,
         ])
         .output()
         .map_err(|error| {
@@ -187,17 +195,38 @@ fn fetch_releases() -> Result<Vec<Release>> {
             "GitHub release response exceeded the xcb update limit",
         )));
     }
-    let value: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+    serde_json::from_slice(&output.stdout).map_err(|_| {
         Error::Io(std::io::Error::other(
             "GitHub returned invalid release metadata",
         ))
-    })?;
+    })
+}
+
+fn fetch_releases() -> Result<Vec<Release>> {
+    let value = fetch_release_metadata(API_URL)?;
     let releases = value.as_array().ok_or_else(|| {
         Error::Io(std::io::Error::other(
             "GitHub returned an invalid release list",
         ))
     })?;
     Ok(releases.iter().filter_map(release_from_value).collect())
+}
+
+fn requested_release_with(
+    requested: &str,
+    fetch: impl FnOnce(&str) -> Result<Value>,
+) -> Result<Option<Release>> {
+    let version = requested.strip_prefix('v').unwrap_or(requested);
+    let canonical =
+        version_tuple(version).map(|(major, minor, patch)| format!("{major}.{minor}.{patch}"));
+    if canonical.as_deref() != Some(version) {
+        return Err(Error::guided(
+            "use an exact release version, such as 0.10.1",
+            "xcb upgrade --help",
+        ));
+    }
+    let url = format!("https://api.github.com/repos/hraness/xcb/releases/tags/v{version}");
+    Ok(release_from_value(&fetch(&url)?).filter(|release| release.version == version))
 }
 
 fn latest_release() -> Result<Option<Release>> {
@@ -361,18 +390,13 @@ pub fn upgrade(
     requested: Option<&str>,
     quiet: bool,
     allow_downgrade: bool,
-) -> Result<i32> {
+) -> Result<UpgradeResult> {
     if let Some(requested) = requested {
         check_downgrade(current, requested, allow_downgrade)?;
     }
-    let releases = fetch_releases()?;
     let release = match requested {
-        Some(requested) => releases
-            .into_iter()
-            .find(|release| release.version == requested.strip_prefix('v').unwrap_or(requested)),
-        None => releases
-            .into_iter()
-            .max_by_key(|release| version_tuple(&release.version).unwrap_or((0, 0, 0))),
+        Some(requested) => requested_release_with(requested, fetch_release_metadata)?,
+        None => latest_release()?,
     }
     .ok_or_else(|| {
         Error::Io(std::io::Error::other(
@@ -383,7 +407,12 @@ pub fn upgrade(
         if !quiet {
             eprintln!("xcb: current {current} is already up to date.");
         }
-        return Ok(0);
+        return Ok(UpgradeResult {
+            version: 1,
+            previous: current.to_owned(),
+            current: current.to_owned(),
+            changed: false,
+        });
     }
     let install = manifest(root)?;
     let metadata = std::fs::symlink_metadata(&install.helper_path).map_err(|_| {
@@ -403,11 +432,17 @@ pub fn upgrade(
             ));
         }
     }
-    let status = Command::new(&install.helper_path)
+    let mut command = Command::new(&install.helper_path);
+    command
         .env("XCB_VERSION", &release.version)
         .env("XCB_INSTALL_PREFIX", &install.prefix)
-        .env("XCB_ADD_PATH", "no")
-        .status()?;
+        .env("XCB_ADD_PATH", "no");
+    // JSON callers own stdout. Keep installer diagnostics on stderr without
+    // buffering an unbounded download/build log in memory.
+    if quiet {
+        command.stdout(Stdio::from(std::io::stderr()));
+    }
+    let status = command.status()?;
     if !status.success() {
         return Err(Error::Io(std::io::Error::other(format!(
             "xcb installer exited with {status}"
@@ -419,7 +454,12 @@ pub fn upgrade(
             release.version
         );
     }
-    Ok(0)
+    Ok(UpgradeResult {
+        version: 1,
+        previous: current.to_owned(),
+        current: release.version,
+        changed: true,
+    })
 }
 
 fn xml_escape(value: &str) -> String {
@@ -545,6 +585,50 @@ pub fn install_scheduler(binary: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_versions_use_the_exact_tag_and_validate_its_assets() {
+        let version = "0.4.0";
+        let binary = platform_asset(version);
+        let value = serde_json::json!({
+            "tag_name": "v0.4.0", "draft": false, "prerelease": false,
+            "assets": [{"name": binary}, {"name": format!("{binary}.sha256")}]
+        });
+        let selected = requested_release_with("v0.4.0", |url| {
+            assert_eq!(
+                url,
+                "https://api.github.com/repos/hraness/xcb/releases/tags/v0.4.0"
+            );
+            Ok(value.clone())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.version, version);
+        assert!(
+            requested_release_with("0.4.1", |_| Ok(value.clone()))
+                .unwrap()
+                .is_none()
+        );
+        let mut missing_checksum = value.clone();
+        missing_checksum["assets"].as_array_mut().unwrap().pop();
+        assert!(
+            requested_release_with(version, |_| Ok(missing_checksum))
+                .unwrap()
+                .is_none()
+        );
+        for invalid in [
+            "latest",
+            "01.2.3",
+            "1.2",
+            "1.2.3-beta",
+            "../latest",
+            "1.2.3?x=y",
+        ] {
+            assert!(
+                requested_release_with(invalid, |_| panic!("must not fetch invalid tag")).is_err()
+            );
+        }
+    }
 
     #[test]
     fn downgrades_need_an_explicit_flag() {

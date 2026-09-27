@@ -17,9 +17,9 @@ version_valid() {
 }
 sha256() {
   if [ "$sha256_kind" = sha256sum ]; then
-    hash_output=$("$sha256_cmd" "$1") || return 1
+    hash_output=$("$sha256_cmd" < "$1") || return 1
   else
-    hash_output=$("$sha256_cmd" -a 256 "$1") || return 1
+    hash_output=$("$sha256_cmd" -a 256 < "$1") || return 1
   fi
   hash_value=${hash_output%% *}
   [ "${#hash_value}" -eq 64 ] || return 1
@@ -27,6 +27,11 @@ sha256() {
   printf '%s\n' "$hash_value"
 }
 regular_file() { [ -f "$1" ] && [ ! -L "$1" ]; }
+shell_quote() {
+  printf "'"
+  printf '%s' "$1" | sed "s/'/'\\\\''/g"
+  printf "'"
+}
 
 bin_dir="$XCB_INSTALL_PREFIX/bin"
 mkdir -p "$bin_dir"
@@ -240,6 +245,9 @@ done
 case ":$PATH:" in
   *":$bin_dir:"*) ;;
   *)
+    # The prefix is data, including shell metacharacters. Quote it before
+    # writing a command that will run when the user's shell starts.
+    path_line="export PATH=$(shell_quote "$bin_dir"):\"\$PATH\""
     if [ "${XCB_ADD_PATH:-ask}" = yes ]; then
       startup="$HOME/.profile"
       case "${SHELL##*/}" in
@@ -247,14 +255,13 @@ case ":$PATH:" in
         bash) startup="$HOME/.bash_profile" ;;
       esac
       mkdir -p "$(dirname "$startup")"
-      path_line="export PATH=\"$bin_dir:\$PATH\""
       if [ ! -f "$startup" ] || ! grep -Fqx "$path_line" "$startup"; then
         printf '\n%s\n' "$path_line" >> "$startup"
       fi
       echo "Added $bin_dir to PATH in $startup"
     else
       echo "$bin_dir is not on PATH. Add it with:"
-      echo "  export PATH=\"$bin_dir:\$PATH\""
+      printf '  %s\n' "$path_line"
     fi
     ;;
 esac

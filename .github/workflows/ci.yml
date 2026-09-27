@@ -120,6 +120,9 @@ jobs:
           python3 -I scripts/prepare-command-dependencies.test.py
           python3 -I .github/scripts/codex-catalog.test.py
           python3 -I scripts/check-glibc-floor.test.py
+      - name: Linux sandbox admission fixture
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
         if: runner.os == 'Linux'

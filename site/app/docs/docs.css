@@ -55,6 +55,7 @@
 }
 
 .xcb-docs-nav-group { margin-block-start: 1.5rem; }
+.xcb-docs-mobile-nav { display: none; }
 .xcb-docs-nav-group > p { margin: 0 0 0.45rem 0.7rem; color: var(--foreground); font-size: 0.78rem; font-weight: 600; }
 .xcb-docs-source { display: inline-block; margin: 1.75rem 0 0 0.7rem; color: var(--muted); font-size: 0.8rem; }
 .xcb-docs-main { min-inline-size: 0; max-inline-size: 52rem; }
@@ -116,7 +117,11 @@
 
 @media (max-width: 48rem) {
   .xcb-docs-shell { display: block; padding-block-start: 1.5rem; }
-  .xcb-docs-sidebar { position: static; max-block-size: none; overflow: visible; margin-block-end: 2.5rem; padding-block-end: 1.4rem; border-block-end: 1px solid var(--line); }
+  .xcb-docs-sidebar { position: static; max-block-size: none; overflow: visible; margin-block-end: 2rem; padding-block-end: 1rem; border-block-end: 1px solid var(--line); }
+  .xcb-docs-desktop-nav { display: none; }
+  .xcb-docs-mobile-nav { display: block; }
+  .xcb-docs-mobile-nav summary { cursor: pointer; padding-block: 0.5rem; color: var(--foreground); font-weight: 600; }
+  .xcb-docs-mobile-nav[open] summary { margin-block-end: 1rem; }
   .xcb-docs-sidebar nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.3rem 1rem; }
   .xcb-docs-nav-title { grid-column: 1 / -1; margin-block-end: 0.3rem; }
   .xcb-docs-sidebar nav > a { align-self: start; }

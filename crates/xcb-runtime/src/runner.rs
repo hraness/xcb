@@ -1117,7 +1117,11 @@ pub fn provider_admitted(root: &Path, pin: &Pin) -> bool {
     }
     let listed = || crate::catalog::admitted(root, pin.provider, &pin.version, &pin.sha256);
     match pin.provider {
-        Provider::Claude => claude::version_admitted(&pin.version) && sandbox::available(),
+        Provider::Claude => {
+            claude::version_admitted(&pin.version)
+                && (sandbox::available()
+                    || (cfg!(target_os = "linux") && sandbox::linux_sandbox(root).qualified))
+        }
         Provider::Codex => {
             cfg!(target_os = "macos")
                 && sandbox::available()
@@ -2578,6 +2582,82 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+
+    /// A supported Claude build becomes selectable only after the same
+    /// host-specific sandbox checks required by the Linux launcher pass.
+    /// The receipt here is synthetic test state; no provider is launched.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_claude_admission_requires_matching_sandbox_evidence() {
+        use crate::qualification::{
+            LINUX_QUALIFICATION_NAME, LinuxQualification, MAX_RECEIPT_AGE_MS,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let pin = Pin {
+            provider: Provider::Claude,
+            executable: root.join("synthetic-provider"),
+            sha256: "1".repeat(64),
+            version: claude::MIN_VERSION.into(),
+            host_sha256: "2".repeat(64),
+            observed_at_ms: now_ms(),
+        };
+        assert!(!provider_admitted(&root, &pin), "missing evidence");
+        let Some(candidate) = sandbox::bwrap_candidate() else {
+            // A host without bubblewrap stays unsupported. CI installs
+            // it so the positive and changed-evidence cases run there.
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "Linux CI must install bubblewrap for the admission regression"
+            );
+            return;
+        };
+        let wrapper = sandbox::BwrapPin::admit(&candidate).unwrap();
+        let mut receipt: LinuxQualification =
+            serde_json::from_str(include_str!("../tests/fixtures/linux-qualification.json"))
+                .unwrap();
+        receipt.wrapper.path = candidate;
+        receipt.wrapper.sha256 = wrapper.sha256;
+        receipt.observed_at_ms = now_ms();
+        receipt.namespaces.unprivileged_userns_clone =
+            std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
+                .map(|value| value.trim().to_owned())
+                .unwrap_or_else(|_| "absent".into());
+        receipt.namespaces.max_user_namespaces =
+            std::fs::read_to_string("/proc/sys/user/max_user_namespaces")
+                .map(|value| value.trim().to_owned())
+                .unwrap_or_else(|_| "0".into());
+        let path = root.join(LINUX_QUALIFICATION_NAME);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let write = |receipt: &LinuxQualification| {
+            std::fs::write(&path, serde_json::to_vec(receipt).unwrap()).unwrap();
+        };
+        write(&receipt);
+        let qualified = sandbox::linux_sandbox(&root).qualified;
+        assert_eq!(provider_admitted(&root, &pin), qualified);
+        if std::env::var_os("CI").is_some() {
+            assert!(
+                qualified,
+                "Linux CI must exercise supported Claude selection"
+            );
+        }
+        let mut old_provider = pin.clone();
+        old_provider.version = "1.0.0".into();
+        assert!(!provider_admitted(&root, &old_provider));
+        for provider in [Provider::Codex, Provider::Devin] {
+            let mut unsupported = pin.clone();
+            unsupported.provider = provider;
+            assert!(!provider_admitted(&root, &unsupported));
+        }
+        receipt.observed_at_ms = now_ms().saturating_sub(MAX_RECEIPT_AGE_MS + 1000);
+        write(&receipt);
+        assert!(!provider_admitted(&root, &pin), "stale evidence");
+        receipt.observed_at_ms = now_ms();
+        receipt.wrapper.sha256 = "3".repeat(64);
+        write(&receipt);
+        assert!(!provider_admitted(&root, &pin), "a replaced wrapper");
+    }
 
     #[test]
     fn diagnostic_is_legacy_compatible_and_bounded() {

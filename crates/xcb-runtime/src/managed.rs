@@ -5980,9 +5980,9 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                 }
                 let nonterminal = managed.has_habitat_work().unwrap_or(true);
                 if supervisor.active.is_empty() && draining { break Ok(0); }
-                // A live relay lane means this machine serves remote
-                // commands — idle-exit would strand the fleet.
-                if supervisor.active.is_empty() && !nonterminal && !relay.live() {
+                // A linked relay keeps retrying through outages — exiting
+                // while it connects or backs off would strand the fleet.
+                if supervisor.active.is_empty() && !nonterminal && !relay.keeps_resident() {
                     if idle_since.elapsed() >= IDLE_EXIT {
                         // Settle the in-flight offer refresh while still holding
                         // the lock, then re-check: a client that committed a task

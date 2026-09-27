@@ -1077,11 +1077,22 @@ fn require_supported(root: &std::path::Path, pin: &Pin) -> Result<()> {
         return Ok(());
     }
     let name = provider_name(pin.provider);
-    if !cfg!(target_os = "macos") {
+    if cfg!(target_os = "linux") {
+        if pin.provider != Provider::Claude {
+            return Err(Error::guided(
+                format!("xcb runs {name} on macOS ARM64 only"),
+                "use Claude on Linux (xcb.sh/docs/providers#claude-on-linux)",
+            ));
+        }
+        if !xcb_runtime::sandbox::linux_sandbox(root).qualified {
+            return Err(Error::guided(
+                "xcb can't run Claude Code until this machine passes its Linux sandbox checks",
+                "run the sandbox checks at xcb.sh/docs/providers#claude-on-linux, then run xcb doctor --provider claude",
+            ));
+        }
+    } else if !cfg!(target_os = "macos") {
         return Err(Error::Guided {
-            message: format!(
-                "xcb can't run {name} on this system yet; provider runs need macOS for now"
-            ),
+            message: "xcb runs providers on macOS and Linux only".into(),
             next: None,
         });
     }
@@ -1092,6 +1103,23 @@ fn require_supported(root: &std::path::Path, pin: &Pin) -> Result<()> {
         ),
         format!("install a supported {name} build (xcb.sh/docs/providers lists them)"),
     ))
+}
+
+fn account_needs_sign_in(store: &Store, account: &xcb_runtime::store::Account) -> Result<bool> {
+    Ok(store.authentication_required(&account.id)? || !auth::has_credentials(store, &account.id)?)
+}
+
+fn require_setup_sign_in(store: &Store, account: &xcb_runtime::store::Account) -> Result<()> {
+    if account_needs_sign_in(store, account)? {
+        return Err(Error::guided(
+            format!(
+                "{} needs sign-in before setup can finish",
+                xcb_core::display_text(&account.name(), 80)
+            ),
+            health::sign_in_step(account.provider, &account.id),
+        ));
+    }
+    Ok(())
 }
 
 fn require_account_credentials(store: &Store, account: &xcb_runtime::store::Account) -> Result<()> {
@@ -1742,7 +1770,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             let ok = ux::Style::stdout().symbol(ux::Symbol::Ok);
             let name = provider_name(provider);
-            // 1. One account for this provider: reuse a signed-in one, then
+            // 1. One account for this provider: reuse a healthy sign-in, then
             // any enabled one, or add one.
             let accounts: Vec<_> = store
                 .accounts()?
@@ -1761,7 +1789,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 ));
             }
             let signed_in = |account: &xcb_runtime::store::Account| {
-                auth::has_credentials(&store, &account.id).unwrap_or(false)
+                !account_needs_sign_in(&store, account).unwrap_or(true)
             };
             let existing = accounts
                 .iter()
@@ -1797,14 +1825,15 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             let pin = ensure_pin(store.root(), provider).await?;
             require_supported(store.root(), &pin)?;
             println!("{ok} {name} {} is installed", pin.version);
-            // 3. Sign in, unless this account already has credentials.
+            // 3. A rejected credential must be replaced by sign-in; refreshing
+            // model metadata does not repair authentication.
             let Some(account) = account else {
                 ux::next(
                     "sign in with devin auth login, then run xcb accounts import-devin --source <path to credentials.toml>",
                 );
                 return Ok(0);
             };
-            if !auth::has_credentials(&store, &account.id)? {
+            if account_needs_sign_in(&store, &account)? {
                 if provider == Provider::Devin {
                     ux::next(&health::sign_in_step(provider, &account.id));
                     return Ok(0);
@@ -1823,8 +1852,9 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 .await?;
             }
             // 4. Load the account's models (what `accounts refresh` does).
-            require_account_credentials(&store, &account)?;
+            require_setup_sign_in(&store, &account)?;
             let models = runner::probe(&store, &pin, Some(&account.id)).await?;
+            require_setup_sign_in(&store, &account)?;
             store.set_models(provider, &models)?;
             println!("{ok} Loaded {} models", models.len());
             println!("{ok} {name} is set up.");
@@ -2898,16 +2928,21 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     allow_downgrade,
                     quiet,
                 } => {
-                    xcb_runtime::update::upgrade(
+                    let result = xcb_runtime::update::upgrade(
                         store.root(),
                         env!("CARGO_PKG_VERSION"),
                         version.as_deref(),
                         quiet || cli.json,
                         allow_downgrade,
                     )?;
+                    if cli.json {
+                        print_json(result)?;
+                    }
                 }
                 UpdateCommand::Daemon { quiet } => {
-                    if xcb_runtime::update::should_check(store.root())? {
+                    let checked = xcb_runtime::update::should_check(store.root())?;
+                    let mut upgrade = None;
+                    if checked {
                         let result = xcb_runtime::update::check(
                             store.root(),
                             env!("CARGO_PKG_VERSION"),
@@ -2917,14 +2952,17 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                             == xcb_runtime::update::Policy::Auto
                             && result.release_available
                         {
-                            xcb_runtime::update::upgrade(
+                            upgrade = Some(xcb_runtime::update::upgrade(
                                 store.root(),
                                 env!("CARGO_PKG_VERSION"),
                                 None,
                                 quiet || cli.json,
                                 false,
-                            )?;
+                            )?);
                         }
+                    }
+                    if cli.json {
+                        print_json(json!({"version":1,"checked":checked,"upgrade":upgrade}))?;
                     }
                 }
             }
@@ -2934,13 +2972,19 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             version,
             allow_downgrade,
             quiet,
-        }) => xcb_runtime::update::upgrade(
-            store.root(),
-            env!("CARGO_PKG_VERSION"),
-            version.as_deref(),
-            quiet || cli.json,
-            allow_downgrade,
-        ),
+        }) => {
+            let result = xcb_runtime::update::upgrade(
+                store.root(),
+                env!("CARGO_PKG_VERSION"),
+                version.as_deref(),
+                quiet || cli.json,
+                allow_downgrade,
+            )?;
+            if cli.json {
+                print_json(result)?;
+            }
+            Ok(0)
+        }
         Some(Commands::Config) => {
             print_json(config)?;
             Ok(0)
@@ -3492,6 +3536,71 @@ fn automatic_route_notice(reason: &str) -> &'static str {
         "Usage limits rule out a higher-ranked model; using the best one available now."
     } else {
         "Picked an account and model automatically."
+    }
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+
+    #[test]
+    fn setup_requires_new_sign_in_after_rejection_even_when_models_refresh() {
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "xcb-setup-auth-{}-{}",
+            std::process::id(),
+            xcb_runtime::new_id("fixture")
+        ));
+        let store = Store::open(&root).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Fixture", 1, None)
+            .unwrap();
+        assert!(account_needs_sign_in(&store, &account).unwrap());
+        private::create(
+            &store
+                .account_root(&account.id)
+                .unwrap()
+                .join("subscription-token"),
+            b"sk-ant-oat01-synthetic_fixture_credential",
+        )
+        .unwrap();
+        assert!(!account_needs_sign_in(&store, &account).unwrap());
+        require_setup_sign_in(&store, &account).unwrap();
+
+        let db = rusqlite::Connection::open(root.join("xcb.sqlite")).unwrap();
+        db.execute(
+            "INSERT INTO account_auth_failures(account,generation,run) VALUES(?1,NULL,'r_fixture')",
+            [account.id.as_str()],
+        )
+        .unwrap();
+        drop(db);
+        // Model metadata can refresh while the provider still rejects the
+        // stored sign-in. Neither setup gate may mistake that for recovery.
+        store
+            .set_models(
+                Provider::Claude,
+                &[xcb_core::models::ModelChoice {
+                    provider: Provider::Claude,
+                    id: Id::new("fixture-model").unwrap(),
+                    label: "Fixture model".into(),
+                    mode: xcb_core::models::Mode::Fixed,
+                    resolved: None,
+                    effort: None,
+                    observed_at_ms: now_ms(),
+                }],
+            )
+            .unwrap();
+        assert!(auth::has_credentials(&store, &account.id).unwrap());
+        assert!(account_needs_sign_in(&store, &account).unwrap());
+        match require_setup_sign_in(&store, &account).unwrap_err() {
+            Error::Guided { next, .. } => {
+                assert_eq!(next, Some(format!("xcb accounts login {}", account.id)));
+            }
+            error => panic!("expected sign-in guidance, got {error}"),
+        }
+        assert!(store.authentication_required(&account.id).unwrap());
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

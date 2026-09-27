@@ -99,8 +99,8 @@
 .xcb-code { position: relative; min-inline-size: 0; max-inline-size: min(100%, 52rem); margin-block: 1rem; }
 .xcb-code + .xcb-code { margin-block-start: 0.75rem; }
 .xcb-home .hraness-marketing-interface { min-inline-size: 0; }
-.xcb-code .xcb-code-block { margin: 0; padding-inline-end: 6rem; }
-.xcb-code .xcb-code-block.language-text { white-space: pre-wrap; overflow-wrap: anywhere; padding-block-start: 3.25rem; padding-inline-end: 1.15rem; }
+.xcb-code .xcb-code-block { margin: 0; padding-block-start: 3.25rem; padding-inline-end: 1.15rem; }
+.xcb-code .xcb-code-block.language-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .xcb-code-copy { position: absolute; inset-block-start: 0.55rem; inset-inline-end: 0.55rem; }
 .xcb-install-page ul, .xcb-picks ul, .xcb-compare-page #elsewhere ul { margin: 0 0 1rem; padding-inline-start: 1.25rem; display: grid; gap: 0.5rem; list-style: disc; }
 .xcb-install-page .xcb-page-section li, .xcb-picks li { line-height: 1.6; }
