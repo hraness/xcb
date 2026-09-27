@@ -15,7 +15,7 @@ use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 use tokio::sync::watch;
 use xcb_core::{
     Id, MAX_TEXT_BYTES, Provider, display_text,
-    policy::{EffectState, Terminal, TurnFacts},
+    policy::{EffectState, Terminal, TurnFacts, no_reply},
     session::State,
 };
 
@@ -221,7 +221,7 @@ impl RouteFailure {
     }
     fn settled_turn(mut self, session: Id, outcome: Outcome) -> Self {
         self.session = Some(session);
-        self.outcome = Some(outcome.facts);
+        self.outcome = Some(outcome.facts.reported(&outcome.text));
         if self.code == RouteCode::NeedsInput {
             self.text_truncated = Some(outcome.text.len() > MAX_TEXT_BYTES);
             self.text = Some(display_text(&outcome.text, MAX_TEXT_BYTES));
@@ -336,7 +336,12 @@ pub async fn dispatch(
 }
 
 /// Classify a finished dispatch. Unsettled custody dominates every other
-/// outcome; a provider asking for input is reported, not answered.
+/// outcome; a provider asking for input is reported, not answered. A turn
+/// the provider completed without answer text or file changes is a
+/// `provider_error` whose outcome reports `failure: no_reply`: nothing says
+/// the task was done, so it must not read as `completed`. A turn that
+/// changed files keeps `completed` even without text, so a caller never
+/// repeats settled effects.
 fn settle(
     id: &Id,
     session: Id,
@@ -381,6 +386,7 @@ fn settle(
     } else if facts.terminal == Terminal::Completed
         && facts.failure.is_none()
         && outcome.state == State::Idle
+        && !no_reply(&outcome.text, &facts)
     {
         None
     } else {
@@ -478,6 +484,64 @@ mod tests {
         let mut value = request();
         value.task = "t".repeat(MAX_TEXT_BYTES + 1);
         assert!(value.validate().is_err());
+    }
+
+    fn settled(text: &str, effects: EffectState) -> Outcome {
+        let facts = TurnFacts {
+            terminal: Terminal::Completed,
+            joined: true,
+            effects,
+            pending_attention: false,
+            failure: None,
+        };
+        Outcome {
+            state: xcb_core::session::classify(text, &facts),
+            text: text.into(),
+            facts,
+            tool_calls: Some(1),
+            diagnostic: None,
+        }
+    }
+
+    fn settle_turn(outcome: Outcome) -> std::result::Result<RouteResponse, Box<RouteFailure>> {
+        let route = RouteTaken {
+            provider: Provider::Devin,
+            account: Id::new("a_fixture").unwrap(),
+            model: "devin/swe-2-high".into(),
+            label: "SWE-2".into(),
+            reason: "fixture".into(),
+        };
+        settle(
+            &Id::new("route_fixture").unwrap(),
+            Id::new("s_fixture").unwrap(),
+            route,
+            Ok(outcome),
+            false,
+        )
+    }
+
+    #[test]
+    fn a_completed_turn_without_a_reply_or_changes_is_a_provider_error() {
+        for text in ["", "  \n"] {
+            let failure = settle_turn(settled(text, EffectState::None)).unwrap_err();
+            assert_eq!(failure.code, RouteCode::ProviderError);
+            assert_eq!(failure.status, "failed");
+            assert_eq!(failure.session.as_ref().unwrap().as_str(), "s_fixture");
+            let reported = serde_json::to_value(&failure.outcome).unwrap();
+            assert_eq!(reported["terminal"], "completed");
+            assert_eq!(reported["effects"], "none");
+            assert_eq!(reported["failure"], "no_reply");
+            // Only needs_input carries text; custody facts come from the turn.
+            assert!(failure.text.is_none() && failure.joined.is_none());
+        }
+        // Settled file changes without text, and a reply without changes,
+        // both remain completed.
+        let changed = settle_turn(settled("", EffectState::Settled)).unwrap();
+        assert_eq!(changed.status, "completed");
+        assert_eq!(changed.outcome.unwrap().failure, None);
+        let answered = settle_turn(settled("Fixed add.js.", EffectState::None)).unwrap();
+        assert_eq!(answered.status, "completed");
+        assert_eq!(answered.text.as_deref(), Some("Fixed add.js."));
     }
 
     #[tokio::test]

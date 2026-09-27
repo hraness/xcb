@@ -594,24 +594,17 @@ async fn route_with_admitted(
         excluded_routes,
         excluded_accounts,
     );
+    // A person reads this. Raw classifier scores and reflex generations stay
+    // in the `reflex` decision, which callers record as an observation.
     let reason = format!(
-        "{}{}{} · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}",
+        "{}{} · {} tier · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}",
         warning.unwrap_or_default(),
         classification.reason(),
-        reflex
-            .as_ref()
-            .map(|decision| format!(
-                " · route reflex g{} {} ({}{})",
-                decision.params_version,
-                decision.value,
-                decision.gate,
-                if config.extensions.reflexes.route == ReflexMode::Active {
-                    ""
-                } else {
-                    ", observed"
-                }
-            ))
-            .unwrap_or_default(),
+        if classification.frontier {
+            "frontier"
+        } else {
+            "standard"
+        },
         match class {
             TaskClass::Routine => "routine",
             TaskClass::Balanced => "balanced",
@@ -625,7 +618,7 @@ async fn route_with_admitted(
             .profile
             .free_offer
             .as_ref()
-            .map(|_| " · public promotion; account eligibility unverified")
+            .map(|_| " · public promotion, not confirmed for this account")
             .unwrap_or(""),
     );
     Ok(RouteDecision {
@@ -917,6 +910,104 @@ mod tests {
             reason(&store, &config, request(), &admitted).await,
             NO_ELIGIBLE_ROUTE
         );
+    }
+
+    /// The reason is for a person: task class, capability tier and the
+    /// relative profile, without raw classifier scores or reflex generations.
+    /// A public promotion only annotates the route; it never changes which
+    /// route wins or its quality, cost and latency.
+    #[tokio::test]
+    async fn route_reason_is_readable_and_a_public_promotion_never_changes_the_route() {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let devin = account(&store, Provider::Devin);
+        store
+            .set_models(
+                Provider::Devin,
+                &[
+                    model(Provider::Devin, "swe-2-high", None, None),
+                    model(Provider::Devin, "gpt-6-astra-medium", None, None),
+                    model(Provider::Devin, "swe-1-7-fast", None, None),
+                ],
+            )
+            .unwrap();
+        let config = Config::default();
+        let excluded = BTreeSet::new();
+        let excluded_accounts = BTreeSet::new();
+        let admitted = [Provider::Devin].into();
+        let request = || RouteRequest {
+            task: "In add.js the add function subtracts; change it so it adds.",
+            required_provider: None,
+            preferred_provider: None,
+            required_model: None,
+            excluded_routes: &excluded,
+            excluded_accounts: &excluded_accounts,
+            account: Some(&devin),
+        };
+        let plain = route_with_admitted(&store, &config, request(), &admitted)
+            .await
+            .unwrap();
+        for fact in [
+            " tier · ",
+            " task · Pareto P",
+            " · quality ",
+            " · relative cost ",
+            " · relative latency ",
+        ] {
+            assert!(plain.reason.contains(fact), "{}", plain.reason);
+        }
+        for internal in ["score", "route reflex", " g0", "(score)", "observed"] {
+            assert!(!plain.reason.contains(internal), "{}", plain.reason);
+        }
+        assert!(
+            plain.reflex.is_some(),
+            "the reflex decision is still returned"
+        );
+        let now = now_ms();
+        let offers = OfferState {
+            version: 1,
+            checked_at_ms: now,
+            next_check_ms: now + 1,
+            source_sha256: "a".repeat(64),
+            offers: vec![crate::offers::ModelOffer {
+                provider: Provider::Devin,
+                model_prefix: "swe-2-".into(),
+                surface: "devin_cli".into(),
+                kind: crate::offers::OfferKind::Free,
+                terms: "Free use of SWE-2 Free in Devin Desktop and CLI through October 10, 2026"
+                    .into(),
+                valid_until_ms: 1_791_676_800_000,
+                source: "https://devin.ai/pricing".into(),
+            }],
+        };
+        crate::private::create(
+            &store.root().join("offers.json"),
+            &serde_json::to_vec(&offers).unwrap(),
+        )
+        .unwrap();
+        let promoted = route_with_admitted(&store, &config, request(), &admitted)
+            .await
+            .unwrap();
+        assert_eq!(promoted.account, plain.account);
+        assert_eq!(promoted.model.key(), plain.model.key());
+        assert_eq!(promoted.profile.quality, plain.profile.quality);
+        assert_eq!(promoted.profile.relative_cost, plain.profile.relative_cost);
+        assert_eq!(
+            promoted.profile.relative_latency,
+            plain.profile.relative_latency
+        );
+        assert_eq!(promoted.profile.pareto_layer, plain.profile.pareto_layer);
+        // Before the promotion ends it is named, never as free use.
+        assert!(promoted.reason.starts_with(&plain.reason));
+        if promoted.profile.free_offer.is_some() {
+            assert!(
+                promoted
+                    .reason
+                    .ends_with(" · public promotion, not confirmed for this account")
+            );
+        }
+        assert!(!promoted.reason.contains("free"));
     }
 
     #[tokio::test]

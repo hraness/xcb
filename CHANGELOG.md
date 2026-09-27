@@ -10,6 +10,30 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+Devin coding tasks get what they need to use xcb's workspace tools, and a turn
+that ends without a reply or file changes is reported as a failure instead of
+a finished answer.
+
+- Each Devin task names xcb's workspace tools and their required arguments,
+  and Devin's tool list is short enough to show in full. Before, the list
+  overflowed into a file Devin could only open with a blocked tool, which
+  ended the turn with no reply.
+- When Devin asks to use one of its own file, shell, or web tools, xcb answers
+  with Devin's one-time reject choice instead of cancelling the request.
+  Those tools still have no access to your project.
+- When a provider finishes a turn with no reply and no file changes,
+  `xcb --json route` returns `status: "failed"` with code `provider_error`
+  and `outcome.failure: "no_reply"`, `xcb run` exits with status 1 and names
+  the session to reopen, a managed task waits for your reply instead of
+  showing as completed, and the terminal says the turn ended without a reply.
+  A turn that changed files still completes without a reply.
+- The route `reason` now reads as the classifier, capability tier, task
+  class, and relative quality, cost, and latency. Raw classifier scores and
+  reflex generation labels are gone. A public pricing promotion is named as
+  not confirmed for your account, and it never changes which route is chosen.
+
 ## 0.9.1 - 2026-09-27
 
 Every command's help fits on one screen and errors say what to run next,

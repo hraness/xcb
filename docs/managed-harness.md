@@ -100,8 +100,10 @@ the direct-session continuation loop beneath the supervisor.
 
 After settlement the supervisor records one of:
 
-- `completed`: a settled, completed provider turn. Checks remain worker-reported.
-- `needs_input`: a worker question or an exhausted automatic dispatch budget.
+- `completed`: a settled, completed provider turn that replied or changed
+  files. Checks remain worker-reported.
+- `needs_input`: a worker question, an exhausted automatic dispatch budget, or
+  a completed turn with no reply and no file changes.
 - `queued`: a permitted continuation or checkpointed quota failover.
 - `cancelled`: confirmed cancellation or cancellation before dispatch.
 - `failed`: a definite failure without completion.

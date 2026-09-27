@@ -37,6 +37,13 @@ const MAX_MODEL_CHOICES: usize = 4096;
 const MAX_WIRE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_IMAGE_BASE64: usize = (10 * 1024 * 1024_usize).div_ceil(3) * 4;
 const MAX_PROMPT_BYTES: usize = 1024 * 1024;
+/// Prepended to every tool-enabled prompt so the model has each workspace
+/// tool's call shape before its first call. Devin's own instructions still
+/// ask it to list a server's tools first; [`broker::compact_descriptors`]
+/// keeps that listing short enough to show in full. A denied native tool
+/// ends Devin's turn, so the guide also says those tools are blocked. Each
+/// `name {arguments}` pair lists that tool's required arguments.
+const TOOL_GUIDE: &str = "Use the xcb MCP server for all project access: call mcp_call_tool with server_name \"xcb\", tool_name and arguments. Tools and their required arguments: workspace_list {path} (\".\" is the project root); workspace_read {path} (returns text and revision); workspace_search {path, query}; workspace_write {path, text, expectedRevision} (null for a new file, otherwise the current revision from workspace_read or your last write); workspace_mkdir {path, parents}; workspace_remove {path, expectedRevision}; workspace_rename {from, to, expectedRevision}; workspace_exec {argv, cwd, timeoutMs, network} (network must be \"none\"). Native file, shell and web tools are blocked, and calling one can end your turn. End with a short reply that says what you changed.";
 
 pub(crate) struct DevinOptions {
     /// Disposable empty process directory, never the consumer workspace.
@@ -85,6 +92,10 @@ pub(crate) struct DevinProtocol {
     unexpected_notification: Option<String>,
     #[cfg(test)]
     compaction_observations: Vec<Value>,
+    /// Offered option identities and kinds with the selected outcome, so the
+    /// native fixture can show which answer Devin continued after.
+    #[cfg(test)]
+    permission_observations: Vec<Value>,
     listed: bool,
     output_tokens: u64,
     /// Per-request initialization deadline; tests shorten it.
@@ -272,6 +283,8 @@ impl DevinProtocol {
             unexpected_notification: None,
             #[cfg(test)]
             compaction_observations: Vec::new(),
+            #[cfg(test)]
+            permission_observations: Vec::new(),
             listed: false,
             output_tokens: 0,
             init_deadline: INIT_DEADLINE,
@@ -284,10 +297,7 @@ impl DevinProtocol {
             ));
         }
         let text = if self.options.tools {
-            format!(
-                "{}\n\nUse only the xcb MCP server for workspace access. Native tools have no workspace authority. List the xcb tools before calling them.\n\n{}",
-                self.instructions, prompt.text
-            )
+            format!("{}\n\n{TOOL_GUIDE}\n\n{}", self.instructions, prompt.text)
         } else {
             format!("{}\n\n{}", self.instructions, prompt.text)
         };
@@ -435,7 +445,17 @@ impl DevinProtocol {
         }
         require(model && mode, "Devin model/mode metadata missing")
     }
-    fn permission(&mut self, p: &Value) -> Result<bool> {
+    /// Answers one permission request and reports whether it was allowed.
+    /// Only the one-time allow for an exact, still-unapproved broker
+    /// declaration is ever selected. Every other request selects the offered
+    /// one-time reject, so Devin reports the refusal to the model and the
+    /// turn can continue with broker tools. ACP reserves `cancelled` for a
+    /// cancelled prompt turn; it is sent only when no one-time reject is
+    /// offered. `reject_always` is never chosen, because it asks Devin to
+    /// remember a rule in configuration that xcb keeps immutable. A reject
+    /// grants nothing: broker calls still run only after this approval, and
+    /// native tools have no workspace access.
+    fn permission(&mut self, p: &Value) -> Result<(bool, Value)> {
         self.session_scope(p)?;
         require(
             self.ready && !self.completed,
@@ -447,29 +467,37 @@ impl DevinProtocol {
             .filter(|v| v.len() <= 32)
             .ok_or(Error::Protocol("Devin permission options"))?;
         let mut seen = BTreeSet::new();
+        let mut reject = None;
         for option in options {
+            let option_id = identity(&option["optionId"])?;
             require(
-                seen.insert(identity(&option["optionId"])?),
+                seen.insert(option_id.clone()),
                 "Devin duplicate permission choice",
             )?;
+            if reject.is_none() && option["kind"] == "reject_once" {
+                reject = Some(option_id);
+            }
         }
         let allow = options
             .iter()
             .any(|o| o["optionId"] == "allow_once" && o["kind"] == "allow_once");
-        let Some(call) = self.calls.get_mut(&id) else {
-            return Ok(false);
-        };
-        if self.options.tools
+        if let Some(call) = self.calls.get_mut(&id)
+            && self.options.tools
             && self.broker_names.contains(&call.name)
             && !call.approved
             && !call.finished
             && allow
         {
             call.approved = true;
-            Ok(true)
-        } else {
-            Ok(false)
+            return Ok((true, json!({"outcome":"selected","optionId":"allow_once"})));
         }
+        Ok((
+            false,
+            match reject {
+                Some(option_id) => json!({"outcome":"selected","optionId":option_id}),
+                None => json!({"outcome":"cancelled"}),
+            },
+        ))
     }
     /// Pure ACP transition. A model can name a native tool, but this creates
     /// no host capability. Any completed native effect is a protocol failure.
@@ -554,9 +582,26 @@ impl DevinProtocol {
                 "Devin duplicate callback",
             )?;
             if method == "session/request_permission" {
-                let allow = self.permission(p)?;
-                outgoing.push(json!({"jsonrpc":"2.0","id":id,"result":{"outcome":if allow {json!({"outcome":"selected","optionId":"allow_once"})}else{json!({"outcome":"cancelled"})}}}));
-                if !allow {
+                let (allow, outcome) = self.permission(p)?;
+                #[cfg(test)]
+                if self.permission_observations.len() < 64 {
+                    // `permission` validated these identities; option names
+                    // and tool details stay out of the fixture evidence.
+                    let offered: Vec<Value> = p["options"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|option| json!({"optionId":option["optionId"],"kind":option["kind"].as_str().filter(|kind| kind.len() <= 32)}))
+                        .collect();
+                    self.permission_observations
+                        .push(json!({"offered":offered,"selected":outcome}));
+                }
+                // A one-time reject tells the model and the turn continues, so
+                // its reply decides the outcome. Only a cancelled request ends
+                // the turn waiting on a person.
+                let cancelled = outcome["outcome"] == "cancelled";
+                outgoing.push(json!({"jsonrpc":"2.0","id":id,"result":{"outcome":outcome}}));
+                if !allow && cancelled {
                     events.push(Event::Attention);
                 }
             } else {
@@ -800,7 +845,7 @@ impl DevinProtocol {
             "tools/list" => {
                 require(self.mcp_initialized, "Devin MCP uninitialized")?;
                 self.listed = true;
-                json!({"tools":broker::descriptors()})
+                json!({"tools":broker::compact_descriptors()})
             }
             "ping" => json!({}),
             "tools/call" => {

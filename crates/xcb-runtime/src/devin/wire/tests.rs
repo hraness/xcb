@@ -33,8 +33,13 @@ fn declaration(id: &str, name: &str, args: Value) -> Value {
     let qualified = format!("mcp__xcb__{name}");
     json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"tool_call","toolCallId":id,"rawInput":args,"_meta":{"cognition.ai/toolName":qualified,"cognition.ai/inferenceToolName":qualified,"cognition.ai/eventType":"mcp_tool_call"}}}})
 }
+/// The tool permission choices Devin offers: allow once, allow for the
+/// session, and reject once.
 fn permission(callback: &str, call: &str) -> Value {
-    json!({"jsonrpc":"2.0","id":callback,"method":"session/request_permission","params":{"sessionId":"fixture-session","toolCall":{"toolCallId":call},"options":[{"optionId":"allow_once","kind":"allow_once"},{"optionId":"allow_session","kind":"allow_always"}]}})
+    json!({"jsonrpc":"2.0","id":callback,"method":"session/request_permission","params":{"sessionId":"fixture-session","toolCall":{"toolCallId":call},"options":[{"optionId":"allow_once","kind":"allow_once"},{"optionId":"allow_session","kind":"allow_always"},{"optionId":"reject_once","kind":"reject_once"}]}})
+}
+fn rejected() -> Value {
+    json!({"outcome":"selected","optionId":"reject_once"})
 }
 fn mcp(id: u64, name: &str, args: Value) -> Request {
     let (reply, _) = oneshot::channel();
@@ -198,8 +203,9 @@ fn extension_compatibility_retains_core_update_and_effect_guards() {
     )
     .unwrap();
     let (events, replies) = accept_frame(&mut p, permission("deny", "native")).unwrap();
-    assert!(matches!(events.as_slice(), [Event::Attention]));
-    assert_eq!(replies[0]["result"]["outcome"]["outcome"], "cancelled");
+    // The model hears the one-time reject and keeps going; no one is paged.
+    assert!(events.is_empty());
+    assert_eq!(replies[0]["result"]["outcome"], rejected());
     assert!(
         accept_frame(
             &mut p,
@@ -254,9 +260,9 @@ fn prompt_prefix_matches_the_enabled_tool_surface() {
             )
             .unwrap();
         let expected = if tools {
-            "Host instructions.\n\nUse only the xcb MCP server for workspace access. Native tools have no workspace authority. List the xcb tools before calling them.\n\nApplication prompt."
+            format!("Host instructions.\n\n{TOOL_GUIDE}\n\nApplication prompt.")
         } else {
-            "Host instructions.\n\nApplication prompt."
+            "Host instructions.\n\nApplication prompt.".into()
         };
         assert_eq!(
             wire,
@@ -267,6 +273,41 @@ fn prompt_prefix_matches_the_enabled_tool_surface() {
             ]}})
         );
     }
+}
+
+#[test]
+fn tool_guide_names_real_broker_tools_with_their_required_arguments() {
+    let guide = TOOL_GUIDE;
+    assert!(guide.contains("mcp_call_tool") && guide.contains("server_name \"xcb\""));
+    // Asking the model to list tools first led Devin to an overflow file.
+    assert!(!guide.contains("mcp_list_tools") && !guide.contains("List the xcb tools"));
+    assert!(guide.contains("Native file, shell and web tools are blocked"));
+    let descriptors = broker::descriptors();
+    let mut named = 0;
+    for entry in guide.split(';') {
+        let Some((head, rest)) = entry.split_once(" {") else {
+            continue;
+        };
+        let name = head.rsplit(' ').next().unwrap();
+        let arguments: Vec<&str> = rest.split('}').next().unwrap().split(", ").collect();
+        let descriptor = descriptors
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is not a broker tool"));
+        assert_eq!(
+            descriptor["inputSchema"]["required"],
+            json!(arguments),
+            "{name} lists the wrong required arguments"
+        );
+        named += 1;
+    }
+    assert_eq!(named, 8, "the guide covers every workspace tool");
+    assert!(
+        descriptors
+            .iter()
+            .filter(|tool| tool["name"].as_str().unwrap().starts_with("workspace_"))
+            .all(|tool| guide.contains(&format!("{} {{", tool["name"].as_str().unwrap())))
+    );
 }
 
 #[test]
@@ -302,7 +343,7 @@ fn recognized_compaction_retains_validation_before_extension_fallback() {
 fn only_an_exact_preceding_broker_declaration_receives_one_approval() {
     let mut p = protocol();
     let (_, reply) = p.accept(permission("unknown", "orphan")).unwrap();
-    assert_eq!(reply[0]["result"]["outcome"]["outcome"], "cancelled");
+    assert_eq!(reply[0]["result"]["outcome"], rejected());
     p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
         .unwrap();
     let (_, reply) = p.accept(permission("permission-1", "call-1")).unwrap();
@@ -311,8 +352,82 @@ fn only_an_exact_preceding_broker_declaration_receives_one_approval() {
         json!({"outcome":"selected","optionId":"allow_once"})
     );
     let (_, reply) = p.accept(permission("permission-2", "call-1")).unwrap();
-    assert_eq!(reply[0]["result"]["outcome"]["outcome"], "cancelled");
+    assert_eq!(reply[0]["result"]["outcome"], rejected());
     assert!(p.accept(permission("permission-2", "call-1")).is_err());
+}
+
+#[test]
+fn a_denied_call_selects_the_offered_one_time_reject_and_never_cancels_the_turn() {
+    let native = |id: &str, name: &str| {
+        let mut value = declaration(id, "workspace_read", json!({"file_path":"/private/secret"}));
+        value["params"]["update"]["_meta"] = json!({"cognition.ai/inferenceToolName":name});
+        value
+    };
+    let request = |callback: &str, call: &str, options: Value| {
+        let mut value = permission(callback, call);
+        value["params"]["options"] = options;
+        value
+    };
+    let mut p = protocol();
+    for (index, name) in ["read", "edit", "write", "exec", "webfetch"]
+        .iter()
+        .enumerate()
+    {
+        let call = format!("native-{index}");
+        p.accept(native(&call, name)).unwrap();
+        let (events, replies) = p
+            .accept(permission(&format!("deny-{index}"), &call))
+            .unwrap();
+        assert!(events.is_empty(), "{name}");
+        assert_eq!(replies[0]["result"]["outcome"], rejected(), "{name}");
+        assert!(!p.calls[&call].approved, "{name}");
+        assert!(!p.completed, "{name}");
+    }
+    // Devin's network prompt names its reject option differently; the kind,
+    // not the name, selects it.
+    p.accept(native("fetch", "webfetch")).unwrap();
+    let (_, replies) = p
+        .accept(request(
+            "network",
+            "fetch",
+            json!([{"optionId":"net_allow_once","kind":"allow_once"},{"optionId":"net_deny","kind":"reject_once"}]),
+        ))
+        .unwrap();
+    assert_eq!(
+        replies[0]["result"]["outcome"],
+        json!({"outcome":"selected","optionId":"net_deny"})
+    );
+    // A remembered rejection is never chosen, and without a one-time reject
+    // the request falls back to ACP's cancelled outcome.
+    p.accept(native("remembered", "exec")).unwrap();
+    let (events, replies) = p
+        .accept(request(
+            "no-reject",
+            "remembered",
+            json!([{"optionId":"allow_once","kind":"allow_once"},{"optionId":"reject_always","kind":"reject_always"}]),
+        ))
+        .unwrap();
+    assert!(matches!(events.as_slice(), [Event::Attention]));
+    assert_eq!(
+        replies[0]["result"]["outcome"],
+        json!({"outcome":"cancelled"})
+    );
+    // A broker call is still allowed only once, and a native tool that
+    // reports completion after its rejection is still a protocol failure.
+    p.accept(declaration("broker", "workspace_read", json!({"path":"a"})))
+        .unwrap();
+    let (events, replies) = p.accept(permission("allow", "broker")).unwrap();
+    assert!(events.is_empty());
+    assert_eq!(
+        replies[0]["result"]["outcome"],
+        json!({"outcome":"selected","optionId":"allow_once"})
+    );
+    let (_, replies) = p.accept(permission("again", "broker")).unwrap();
+    assert_eq!(replies[0]["result"]["outcome"], rejected());
+    assert!(
+        p.accept(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"native-3","status":"completed"}}}))
+            .is_err()
+    );
 }
 
 #[test]
@@ -491,7 +606,7 @@ fn completed_native_notebook_is_never_treated_as_brokered_work() {
     native["params"]["update"]["_meta"] = json!({"cognition.ai/inferenceToolName":"notebook_read"});
     p.accept(native).unwrap();
     let (_, reply) = p.accept(permission("deny", "native")).unwrap();
-    assert_eq!(reply[0]["result"]["outcome"]["outcome"], "cancelled");
+    assert_eq!(reply[0]["result"]["outcome"], rejected());
     assert!(p.accept(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"native","status":"completed"}}})).is_err());
 }
 

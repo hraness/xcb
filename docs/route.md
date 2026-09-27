@@ -56,8 +56,11 @@ optional judge that can only order already-eligible routes. See
 ## Response
 
 A selected route reports `provider`, `account`, the full `model` key, a display
-`label`, and a bounded heuristic `reason` (deterministic or judge-selected, task
-class, Pareto layer, relative profile). A dry run returns:
+`label`, and a bounded heuristic `reason` for a person to read: how the task was
+classified, the capability tier (`standard` or `frontier`), the task class, the
+Pareto layer (models ranked by relative quality, cost and latency), and the
+relative profile. A public pricing promotion is named in the reason but never
+changes which route wins or its relative cost. A dry run returns:
 
 ```json
 {
@@ -69,13 +72,14 @@ class, Pareto layer, relative profile). A dry run returns:
     "account": "a_…",
     "model": "claude/sonnet/low",
     "label": "Sonnet · low",
-    "reason": "deterministic · balanced task · Pareto P1 · quality 92 · relative cost 55 · relative latency 50"
+    "reason": "deterministic fallback · classifier not available · standard tier · balanced task · Pareto P1 · quality 92 · relative cost 55 · relative latency 50"
   }
 }
 ```
 
 An executed route returns `status: "completed"` only for a completed, joined,
-settled turn with no pending attention:
+settled turn with no pending attention that produced answer text or file
+changes:
 
 ```json
 {
@@ -116,10 +120,13 @@ Failures return a nonzero exit code and a closed object:
 Codes are `invalid_request`, `unavailable` (no eligible route, unknown account
 or model, unadmitted runtime, missing credentials), `busy` (account custody
 held by live work), `deadline` (the caller's `timeoutMs` expired), `cancelled`,
-`provider_error` (the turn failed or hit a provider limit; `outcome.terminal`
-and `outcome.failure` carry the exact detail, including `account_quota` /
-`model_quota`), `custody_unproven` (process exit or effect settlement could not
-be proven — the account record stays held; do not retry blindly), and
+`provider_error` (the turn failed, hit a provider limit, or ended without a
+reply; `outcome.terminal` and `outcome.failure` carry the exact detail,
+including `account_quota` / `model_quota`, and `no_reply` when the provider
+completed the turn with no answer text and no file changes — the saved
+`session` can be resumed), `custody_unproven` (process exit or effect
+settlement could not be proven — the account record stays held; do not retry
+blindly), and
 `needs_input` (the provider stopped with a question; `text` carries it and the
 saved `session` can be resumed by a person).
 

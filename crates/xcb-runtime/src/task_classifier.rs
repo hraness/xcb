@@ -105,10 +105,12 @@ impl Classification {
         })
     }
 
+    /// The classifier and the task kind it chose, for a person to read. The
+    /// raw score stays out: it has no meaning outside the fitted head.
     pub fn reason(&self) -> String {
-        match (&self.kind, self.score_milli) {
-            (Some(kind), Some(score)) => format!("{} · {kind} · score {score}", self.source),
-            _ => self.source.into(),
+        match &self.kind {
+            Some(kind) => format!("{} · {kind}", self.source),
+            None => self.source.into(),
         }
     }
 }

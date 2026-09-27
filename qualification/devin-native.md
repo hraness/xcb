@@ -47,8 +47,13 @@ and config writes, and web fetches. A positive scenario requires a brokered
 workspace write and read to succeed. Each permission-denied native effect gets
 a separate disposable process because Devin can end its turn immediately when
 permission is denied; the fixture still requires the failed native call to be
-observed. Every tool-bearing model request must advertise the exact checked-in
-native tool schemas. Automatic title requests advertise no tools and receive
+observed. xcb answers a permission request it refuses with Devin's offered
+`reject_once` choice; ACP's `cancelled` outcome is reserved for a cancelled
+prompt turn and is sent only when no one-time reject is offered. Each
+scenario's `permission_observations` records the offered option identities
+and kinds and the selected answer, never option names or tool details. Every
+tool-bearing model request must advertise the exact checked-in native tool
+schemas. Automatic title requests advertise no tools and receive
 static text without advancing the probes. The harness checks canaries never
 reach requests, native effects never appear, the immutable configuration
 survives, a PNG prompt is accepted, and every provider process group and bridge

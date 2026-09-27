@@ -863,7 +863,7 @@ fn print_json(value: impl serde::Serialize) -> Result<()> {
 }
 
 fn run_output(session: &Id, result: &runner::Outcome) -> serde_json::Value {
-    let mut output = json!({"version":1,"session":session,"state":result.state,"outcome":result.facts,"text":result.text});
+    let mut output = json!({"version":1,"session":session,"state":result.state,"outcome":result.facts.reported(&result.text),"text":result.text});
     if let Some(diagnostic) = &result.diagnostic {
         output["diagnostic"] = json!(diagnostic);
     }
@@ -877,11 +877,24 @@ fn run_exit_code(result: &runner::Outcome) -> i32 {
         && !result.facts.pending_attention
         && result.facts.failure.is_none()
         && result.state == xcb_core::session::State::Idle
+        && !xcb_core::policy::no_reply(&result.text, &result.facts)
     {
         0
     } else {
         1
     }
+}
+
+/// `xcb run` when the provider completed its turn without a reply or file
+/// changes: one sentence, and the session to reopen.
+fn no_reply_error(provider: Provider, session: &Id) -> Error {
+    Error::guided(
+        format!(
+            "{} ended the turn without a reply or file changes; reopen the session to continue, or run again with --model to use another model",
+            provider_name(provider)
+        ),
+        format!("xcb resume {session}"),
+    )
 }
 
 fn import_acknowledgement(id: &Id) -> serde_json::Value {
@@ -1488,7 +1501,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 }
             });
             let result = kernel::execute(
-                store,
+                store.clone(),
                 session.id.clone(),
                 prompt,
                 attachments,
@@ -1501,6 +1514,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             let result = result?;
             if cli.json {
                 print_json(run_output(&session.id, &result))?;
+            } else if xcb_core::policy::no_reply(&result.text, &result.facts) {
+                // Failover can move the session to another provider.
+                let provider = store
+                    .session(&session.id)?
+                    .map_or(session.model.provider, |current| current.model.provider);
+                return Err(no_reply_error(provider, &session.id));
             } else {
                 println!("{}", result.text);
             }
@@ -4327,6 +4346,49 @@ mod tests {
         assert_eq!(
             run_output(&session, &result)["diagnostic"],
             "provider protocol error: fixture failure"
+        );
+    }
+
+    #[test]
+    fn a_run_without_a_reply_or_changes_fails_with_a_next_step() {
+        use xcb_core::{
+            policy::{EffectState, TurnFacts},
+            session::State,
+        };
+        let mut result = runner::Outcome {
+            tool_calls: Some(1),
+            diagnostic: None,
+            text: " \n".into(),
+            facts: TurnFacts {
+                terminal: Terminal::Completed,
+                joined: true,
+                effects: EffectState::None,
+                pending_attention: false,
+                failure: None,
+            },
+            state: State::Idle,
+        };
+        let session = Id::new("s_silent").unwrap();
+        assert_eq!(run_exit_code(&result), 1);
+        let output = run_output(&session, &result);
+        assert_eq!(output["outcome"]["terminal"], "completed");
+        assert_eq!(output["outcome"]["failure"], "no_reply");
+        // The recorded facts are unchanged; only the report names the gap.
+        assert_eq!(result.facts.failure, None);
+        let error = no_reply_error(Provider::Devin, &session);
+        assert_eq!(
+            ux::next_step(&error).as_deref(),
+            Some("xcb resume s_silent")
+        );
+        let sentence = ux::sentence(&error);
+        assert!(sentence.starts_with("Devin ended the turn without a reply or file changes"));
+        assert!(sentence.contains("--model"));
+        // Settled file changes without a reply still succeed.
+        result.facts.effects = EffectState::Settled;
+        assert_eq!(run_exit_code(&result), 0);
+        assert_eq!(
+            run_output(&session, &result)["outcome"]["failure"],
+            json!(null)
         );
     }
 

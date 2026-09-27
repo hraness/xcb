@@ -31,6 +31,10 @@ use xcb_core::{
     ui::{Intent, RoutePreview, Update},
 };
 
+/// Shown in a direct session when the provider completed a turn without a
+/// reply or file changes, so the empty turn does not read as an answer.
+const NO_REPLY_NOTICE: &str = "The turn ended without a reply or file changes. Send another message to continue, or choose another model with /model.";
+
 pub fn choose_model(
     store: &Store,
     provider: Provider,
@@ -1335,6 +1339,7 @@ pub async fn serve(
                         match Pane::parse(text.as_bytes()) { Ok(pane) => queue(&outbox, Update::PaneCandidate(pane)), Err(error) => queue(&outbox, Update::Notice(format!("Generated pane rejected: {error}. The current pane is unchanged."))) }
                     }
                     Ok(outcome) if outcome.facts.terminal != Terminal::Completed => queue(&outbox, Update::Notice(format!("Turn stopped: {}", outcome.state.label()))),
+                    Ok(outcome) if !was_pane && xcb_core::policy::no_reply(&outcome.text, &outcome.facts) => queue(&outbox, Update::Notice(NO_REPLY_NOTICE.into())),
                     Err(error) => queue(&outbox, Update::Notice(error.to_string())),
                     _ => (),
                 }

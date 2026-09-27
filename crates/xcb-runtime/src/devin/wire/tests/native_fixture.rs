@@ -194,7 +194,7 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         .filter(|call| !codec.broker_names.contains(&call.name))
         .map(|call| json!({"name":call.name,"finished":call.finished,"approved":call.approved}))
         .collect();
-    let evidence = json!({"status":status,"process_joined":joined,"bridge_joined":bridge_joined,"provider_sha256":expected_provider,"helper_sha256":spec.helper_sha256,"production_policy_sha256":crate::digest(&production),"fixture_policy_sha256":crate::digest(&policy),"calls":recorded,"native_calls":native_calls,"denials":denials,"image_prompt":true,"mcp_proposed_version":codec.mcp_proposed_version,"mcp_metadata_seen":codec.mcp_metadata_seen,"unexpected_notification":codec.unexpected_notification,"compaction_observations":codec.compaction_observations});
+    let evidence = json!({"status":status,"process_joined":joined,"bridge_joined":bridge_joined,"provider_sha256":expected_provider,"helper_sha256":spec.helper_sha256,"production_policy_sha256":crate::digest(&production),"fixture_policy_sha256":crate::digest(&policy),"calls":recorded,"native_calls":native_calls,"denials":denials,"image_prompt":true,"mcp_proposed_version":codec.mcp_proposed_version,"mcp_metadata_seen":codec.mcp_metadata_seen,"unexpected_notification":codec.unexpected_notification,"compaction_observations":codec.compaction_observations,"permission_observations":codec.permission_observations});
     private::create(
         &directory.join("native-evidence.json"),
         &serde_json::to_vec_pretty(&evidence).unwrap(),
@@ -207,6 +207,21 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
     let (terminal, text) = outcome
         .expect("fixture deadline")
         .expect("native fixture protocol");
+    // A refused call selects Devin's offered one-time reject; ACP's
+    // cancelled outcome would claim the whole prompt turn was cancelled.
+    for observation in &codec.permission_observations {
+        let reject = observation["offered"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|option| option["kind"] == "reject_once")
+            .map(|option| option["optionId"].clone());
+        let selected = &observation["selected"]["optionId"];
+        assert!(
+            selected == "allow_once" || reject.as_ref().is_none_or(|reject| selected == reject),
+            "{observation}"
+        );
+    }
     if matches!(spec.scenario, Scenario::Compaction) {
         assert!(
             !codec.compaction_observations.is_empty(),

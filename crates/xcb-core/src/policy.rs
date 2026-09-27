@@ -27,6 +27,11 @@ pub enum Failure {
     Policy,
     Transport,
     Unknown,
+    /// Reported, never recorded: the provider completed the turn without
+    /// answer text or workspace effects (see [`no_reply`]). Recorded facts
+    /// keep `failure: None`, so continuation can still act on the turn and
+    /// earlier builds can still read the settled-outcome record.
+    NoReply,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +42,28 @@ pub struct TurnFacts {
     pub effects: EffectState,
     pub pending_attention: bool,
     pub failure: Option<Failure>,
+}
+
+impl TurnFacts {
+    /// The facts a result reports for a turn that ended with `text`: a turn
+    /// that [`no_reply`] describes reports [`Failure::NoReply`].
+    pub fn reported(&self, text: &str) -> Self {
+        let mut facts = self.clone();
+        if no_reply(text, self) {
+            facts.failure = Some(Failure::NoReply);
+        }
+        facts
+    }
+}
+
+/// A turn the provider reported as completed that produced no answer text
+/// and no workspace effects. Nothing tells the caller whether the task was
+/// done, so no surface may present it as a finished answer.
+pub fn no_reply(text: &str, facts: &TurnFacts) -> bool {
+    facts.terminal == Terminal::Completed
+        && facts.failure.is_none()
+        && facts.effects == EffectState::None
+        && text.trim().is_empty()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
