@@ -80,12 +80,12 @@ export default function Home() {
               {
                 label: "As your coding agent",
                 summary: "Type work into one thread that spans your projects. xcb picks the project and an account that can take the task, and the task keeps running after you close the terminal.",
-                example: <><CodeBlock code={agentExample} language="text" /><a className="xcb-text-link" href="/docs/getting-started">Getting started →</a></>,
+                example: <><CodeBlock code={agentExample} language="text" copyValue="xcb" copyLabel="Copy command" /><a className="xcb-text-link" href="/docs/getting-started">Getting started →</a></>,
               },
               {
                 label: "Inside your agent or app",
                 summary: "Your agent sends one JSON task to xcb --json route and gets back the result, the account and model xcb picked, and a session it can resume. Apps can embed the TypeScript SDK instead, where the app names the account and model.",
-                example: <><CodeBlock code={routeExample} /><a className="xcb-text-link" href="/docs/route">Route tasks →</a></>,
+                example: <><CodeBlock code={routeExample} copyValue="xcb --json route < task.json" copyLabel="Copy command" /><a className="xcb-text-link" href="/docs/route">Route tasks →</a></>,
               },
             ]}
           />
@@ -107,7 +107,7 @@ export default function Home() {
             <dl className="xcb-status-list">
               {readiness.map((row) => (
                 <div key={row.name}>
-                  <dt>{row.mark === null ? null : <ProviderMark mark={row.mark} label={row.name} size={20} />}{row.name}</dt>
+                  <dt>{row.mark === null ? null : <span aria-hidden="true"><ProviderMark mark={row.mark} label={row.name} size={20} /></span>}{row.name}</dt>
                   <dd>{row.detail}</dd>
                 </div>
               ))}

@@ -10,6 +10,27 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.10.2 - 2026-09-27
+
+xcb reconnects after a relay outage, recognizes accounts that need a fresh
+sign-in, and lets Claude run on Linux after its sandbox checks pass. The
+install and documentation pages are easier to use on a phone.
+
+- A linked background supervisor stays running while it connects or waits
+  to retry, so it can receive remote commands when the network recovers.
+- Claude on Linux becomes available only after the existing sandbox checks
+  pass for the installed bubblewrap build and current system settings.
+- `xcb setup` prefers a working sign-in and asks you to reconnect an account
+  whose credentials were rejected before reporting it ready.
+- Exact-version upgrades find older releases directly. `--json upgrade`
+  and `--json update install` return one JSON result and send installer
+  diagnostics to stderr.
+- Custom installation directories are quoted safely in shell startup files
+  and copied PATH instructions, including directories with shell punctuation.
+- Phone readers can open documentation navigation when they need it.
+  Example copy buttons copy commands without their output, and install
+  instructions link to the Linux sandbox prerequisites.
+
 ## 0.10.1 - 2026-09-27
 
 Devin now finishes the tasks xcb routes to it, and xcb reports a turn that ends

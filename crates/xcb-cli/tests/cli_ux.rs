@@ -73,10 +73,15 @@ impl Sandbox {
     /// `version_line`. xcb finds it, but it is not a build xcb supports, so
     /// nothing ever runs it.
     fn fake_provider(&self, name: &str, version_line: &str) {
+        self.script(
+            &self.root.join("bin").join(name),
+            &format!("#!/bin/sh\necho '{version_line}'\n"),
+        );
+    }
+    fn script(&self, path: &Path, body: &str) {
         use std::os::unix::fs::PermissionsExt as _;
-        let path = self.root.join("bin").join(name);
-        std::fs::write(&path, format!("#!/bin/sh\necho '{version_line}'\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
 
@@ -311,6 +316,43 @@ fn setup_refuses_a_turned_off_account_and_names_the_fix() {
         stderr.ends_with(&format!("is turned off.\n→ xcb accounts enable {id}\n")),
         "{stderr}"
     );
+}
+
+#[test]
+fn setup_prefers_a_healthy_enabled_account_over_rejected_or_missing_credentials() {
+    let sandbox = Sandbox::new("setup-healthy");
+    let mut ids: Vec<_> = (0..4).map(|_| sandbox.add_claude()).collect();
+    ids.sort();
+    let store = xcb_runtime::store::Store::open(&sandbox.state()).unwrap();
+    for index in [0, 1, 3] {
+        let id = xcb_core::Id::new(&ids[index]).unwrap();
+        xcb_runtime::private::create(
+            &store.account_root(&id).unwrap().join("subscription-token"),
+            b"sk-ant-oat01-synthetic_fixture_credential",
+        )
+        .unwrap();
+    }
+    let rejected = xcb_core::Id::new(&ids[0]).unwrap();
+    let db = rusqlite::Connection::open(sandbox.state().join("xcb.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO account_auth_failures(account,generation,run) VALUES(?1,NULL,'r_fixture')",
+        [&ids[0]],
+    )
+    .unwrap();
+    drop(db);
+    store
+        .set_account_enabled(&xcb_core::Id::new(&ids[1]).unwrap(), false)
+        .unwrap();
+
+    // Provider discovery fails on the empty PATH after choosing an account.
+    // No provider or browser can run, and no failure marker is cleared.
+    let output = sandbox.run(&["setup", "claude"], &[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stdout = text(&output.stdout);
+    assert!(stdout.contains(&format!(" · {}\n", ids[3])), "{stdout}");
+    assert!(store.authentication_required(&rejected).unwrap());
+    assert!(store.unsettled_runs().unwrap().is_empty());
+    assert_eq!(store.accounts().unwrap().len(), 4);
 }
 
 #[test]
@@ -550,6 +592,76 @@ fn upgrading_to_an_older_release_needs_an_explicit_flag() {
         value["error"]["next"],
         "xcb upgrade 0.0.1 --allow-downgrade"
     );
+}
+
+#[test]
+fn json_upgrade_reports_the_installed_release_without_installer_output_on_stdout() {
+    let sandbox = Sandbox::new("upgrade-json");
+    let state = xcb_runtime::private::directory(&sandbox.state()).unwrap();
+    let installer = sandbox.root.join("install-fixture.sh");
+    sandbox.script(
+        &installer,
+        "#!/bin/sh\n[ \"$XCB_VERSION\" = '99.0.1' ] || exit 42\n[ \"$XCB_ADD_PATH\" = no ] || exit 43\nprintf '%s\\n' \"$XCB_VERSION\" > \"$XCB_INSTALL_PREFIX/installed-version\"\nprintf 'installer fixture output\\n'\n",
+    );
+    xcb_runtime::private::create(
+        &state.join("install.json"),
+        &serde_json::to_vec(&serde_json::json!({
+            "helperPath": installer,
+            "prefix": sandbox.root,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        std::env::consts::OS
+    };
+    let asset = format!("xcb-99.0.1-{os}-{}.tar.gz", std::env::consts::ARCH);
+    let release = serde_json::json!({
+        "tag_name": "v99.0.1", "draft": false, "prerelease": false,
+        "assets": [{"name": asset}, {"name": format!("{asset}.sha256")}],
+    });
+    sandbox.script(
+        &sandbox.root.join("bin/curl"),
+        &format!(
+            "#!/bin/sh\nfor arg do url=\"$arg\"; done\n[ \"$url\" = 'https://api.github.com/repos/hraness/xcb/releases/tags/v99.0.1' ] || exit 44\nprintf '%s\\n' '{release}'\n"
+        ),
+    );
+    for args in [
+        &["--json", "upgrade", "99.0.1"][..],
+        &["--json", "update", "install", "v99.0.1"],
+    ] {
+        let output = sandbox.run(args, &[]);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "version": 1, "previous": env!("CARGO_PKG_VERSION"),
+                "current": "99.0.1", "changed": true,
+            })
+        );
+        assert!(text(&output.stderr).contains("installer fixture output"));
+        assert_eq!(
+            std::fs::read_to_string(sandbox.root.join("installed-version")).unwrap(),
+            "99.0.1\n"
+        );
+    }
+}
+
+#[test]
+fn json_update_daemon_reports_a_disabled_check_without_network_access() {
+    let sandbox = Sandbox::new("update-daemon-json");
+    assert!(sandbox.run(&["update", "disable"], &[]).status.success());
+    let output = sandbox.run(&["--json", "update", "daemon"], &[]);
+    assert!(output.status.success(), "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result,
+        serde_json::json!({"version": 1, "checked": false, "upgrade": null})
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
 }
 
 #[test]
@@ -1027,12 +1139,18 @@ fn setup_checks_the_build_is_supported_before_sign_in() {
     assert_eq!(devin.status.code(), Some(1), "{devin:?}");
     assert_eq!(text(&devin.stdout), "");
     let stderr = text(&devin.stderr);
-    let expected = if cfg!(target_os = "macos") {
-        "✗ xcb can't run Devin 0.0.1 yet; it runs only provider builds it has checked.\n→ install a supported Devin build (xcb.sh/docs/providers lists them)\n"
-    } else {
-        "✗ xcb can't run Devin on this system yet; provider runs need macOS for now.\n"
-    };
-    assert!(stderr.ends_with(expected), "{stderr}");
+    assert!(stderr.contains("Devin"), "{stderr}");
+    if cfg!(target_os = "linux") {
+        assert!(stderr.contains("macOS ARM64"), "{stderr}");
+        assert!(stderr.contains("use Claude on Linux"), "{stderr}");
+        assert!(
+            stderr.contains("xcb.sh/docs/providers#claude-on-linux"),
+            "{stderr}"
+        );
+    } else if cfg!(target_os = "macos") {
+        assert!(stderr.contains("0.0.1"), "{stderr}");
+        assert!(stderr.contains("xcb.sh/docs/providers"), "{stderr}");
+    }
     assert!(!stderr.contains("qualified"), "{stderr}");
     let accounts = sandbox.run(&["--json", "accounts"], &[]);
     let list: serde_json::Value = serde_json::from_slice(&accounts.stdout).unwrap();
@@ -1051,6 +1169,14 @@ fn setup_checks_the_build_is_supported_before_sign_in() {
     let stderr = text(&claude.stderr);
     assert!(stderr.contains("✗ xcb can't run Claude Code"), "{stderr}");
     assert!(!stderr.contains("Opening your browser"), "{stderr}");
+    if cfg!(target_os = "linux") {
+        assert!(stderr.contains("sandbox checks"), "{stderr}");
+        assert!(
+            stderr.contains("xcb.sh/docs/providers#claude-on-linux"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("xcb doctor --provider claude"), "{stderr}");
+    }
 }
 
 #[test]

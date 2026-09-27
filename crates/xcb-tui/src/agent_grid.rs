@@ -1754,10 +1754,16 @@ mod tests {
     #[test]
     fn state_and_response_categories_have_labels_and_distinct_colors() {
         let mut app = fixture(1);
-        let screen = draw(&mut app, 80, 24);
+        // Inspect the grid before the full-frame NO_COLOR policy is applied.
+        let mut screen = Terminal::new(TestBackend::new(80, CARD_HEIGHT + 1)).unwrap();
+        screen
+            .draw(|frame| render(frame, &mut app, frame.area(), 12))
+            .unwrap();
         let content = text(&screen);
         assert!(content.contains("thinking · completed"));
-        let response_cell = &screen.backend().buffer()[(1, 5)];
+        let state_cell = &screen.backend().buffer()[(1, 3)];
+        assert_eq!(state_cell.fg, Color::Cyan);
+        let response_cell = &screen.backend().buffer()[(1, 4)];
         assert_eq!(response_cell.fg, Color::Green);
         assert!(app.overview_animating());
         app.view.reduced_motion = true;

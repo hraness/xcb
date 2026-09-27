@@ -1353,6 +1353,8 @@ fn quiet_chrome_uses_terminal_defaults_and_anchors_the_prompt() {
 #[test]
 fn markdown_styles_are_visible_in_actual_transcript_cells() {
     use ratatui::style::{Color, Modifier};
+    let no_color = render::no_color(&|name| std::env::var_os(name));
+    let expected_color = |color| if no_color { Color::Reset } else { color };
     let mut app = app();
     app.stream = "# Result\n- **bold** and `inline`\n[docs](https://example.test)\n```diff\n-old\n+new\n@@ hunk\n```\n> quote\n1. first".into();
     let mut terminal = Terminal::new(TestBackend::new(90, 26)).unwrap();
@@ -1371,15 +1373,15 @@ fn markdown_styles_are_visible_in_actual_transcript_cells() {
     };
     assert!(cell_at("Result").modifier.contains(Modifier::BOLD));
     assert!(cell_at("bold").modifier.contains(Modifier::BOLD));
-    assert_eq!(cell_at("inline").fg, Color::Cyan);
+    assert_eq!(cell_at("inline").fg, expected_color(Color::Cyan));
     assert!(cell_at("docs").modifier.contains(Modifier::UNDERLINED));
     assert!(
         rows.iter()
             .any(|row| row.contains("docs (https://example.test)"))
     );
-    assert_eq!(cell_at("-old").fg, Color::Red);
-    assert_eq!(cell_at("+new").fg, Color::Green);
-    assert_eq!(cell_at("@@ hunk").fg, Color::Cyan);
+    assert_eq!(cell_at("-old").fg, expected_color(Color::Red));
+    assert_eq!(cell_at("+new").fg, expected_color(Color::Green));
+    assert_eq!(cell_at("@@ hunk").fg, expected_color(Color::Cyan));
     assert!(rows.iter().any(|row| row.contains("│ quote")));
     assert!(rows.iter().any(|row| row.contains("1. first")));
 }
@@ -1811,6 +1813,8 @@ fn no_color_keeps_text_and_modifiers_but_drops_colors() {
         .draw(|frame| render::draw(frame, &mut app, 0))
         .unwrap();
     let mut buffer = terminal.backend().buffer().clone();
+    // Exercise removal even when the host already rendered without color.
+    buffer[(0, 0)].set_fg(Color::Cyan).set_bg(Color::Blue);
     let before: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
     let bold = buffer
         .content

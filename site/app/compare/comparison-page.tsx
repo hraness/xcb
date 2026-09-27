@@ -13,6 +13,7 @@ export function formatDate(isoDate: string): string {
 /** The calm template every "xcb vs <tool>" page renders from its record. */
 export function ComparisonPage({ entry }: Readonly<{ entry: Comparison }>) {
   const captionId = `${entry.slug}-comparison-caption`;
+  const scrollHintId = `${entry.slug}-scroll-hint`;
   return (
     <div data-hraness-marketing-preset="minimal" className="xcb-compare-page">
       <SiteHeader active="compare" />
@@ -37,7 +38,8 @@ export function ComparisonPage({ entry }: Readonly<{ entry: Comparison }>) {
           </div>
         </PageSection>
         <PageSection id="table" title="Side by side" wide>
-          <div className="xcb-comparison-scroll" role="region" aria-labelledby={captionId} tabIndex={0}>
+          <p className="xcb-compare-scroll-hint" id={scrollHintId}>Scroll horizontally to compare both tools.</p>
+          <div className="xcb-comparison-scroll" role="region" aria-labelledby={captionId} aria-describedby={scrollHintId} tabIndex={0}>
             <table className="xcb-comparison-table">
               <caption id={captionId}>{entry.tool} and xcb at a glance</caption>
               <thead><tr><th scope="col">Aspect</th><th scope="col">{entry.tool}</th><th scope="col">xcb</th></tr></thead>

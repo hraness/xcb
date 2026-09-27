@@ -128,6 +128,34 @@ test("native source upgrade validates staged bytes, atomically replaces, and bac
   } finally { closeSync(old); }
 });
 
+test("PATH instructions preserve literal custom prefixes without shell expansion", () => {
+  const f = fixture();
+  const prefix = join(f.root, "prefix ' \" $USER `touch backtick-ran` $(touch dollar-ran) \\");
+  const initialPath = "/usr/bin:/bin";
+  const extra = { XCB_INSTALL_PREFIX: prefix, SHELL: "/bin/sh" };
+  const printed = f.run(false, extra);
+  expect(printed.status, printed.stderr).toBe(0);
+  const command = printed.stdout.split("\n").find(line => line.startsWith("  export PATH="));
+  expect(command).toBeDefined();
+  const execute = (script: string) => spawnSync("/bin/sh", ["-c", script], {
+    cwd: f.root, encoding: "utf8", env: { PATH: initialPath, USER: "expanded-user" },
+  });
+  const copied = execute(`${command}\nprintf '%s' "$PATH"`);
+  expect(copied.status).toBe(0);
+  expect(copied.stdout).toBe(`${join(prefix, "bin")}:${initialPath}`);
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    expect(f.run(false, { ...extra, XCB_ADD_PATH: "yes" }).status).toBe(0);
+  }
+  const profile = readFileSync(join(f.root, "home/.profile"), "utf8");
+  expect(profile.trim()).toBe(command!.trim());
+  const sourced = execute(`${profile}\nprintf '%s' "$PATH"`);
+  expect(sourced.status).toBe(0);
+  expect(sourced.stdout).toBe(`${join(prefix, "bin")}:${initialPath}`);
+  expect(existsSync(join(f.root, "backtick-ran"))).toBe(false);
+  expect(existsSync(join(f.root, "dollar-ran"))).toBe(false);
+});
+
 for (const configured of ["environment", "cargo-config"] as const) {
   test(`native source installs Cargo's actual artifact with ${configured} overrides and a same-version stale default`, () => {
     const f = fixture();

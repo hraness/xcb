@@ -73,18 +73,20 @@ fn is_relay_fault(message: &str) -> bool {
 /// inline would stall dispatch, worker settlement and the supervisor
 /// heartbeat whenever the relay is slow.
 pub(crate) struct RelayTask {
-    live: Arc<AtomicBool>,
+    resident: Arc<AtomicBool>,
     stop: watch::Sender<bool>,
     done: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 impl RelayTask {
     pub(crate) fn spawn(root: &Path, managed: Arc<ManagedStore>) -> Self {
-        let live = Arc::new(AtomicBool::new(false));
+        // Keep the supervisor until the lane has checked local linkage,
+        // including while its thread is starting.
+        let resident = Arc::new(AtomicBool::new(true));
         let (stop, stopped) = watch::channel(false);
         let (finished, done) = tokio::sync::oneshot::channel();
         let root = root.to_path_buf();
-        let lane_live = live.clone();
+        let lane_resident = resident.clone();
         let spawned = std::thread::Builder::new()
             .name("xcb-relay".into())
             .spawn(move || {
@@ -93,26 +95,30 @@ impl RelayTask {
                     .build()
                 {
                     Ok(runtime) => {
-                        runtime.block_on(relay_loop(&root, &managed, &lane_live, stopped));
+                        runtime.block_on(relay_loop(&root, &managed, lane_resident.clone(), stopped));
                     }
                     Err(_) => relay_fault(
                         managed.root(),
                         "relay lane could not start its runtime; remote commands are unavailable until the supervisor restarts",
                     ),
                 }
+                lane_resident.store(false, Ordering::Relaxed);
                 let _ = finished.send(());
             });
+        if spawned.is_err() {
+            resident.store(false, Ordering::Relaxed);
+        }
         Self {
-            live,
+            resident,
             stop,
             done: spawned.ok().map(|_| done),
         }
     }
 
-    /// True while a lane is live — a linked machine stays resident to serve
-    /// remote commands rather than idle-exiting.
-    pub(crate) fn live(&self) -> bool {
-        self.live.load(Ordering::Relaxed)
+    /// A linked machine stays resident through connection and retry waits,
+    /// so a temporary outage cannot strand its remote command queue.
+    pub(crate) fn keeps_resident(&self) -> bool {
+        self.resident.load(Ordering::Relaxed)
     }
 
     /// Stop polling and drop the presence row. An in-flight pass gets
@@ -130,10 +136,11 @@ impl RelayTask {
 async fn relay_loop(
     root: &Path,
     managed: &Arc<ManagedStore>,
-    live: &AtomicBool,
+    resident: Arc<AtomicBool>,
     mut stopped: watch::Receiver<bool>,
 ) {
     let mut host = RelayHost::new(root);
+    host.resident = resident;
     let mut poll = tokio::time::interval(host.poll_interval());
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -142,18 +149,19 @@ async fn relay_loop(
             _ = stopped.changed() => break,
             _ = poll.tick() => {
                 host.tick(managed).await;
-                live.store(host.live(), Ordering::Relaxed);
             }
         }
     }
     host.shutdown().await;
-    live.store(false, Ordering::Relaxed);
 }
 
 /// The relay-lane host owned by the supervisor loop. Holds the lane plus
 /// retry/projection scheduling state; `tick` is the only entry point.
 pub struct RelayHost {
     lane: Option<RelayLane>,
+    /// The supervisor's residency signal, published before any network
+    /// wait and retained through retry backoff. This is not connectivity.
+    resident: Arc<AtomicBool>,
     root: PathBuf,
     next_boot: Instant,
     /// Delay applied to the next reboot attempt; grows on consecutive
@@ -176,6 +184,7 @@ impl RelayHost {
     pub fn new(root: &Path) -> Self {
         Self {
             lane: None,
+            resident: Arc::new(AtomicBool::new(false)),
             root: root.to_path_buf(),
             next_boot: Instant::now(),
             boot_delay: BOOT_RETRY,
@@ -189,14 +198,15 @@ impl RelayHost {
     }
 
     /// How long until the next relay poll — the `select!` arm sleeps this
-    /// long. A live lane keeps the supervisor resident.
+    /// long.
     pub fn poll_interval(&self) -> Duration {
         POLL_INTERVAL
     }
 
-    /// True while a lane is live — a linked machine stays resident to
-    /// serve remote commands rather than idle-exiting.
-    pub fn live(&self) -> bool {
+    /// True while a lane is connected. A linked machine also remains
+    /// resident during boot and recovery, when this returns false.
+    #[cfg(test)]
+    fn live(&self) -> bool {
         self.lane.is_some()
     }
 
@@ -207,37 +217,7 @@ impl RelayHost {
             if self.disabled || Instant::now() < self.next_boot {
                 return;
             }
-            self.next_boot = Instant::now() + self.boot_delay;
-            match lane::load_lane_keys(&self.root) {
-                Ok(Some(keys)) => match RelayLane::boot(keys).await {
-                    Ok(mut lane) => {
-                        // Seed the CAS pin from the row a previous boot
-                        // may have left behind.
-                        if let Ok(revision) = lane.projection_revision(FLEET_SCOPE).await {
-                            self.fleet_revision = revision;
-                        }
-                        self.lane = Some(lane);
-                    }
-                    Err(error) => {
-                        if fatal(&error) {
-                            self.disabled = true;
-                        }
-                        self.boot_delay = (self.boot_delay * 2).min(BOOT_RETRY_MAX);
-                        relay_fault(
-                            managed.root(),
-                            &format!("relay lane boot failed: {}", fault_text(&error)),
-                        );
-                    }
-                },
-                Ok(None) => {}
-                Err(error) => {
-                    self.boot_delay = (self.boot_delay * 2).min(BOOT_RETRY_MAX);
-                    relay_fault(
-                        managed.root(),
-                        &format!("relay lane custody failed: {}", fault_text(&error)),
-                    );
-                }
-            }
+            self.boot_with(managed, RelayLane::boot).await;
             return;
         }
 
@@ -251,6 +231,7 @@ impl RelayHost {
         if let Err(error) = lane.pump(&mut handler).await {
             if fatal(&error) {
                 self.disabled = true;
+                self.resident.store(false, Ordering::Relaxed);
             }
             relay_fault(
                 managed.root(),
@@ -310,6 +291,8 @@ impl RelayHost {
                     Err(error) => {
                         if fatal(&error) {
                             self.disabled = true;
+                            self.resident.store(false, Ordering::Relaxed);
+                            self.lane = None;
                         }
                         relay_fault(
                             managed.root(),
@@ -329,11 +312,63 @@ impl RelayHost {
         }
     }
 
+    async fn boot_with(
+        &mut self,
+        managed: &Arc<ManagedStore>,
+        boot: impl AsyncFnOnce(lane::LaneKeys) -> Result<RelayLane>,
+    ) {
+        let fault = match lane::load_lane_keys(&self.root) {
+            Ok(Some(keys)) => {
+                // A single call can outlast the supervisor's idle window.
+                // Publish linkage before awaiting it, and keep retrying
+                // while this device remains authorized.
+                self.resident.store(true, Ordering::Relaxed);
+                match boot(keys).await {
+                    Ok(mut lane) => {
+                        // Seed the CAS pin from the row a previous boot
+                        // may have left behind.
+                        if let Ok(revision) = lane.projection_revision(FLEET_SCOPE).await {
+                            self.fleet_revision = revision;
+                        }
+                        self.lane = Some(lane);
+                        return;
+                    }
+                    Err(error) => {
+                        if fatal(&error) {
+                            self.disabled = true;
+                            self.resident.store(false, Ordering::Relaxed);
+                        }
+                        Some(format!("relay lane boot failed: {}", fault_text(&error)))
+                    }
+                }
+            }
+            Ok(None) => {
+                self.resident.store(false, Ordering::Relaxed);
+                None
+            }
+            Err(error) => Some(format!("relay lane custody failed: {}", fault_text(&error))),
+        };
+        // Back off from the completed attempt: a slow network failure
+        // must not spend the retry delay while the request is in flight.
+        self.next_boot = Instant::now() + self.boot_delay;
+        if let Some(fault) = fault {
+            self.boot_delay = (self.boot_delay * 2).min(BOOT_RETRY_MAX);
+            relay_fault(managed.root(), &fault);
+        }
+    }
+
     /// Drop the lane's presence row on supervisor shutdown.
     pub async fn shutdown(&mut self) {
+        self.resident.store(false, Ordering::Relaxed);
         if let Some(mut lane) = self.lane.take() {
             let _ = lane.disconnect().await;
         }
+    }
+}
+
+impl Drop for RelayHost {
+    fn drop(&mut self) {
+        self.resident.store(false, Ordering::Relaxed);
     }
 }
 
@@ -959,10 +994,103 @@ mod tests {
         let f = fixture();
         let lane = RelayTask::spawn(&f.base.join("state"), f.store.clone());
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(!lane.live(), "no custody, no lane");
+        assert!(!lane.keeps_resident(), "no custody, no lane");
         let started = Instant::now();
         lane.shutdown(Duration::from_secs(5)).await;
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    fn linked_fixture() -> Fixture {
+        use crate::cloud::crypto::{AccountKey, DeviceIdentity};
+        use crate::cloud::custody::{self, CloudSession, RelayLink};
+
+        let f = fixture();
+        let root = f.base.join("state");
+        let device = DeviceIdentity::generate().unwrap();
+        custody::store_device(&root, &device, "executor", "fixture", &device.device).unwrap();
+        custody::store_account_key(&root, &AccountKey::generate(), 1).unwrap();
+        custody::store_session(
+            &root,
+            &CloudSession::issue("fixture-token".into(), "fixture-refresh".into(), now_ms()),
+        )
+        .unwrap();
+        custody::store_link(
+            &root,
+            &RelayLink {
+                deployment_url: "https://fixture.invalid".into(),
+                boot_generation: 0,
+            },
+        )
+        .unwrap();
+        f
+    }
+
+    /// The idle supervisor must survive both a connection call longer
+    /// than its idle window and retry delays that grow beyond that window.
+    /// The injected boot never opens a network connection.
+    #[tokio::test]
+    async fn a_linked_relay_keeps_the_supervisor_during_slow_boot_and_retries() {
+        let f = linked_fixture();
+        let mut host = RelayHost::new(&f.base.join("state"));
+        let resident = host.resident.clone();
+        tokio::select! {
+            _ = host.boot_with(&f.store, async |_| std::future::pending().await) => {
+                panic!("synthetic boot never completes");
+            }
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        assert!(resident.load(Ordering::Relaxed), "connection is in flight");
+        assert!(!host.live(), "residency does not claim connectivity");
+
+        for _ in 0..8 {
+            let delay = host.boot_delay;
+            let before = Instant::now();
+            host.boot_with(&f.store, async |_| {
+                Err(Error::Unavailable("synthetic offline relay"))
+            })
+            .await;
+            assert!(resident.load(Ordering::Relaxed), "retry must stay alive");
+            assert!(!host.disabled);
+            assert!(host.next_boot >= before + delay);
+            assert!(host.boot_delay <= BOOT_RETRY_MAX);
+            // Ordinary ticks inside backoff neither connect nor clear
+            // residency, including the five-minute maximum delay.
+            host.tick(&f.store).await;
+            assert!(resident.load(Ordering::Relaxed));
+        }
+        assert_eq!(host.boot_delay, BOOT_RETRY_MAX);
+        drop(host);
+        assert!(
+            !resident.load(Ordering::Relaxed),
+            "a stopped lane releases residency"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_or_unlinked_relays_allow_the_supervisor_to_idle_exit() {
+        let f = linked_fixture();
+        let root = f.base.join("state");
+        let mut host = RelayHost::new(&root);
+        host.boot_with(&f.store, async |_| {
+            Err(Error::Protocol("relay revoked-device"))
+        })
+        .await;
+        assert!(host.disabled);
+        assert!(!host.resident.load(Ordering::Relaxed));
+
+        let mut host = RelayHost::new(&root);
+        host.boot_with(&f.store, async |_| {
+            Err(Error::Unavailable("synthetic offline relay"))
+        })
+        .await;
+        assert!(host.resident.load(Ordering::Relaxed));
+        crate::cloud::custody::clear_session(&root).unwrap();
+        host.next_boot = Instant::now();
+        host.tick(&f.store).await;
+        assert!(
+            !host.resident.load(Ordering::Relaxed),
+            "linkage was removed"
+        );
     }
 
     /// Relay retry noise never replaces a recent fault from local work, and
