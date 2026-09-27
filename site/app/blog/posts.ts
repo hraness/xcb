@@ -33,6 +33,18 @@ const checkedOn: ArticleIsoDate = "2026-09-24";
  */
 const editorialReview: ArticleReview = { reviewer, reviewerType: "ai", reviewedOn };
 
+/**
+ * The launch post's review, by a different run from the one that drafted it:
+ * it checked each claim against source at 27dc148, the launch pull requests,
+ * and live runs on 2026-09-27, and edited the Devin status after the live
+ * Devin coding runs on the launch build.
+ */
+const launchReview: ArticleReview = {
+  reviewer: "Claude Opus 5.5 (claude-opus-5-5) independent editorial review",
+  reviewerType: "ai",
+  reviewedOn: "2026-09-27",
+};
+
 /** Sources pinned to the commits the fact check read. */
 const xcb = (path: string) => `https://github.com/hraness/xcb/blob/6437bcb/${path}`;
 const algalAt = (rev: string, path: string) => `https://github.com/hraness/algal/blob/${rev}/${path}`;
@@ -113,11 +125,12 @@ export const blogPosts: readonly BlogPost[] = [
       { title: "Published release record", href: launch("site/published-release.json"), checkedOn: launchCheckedOn },
       { title: "Herdr home page: coding agents in their own terminals, marked working, blocked, or idle", href: "https://herdr.dev/", checkedOn: launchCheckedOn },
       { title: "Pi home page: a minimal agent harness you adapt with extensions", href: "https://pi.dev/", checkedOn: launchCheckedOn },
+      { title: "Launch fixes and live runs: Devin 3000.11.3 route and managed coding tasks on macOS ARM64", href: "https://github.com/hraness/xcb/pull/247", checkedOn: launchCheckedOn },
     ],
     admission: {
-      lifecycle: "quarantined",
+      lifecycle: "indexable",
       readerJob: "Decide whether xcb is worth installing today when you pay for more than one of Claude, Codex, and Devin or build agent tooling, and know the first commands to run.",
-      nonObviousAnswer: "xcb runs each task through a private copy of the provider's own tool under your sign-in, holds one account per task until the provider process exits, and sandboxes the run. The route command picks the account and model, while an SDK host names both. Panes and reflexes cannot widen what a run may do, and hooks run as you, so each starts off. On the current supported builds only Claude has a confirmed coding session; Linux runs only Claude, and a signed-in Devin coding session is unconfirmed.",
+      nonObviousAnswer: "xcb runs each task through a private copy of the provider's own tool under your sign-in, holds one account per task until the provider process exits, and sandboxes the run. The route command picks the account and model, while an SDK host names both. Panes and reflexes cannot widen what a run may do, and hooks run as you, so each starts off. With the tested accounts, Claude and Devin have completed coding tasks on macOS on Apple silicon; Linux runs only Claude, and Codex's last signed-in coding run used the previous supported build.",
       originalContribution: "One account of how xcb runs a task, the thread and the route and SDK uses, where it sits beside Herdr and Pi, and its limits, with each claim taken from xcb source at 27dc148 and from the two tools' own sites rather than from the home page.",
       hostFit: "The product's own introduction on its own host. It replaces Introducing xcb, whose URL redirects here, for the v0.10.0 launch.",
       nearestUrls: [
@@ -130,19 +143,13 @@ export const blogPosts: readonly BlogPost[] = [
         "Hooks are off twice by default: the hooks extension is disabled in config.json and each new hook is stored disabled; a hook whose executable changes fails with \"register it again\" until it is added anew (hooks.rs, config.rs).",
         "xcb setup claude needs no --plan flag: the label defaults to \"Subscription\", is display-only, and an existing enabled Claude account is reused rather than duplicated (main.rs).",
       ],
-      // Not scored: the run that drafted this post does not score it. Zero is
-      // the lowest value the type allows, and the post stays quarantined until
-      // an independent reviewer records a review and real scores.
-      scores: { readerUtility: 0, originalEvidence: 0, factualConfidence: 0, hostFit: 0, voiceIntegrity: 0, maintenanceValue: 0 },
-      review: null,
-      // With no review there is no 28-to-56-day window yet. Reassessing on the
-      // publication date keeps the post in articleAdmissionsDue() until the
-      // reviewer records a review and sets a real reassessOn.
-      reassessOn: "2026-09-27",
-      harmIfWrong: "A reader could install xcb expecting Devin or Linux coding sessions to work today, run several accounts believing xcb raises usage limits, or enable a hook believing it runs inside xcb's sandbox.",
+      scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
+      review: launchReview,
+      reassessOn: "2026-11-08",
+      harmIfWrong: "A reader could install xcb expecting Linux coding sessions or the newest Codex build to work today, run several accounts believing xcb raises usage limits, or enable a hook believing it runs inside xcb's sandbox.",
       refreshTriggers: [
         "xcb release tag bump (site/published-release.json), including the v0.10.0 datum",
-        "A confirmed signed-in Devin coding session: update the one Devin sentence under Limits",
+        "A change to which providers have a confirmed coding session, or to the supported Devin builds: update the Limits paragraph",
         "A change to the supported Codex or Devin builds (qualified-builds.json) or the Claude Code version floor, or a coding session confirmed for Claude on Linux or on the current Codex build",
         "The one-line installer at /install.sh shipping, changing its platforms, or being withdrawn, or a change to xcb setup",
         "A change to the route request or response, its failure codes, or the 256 KiB text cap, or to how the SDK's createSubscriptionRouter chooses accounts",
