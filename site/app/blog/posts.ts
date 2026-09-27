@@ -2,6 +2,7 @@ import type {
   ArticleAdmission,
   ArticleAuthor,
   ArticleIsoDate,
+  ArticleReview,
   ArticleSourceItem,
 } from "@hraness/design-kit";
 
@@ -25,12 +26,24 @@ const reviewer = "Claude Opus 5.5 (claude-opus-5-5) editorial review";
 const reviewedOn: ArticleIsoDate = "2026-09-27";
 const checkedOn: ArticleIsoDate = "2026-09-24";
 
+/**
+ * The AI editorial review on record for the posts published on 2026-09-24.
+ * Each post names its own review; a post nobody has reviewed yet passes null
+ * and stays quarantined.
+ */
+const editorialReview: ArticleReview = { reviewer, reviewerType: "ai", reviewedOn };
+
 /** Sources pinned to the commits the fact check read. */
 const xcb = (path: string) => `https://github.com/hraness/xcb/blob/6437bcb/${path}`;
 const algalAt = (rev: string, path: string) => `https://github.com/hraness/algal/blob/${rev}/${path}`;
 const gobstopperAt = (rev: string, path: string) => `https://github.com/hraness/gobstopper/blob/${rev}/${path}`;
 const wordcell = (path: string) => `https://github.com/hraness/wordcell/blob/7b6cb5e/${path}`;
 const designKitPortfolio = "https://github.com/hraness/design-kit/blob/v0.17.0/src/portfolio.generated.json";
+const xcbAt = (rev: string, path: string) => `https://github.com/hraness/xcb/blob/${rev}/${path}`;
+
+/** Introducing Excalibur's fact check read xcb at 27dc148 and the two external sites on this date. */
+const launch = (path: string) => xcbAt("27dc148", path);
+const launchCheckedOn: ArticleIsoDate = "2026-09-27";
 
 export type BlogPost = Readonly<{
   slug: string;
@@ -57,7 +70,7 @@ function sourceRecords(sources: readonly ArticleSourceItem[]) {
 
 function post(
   entry: Omit<BlogPost, "admission"> & Readonly<{
-    admission: Omit<ArticleAdmission, "href" | "sources" | "drafting" | "review" | "humanReview" | "owner">;
+    admission: Omit<ArticleAdmission, "href" | "sources" | "drafting" | "humanReview" | "owner">;
   }>,
 ): BlogPost {
   return {
@@ -68,7 +81,6 @@ function post(
       sources: sourceRecords(entry.sources),
       owner: "Hraness",
       drafting: "ai-from-source",
-      review: { reviewer, reviewerType: "ai", reviewedOn },
       humanReview: null,
     },
   };
@@ -76,47 +88,67 @@ function post(
 
 export const blogPosts: readonly BlogPost[] = [
   post({
-    slug: "introducing-xcb",
-    title: "Introducing xcb",
-    dek: "xcb sends each coding task to one of your Claude, Codex, or Devin accounts that is signed in, idle, and not at a known quota limit.",
+    slug: "introducing-excalibur",
+    title: "Introducing Excalibur",
+    dek: "xcb, short for Excalibur, sends each coding task to one of your Claude, Codex, or Devin accounts that is signed in, idle, and not at a known usage limit.",
     eyebrow: "Release",
-    published: "2026-09-24",
-    keywords: ["xcb", "coding agents", "routing", "Claude Code", "Codex", "Devin"],
+    published: "2026-09-27",
+    keywords: ["xcb", "Excalibur", "coding agents", "routing", "Claude Code", "Codex", "Devin"],
     relation: "all",
-    statusInBody: false,
+    statusInBody: true,
     sources: [
-      { title: "xcb README: lead, readiness table, managed conversations, optional behavior", href: xcb("README.md"), checkedOn },
-      { title: "Reflexes reference: defaults, certification floors, measured history", href: xcb("docs/reflexes.md"), checkedOn },
-      { title: "Published release record", href: xcb("site/published-release.json"), checkedOn },
-      { title: "Context trimming with Gobstopper's elision policy", href: xcb("crates/xcb-runtime/src/context.rs"), checkedOn },
-      { title: "Pinned ALGAL planners and resumable controllers", href: xcb("crates/xcb-runtime/src/managed_program.rs"), checkedOn },
-      { title: "Registered relation: Gobstopper compacts sessions for xcb", href: designKitPortfolio, checkedOn },
-      { title: "xcb releases", href: "https://github.com/hraness/xcb/releases", checkedOn },
+      { title: "xcb README: lead, xcb setup, the thread, readiness by provider, the command runner, optional behavior", href: launch("README.md"), checkedOn: launchCheckedOn },
+      { title: "Route contract: request fields, the completed response, failure codes, the 256 KiB text cap", href: launch("docs/route.md"), checkedOn: launchCheckedOn },
+      { title: "Managed harness: choosing a task's directory, the detached supervisor, concurrency, a new route with the original instructions", href: launch("docs/managed-harness.md"), checkedOn: launchCheckedOn },
+      { title: "Quota routing: Claude's five-hour and seven-day windows, no inferred Codex or Devin limits, failover after a reported quota failure", href: launch("docs/quota-routing.md"), checkedOn: launchCheckedOn },
+      { title: "Provider launches: a private copy of the executable, private home, cleared environment, Seatbelt and bwrap sandboxes, provider tools and MCP off", href: launch("crates/xcb-runtime/src/runner.rs"), checkedOn: launchCheckedOn },
+      { title: "Claude sign-in through claude setup-token in a private profile", href: launch("crates/xcb-runtime/src/auth.rs"), checkedOn: launchCheckedOn },
+      { title: "Codex configuration: web search and agents turned off", href: launch("crates/xcb-runtime/src/codex/config.rs"), checkedOn: launchCheckedOn },
+      { title: "Supported Codex and Devin builds", href: launch("qualified-builds.json"), checkedOn: launchCheckedOn },
+      { title: "xcb setup: add or reuse an account, check the provider build, sign in, load models", href: launch("crates/xcb-cli/src/main.rs"), checkedOn: launchCheckedOn },
+      { title: "Hooks: stored disabled, pinned by SHA-256, run with a cleared environment", href: launch("crates/xcb-runtime/src/hooks.rs"), checkedOn: launchCheckedOn },
+      { title: "Reflexes reference: learning from your replies, rollback, effect-free programs", href: launch("docs/reflexes.md"), checkedOn: launchCheckedOn },
+      { title: "Docs site: panes as presentation data, the TypeScript SDK's createSubscriptionRouter", href: launch("site/app/docs/topic-content.tsx"), checkedOn: launchCheckedOn },
+      { title: "Home page: the managed harness rebuild and what stays fixed", href: launch("site/app/page.tsx"), checkedOn: launchCheckedOn },
+      { title: "Published release record", href: launch("site/published-release.json"), checkedOn: launchCheckedOn },
+      { title: "Herdr home page: coding agents in their own terminals, marked working, blocked, or idle", href: "https://herdr.dev/", checkedOn: launchCheckedOn },
+      { title: "Pi home page: a minimal agent harness you adapt with extensions", href: "https://pi.dev/", checkedOn: launchCheckedOn },
     ],
     admission: {
-      lifecycle: "indexable",
-      readerJob: "Decide whether xcb fits a workflow that already spans more than one of Claude Code, Codex, and Devin, and start a first managed conversation.",
-      nonObviousAnswer: "xcb locks the chosen account until the provider process exits, trims old tool output for Claude and Codex (never the eight most recent), lets a reflex act only after your own replies certify it (at least 30 turns, precision floors 0.75 and 0.85, about one in ten held out), and replays each task's local record offline without vouching for the provider.",
-      originalContribution: "One account of routing, context trimming, reflexes, and replayable history, with commands and limits taken from xcb source at 6437bcb rather than from the home page.",
-      hostFit: "The product's own introduction on its own host.",
+      lifecycle: "quarantined",
+      readerJob: "Decide whether xcb is worth installing today when you pay for more than one of Claude, Codex, and Devin or build agent tooling, and know the first commands to run.",
+      nonObviousAnswer: "xcb runs each task through a private copy of the provider's own tool under your sign-in, holds one account per task until the provider process exits, and sandboxes the run. The route command picks the account and model, while an SDK host names both. Panes and reflexes cannot widen what a run may do, and hooks run as you, so each starts off. On the current supported builds only Claude has a confirmed coding session; Linux runs only Claude, and a signed-in Devin coding session is unconfirmed.",
+      originalContribution: "One account of how xcb runs a task, the thread and the route and SDK uses, where it sits beside Herdr and Pi, and its limits, with each claim taken from xcb source at 27dc148 and from the two tools' own sites rather than from the home page.",
+      hostFit: "The product's own introduction on its own host. It replaces Introducing xcb, whose URL redirects here, for the v0.10.0 launch.",
       nearestUrls: [
-        { url: "/docs/getting-started", distinction: "The guide gives setup steps for each provider; the post explains why xcb exists and who should use something else." },
-        { url: "/", distinction: "The home page lists features; the post shows one first conversation and states the limits beside it." },
+        { url: "/docs/getting-started", distinction: "The guide gives install and sign-in steps for each provider; the post explains what xcb does, who it suits, and its limits, and ends with the shortest start." },
+        { url: "/", distinction: "The home page lists features and answers setup questions; the post follows one task from sign-in to its recorded outcome and keeps the limits in one place." },
+        { url: "/compare", distinction: "The comparison pages weigh xcb against each tool in detail; the post gives a first-time reader the short version and links there." },
       ],
       observations: [
-        "Two separate protections keep recent work in the prompt: Gobstopper's elide rule skips the eight newest tool outputs, and xcb separately refuses to touch the last eight messages of any role (context.rs).",
-        "The --plan flag on xcb accounts add is a display label that checks nothing, so routing depends on xcb's own sign-in and quota observations rather than the plan name.",
+        "The provider process never runs in the project directory: xcb launches a private copy of the binary in a scratch directory with its own home, and project files are reachable only through xcb's file tools, which is why MCP servers, plugins, and web search are unavailable inside xcb runs (runner.rs, codex/config.rs).",
+        "Hooks are off twice by default: the hooks extension is disabled in config.json and each new hook is stored disabled; a hook whose executable changes fails with \"register it again\" until it is added anew (hooks.rs, config.rs).",
+        "xcb setup claude needs no --plan flag: the label defaults to \"Subscription\", is display-only, and an existing enabled Claude account is reused rather than duplicated (main.rs).",
       ],
-      scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
-      reassessOn: "2026-11-05",
-      harmIfWrong: "A reader could install xcb expecting a daily-driver replacement, or trust a reflex or history check further than the source supports.",
+      // Not scored: the run that drafted this post does not score it. Zero is
+      // the lowest value the type allows, and the post stays quarantined until
+      // an independent reviewer records a review and real scores.
+      scores: { readerUtility: 0, originalEvidence: 0, factualConfidence: 0, hostFit: 0, voiceIntegrity: 0, maintenanceValue: 0 },
+      review: null,
+      // With no review there is no 28-to-56-day window yet. Reassessing on the
+      // publication date keeps the post in articleAdmissionsDue() until the
+      // reviewer records a review and sets a real reassessOn.
+      reassessOn: "2026-09-27",
+      harmIfWrong: "A reader could install xcb expecting Devin or Linux coding sessions to work today, run several accounts believing xcb raises usage limits, or enable a hook believing it runs inside xcb's sandbox.",
       refreshTriggers: [
-        "xcb release tag bump (site/published-release.json), including publication of v0.8.1 with the Claude Code 2.1.281 fix",
-        "Change to reflex defaults, the 30-turn minimum, the 0.75/0.85 floors, or the hold-out rate",
-        "Change to Gobstopper elision defaults, the recent-output count, or the optional judge",
-        "Change to the README readiness table or supported provider builds",
-        "Change to ALGAL managed-program limits (--managed-calls) or tasks verify semantics",
-        "Change to a registered relation detail for xcb, or a product rename",
+        "xcb release tag bump (site/published-release.json), including the v0.10.0 datum",
+        "A confirmed signed-in Devin coding session: update the one Devin sentence under Limits",
+        "A change to the supported Codex or Devin builds (qualified-builds.json) or the Claude Code version floor, or a coding session confirmed for Claude on Linux or on the current Codex build",
+        "The one-line installer at /install.sh shipping, changing its platforms, or being withdrawn, or a change to xcb setup",
+        "A change to the route request or response, its failure codes, or the 256 KiB text cap, or to how the SDK's createSubscriptionRouter chooses accounts",
+        "The /compare, /compare/herdr, or /compare/pi pages moving or changing their verdicts, or Herdr or Pi changing what their own sites say they do",
+        "The managed harness leaving experimental status or running self-tuning routing, or a change to panes, hooks, or reflex rollback",
+        "A change to a registered relation detail for xcb, or a product rename",
       ],
     },
   }),
@@ -155,6 +187,7 @@ export const blogPosts: readonly BlogPost[] = [
         "Devin sessions are sent without elision because context.rs maps the Devin provider to no Gobstopper provider.",
       ],
       scores: { readerUtility: 2, originalEvidence: 2, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
+      review: editorialReview,
       reassessOn: "2026-11-05",
       harmIfWrong: "A reader could expect elided output to be gone for good, or expect Devin sessions to be trimmed, and size their sessions on a wrong assumption.",
       refreshTriggers: [
@@ -202,6 +235,7 @@ export const blogPosts: readonly BlogPost[] = [
         "The chain's first link is the literal placeholder sha256:pending, which lets the verifier distinguish a history truncated in the middle from one that starts at revision 1.",
       ],
       scores: { readerUtility: 2, originalEvidence: 2, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
+      review: editorialReview,
       reassessOn: "2026-11-05",
       harmIfWrong: "A reader could treat a passing check as proof the agent's work is right, or run it against their only state directory.",
       refreshTriggers: [
@@ -248,6 +282,7 @@ export const blogPosts: readonly BlogPost[] = [
         "The September 26 edit dropped \"continuation\" from the dek, which then said every reflex waits for certification; the route reflex defaults to active (docs/reflexes.md), so the September 27 fact review restored the qualifier.",
       ],
       scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
+      review: editorialReview,
       reassessOn: "2026-11-05",
       harmIfWrong: "A reader could let reflexes answer go-ahead requests on the belief that a certificate guarantees a correct call.",
       refreshTriggers: [
@@ -292,6 +327,7 @@ export const blogPosts: readonly BlogPost[] = [
         "Only the memory tools are read-only; a worker's ordinary file tools could reach a vault placed inside the workspace, so the separation holds only when the vault lives outside it.",
       ],
       scores: { readerUtility: 2, originalEvidence: 2, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
+      review: editorialReview,
       reassessOn: "2026-11-05",
       harmIfWrong: "A reader could place a vault inside the workspace believing workers cannot write to it.",
       refreshTriggers: [

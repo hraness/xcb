@@ -23,6 +23,12 @@ const nextConfig: NextConfig = {
         destination: "https://xcb.sh/:path*",
         permanent: true,
       },
+      // The introduction was renamed; keep the old post URL working.
+      {
+        source: "/blog/introducing-xcb",
+        destination: "/blog/introducing-excalibur",
+        permanent: true,
+      },
     ];
   },
 };
