@@ -13,12 +13,19 @@
   <url><loc>https://xcb.sh/compare</loc></url>
   <url><loc>https://xcb.sh/compare/openrouter</loc></url>
   <url><loc>https://xcb.sh/download</loc></url>
+  <url><loc>https://xcb.sh/reflexes</loc></url>
   <url><loc>https://xcb.sh/docs/getting-started</loc></url>
+  <url><loc>https://xcb.sh/docs/how-routing-works</loc></url>
+  <url><loc>https://xcb.sh/docs/security</loc></url>
+  <url><loc>https://xcb.sh/docs/projects-and-tasks</loc></url>
   <url><loc>https://xcb.sh/docs/providers</loc></url>
   <url><loc>https://xcb.sh/docs/workspace</loc></url>
-  <url><loc>https://xcb.sh/reflexes</loc></url>
   <url><loc>https://xcb.sh/docs/customization</loc></url>
   <url><loc>https://xcb.sh/docs/reflexes</loc></url>
+  <url><loc>https://xcb.sh/docs/upgrade-and-uninstall</loc></url>
+  <url><loc>https://xcb.sh/docs/troubleshooting</loc></url>
+  <url><loc>https://xcb.sh/docs/route</loc></url>
+  <url><loc>https://xcb.sh/docs/sdk</loc></url>
   <url><loc>https://xcb.sh/docs/application-api</loc></url>
   <url><loc>https://xcb.sh/docs/reference</loc></url>
   <url><loc>https://xcb.sh/blog</loc><lastmod>2026-09-24T00:00:00.000Z</lastmod></url>

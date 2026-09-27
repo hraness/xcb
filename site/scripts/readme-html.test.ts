@@ -29,10 +29,10 @@ test("adds verified links to both site README formats without changing generic s
 test("renders the repository README with stable heading fragments and repository-rooted relative links", async () => {
   const source = await readFile(join(repository, "README.md"), "utf8");
   const html = renderReadmeHtml(source);
-  expect(html).toContain('<h2 id="standalone-package">Standalone package</h2>');
-  expect(html).toContain('<h2 id="readiness">Readiness</h2>');
+  expect(html).toContain('<h3 id="install-a-verified-release">Install a verified release</h3>');
+  expect(html).toContain('id="limits"');
   expect(html).toContain('href="https://github.com/hraness/xcb/blob/main/docs/compatibility.md"');
-  expect(html).toContain('href="https://github.com/hraness/xcb/blob/main/MANAGED-CODEX.md"');
+  expect(html).toContain('href="https://github.com/hraness/xcb/blob/main/docs/route.md"');
   expect(html).not.toContain("<script");
 });
 
@@ -42,8 +42,12 @@ test("extracts the landing block between the shared Hraness markers", async () =
   expect(source.indexOf(LANDING_END)).toBeGreaterThan(source.indexOf(LANDING_START));
   const landing = readmeLanding(source);
   expect(landing.title).toBe("xcb");
-  expect(landing.lead).toContain("Claude, Codex, and Devin");
-  expect(landing.markdown).toContain("customizable panes");
+  // The canonical one-line description leads the README.
+  expect(landing.lead.startsWith("xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.")).toBe(true);
+  // The README never types the current version; the site inserts the verified release.
+  const { version } = JSON.parse(await readFile(join(repository, "package.json"), "utf8")) as { version: string };
+  expect(source).not.toContain(version);
+  expect(source).toContain("https://github.com/hraness/xcb/releases/latest");
 });
 
 test("serves the README as markdown with repository-rooted relative links", async () => {
@@ -51,9 +55,9 @@ test("serves the README as markdown with repository-rooted relative links", asyn
   const markdown = renderReadmeMarkdown(source);
   expect(markdown).toContain("# xcb");
   expect(markdown).not.toContain("hraness:xcb-landing");
-  expect(markdown).toContain("[Compatibility reference](https://github.com/hraness/xcb/blob/main/docs/compatibility.md)");
-  expect(markdown).toContain("[MIT](https://github.com/hraness/xcb/blob/main/LICENSE)");
-  expect(markdown).toContain("[Project site](https://xcb.sh)");
+  expect(markdown).toContain("](https://github.com/hraness/xcb/blob/main/docs/compatibility.md)");
+  expect(markdown).toContain("](https://github.com/hraness/xcb/blob/main/LICENSE)");
+  expect(markdown).toContain("](https://xcb.sh)");
   expect(() => renderReadmeMarkdown("[x](javascript:alert(1))")).toThrow();
   expect(() => renderReadmeMarkdown("[x](//evil.example)")).toThrow();
 });

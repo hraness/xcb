@@ -109,17 +109,35 @@ describe("xcb site source contract", () => {
   });
 
   test("keeps the llms.txt map and docs social metadata on the canonical origin", async () => {
-    const [{ GET }, docs] = await Promise.all([import("../app/llms.txt/route"), read("app/docs/page.tsx")]);
+    const [{ GET }, docs, { docsTopics }, { providerStatus, supportedBuilds }] = await Promise.all([
+      import("../app/llms.txt/route"),
+      read("app/docs/page.tsx"),
+      import("../app/docs/topics"),
+      import("../app/docs/provider-status"),
+    ]);
     const llms = await GET().text();
     expect(llms).toContain("https://xcb.sh/");
     expect(llms).toContain("https://xcb.sh/docs");
     expect(llms).toContain("https://xcb.sh/README.md");
     expect(llms).not.toContain("http://");
-    if (publishedRelease === null) expect(llms).toContain("No native xcb binary");
-    else {
-      expect(llms).toContain(`v${publishedRelease.version}`);
+    // The canonical one-line description leads, verbatim.
+    expect(llms.split("\n")[2]).toBe("> xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.");
+    // Every current docs page is listed, and repository links follow main, not an old tag.
+    for (const topic of docsTopics) expect(llms).toContain(`(https://xcb.sh/docs/${topic.slug})`);
+    expect(llms).not.toMatch(/github\.com\/hraness\/xcb\/blob\/v\d/u);
+    // The only xcb version named is the published release: no changelog narrative.
+    const versions = new Set([...llms.matchAll(/\bv(\d+\.\d+\.\d+)\b/gu)].map((match) => match[1]));
+    if (publishedRelease === null) {
+      expect(llms).toContain("No native xcb binary");
+      expect(versions.size).toBe(0);
+    } else {
       expect(llms).toContain(publicationMarkdown(publishedRelease));
+      expect([...versions]).toEqual([publishedRelease.version]);
     }
+    for (const fact of ["xcb --json route", "dryRun", "createSubscriptionRouter", "not on npm", supportedBuilds.claudeMinimum, ...supportedBuilds.codex, ...supportedBuilds.devin, "does not run self-modifying routing policies"]) {
+      expect(llms).toContain(fact);
+    }
+    for (const status of Object.values(providerStatus)) expect(llms.split(status).length - 1).toBe(1);
     expect(docs).toContain('siteName: "xcb"');
     expect(docs).toContain('card: "summary_large_image"');
   });

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
 import { blogPostPath, blogPosts, indexableBlogPosts } from "../app/blog/posts";
+import { docsTopics } from "../app/docs/topics";
 import { publishedRelease } from "../app/publication";
 
 const site = join(import.meta.dir, "..");
@@ -128,7 +129,7 @@ describe("built xcb site", () => {
 
       // Follow every local link across the actual built public pages. Broken
       // doc routes or fragments must fail before publishing the marketing site.
-      const paths = ["/", "/compare", "/reflexes", "/download", "/docs", "/docs/getting-started", "/docs/providers", "/docs/workspace", "/docs/customization", "/docs/reflexes", "/docs/application-api", "/docs/reference", "/blog", ...indexableBlogPosts.map(blogPostPath)];
+      const paths = ["/", "/compare", "/reflexes", "/download", "/docs", ...docsTopics.map((topic) => `/docs/${topic.slug}`), "/blog", ...indexableBlogPosts.map(blogPostPath)];
       const documents = new Map<string, string>();
       for (const path of paths) {
         const response = await fetch(`${server.origin}${path}`, { redirect: "manual" });
