@@ -118,6 +118,7 @@ jobs:
           python3 -I crates/xcb-runtime/src/command/test_git_projection.py
           python3 -I crates/xcb-runtime/src/command/test_public_cache.py
           python3 -I scripts/prepare-command-dependencies.test.py
+          python3 -I .github/scripts/codex-catalog.test.py
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
         if: runner.os == 'Linux'

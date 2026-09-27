@@ -25,6 +25,17 @@ assert (args.expect_version is not None) == (args.expect_sha256 is not None), \
     '--expect-version and --expect-sha256 go together'
 BAKED_VERSION, BAKED_SHA256 = const('VERSION'), const('BINARY_SHA256')
 VERSION, EXPECTED = args.expect_version or BAKED_VERSION, args.expect_sha256 or BAKED_SHA256
+VERDICT = ROOT/'verdict.json'; VERDICT.unlink(missing_ok=True)
+def verdict(outcome, **detail):
+    # One machine-readable result beside the evidence: `passed`, `failed` (the
+    # inventory ran and a case failed) or `incompatible` (only an xcb release can
+    # adopt this build). No verdict file means the run itself broke.
+    VERDICT.write_text(json.dumps({'schema': 'xcb.codex-inventory-verdict.v1', 'outcome': outcome, 'version': VERSION,
+                                   'binarySha256': EXPECTED, **detail}, indent=2, sort_keys=True) + '\n')
+def incompatible(reason, message, **detail):
+    verdict('incompatible', reason=reason, **detail)
+    print(message, file=sys.stderr)
+    raise SystemExit(3)
 strings = lambda block: [json.loads(x) for x in re.findall(r'"(?:[^"\\]|\\.)*"', block)]
 array = lambda head: strings(config_source.split(head, 1)[1].split('];', 1)[0])
 QUALIFIED = array('pub const QUALIFIED_MODELS: &[&str] = &[')
@@ -45,13 +56,13 @@ EXPECTED_MANIFEST = [{'type': 'namespace', 'name': 'functions', 'description': '
 OVERRIDES = {'model_provider': 'qualification', 'requires_openai_auth': False, 'supports_websockets': False, 'features.enable_request_compression': False}
 
 with BIN.open('rb') as f: binary = f.read(512 * 1024 * 1024 + 1)
-assert len(binary) <= 512 * 1024 * 1024 and sha(binary) == EXPECTED, 'Provider is not the admitted executable'
+if len(binary) > 512 * 1024 * 1024 or sha(binary) != EXPECTED: raise SystemExit('Provider is not the admitted executable')
 marker = b'{\n  "models":'
-assert binary.count(marker) == 1, 'Ambiguous bundled catalog'
+if binary.count(marker) != 1: incompatible('bundled-catalog', 'Ambiguous bundled catalog')
 catalog_rows, _ = json.JSONDecoder().raw_decode(binary[binary.index(marker):][:4 * 1024 * 1024].decode('utf-8', 'replace'))
 del binary
 version_output = subprocess.run([str(BIN), '--version'], capture_output=True, text=True, timeout=30, env={'PATH': '/usr/bin:/bin'}).stdout.strip()
-assert version_output == 'codex-cli ' + VERSION, 'Provider version is not the admitted version: ' + version_output
+if version_output != 'codex-cli ' + VERSION: raise SystemExit('Provider version is not the admitted version: ' + version_output)
 SCHEMA_COMMAND = ['app-server', 'generate-json-schema', '--experimental', '--out']
 def schema_digest():
     # Offline code generation from the checked executable with an empty, disposable home.
@@ -63,7 +74,10 @@ def schema_digest():
         digest.update(path.encode() + b'\0' + (out/path).read_bytes() + b'\0')
     return digest.hexdigest()
 SCHEMA = schema_digest()
-assert SCHEMA == const('SCHEMA_SHA256'), 'app-server schema digest differs from config.rs SCHEMA_SHA256: observed ' + SCHEMA
+# A changed wire protocol is never admitted through the catalog; it ships in an xcb release.
+if SCHEMA != const('SCHEMA_SHA256'):
+    incompatible('schema-drift', 'app-server schema digest differs from config.rs SCHEMA_SHA256: observed ' + SCHEMA,
+                 observedSchemaSha256=SCHEMA, bakedSchemaSha256=const('SCHEMA_SHA256'), bakedVersion=BAKED_VERSION)
 
 def configuration(catalog, port):
     body = config_source.split('pub fn configuration(', 1)[1].split('\npub fn thread_configuration(', 1)[0]
@@ -275,7 +289,7 @@ def run_case(model, effort, trace=False):
 cases, failures = [], []
 for model in QUALIFIED:
     rows = [row for row in catalog_rows['models'] if row['slug'] == model]
-    assert len(rows) == 1, 'qualified model missing from the bundled catalog: ' + model
+    if len(rows) != 1: incompatible('qualified-model', 'qualified model missing from the bundled catalog: ' + model, model=model)
     for effort in [level['effort'] for level in rows[0]['supported_reasoning_levels']]:
         passed, summary, evidence = run_case(model, effort)
         cases.append(summary)
@@ -314,5 +328,7 @@ if args.wire_trace:
     text = text.replace('"synthetic_echo"', '"workspace_read"').replace('{"text": "broker-echo"}', '{"path": "note.txt"}')
     trace_frames = json.loads(text); trace_frames[0]['id'] = 7
     args.wire_trace.write_text(json.dumps(trace_frames, indent=2) + '\n')
+verdict('passed' if cases and not failures else 'failed', cases=len(cases), failures=failures,
+        inventory=target.name, inventorySha256=sha(target.read_bytes()), schemaSha256=SCHEMA)
 print(json.dumps({'inventory': str(target), 'cases': len(cases), 'failures': failures}, indent=1))
 raise SystemExit(bool(failures) or not cases)
