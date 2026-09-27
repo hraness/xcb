@@ -39,7 +39,9 @@ describe("the comparison pages", () => {
       expect(entry.description.length).toBeLessThanOrEqual(160);
       expect(entry.title.length).toBeLessThanOrEqual(70);
       // Public copy: no internal vocabulary, no em dashes, no outdated status.
-      const text = html.replace(/<[^>]+>/gu, " ");
+      const chunks: string[] = [];
+      new HTMLRewriter().onDocument({ text(chunk) { chunks.push(chunk.text); } }).transform(html);
+      const text = chunks.join(" ");
       expect(text).not.toMatch(internalTerms);
       expect(text).not.toContain("—");
       expect(text).not.toContain("source preview");
@@ -53,7 +55,7 @@ describe("the comparison pages", () => {
     expect(html.match(/<h1\b/gu)).toHaveLength(1);
     for (const entry of comparisons) expect(html).toContain(`href="${comparisonPath(entry.slug)}"`);
     for (const group of hubGroups) expect(html).toContain(`id="${group.id}"`);
-    expect(html.split(devinStatus.replaceAll("’", "’")).length - 1).toBe(1);
+    expect(html.split(devinStatus).length - 1).toBe(1);
     expect(hubDescription.length).toBeLessThanOrEqual(160);
     expect(html).not.toContain("—");
   });

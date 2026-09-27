@@ -13,8 +13,9 @@ import { siteDefaultPalette } from "../palette";
 
 /** Visible text: tags removed and the entities React and the highlighter emit decoded. */
 function textOf(html: string): string {
-  return html
-    .replace(/<[^>]+>/gu, "")
+  const chunks: string[] = [];
+  new HTMLRewriter().onDocument({ text(chunk) { chunks.push(chunk.text); } }).transform(html);
+  return chunks.join("")
     .replaceAll("&quot;", '"').replaceAll("&#x27;", "'").replaceAll("&#39;", "'")
     .replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
 }
