@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { ProviderMark } from "@hraness/design-kit/react/server";
 import { publishedRelease } from "../publication";
 import { providerStatus, supportedBuilds } from "./provider-status";
+import { sdkExample, sdkExampleOutput } from "./sdk-example";
 import type { DocsSlug } from "./topics";
 
 const repository = "https://github.com/hraness/xcb";
@@ -52,12 +53,10 @@ function GettingStarted() {
       {releaseVersion === null
         ? <p>No verified release is published yet, so <a href="#build-from-source">build from source</a>.</p>
         : <>
-          <p>The installer downloads the v{releaseVersion} archive for your platform, checks its SHA-256 checksum, and installs <code>~/.local/bin/xcb</code>:</p>
-          <Code>{`curl -fsSLO https://raw.githubusercontent.com/hraness/xcb/v${releaseVersion}/scripts/install-native.sh
-XCB_VERSION=${releaseVersion} sh install-native.sh
-export PATH="$HOME/.local/bin:$PATH"
+          <p>The installer downloads the v{releaseVersion} release for your platform, checks its SHA-256 checksum, and installs <code>~/.local/bin/xcb</code>:</p>
+          <Code>{`curl -fsSL https://xcb.sh/install.sh | sh
 xcb --version`}</Code>
-          <p>Add the <code>export</code> line to your shell profile, or install with <code>XCB_ADD_PATH=yes</code> to have the installer add it. The <a href="/download">download page</a> also lists each archive and its checksum.</p>
+          <p>If your shell can’t find <code>xcb</code>, add <code>export PATH=&quot;$HOME/.local/bin:$PATH&quot;</code> to your shell profile and open a new terminal. The <a href="/install">install page</a> covers the other options.</p>
         </>}
       <h2 id="connect">2. Connect Claude</h2>
       <Code>{`xcb setup claude`}</Code>
@@ -72,7 +71,7 @@ printf 'export function add(a, b) {\\n  return a - b;\\n}\\n' > add.js`}</Code>
       <p>The first line names the model key and the account ID xcb would use right now, then the reasons. Nothing runs and no account is held.</p>
       <h2 id="first-task">5. Send the task from your thread</h2>
       <Code>{`xcb`}</Code>
-      <p>This opens your thread. Type <code>Fix add() in add.js so it adds instead of subtracting.</code> and press Enter. xcb replies with the folder it chose and why, such as “Started <strong>Fix add()</strong> in <code>xcb-tutorial</code> · launch dir · /workspace to move”. The session card above the chat shows the routed model while the task runs, and the answer appears in the thread when it finishes.</p>
+      <p>This opens your thread. Type <code>Fix add() in ~/xcb-tutorial/add.js so it adds instead of subtracting.</code> and press Enter. xcb replies with the folder it chose and why, such as “Started <strong>Fix add()</strong> in <code>xcb-tutorial</code> · path in <code>xcb-tutorial</code> · /workspace to move”. The session card above the chat shows the routed model while the task runs, and the answer appears in the thread when it finishes.</p>
       <p>Check the result from another terminal:</p>
       <Code>{`cat ~/xcb-tutorial/add.js`}</Code>
       <p>The function now returns <code>a + b</code>. xcb routed the task to one of your accounts, ran Claude Code in a sandbox with access to this folder only, and recorded how the run ended.</p>
@@ -433,14 +432,16 @@ xcb update disable`}</Code>
         <li>Let the background supervisor finish. The old supervisor starts no new turns, lets running tasks finish, and exits; queued tasks and tasks waiting for you stay saved. Until it exits, xcb says another xcb build owns the supervisor. On macOS, <code>xcb service status</code> shows “supervisor idle” once it has exited.</li>
         <li>If you use the command runner, <a href="/docs/workspace#refresh">refresh it</a> from the matching source version.</li>
       </ol>
+      <p>If you’re upgrading from an 0.8 release, the first newer build to open your state moves project grants and Wordcell bindings from conversations to folders. Follow the <Ext href={`${repositoryDocs}/project-agents.md#upgrading-from-an-08-release`}>upgrade steps</Ext> first.</p>
       <p>To go back to an earlier release, run <code>xcb upgrade &lt;version&gt;</code>. An older build may refuse state written by a newer one, so keep your state folder and read the <Ext href={`${repository}/blob/main/CHANGELOG.md`}>changelog</Ext> first.</p>
       <h2 id="uninstall">Uninstall</h2>
-      <Code>{`xcb uninstall                      # list what would be removed
-xcb uninstall --yes                # remove xcb, keep your state folder
-xcb uninstall --yes --remove-state # also remove accounts, credentials, and history`}</Code>
-      <p><code>xcb uninstall</code> prints what it will remove and acts only with <code>--yes</code>. It keeps the state folder unless you add <code>--remove-state</code>. Before you uninstall, let running tasks finish or cancel them.</p>
-      <h2 id="manual-removal">Remove xcb by hand</h2>
-      <p>If you can’t run <code>xcb uninstall</code>, remove these yourself. Paths assume the default <code>~/.local</code> prefix.</p>
+      <p>Let running tasks finish or cancel them, then remove the login items and the binary:</p>
+      <Code>{`xcb service uninstall   # macOS: stop starting the supervisor at login
+xcb update disable      # stop the daily update check
+rm ~/.local/bin/xcb`}</Code>
+      <p>Your accounts, credentials, and history stay in <code>~/.local/share/xcb</code> until you delete that folder. The table lists everything xcb creates.</p>
+      <h2 id="manual-removal">What xcb creates</h2>
+      <p>Paths assume the default <code>~/.local</code> prefix.</p>
       <Table label="Files xcb creates" head={["What", "Where", "Notes"]} rows={[
         ["Binary", <code key="b">~/.local/bin/xcb</code>, <>Also <code>~/.local/bin/xcb.previous.*</code> backups.</>],
         ["Installer record", <code key="i">~/.local/share/xcb/install.json</code>, <>With <code>install-native.sh</code> beside it, inside the state folder.</>],
@@ -462,8 +463,6 @@ function Troubleshooting() {
       <p>Start with <code>xcb doctor</code>. It checks each provider build, the list of reviewed builds, and runs that didn’t finish cleanly, then names the next command to run.</p>
       <h2 id="not-found">The shell can’t find xcb, or runs the wrong one</h2>
       <p>Add <code>~/.local/bin</code> to your <code>PATH</code> (<code>export PATH=&quot;$HOME/.local/bin:$PATH&quot;</code>), then check <code>command -v xcb</code>. The installer warns when another <code>xcb</code> earlier on your <code>PATH</code>, such as an old copy, would run instead. The TypeScript compatibility CLI installs as <code>xcb-compat</code>.</p>
-      <h2 id="macos-blocked">macOS won’t open xcb</h2>
-      <p>If you downloaded the archive in a browser, macOS can refuse to run the extracted binary. Install with <code>install-native.sh</code>, which downloads with <code>curl</code>, or clear the download flag after checking the checksum: <code>xattr -d com.apple.quarantine ~/.local/bin/xcb</code>.</p>
       <h2 id="unsupported-build">doctor says a provider build can’t run</h2>
       <p>“found, but xcb can’t run this build yet” means the installed provider isn’t a <a href="/docs/providers#supported-builds">supported build</a>. “waiting for review before xcb runs it” means the provider updated itself; xcb keeps using the build it already checked until the new one is reviewed. Install a supported build, or wait for the review.</p>
       <h2 id="wrong-binary">xcb found the wrong provider executable</h2>
@@ -564,111 +563,20 @@ EOF`}</Code>
 }
 
 function Sdk() {
-  const archive = publishedRelease?.archiveUrl ?? null;
   return (
     <>
       <p>The TypeScript SDK’s <code>createSubscriptionRouter</code> runs one task at a time on the account and model your app names, and holds that account until the provider process has exited. Your app names both: to let xcb choose them, call <a href="/docs/route"><code>xcb --json route</code></a> instead.</p>
       <h2 id="install">Install</h2>
-      <p>The SDK is the <code>@hraness/xcb</code> package. It ships as a release archive on GitHub, not on npm. It runs on Node 22.13 or later and Bun 1.3.14 or later.</p>
-      {archive === null
-        ? <p>No SDK archive is published yet. Build it from source as described in the <Ext href={`${repositoryDocs}/compatibility.md#build-from-source`}>compatibility reference</Ext>.</p>
-        : <Code>{`npm install ${archive}
+      <p>The SDK is the <code>@hraness/xcb</code> package on npm. It runs on Node 22.13 or later and Bun 1.3.14 or later.</p>
+      <Code>{`npm install @hraness/xcb
 # or
-bun add ${archive}`}</Code>}
-      <p>The archive also installs the <code>xcb-compat</code> command, which is separate from the native <code>xcb</code>.</p>
+bun add @hraness/xcb`}</Code>
+      <p>The package also installs the <code>xcb-compat</code> command, which is separate from the native <code>xcb</code>.</p>
       <h2 id="example">A complete example</h2>
       <p>This program runs as is. It uses a stand-in adapter that starts no provider and echoes the prompt, so you can watch the router hold the account during the task and release it after. Save it as <code>router-demo.ts</code> in the project where you installed the SDK:</p>
-      <Code>{`import { createHash } from "node:crypto";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import {
-  createCapabilityBroker,
-  createCapabilityProfile,
-  createSubscriptionRouter,
-  openAccountDatabase,
-  SqliteAccountLeases,
-  type AgentTaskAdapter,
-  type AgentTaskExecutionRequest,
-} from "@hraness/xcb";
-
-const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
-
-// 1. The account store. A real host keeps this file in its own private
-//    folder, outside every project folder, and shares it between processes.
-const db = await openAccountDatabase(join(tmpdir(), "xcb-router-demo.sqlite"));
-const leases = new SqliteAccountLeases(db);
-
-// 2. The tools a model may call during the task. This demo offers none.
-const profile = createCapabilityProfile({ id: "demo.no-tools", version: 1, tools: [] });
-const profileId = { id: profile.id, version: profile.version, digest: profile.digest };
-
-// 3. A stand-in adapter. It starts no provider and answers with an echo, so
-//    you can watch the router hold and release the account.
-const route = { id: "demo-claude", provider: "claude", authentication: "subscription" } as const;
-const runtime = { version: "demo-1", digest: sha256("demo-1") };
-const binding = (request: AgentTaskExecutionRequest) => ({
-  route: request.route, accountId: request.accountId, workspaceId: request.workspaceId,
-  runId: request.runId, profile: request.profile, model: request.model,
-  runtime: request.runtime, accountLease: request.accountLease,
-});
-const demoAdapter: AgentTaskAdapter = {
-  route,
-  runtime,
-  qualification: {
-    status: "qualified", route, profile: profileId,
-    runtimeVersion: runtime.version, runtimeDigest: runtime.digest,
-    evidenceDigest: sha256("demo evidence"), expiresAt: Date.now() + 60 * 60 * 1000,
-    controls: {
-      noCommandTools: true, exactToolInventory: true, workspaceReadIsolation: true,
-      workspaceWriteIsolation: true, isolatedConfiguration: true,
-      authOutsideWorkspace: true, hostBrokerOnly: true,
-    },
-  },
-  async run(request) {
-    const holder = leases.inspect(request.route.provider, request.accountId)?.owner;
-    return {
-      ...binding(request),
-      output: \`echo: \${request.prompt} (account held by \${holder})\`,
-      usage: { inputTokens: null, outputTokens: null, totalTokens: null, costUsd: null },
-      outcome: { status: "completed", code: null },
-    };
-  },
-  async stop(request) {
-    return {
-      ...binding(request),
-      processStopped: true, controllersStopped: true, joined: true,
-      stoppedAtUnixMs: Date.now(), proofDigest: sha256(\`stopped \${request.runId}\`),
-    };
-  },
-};
-
-// 4. The router: your account store plus the adapters you trust.
-const router = createSubscriptionRouter({ leases, adapters: [demoAdapter] });
-
-// 5. One task. Your app names the account and the model.
-const broker = createCapabilityBroker({
-  profile, workspaceId: "demo-project", runId: "run-1", isActive: () => true,
-});
-const result = await router.run({
-  provider: "claude",
-  accountId: "work-claude",
-  profile: profileId,
-  model: { id: "claude-sonnet", reasoningEffort: "low", serviceTier: null },
-  purpose: "respond",
-  prompt: "Summarize the open pull requests.",
-  limits: { maxRunMs: 60_000, maxCleanupMs: 10_000, maxOutputBytes: 65_536 },
-}, broker);
-
-console.log(result.outcome.status); // completed
-console.log(result.output);         // echo: … (account held by run-1)
-console.log(result.custody);        // released
-console.log(leases.inspect("claude", "work-claude")); // null: free for the next task
-db.close();`}</Code>
+      <Code>{sdkExample}</Code>
       <p>Run it with <code>node router-demo.ts</code> (Node 24 or later runs TypeScript directly) or <code>bun router-demo.ts</code>. It prints:</p>
-      <Code>{`completed
-echo: Summarize the open pull requests. (account held by run-1)
-released
-null`}</Code>
+      <Code>{sdkExampleOutput}</Code>
       <h2 id="parts">What each part does</h2>
       <ul>
         <li><strong>Account store:</strong> <code>SqliteAccountLeases</code> records which task holds each account. While one task holds an account, another <code>run</code> on it fails with <code>ACCOUNT_BUSY_OR_RECOVERY_REQUIRED</code>.</li>
@@ -710,7 +618,7 @@ function ApplicationApi() {
   "timeoutMs": 60000,
   "maxOutputBytes": 65536
 }`}</Code>
-      <p>All six fields are required and other fields are rejected. The whole input is limited to 1 MiB, <code>timeoutMs</code> to 1,000 to 120,000 milliseconds, and <code>maxOutputBytes</code> to 1 to 262,144 bytes. The prompt can’t be empty or contain NUL.</p>
+      <p>All six fields are required and other fields are rejected. The whole input is limited to 1 MiB, <code>timeoutMs</code> to 1,000 to 300,000 milliseconds, and <code>maxOutputBytes</code> to 1 to 262,144 bytes. The prompt can’t be empty or contain NUL.</p>
       <p>A success has <code>status: completed</code>, the generated <code>text</code>, and an outcome showing the provider exited with no effects. A failure exits nonzero with a fixed error object and no text. Treat the text as untrusted: validate it against your app’s own schema before acting on it.</p>
       <h2 id="host-responsibilities">Keep your app’s actions in your app</h2>
       <p>xcb does the inference, not your app’s file access, network requests, or message delivery. Your app chooses recipients, authorizes actions, validates output, and keeps its own request records. <Ext href="https://github.com/hraness/textbutler">Textbutler</Ext> is an example app that keeps contact access and message approval in its own code.</p>
@@ -753,7 +661,6 @@ const commandGroups: readonly Readonly<{ id: string; title: string; commands: re
     ["service", "Start the background supervisor at login (macOS); install, status, uninstall, plan"],
     ["update", "Check for updates and set the update policy; check, status, enable, disable"],
     ["upgrade [version]", "Install the latest, or a named, verified release"],
-    ["uninstall", "List what would be removed; --yes removes it, --remove-state also removes your state"],
     ["completions <shell>", "Print shell completions"],
   ] },
   { id: "commands-advanced", title: "Advanced (xcb help advanced)", commands: [

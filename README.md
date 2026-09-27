@@ -20,22 +20,17 @@ for macOS ARM64 and Linux x86_64; other hosts build from source. MIT licensed.
 
 ### Install a verified release
 
-On a supported platform, the installer downloads one release archive, checks
-its SHA-256 checksum, and installs `~/.local/bin/xcb`. Replace `<version>`
-with the number on the [latest release](https://github.com/hraness/xcb/releases/latest),
-without the leading `v`:
+On macOS with Apple silicon or Linux x86_64 (glibc 2.34 or newer), one command
+downloads the latest release for your platform, checks its SHA-256 checksum,
+and installs `~/.local/bin/xcb`:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/hraness/xcb/v<version>/scripts/install-native.sh
-XCB_VERSION=<version> sh install-native.sh
-export PATH="$HOME/.local/bin:$PATH"
+curl -fsSL https://xcb.sh/install.sh | sh
 ```
 
-The installer refuses a checksum mismatch or an archive that holds anything
-but the `xcb` binary, keeps the binary it replaces as `xcb.previous.<sha256>`,
-and records itself so `xcb upgrade` installs later releases the same way.
-`XCB_INSTALL_PREFIX` replaces `~/.local`; `XCB_ADD_PATH=yes` adds the `bin`
-folder to your shell profile.
+`xcb upgrade` installs later releases the same way. `XCB_VERSION` installs one
+exact version, `XCB_INSTALL_PREFIX` replaces `~/.local`, and `XCB_ADD_PATH=yes`
+adds the `bin` folder to your shell profile.
 
 ### Build from source
 
@@ -105,9 +100,9 @@ lists every field.
 
 **From your own app,** the TypeScript SDK's `createSubscriptionRouter` runs a
 task on the account and model your app names, and holds that account until
-the provider process exits; it does not choose them for you. It ships as the
-`hraness-xcb-<version>.tgz` release archive, not on npm. See the
-[SDK quickstart](docs/sdk.md).
+the provider process exits; it does not choose them for you. Install it with
+`npm install @hraness/xcb`; the [SDK quickstart](docs/sdk.md) has a complete
+example.
 
 ## Providers
 
@@ -115,7 +110,7 @@ the provider process exits; it does not choose them for you. It ships as the
 | --- | --- | --- |
 | Claude | Claude Code 2.1.268 or later within version 2 | Coding workflow passed on macOS ARM64 with the tested account. On Linux, Claude runs after you run xcb's sandbox checks on that machine. |
 | Codex | Codex CLI 0.156.1 on macOS ARM64 | Passes xcb's sandbox and tool checks. The recorded signed-in coding run used the previous supported build. |
-| Devin | Devin CLI 3000.11.3, 3000.11.1, or 3000.10.31 on macOS ARM64 | The supported builds pass xcb's sandbox checks, but a coding session on a signed-in Devin account hasn't been confirmed. |
+| Devin | Devin CLI 3000.11.3, 3000.11.1, or 3000.10.31 on macOS ARM64 | Coding workflow passed on macOS ARM64 with the tested account and Devin CLI 3000.11.3. |
 
 xcb checks each provider executable's version, and for Codex and Devin its
 exact SHA-256, before it runs anything. `xcb doctor` shows what it found.

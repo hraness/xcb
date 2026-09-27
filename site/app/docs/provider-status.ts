@@ -14,5 +14,5 @@ export const supportedBuilds = {
 export const providerStatus = {
   claude: "Claude's coding workflow passed on macOS ARM64 with the tested account.",
   codex: "Codex 0.156.1 passes xcb's sandbox and tool checks; the recorded signed-in coding run used the previous supported build.",
-  devin: "The supported Devin builds pass xcb's sandbox checks, but a coding session on a signed-in Devin account hasn't been confirmed.",
+  devin: "Devin's coding workflow passed on macOS ARM64 with the tested account and Devin CLI 3000.11.3.",
 } as const;

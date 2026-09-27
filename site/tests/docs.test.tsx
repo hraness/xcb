@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import Docs, { metadata as overviewMetadata } from "../app/docs/page";
 import DocsTopicPage, { dynamicParams, generateMetadata, generateStaticParams } from "../app/docs/[slug]/page";
 import { providerStatus, supportedBuilds } from "../app/docs/provider-status";
+import { sdkExample, sdkExampleOutput } from "../app/docs/sdk-example";
 import { docsGroups, docsTopics } from "../app/docs/topics";
 import { publishedRelease } from "../app/publication";
 
@@ -100,8 +101,8 @@ describe("organized documentation", () => {
     if (publishedRelease === null) {
       expect(html).toContain("No verified release is published yet");
     } else {
-      expect(html).toContain(`https://raw.githubusercontent.com/hraness/xcb/v${publishedRelease.version}/scripts/install-native.sh`);
-      expect(html).toContain(`XCB_VERSION=${publishedRelease.version} sh install-native.sh`);
+      expect(html).toContain("curl -fsSL https://xcb.sh/install.sh | sh");
+      expect(html).toContain(`v${publishedRelease.version}`);
     }
     expect(html).toContain("rustup toolchain install 1.97.1 --profile minimal");
     expect(html).toContain("./scripts/install-native.sh");
@@ -172,7 +173,7 @@ describe("organized documentation", () => {
     expect(application).toContain("supported: false");
     expect(application).toContain("All six fields are required");
     expect(application).toContain("1 MiB");
-    expect(application).toContain("1,000 to 120,000 milliseconds");
+    expect(application).toContain("1,000 to 300,000 milliseconds");
     expect(application).toContain("1 to 262,144 bytes");
     expect(application).toContain("24 hours");
     expect(application).toContain("close stdin");
@@ -219,15 +220,16 @@ describe("organized documentation", () => {
     expect(html).toContain("xcb doctor --provider claude --executable /absolute/path/to/claude");
     expect(html).toContain("xcb accounts login &lt;account&gt;");
     expect(html).toContain("x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders");
-    expect(html).toContain("xattr -d com.apple.quarantine");
+    // xcb installs with curl; there is no browser download to unblock.
+    expect(html).not.toContain("xattr -d com.apple.quarantine");
   });
 
   test("covers upgrades, uninstall, and every folder xcb creates", async () => {
     const html = await renderTopic("upgrade-and-uninstall");
     expect(html).toContain("xcb update check");
     expect(html).toContain("xcb upgrade &lt;version&gt;");
-    expect(html).toContain("xcb uninstall --yes");
-    expect(html).toContain("--remove-state");
+    expect(html).toContain("xcb service uninstall");
+    expect(html).toContain("rm ~/.local/bin/xcb");
     for (const path of ["~/.local/bin/xcb", "~/.local/share/xcb", "~/.local/share/xcb-command", "~/.local/share/xcb-coordination", "dev.hraness.xcb.update.plist", "dev.hraness.xcb.habitat.*.plist", "~/.xcb"]) {
       expect(html).toContain(path);
     }
@@ -249,13 +251,11 @@ describe("organized documentation", () => {
     expect(html).toContain('href="/docs/sdk"');
   });
 
-  test("installs the SDK from the release archive and imports only exported names", async () => {
+  test("installs the SDK from npm and imports only exported names", async () => {
     const html = await renderTopic("sdk");
-    if (publishedRelease?.archiveUrl) {
-      expect(html).toContain(`npm install ${publishedRelease.archiveUrl}`);
-      expect(html).toContain(`bun add ${publishedRelease.archiveUrl}`);
-    }
-    expect(html).not.toMatch(/(?:npm|bun) (?:install|add) (?:-g )?@hraness\/xcb/u);
+    expect(html).toContain("npm install @hraness/xcb");
+    expect(html).toContain("bun add @hraness/xcb");
+    expect(html).not.toMatch(/npm install -g @hraness\/xcb/u);
     expect(html).toContain("createSubscriptionRouter");
     expect(html).toContain('href="/docs/route"');
     // src/index.ts is the package's public surface: named exports plus `export *` modules.
@@ -270,11 +270,15 @@ describe("organized documentation", () => {
     const names = example![1]!.split(",").map((name) => name.replace(/^\s*type\s+/u, "").trim()).filter(Boolean);
     expect(names).toContain("createSubscriptionRouter");
     for (const name of names) expect({ name, exported: exported(name) }).toEqual({ name, exported: true });
+    // The repository's Markdown twin carries the same example and output.
+    const markdown = await readFile(join(repository, "docs/sdk.md"), "utf8");
+    expect(markdown).toContain(`\`\`\`ts\n${sdkExample}\n\`\`\``);
+    expect(markdown).toContain(`\`\`\`text\n${sdkExampleOutput}\n\`\`\``);
   });
 
   test("lists every command, setting, environment variable, and exit code", async () => {
     const html = await renderTopic("reference");
-    for (const command of ["setup", "chat", "run", "doctor", "accounts", "models", "offers", "conversations", "workspaces", "history", "rename", "tasks", "backlog", "steer", "watch", "inbox", "attention", "schedules", "sessions", "resume", "service", "update", "upgrade", "uninstall", "completions", "link", "fleet", "dispatch", "send", "remote", "daemons", "projects", "memory", "reflex", "panes", "plugins", "hooks", "judge", "config", "recover", "command", "generate", "route"]) {
+    for (const command of ["setup", "chat", "run", "doctor", "accounts", "models", "offers", "conversations", "workspaces", "history", "rename", "tasks", "backlog", "steer", "watch", "inbox", "attention", "schedules", "sessions", "resume", "service", "update", "upgrade", "completions", "link", "fleet", "dispatch", "send", "remote", "daemons", "projects", "memory", "reflex", "panes", "plugins", "hooks", "judge", "config", "recover", "command", "generate", "route"]) {
       expect(html).toMatch(new RegExp(`<code>xcb [^<]*\\b${command}\\b`, "u"));
     }
     for (const key of ["turn_timeout_ms", "default_account", "favorites", "auto_failover", "extensions.auto_continue", "extensions.gobstopper", "extensions.judge", "extensions.reflexes"]) {

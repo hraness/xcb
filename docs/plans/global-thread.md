@@ -825,14 +825,14 @@ Tightenings the controller must be told about, documented in
 **All lanes land on one integration branch, `claude/global-thread-20260926`,
 and ship as ONE pull request.** No lane pushes, opens a PR or merges to main.
 
-- **Integration worktree:** `/Users/benguo/Documents/xcb-global-thread-20260926`
+- **Integration worktree:** `~/Documents/xcb-global-thread-20260926`
   on `claude/global-thread-20260926` (based on origin/main `5756a49`).
 - **Wave 1 — `foundation`** commits directly on `claude/global-thread-20260926`
   in the integration worktree. Its first commit adds this spec.
 - **Wave 2 — `rekey`, `intake`, `surfaces`, `entry`**, in parallel, after
   foundation's last commit. Each lane creates its own worktree from the
   integration branch:
-  `git -C /Users/benguo/Documents/xcb-global-thread-20260926 worktree add -b claude/gt-<lane>-20260926 /Users/benguo/Documents/xcb-gt-<lane>-20260926 claude/global-thread-20260926`,
+  `git -C ~/Documents/xcb-global-thread-20260926 worktree add -b claude/gt-<lane>-20260926 ~/Documents/xcb-gt-<lane>-20260926 claude/global-thread-20260926`,
   commits there and **does not push**.
 - **Integrator** merges the four wave-2 branches into
   `claude/global-thread-20260926` (in the integration worktree), resolves

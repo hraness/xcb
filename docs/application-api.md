@@ -1,38 +1,40 @@
 # Build applications with an AI subscription
 
-xcb owns coding-agent sign-in, provider confinement and process/account custody.
-An application supplies a bounded prompt and receives untrusted text. Its own
-code decides which files, network operations or messages that text can propose.
-[Textbutler](https://github.com/hraness/textbutler) is the reference consumer: it
-uses separate classification and reply prompts and keeps contact memory,
-recipient selection, review and message delivery in its trusted host.
+`xcb --json generate` gives an application one model response per call from a
+coding-agent subscription. xcb handles provider sign-in, the provider's
+sandbox, and the provider process, and holds the account while the call runs.
+The application sends a prompt of up to 1 MiB and receives untrusted text; its
+own code decides which files, network requests, or messages that text can lead
+to. [Textbutler](https://github.com/hraness/textbutler) is an example: it uses
+separate classification and reply prompts and keeps contact memory, recipient
+selection, review, and message delivery in its own code.
 
 The application route is separate from `xcb run`. It creates no saved session,
-reads no conversation history and enables no tools, hooks, plugins, judge,
-continuation or account fallback. Private run records preserve account/process
-custody, selected model and timing without storing application prompts or replies.
-Provider authentication remains in xcb; applications never pass credentials.
+reads no conversation history, and turns on no tools, hooks, plugins, judge,
+continuation, or switching to another account. Private run records keep the
+account, process, model, and timing without storing application prompts or
+replies. Provider sign-in stays in xcb; applications never pass credentials.
 
 For Devin ACP, the host instructions and application prompt are combined in one
 text content block, separated by a blank line; there is no separate system-role
 message. This tool-free route does not add the MCP workspace instructions used
 by tool-enabled Devin sessions. The native decoder follows
 [ACP extension semantics](https://agentclientprotocol.com/protocol/v1/extensibility):
-unrecognized, bounded, valid underscore-prefixed notifications without an `id`
+unrecognized, size-limited, valid underscore-prefixed notifications without an `id`
 are discarded
-without events, replies or changes to session, model, tools or custody. Unknown
+without events, replies, or changes to the session, model, tools, or account. Unknown
 requests still receive a method-not-found response and trigger attention;
 ordinary unknown notifications and invalid `session/update` messages still fail.
 Recognized `_cognition.ai/compaction` notifications retain their closed-shape,
 matching-session and active-turn checks before this extension fallback. Their
-summary is discarded without changing output or tool custody. This compatibility
-handling does not qualify or activate a provider.
+summary is discarded without changing output or tool state. This handling does
+not approve a provider for application use.
 
-An installation reports `supported: false` until the application path has current
-qualification for the exact built executable, provider, account and model. A provider pin,
-configured account or successful metadata request does not establish that
-qualification. Do not substitute `xcb run` when application generation is
-unavailable.
+An installation reports `supported: false` until the application path has
+passed xcb's application checks for that xcb executable, provider, account, and
+model. The record of those checks is called a qualification. A provider pin, a
+configured account, or a successful metadata request doesn't create one. Do not
+substitute `xcb run` when application generation is unavailable.
 
 ## Discover available accounts and models
 
@@ -44,12 +46,12 @@ This reads local account/model metadata without refreshing a provider, connectin
 an account or making an inference call. It does not initialize a missing state
 directory. Existing installations open their database read-only without initialization or
 migration; SQLite may maintain its normal reader coordination sidecars.
-Only accounts with `available: true` are eligible. `connected` reports local
-credential presence/shape; it does not promise current remote authentication.
-`runtimeAdmitted` describes provider artifact admission, independently of
-application qualification. `supported` reports whether this build has any
-qualified application provider; a supported build can still have no available
-account.
+Use only accounts with `available: true`. `connected` reports that local
+credentials exist and look valid; it doesn't promise the provider still accepts
+them. `runtimeAdmitted` reports whether xcb supports the provider build,
+separately from the application checks. `supported` reports whether this build
+has any provider that passed the application checks; a supported build can
+still have no available account.
 
 ```json
 {
@@ -84,8 +86,8 @@ account sign-in nor caller JSON can issue it.
 
 ## Generate one response
 
-Start the exact admitted xcb executable directly, write one UTF-8 JSON document
-to stdin, close stdin and read its bounded stdout:
+Start the xcb executable that passed the checks directly, write one UTF-8 JSON
+document to stdin, close stdin, and read stdout:
 
 ```json
 {"version":1,"account":"a_selected_account","model":"claude/observed-model/observed-effort","prompt":"Return the requested application response.","timeoutMs":60000,"maxOutputBytes":65536}
@@ -103,21 +105,22 @@ Success is one JSON object and exit code zero:
 {"version":1,"status":"completed","requestId":"application_generated_id","account":"a_selected_account","model":"claude/observed-model/observed-effort","text":"application response","outcome":{"terminal":"completed","joined":true,"effects":"none"}}
 ```
 
-xcb emits success only after native process-group, protocol and egress joins,
-credential persistence and durable account lease settlement. `effects: none`
-means no application tools or actions were performed; required xcb authentication
-and custody maintenance still occurs. Validate `text` against your application's
+xcb reports success only after the provider's processes, protocol connection,
+and network bridge have exited, any refreshed credentials are saved, and the
+account is released. `effects: none` means no application tools or actions ran;
+xcb's own sign-in and account bookkeeping still happen. Validate `text` against your application's
 own schema before using it. The provider is not claimed to enforce arbitrary JSON
 schemas.
 
-Failures use a nonzero exit code and a closed object with `version: 1`,
+Failures use a nonzero exit code and a fixed-shape object with `version: 1`,
 `status: failed`, `code`, and `requestId` when known. Codes are `invalid_request`,
-`unavailable`, `busy`, `deadline`, `cancelled`, `provider_error`, `output_limit`
-and `custody_unproven`. `joined: true` and `effects: none` appear only when
-independently established. Failure responses never include generated text,
+`unavailable`, `busy`, `deadline`, `cancelled`, `provider_error`, `output_limit`,
+and `custody_unproven` (xcb couldn't confirm the provider stopped, so it keeps
+the account held). `joined: true` and `effects: none` appear only when xcb
+confirmed them. Failure responses never include generated text,
 provider payloads, stderr, credentials or private paths.
 
-For an execution failure, the host may retain one bounded private diagnostic per
+For an execution failure, the host may keep one small private diagnostic per
 account. Inspect it using the exact account and application request ID:
 
 ```sh
@@ -138,34 +141,35 @@ refusal can retain `receive`, `quota_or_resource_limit`, `session_prompt` and
 `model_changed`. Unknown protocol checks become `other`. No original error
 string, prompt, reply, provider payload, stderr, credentials or path is stored.
 
-Publication uses the existing account lease and replaces only that account's
-previous diagnostic, with a 4 KiB limit and owner-only file permissions. It is
+Writing a diagnostic replaces only that account's previous one, with a 4 KiB
+limit and owner-only file permissions. It is
 best effort: a diagnostic I/O failure never changes the execution result or
 weakens cleanup. Preparation, initialization, prompt start, response decoding
 and rejected output can produce records. Pre-admission refusals, cancellation,
-deadlines and output-size limits need not produce one. A diagnostic is **not**
-proof of process termination, account settlement, qualification, cost or an
-entitlement; use the command's settlement fields and normal qualification gates.
+deadlines, and output-size limits need not produce one. A diagnostic doesn't
+prove that the process stopped, the account was released, the checks passed, or
+anything about cost or entitlement; use the command's outcome fields and the
+normal application checks.
 
 ## Cancellation and recovery
 
-Send SIGINT or SIGTERM and wait for the command to finish its cleanup. xcb
-continues joining processes and settling credential/account custody after the
-inference deadline. A deadline is not a promise that cleanup finishes at the
-same instant. Killing xcb, dropping its future or seeing its root process exit
-does not prove that a provider has stopped. An uncertain outcome retains the
-account's custody record and blocks new work; do not delete it or blindly retry.
+Send SIGINT or SIGTERM and wait for the command to finish its cleanup. After
+the deadline, xcb keeps waiting for the provider's processes to exit and saves
+credentials before releasing the account, so cleanup can outlast the deadline.
+Killing xcb or seeing its main process exit doesn't prove that a provider has
+stopped. When the outcome is uncertain, xcb keeps the account held and blocks new
+work on it; don't delete its records or blindly retry.
 
 Applications own their own durable request records, privacy controls, output
 validation and external effects. Textbutler's recipient-bound grants, final
 takeover checks and send journal remain necessary even when xcb has successfully
 generated a response. xcb never sends messages for the application.
 
-## Qualification and expiry
+## Application checks and expiry
 
-The host qualification command accepts a private directory of actual native
-boundary and source/test evidence, then runs a fixed harmless challenge through
-the same ephemeral executor:
+The host check command takes a private directory of sandbox and source/test
+evidence collected on the host, then runs a fixed harmless challenge through the
+same path as `generate`:
 
 ```sh
 xcb --json qualify-application --account <account-id> --model <full-model-key> --evidence /absolute/private/evidence-directory
@@ -173,13 +177,13 @@ xcb --json qualify-application --account <account-id> --model <full-model-key> -
 
 The evidence must match the current executable, provider, platform and effective
 application settings. The command accepts no caller prompt, tools or availability
-override. It publishes a receipt only after the fixed response, process and
-protocol joins, credential settlement and exclusive publication lease are
-verified. Application `generate` cannot invoke this qualification path. Each invocation
-qualifies one explicit model and atomically replaces that account's previous
-application coverage; it does not accumulate other model qualifications.
+override. It saves a qualification only after the fixed response is correct,
+the provider's processes and connection have exited, credentials are saved, and
+it holds the account exclusively. `generate` can't run this path. Each run covers
+one model and replaces that account's previous coverage; it doesn't add to other
+models' qualifications.
 
-Receipts expire at a fixed deadline no later than 24 hours after their evidence
+Qualifications expire at a fixed deadline no later than 24 hours after evidence
 collection began. Reads never extend it. Exact executable/provider changes and
 explicit account credential replacement invalidate it immediately. Model
 observations also expire after 24 hours; `xcb accounts refresh <account>` obtains
@@ -193,8 +197,8 @@ renewal whose actual result and final installed bytes have been verified.
 
 Discovery emits models only when covered by that account's valid qualification.
 The complete response is limited to 128 accounts, 64 qualified models per
-account, 1,024 models total, and 2 MiB. An oversized inventory fails discovery
-closed; it is never silently truncated. These cardinalities also keep the closed
+account, 1,024 models total, and 2 MiB. An oversized inventory makes discovery
+fail rather than be silently truncated. These cardinalities also keep the closed
 version-one schema below 131,072 JSON tokens.
 
 Trusted qualification tooling can read the executable's exact binding without
@@ -206,4 +210,4 @@ xcb --json qualify-application --inspect --account ACCOUNT_ID --model claude/son
 
 Inspection returns the xcb and provider versions and SHA-256 digests, OS,
 architecture, effective policy/configuration digests, and selected account/model.
-It does not grant qualification or extend a receipt.
+It doesn't pass the checks or extend a qualification.
