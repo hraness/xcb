@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { renderInstallScript } from "../app/install.sh/route";
+import { renderInstallScript } from "../app/install.sh/render";
 import { installScript } from "../app/install.sh/install-script.generated";
 import { publishedRelease } from "../app/publication";
 
