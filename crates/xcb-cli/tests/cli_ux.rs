@@ -495,6 +495,63 @@ fn accounts_table_lines_up_and_names_the_account_to_sign_in() {
     );
 }
 
+/// `update disable` and `update enable --policy disable` only record the
+/// policy: no LaunchAgent, no login-item notice, on every platform. The
+/// sandbox HOME has no LaunchAgent, so nothing reaches launchd.
+#[test]
+fn update_policy_changes_without_installing_anything_to_turn_off() {
+    let sandbox = Sandbox::new("update-policy");
+    let agents = sandbox.root.join("home/Library/LaunchAgents");
+    for args in [
+        &["update", "disable"][..],
+        &["update", "enable", "--policy", "disable"],
+    ] {
+        let output = sandbox.run(args, &[("HRANESS_AUDIENCE", "human")]);
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {output:?}");
+        assert_eq!(text(&output.stdout), "xcb updates disabled\n", "{args:?}");
+        assert_eq!(text(&output.stderr), "", "{args:?}");
+        let status = sandbox.run(&["--json", "update", "status"], &[]);
+        let value: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(value["policy"], "disable", "{args:?}");
+        assert!(!agents.exists(), "{args:?} created {}", agents.display());
+    }
+    // Linux has no built-in daily check: enable records the policy and
+    // names the timer to add instead of failing.
+    if cfg!(target_os = "linux") {
+        let output = sandbox.run(&["update", "enable"], &[("HRANESS_AUDIENCE", "human")]);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert_eq!(text(&output.stdout), "xcb updates: notify\n");
+        assert!(
+            text(&output.stderr).contains("xcb update daemon"),
+            "{output:?}"
+        );
+        let json = sandbox.run(&["--json", "update", "enable", "--policy", "auto"], &[]);
+        let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(value["policy"], "auto");
+        assert_eq!(value["scheduled"], false);
+    }
+}
+
+#[test]
+fn upgrading_to_an_older_release_needs_an_explicit_flag() {
+    let sandbox = Sandbox::new("downgrade");
+    let output = sandbox.run(&["upgrade", "0.0.1"], &[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(
+        text(&output.stderr),
+        format!(
+            "✗ xcb 0.0.1 is older than the installed {}; installing it would downgrade xcb.\n→ xcb upgrade 0.0.1 --allow-downgrade\n",
+            env!("CARGO_PKG_VERSION")
+        )
+    );
+    let json = sandbox.run(&["--json", "update", "install", "v0.0.1"], &[]);
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        value["error"]["next"],
+        "xcb upgrade 0.0.1 --allow-downgrade"
+    );
+}
+
 #[test]
 fn empty_sessions_say_so() {
     let sandbox = Sandbox::new("sessions");

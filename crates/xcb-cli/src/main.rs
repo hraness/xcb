@@ -381,6 +381,9 @@ enum Commands {
     Upgrade {
         /// Version tag to install; the latest verified release when omitted.
         version: Option<String>,
+        /// Allow installing a release older than the running one.
+        #[arg(long)]
+        allow_downgrade: bool,
         /// Suppress progress output (used by the updater itself).
         #[arg(long, hide = true)]
         quiet: bool,
@@ -439,18 +442,23 @@ enum UpdateCommand {
     Check,
     /// Show the local update policy and the last cached result.
     Status,
-    /// Set the user-level policy. The default is notify.
+    /// Set the update policy (default notify); on macOS also add the daily
+    /// check. --policy disable turns checks off like `xcb update disable`.
     Enable {
         /// Update policy: notify, auto, or disable.
         #[arg(long, default_value = "notify", value_parser = parse_update_policy)]
         policy: xcb_runtime::update::Policy,
     },
-    /// Disable update checks and scheduled upgrades.
+    /// Turn off update checks and scheduled upgrades, and remove the daily
+    /// check on macOS.
     Disable,
     /// Install a verified release using the recorded global installer.
     Install {
         /// Version tag to install; the latest verified release when omitted.
         version: Option<String>,
+        /// Allow installing a release older than the running one.
+        #[arg(long)]
+        allow_downgrade: bool,
         /// Suppress progress output (used by the updater itself).
         #[arg(long, hide = true)]
         quiet: bool,
@@ -1137,6 +1145,53 @@ fn parse_update_policy(value: &str) -> std::result::Result<xcb_runtime::update::
         "disable" => Ok(xcb_runtime::update::Policy::Disable),
         _ => Err("update policy must be notify, auto, or disable".to_owned()),
     }
+}
+
+/// `xcb update enable|disable`: record the policy, then add or remove the
+/// daily check where the platform has one. Turning updates off never
+/// installs anything and works on every platform.
+fn set_update_policy(
+    root: &std::path::Path,
+    policy: xcb_runtime::update::Policy,
+    as_json: bool,
+) -> Result<()> {
+    use xcb_runtime::update::{self, Policy};
+    let state = update::set_policy(root, policy)?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let scheduled = if policy == Policy::Disable {
+        if let Some(home) = &home {
+            update::remove_scheduler(home)?;
+        }
+        false
+    } else if update::scheduler_supported() {
+        let home = home.ok_or(Error::PrivateState)?;
+        if !update::scheduler_path(&home).exists() {
+            ux::login_item_notice(
+                "It checks once a day for a verified xcb release, until you run xcb update disable.",
+            );
+        }
+        update::install_scheduler(&std::env::current_exe()?)?;
+        true
+    } else {
+        false
+    };
+    if as_json {
+        return print_json(json!({
+            "version": 1,
+            "policy": state.policy,
+            "enabled": state.policy != Policy::Disable,
+            "scheduled": scheduled,
+        }));
+    }
+    if policy == Policy::Disable {
+        println!("xcb updates disabled");
+    } else if scheduled {
+        println!("xcb updates: {} · checked once a day", state.policy);
+    } else {
+        println!("xcb updates: {}", state.policy);
+        ux::next("run xcb update daemon once a day from a user timer (systemd or cron)");
+    }
+    Ok(())
 }
 
 fn parse_expected_generation(value: &str) -> std::result::Result<String, &'static str> {
@@ -2680,39 +2735,26 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                     }
                 }
                 UpdateCommand::Enable { policy } => {
-                    if cfg!(target_os = "macos") {
-                        ux::login_item_notice(
-                            "It checks once a day for a verified xcb release, until you run xcb update disable.",
-                        );
-                    }
-                    xcb_runtime::update::configure_scheduler(&std::env::current_exe()?, true)?;
-                    let state = xcb_runtime::update::set_policy(store.root(), policy)?;
-                    if cli.json {
-                        print_json(
-                            json!({"version":1,"policy":state.policy,"enabled":state.policy != xcb_runtime::update::Policy::Disable}),
-                        )?;
-                    } else {
-                        println!("xcb updates: {}", state.policy);
-                    }
+                    set_update_policy(store.root(), policy, cli.json)?;
                 }
                 UpdateCommand::Disable => {
-                    xcb_runtime::update::configure_scheduler(&std::env::current_exe()?, false)?;
-                    let state = xcb_runtime::update::set_policy(
+                    set_update_policy(
                         store.root(),
                         xcb_runtime::update::Policy::Disable,
+                        cli.json,
                     )?;
-                    if cli.json {
-                        print_json(json!({"version":1,"policy":state.policy,"enabled":false}))?;
-                    } else {
-                        println!("xcb updates disabled");
-                    }
                 }
-                UpdateCommand::Install { version, quiet } => {
+                UpdateCommand::Install {
+                    version,
+                    allow_downgrade,
+                    quiet,
+                } => {
                     xcb_runtime::update::upgrade(
                         store.root(),
                         env!("CARGO_PKG_VERSION"),
                         version.as_deref(),
                         quiet || cli.json,
+                        allow_downgrade,
                     )?;
                 }
                 UpdateCommand::Daemon { quiet } => {
@@ -2731,6 +2773,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                                 env!("CARGO_PKG_VERSION"),
                                 None,
                                 quiet || cli.json,
+                                false,
                             )?;
                         }
                     }
@@ -2738,11 +2781,16 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Some(Commands::Upgrade { version, quiet }) => xcb_runtime::update::upgrade(
+        Some(Commands::Upgrade {
+            version,
+            allow_downgrade,
+            quiet,
+        }) => xcb_runtime::update::upgrade(
             store.root(),
             env!("CARGO_PKG_VERSION"),
             version.as_deref(),
             quiet || cli.json,
+            allow_downgrade,
         ),
         Some(Commands::Config) => {
             print_json(config)?;
@@ -4104,12 +4152,27 @@ mod tests {
         ));
         let cli = Cli::try_parse_from(["xcb", "update", "install", "0.5.0"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Commands::Update { command: Some(UpdateCommand::Install { version: Some(version), quiet: false }) }) if version == "0.5.0")
+            matches!(cli.command, Some(Commands::Update { command: Some(UpdateCommand::Install { version: Some(version), quiet: false, allow_downgrade: false }) }) if version == "0.5.0")
         );
         let cli = Cli::try_parse_from(["xcb", "upgrade", "0.5.0"]).unwrap();
         assert!(
-            matches!(cli.command, Some(Commands::Upgrade { version: Some(version), quiet: false }) if version == "0.5.0")
+            matches!(cli.command, Some(Commands::Upgrade { version: Some(version), quiet: false, allow_downgrade: false }) if version == "0.5.0")
         );
+        let cli = Cli::try_parse_from(["xcb", "upgrade", "0.5.0", "--allow-downgrade"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Upgrade {
+                allow_downgrade: true,
+                ..
+            })
+        ));
+        let cli = Cli::try_parse_from(["xcb", "update", "disable"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Update {
+                command: Some(UpdateCommand::Disable)
+            })
+        ));
         assert!(Cli::try_parse_from(["xcb", "update", "enable", "--policy", "project"]).is_err());
     }
 
