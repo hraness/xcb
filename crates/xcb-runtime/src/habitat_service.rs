@@ -46,11 +46,39 @@ fn xml(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+/// The path the login service runs: the canonical binary, except that a
+/// binary inside a Homebrew keg (`<prefix>/Cellar/<formula>/<version>/bin/<name>`)
+/// is recorded through the keg's `opt` link (`<prefix>/opt/<formula>/bin/<name>`).
+/// `brew upgrade` repoints that link at the new keg and `brew cleanup` deletes
+/// the old one, so a recorded keg path would stop starting after an upgrade.
+/// The link is used only while it resolves to this exact binary; an unlinked
+/// older keg keeps its own path.
+fn stable_executable(canonical: PathBuf) -> PathBuf {
+    homebrew_opt_path(&canonical).unwrap_or(canonical)
+}
+
+fn homebrew_opt_path(canonical: &Path) -> Option<PathBuf> {
+    let name = canonical.file_name()?;
+    let bin = canonical.parent()?;
+    let formula = bin.parent()?.parent()?;
+    let cellar = formula.parent()?;
+    if bin.file_name()? != "bin" || cellar.file_name()? != "Cellar" {
+        return None;
+    }
+    let opt = cellar
+        .parent()?
+        .join("opt")
+        .join(formula.file_name()?)
+        .join("bin")
+        .join(name);
+    (opt.canonicalize().ok()? == canonical).then_some(opt)
+}
+
 impl Service {
     pub fn plan(root: &Path, executable: &Path, home: &Path) -> Result<Self> {
         let state = root.canonicalize()?;
         private::check_directory(&state)?;
-        let executable = executable.canonicalize()?;
+        let executable = stable_executable(executable.canonicalize()?);
         if !executable.is_file() {
             return Err(Error::PrivateState);
         }
@@ -577,6 +605,64 @@ mod tests {
             .set_modified(old)
             .unwrap();
         assert_eq!(current_denial(&log), None);
+    }
+
+    #[test]
+    fn homebrew_keg_binary_is_recorded_through_its_opt_link() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let prefix = root.path().canonicalize().unwrap();
+        let keg = |version: &str| {
+            let bin = prefix.join(format!("Cellar/xcb/{version}/bin"));
+            fs::create_dir_all(&bin).unwrap();
+            fs::write(bin.join("xcb"), version).unwrap();
+            bin.join("xcb")
+        };
+        let (old, new) = (keg("1.2.3"), keg("1.2.4"));
+        for directory in ["opt", "bin", "home"] {
+            fs::create_dir(prefix.join(directory)).unwrap();
+        }
+        symlink("../Cellar/xcb/1.2.3", prefix.join("opt/xcb")).unwrap();
+        symlink("../Cellar/xcb/1.2.3/bin/xcb", prefix.join("bin/xcb")).unwrap();
+        let state = private::directory(&prefix.join("state")).unwrap();
+        let home = prefix.join("home");
+        let stable = prefix.join("opt/xcb/bin/xcb");
+
+        // Run from PATH or by its keg path, the service records the opt link.
+        for invoked in [prefix.join("bin/xcb"), old.clone()] {
+            let service = Service::plan(&state, &invoked, &home).unwrap();
+            assert_eq!(service.executable, stable);
+            assert!(service.verify(&state, &home).is_ok());
+            let text = service.render().unwrap();
+            assert!(text.contains(&format!(
+                "<key>ProgramArguments</key><array><string>{}</string>",
+                stable.display()
+            )));
+            assert!(!text.contains("Cellar"));
+        }
+
+        // `brew upgrade` relinks opt to the new keg and cleanup removes the
+        // old one: the recorded path now starts the new binary, and planning
+        // again from the new keg records the same path, so no rebind is needed.
+        fs::remove_file(prefix.join("opt/xcb")).unwrap();
+        symlink("../Cellar/xcb/1.2.4", prefix.join("opt/xcb")).unwrap();
+        assert_eq!(Service::plan(&state, &old, &home).unwrap().executable, old);
+        fs::remove_dir_all(prefix.join("Cellar/xcb/1.2.3")).unwrap();
+        assert_eq!(stable.canonicalize().unwrap(), new);
+        assert_eq!(
+            Service::plan(&state, &new, &home).unwrap().executable,
+            stable
+        );
+
+        // A binary outside a keg, or a keg whose opt link is missing, keeps
+        // its canonical path.
+        fs::remove_file(prefix.join("opt/xcb")).unwrap();
+        assert_eq!(Service::plan(&state, &new, &home).unwrap().executable, new);
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(
+            Service::plan(&state, &exe, &home).unwrap().executable,
+            exe.canonicalize().unwrap()
+        );
     }
 
     #[test]
