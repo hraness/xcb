@@ -1,17 +1,17 @@
 {
-  "version": "0.9.1",
-  "verificationRun": "https://github.com/hraness/xcb/actions/runs/36303605271",
-  "archiveUrl": "https://github.com/hraness/xcb/releases/download/v0.9.1/hraness-xcb-0.9.1.tgz",
+  "version": "0.10.1",
+  "verificationRun": "https://github.com/hraness/xcb/actions/runs/36352491789",
+  "archiveUrl": "https://github.com/hraness/xcb/releases/download/v0.10.1/hraness-xcb-0.10.1.tgz",
   "native": [
     {
       "platform": "darwin-aarch64",
-      "url": "https://github.com/hraness/xcb/releases/download/v0.9.1/xcb-0.9.1-darwin-aarch64.tar.gz",
-      "sha256Url": "https://github.com/hraness/xcb/releases/download/v0.9.1/xcb-0.9.1-darwin-aarch64.tar.gz.sha256"
+      "url": "https://github.com/hraness/xcb/releases/download/v0.10.1/xcb-0.10.1-darwin-aarch64.tar.gz",
+      "sha256Url": "https://github.com/hraness/xcb/releases/download/v0.10.1/xcb-0.10.1-darwin-aarch64.tar.gz.sha256"
     },
     {
       "platform": "linux-x86_64",
-      "url": "https://github.com/hraness/xcb/releases/download/v0.9.1/xcb-0.9.1-linux-x86_64.tar.gz",
-      "sha256Url": "https://github.com/hraness/xcb/releases/download/v0.9.1/xcb-0.9.1-linux-x86_64.tar.gz.sha256"
+      "url": "https://github.com/hraness/xcb/releases/download/v0.10.1/xcb-0.10.1-linux-x86_64.tar.gz",
+      "sha256Url": "https://github.com/hraness/xcb/releases/download/v0.10.1/xcb-0.10.1-linux-x86_64.tar.gz.sha256"
     }
   ]
 }
