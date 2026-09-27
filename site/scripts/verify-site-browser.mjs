@@ -60,7 +60,7 @@ try {
             heading: document.querySelector("h1")?.textContent?.trim(),
             theme: document.documentElement.dataset.theme,
             footerPositions: [footer, footer?.querySelector(".hraness-site-footer__inner")].map(element => element ? getComputedStyle(element).position : null),
-            smallHeaderTargets: innerWidth > 600 ? [] : [...document.querySelectorAll("header a, header button")].filter(element => { const box = element.getBoundingClientRect(); return box.width > 0 && box.height > 0 && (box.width < 43.5 || box.height < 43.5); }).map(element => ({ label: element.textContent?.trim() || element.getAttribute("aria-label"), width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height })),
+            smallHeaderTargets: innerWidth > 600 ? [] : [...document.querySelectorAll("header a, header button, header summary")].filter(element => { const box = element.getBoundingClientRect(); return box.width > 0 && box.height > 0 && (box.width < 43.5 || box.height < 43.5); }).map(element => ({ label: element.textContent?.trim() || element.getAttribute("aria-label"), width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height })),
           };
         });
         const name = `${width}-${theme}-${route === "/" ? "home" : route.slice(1).replaceAll("/", "_")}`;
@@ -75,9 +75,11 @@ try {
         results.push({ route, width, theme });
       }
       await page.goto(origin);
-      await page.getByRole("button", { name: /^Appearance/u }).click();
+      const themeMenu = page.locator(".hraness-design-palette-menu");
+      await page.waitForFunction(() => document.querySelector(".hraness-design-palette-menu")?.dataset.ready === "true");
+      await themeMenu.locator(":scope > summary").click();
       const targetTheme = theme === "light" ? "dark" : "light";
-      await page.getByRole("menuitemradio", { name: new RegExp(`^${targetTheme}$`, "iu") }).click();
+      await page.getByRole("radio", { name: new RegExp(`^${targetTheme}$`, "iu") }).check();
       await page.waitForFunction(expected => document.documentElement.dataset.theme === expected, targetTheme);
       await page.reload();
       await page.waitForFunction(expected => document.documentElement.dataset.theme === expected, targetTheme);
