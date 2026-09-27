@@ -83,6 +83,120 @@ fn version_prints_name_and_version() {
 }
 
 #[test]
+fn bare_xcb_without_a_terminal_prints_where_to_start() {
+    let sandbox = Sandbox::new("bare");
+    let output = sandbox.run(&[], &[]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let stdout = text(&output.stdout);
+    assert!(
+        stdout.starts_with("xcb routes coding tasks across the Claude, Codex, and Devin"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\nStart here\n  xcb setup claude"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.ends_with(&format!(
+            "All commands: xcb --help · Advanced: xcb help advanced\nxcb {}\n",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{stdout}"
+    );
+    assert!(stdout.lines().count() <= 25);
+    assert!(output.stderr.is_empty(), "{output:?}");
+    // It only prints; it never opens or creates the state folder.
+    assert!(!sandbox.state().exists());
+}
+
+#[test]
+fn usage_errors_name_the_input_and_the_help_to_read() {
+    let sandbox = Sandbox::new("usage");
+    for (args, expected) in [
+        (
+            &["acounts"][..],
+            "✗ Unknown command \"acounts\". Did you mean \"accounts\"?\n→ xcb --help\n",
+        ),
+        (
+            &["login"],
+            "✗ Unknown command \"login\". Did you mean \"accounts login\"?\n→ xcb --help\n",
+        ),
+        (
+            &["accounts", "list"],
+            "✗ Unknown command \"list\".\n→ xcb accounts --help\n",
+        ),
+        (&["setup"], "✗ Missing <provider>.\n→ xcb setup --help\n"),
+        (
+            &["run", "--modl", "x"],
+            "✗ Unknown option \"--modl\". Did you mean \"--model\"?\n→ xcb run --help\n",
+        ),
+    ] {
+        let output = sandbox.run(args, &[("HRANESS_AUDIENCE", "human")]);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert_eq!(text(&output.stdout), "", "{args:?}");
+        assert_eq!(text(&output.stderr), expected, "{args:?}");
+    }
+    let dumb = sandbox.run(&["acounts"], &[("TERM", "dumb")]);
+    assert_eq!(
+        text(&dumb.stderr),
+        "FAIL Unknown command \"acounts\". Did you mean \"accounts\"?\n-> xcb --help\n"
+    );
+    // --json and agents get one JSON document on stdout, and nothing on
+    // stderr, with the same exit code.
+    for (args, env) in [
+        (&["--json", "acounts"][..], &[][..]),
+        (&["acounts"], &[("CLAUDECODE", "1")]),
+    ] {
+        let output = sandbox.run(args, env);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        assert_eq!(text(&output.stderr), "", "{args:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error"]["code"], "usage");
+        assert_eq!(
+            value["error"]["message"],
+            "Unknown command \"acounts\". Did you mean \"accounts\"?"
+        );
+        assert_eq!(value["error"]["next"], "xcb --help");
+    }
+}
+
+#[test]
+fn help_is_short_grouped_and_fits_100_columns() {
+    let root = plain(&["--help"]);
+    let root = text(&root.stdout);
+    assert!(root.lines().count() <= 60, "{root}");
+    assert!(root.ends_with("xcb help advanced\n"), "{root}");
+    let advanced = plain(&["help", "advanced"]);
+    assert!(advanced.status.success());
+    let advanced = text(&advanced.stdout);
+    assert!(advanced.contains("\nOther machines\n  link "), "{advanced}");
+    assert!(!root.contains("\n  link "), "{root}");
+    for args in [
+        &["accounts", "--help"][..],
+        &["run", "--help"],
+        &["models", "--help"],
+        &["doctor", "--help"],
+        &["service", "--help"],
+        &["remote", "--help"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xcb"))
+            .env_clear()
+            .env("COLUMNS", "200")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{args:?}");
+        let stdout = text(&output.stdout);
+        let wide: Vec<&str> = stdout
+            .lines()
+            .filter(|line| line.chars().count() > 100)
+            .collect();
+        assert!(wide.is_empty(), "{args:?}: {wide:#?}");
+    }
+}
+
+#[test]
 fn every_command_help_exits_zero() {
     for args in [
         &["--help"][..],
@@ -94,6 +208,7 @@ fn every_command_help_exits_zero() {
         &["setup", "--help"],
         &["-h"],
         &["help"],
+        &["help", "advanced"],
     ] {
         let output = plain(args);
         assert!(output.status.success(), "{args:?}: {output:?}");
@@ -185,6 +300,8 @@ fn doctor_marks_each_provider_and_names_one_next_step() {
         "{stdout}"
     );
     assert!(!stdout.contains("custody"), "{stdout}");
+    // The checks end with a count line.
+    assert!(stdout.ends_with("\n\n3 problems.\n"), "{stdout}");
     assert!(
         text(&output.stderr).ends_with("Next: install Claude Code, or run xcb doctor --provider claude --executable <absolute path>\n"),
         "{output:?}"
@@ -209,7 +326,7 @@ fn empty_accounts_point_at_the_first_command() {
     // A pipe is a quiet reader: no hint.
     assert_eq!(text(&quiet.stderr), "");
     let human = sandbox.run(&["accounts"], &[("HRANESS_AUDIENCE", "human")]);
-    assert_eq!(text(&human.stderr), "Next: xcb accounts add claude\n");
+    assert_eq!(text(&human.stderr), "Next: xcb setup <provider>\n");
 }
 
 #[test]

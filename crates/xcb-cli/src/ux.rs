@@ -1,122 +1,14 @@
-//! The Hraness CLI style contract for xcb: symbols, color, audience, `Next:`
-//! hints and human error output.
-//!
-//! TODO(df-0.8): use detectAudience — replace `detect_audience`, `Style` and
-//! the error renderer with the `hraness-cli-kit` crate from desktop-foundation
-//! 0.8.0 once it ships. The rules below are copied from that contract.
+//! The Hraness CLI style contract for xcb, on top of `hraness-cli-kit` from
+//! desktop-foundation: audience, symbols and color, `Next:` hints, the
+//! login-item notice, usage errors and human or JSON error output.
 
-use std::io::{IsTerminal, Write};
+use hraness_cli_kit::permissions::{self, PermissionNeed, ProductRef, presets};
+pub use hraness_cli_kit::{Audience, Style, Symbol};
 use xcb_runtime::Error;
 
-/// Who reads this process's output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Audience {
-    Human,
-    Agent,
-    Quiet,
-}
-
-/// Exact agent markers. Prefixes never count: `CODEX_HOME` and
-/// `DEVIN_API_KEY` are human configuration.
-const AGENT_MARKERS: [&str; 6] = [
-    "AI_AGENT",
-    "CLAUDECODE",
-    "CODEX_SANDBOX",
-    "CODEX_SANDBOX_NETWORK_DISABLED",
-    "CURSOR_AGENT",
-    "GEMINI_CLI",
-];
-
-pub fn detect_audience(env: &dyn Fn(&str) -> Option<String>, stderr_is_tty: bool) -> Audience {
-    match env("HRANESS_AUDIENCE").as_deref() {
-        Some("human") => return Audience::Human,
-        Some("agent") => return Audience::Agent,
-        Some("quiet" | "off") => return Audience::Quiet,
-        _ => {}
-    }
-    if AGENT_MARKERS
-        .iter()
-        .any(|name| env(name).is_some_and(|value| !value.is_empty()))
-    {
-        return Audience::Agent;
-    }
-    if stderr_is_tty {
-        Audience::Human
-    } else {
-        Audience::Quiet
-    }
-}
-
-fn process_env(name: &str) -> Option<String> {
-    std::env::var(name).ok()
-}
-
+/// Who reads this process's output: a person, an agent, or a quiet pipe.
 pub fn audience() -> Audience {
-    detect_audience(&process_env, std::io::stderr().is_terminal())
-}
-
-/// The shared CLI symbol set. Not every command uses every symbol.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Symbol {
-    Ok,
-    Fail,
-    Warn,
-    Next,
-    On,
-    Off,
-    Skip,
-}
-
-/// How one stream renders symbols.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Style {
-    pub color: bool,
-    pub ascii: bool,
-}
-
-impl Style {
-    pub fn detect(env: &dyn Fn(&str) -> Option<String>, is_tty: bool) -> Self {
-        let set = |name: &str| env(name).is_some_and(|value| !value.is_empty());
-        let dumb = env("TERM").as_deref() == Some("dumb");
-        let color = if env("FORCE_COLOR").as_deref() == Some("1") {
-            true
-        } else {
-            is_tty && !dumb && !set("NO_COLOR")
-        };
-        let utf8 = ["LC_ALL", "LC_CTYPE", "LANG"].iter().any(|name| {
-            env(name).is_some_and(|value| {
-                let value = value.to_ascii_lowercase();
-                value.contains("utf-8") || value.contains("utf8")
-            })
-        });
-        let ascii = dumb || !utf8 || env("HRANESS_ASCII").as_deref() == Some("1");
-        Self { color, ascii }
-    }
-    pub fn stdout() -> Self {
-        Self::detect(&process_env, std::io::stdout().is_terminal())
-    }
-    pub fn stderr() -> Self {
-        Self::detect(&process_env, std::io::stderr().is_terminal())
-    }
-    /// The symbol, colored when this stream allows it. Only the symbol is
-    /// ever colored, never the sentence.
-    pub fn sym(self, symbol: Symbol) -> String {
-        let (glyph, ascii, color) = match symbol {
-            Symbol::Ok => ("✓", "OK", Some("32")),
-            Symbol::Fail => ("✗", "FAIL", Some("31")),
-            Symbol::Warn => ("⚠", "WARN", Some("33")),
-            Symbol::Next => ("→", "->", Some("2")),
-            Symbol::On => ("●", "*", Some("32")),
-            Symbol::Off => ("○", "o", None),
-            Symbol::Skip => ("–", "-", Some("2")),
-        };
-        let text = if self.ascii { ascii } else { glyph };
-        match color {
-            Some(code) if self.color => format!("\x1b[{code}m{text}\x1b[0m"),
-            _ => text.to_owned(),
-        }
-    }
+    hraness_cli_kit::audience::detect_current()
 }
 
 /// Set while one command runs another's steps (`xcb setup`), so only the
@@ -134,39 +26,35 @@ pub fn hold_next() -> impl Drop {
     Held(QUIET_NEXT.swap(true, std::sync::atomic::Ordering::Relaxed))
 }
 
-const LOGIN_ITEMS_PATH: &str = "System Settings › General › Login Items & Extensions";
 const FILES_AND_FOLDERS_PATH: &str = "System Settings › Privacy & Security › Files & Folders";
 pub const FILES_AND_FOLDERS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
 
-/// The SPEC `LOGIN_ITEM` notice, said before xcb registers a LaunchAgent.
-/// Login items only notify, so there is no Enter confirm.
-///
-/// TODO(df-0.8): use hraness-cli-kit `permissions::render_pre_prompt`.
-pub fn login_item_text(why: &str, off: &str, ascii: bool) -> String {
-    format!(
-        "{} macOS will show a notice that xcb can open at login.\n   {why} Turn it off any time in {LOGIN_ITEMS_PATH}, or run {off}.\n",
-        if ascii { "NOTE" } else { "🔐" }
-    )
+/// The kit's `LOGIN_ITEM` notice, with xcb's reason. Login items only
+/// notify, so there is no Enter confirm.
+fn login_item_need(why: &str) -> PermissionNeed {
+    let mut need = presets::login_item(ProductRef::new("xcb", "xcb"));
+    need.why = why.to_owned();
+    need
 }
 
-pub fn login_item_notice(why: &str, off: &str) {
-    match audience() {
-        Audience::Human => eprint!(
-            "{}",
-            login_item_text(why, off, Style::stderr().sym(Symbol::Ok) == "OK")
-        ),
-        Audience::Agent => eprintln!(
-            "{}",
-            serde_json::json!({
-                "type": "permission-notice",
-                "product": "xcb",
-                "kind": "login-item",
-                "message": format!("macOS will show a notice that xcb can open at login. {why} Turn it off any time in {LOGIN_ITEMS_PATH}, or run {off}."),
-            })
-        ),
-        Audience::Quiet => {}
-    }
+/// The notice as a person reads it.
+#[cfg(test)]
+fn login_item_text(why: &str, style: Style) -> String {
+    use hraness_cli_kit::permissions::{NoticeKind, Surface};
+    let notice = permissions::render_pre_prompt(
+        &login_item_need(why),
+        Surface::Cli,
+        &hraness_cli_kit::audience::process_env,
+    );
+    permissions::format_notice(&notice, NoticeKind::PrePrompt, false, style)
+}
+
+/// Say the login-item notice before xcb registers a LaunchAgent: text for a
+/// person, one JSON line for an agent, nothing for a quiet reader. It never
+/// waits for input.
+pub fn login_item_notice(why: &str) {
+    let _ = permissions::pre_prompt(&login_item_need(why), None, &mut permissions::ProcessIo);
 }
 
 /// The SPEC CLI recovery block for a protected folder macOS kept from the
@@ -184,8 +72,8 @@ pub fn files_and_folders_denial(folder: Option<&str>, style: Style) -> String {
     };
     format!(
         "{} xcb can't {what}: macOS access is off for xcb.\n  Turn on xcb {turn_on} in {FILES_AND_FOLDERS_PATH}.\n{} open '{FILES_AND_FOLDERS_URL}'\n",
-        style.sym(Symbol::Fail),
-        style.sym(Symbol::Next)
+        style.symbol(Symbol::Fail),
+        style.symbol(Symbol::Next)
     )
 }
 
@@ -214,19 +102,8 @@ pub fn sentence(error: &Error) -> String {
             text = rest;
         }
     }
-    let mut out = String::with_capacity(text.len() + 1);
-    let mut chars = text.chars();
     // The product name stays lowercase at the start of a sentence.
-    if text.starts_with("xcb ") {
-        out.push_str(text);
-    } else if let Some(first) = chars.next() {
-        out.extend(first.to_uppercase());
-        out.push_str(chars.as_str());
-    }
-    if !out.ends_with(['.', '?', '!']) {
-        out.push('.');
-    }
-    out
+    hraness_cli_kit::style::sentence(text, &["xcb "])
 }
 
 /// The one next command for an error, when xcb knows it.
@@ -256,37 +133,42 @@ pub fn code(error: &Error) -> &'static str {
     }
 }
 
-/// The human rendering: `✗ sentence` and, when known, `→ next command`.
-pub fn render_human(error: &Error, style: Style) -> String {
-    let mut out = format!("{} {}", style.sym(Symbol::Fail), sentence(error));
+/// The kit's error form: one sentence, the one next command, and the
+/// stable code for `--json`.
+pub fn cli_error(error: &Error) -> hraness_cli_kit::CliError {
+    let mut out = hraness_cli_kit::CliError::new(code(error), sentence(error));
     if let Some(next) = next_step(error) {
-        out.push('\n');
-        out.push_str(&format!("{} {next}", style.sym(Symbol::Next)));
+        out = out.with_next(next);
     }
     out
 }
 
-pub fn render_json(error: &Error) -> serde_json::Value {
-    serde_json::json!({
-        "ok": false,
-        "error": {
-            "code": code(error),
-            "message": sentence(error),
-            "next": next_step(error),
-        }
-    })
+/// Report a failed command and return its exit code. `--json` or an agent
+/// reader gets the error object on stdout; everyone else, and every internal
+/// protocol helper whose stdout belongs to its peer, gets the human lines on
+/// stderr.
+pub fn report_error(error: &Error, json: bool, protocol: bool) -> i32 {
+    let error = cli_error(error);
+    if protocol {
+        return error.report(false, Audience::Quiet);
+    }
+    error.report(json, audience())
 }
 
-/// Report a failed command. `--json` or an agent reader gets the error
-/// object on stdout; everyone else, and every internal protocol helper whose
-/// stdout belongs to its peer, gets the human lines on stderr.
-pub fn report_error(error: &Error, json: bool, protocol: bool) {
-    if !protocol && (json || audience() == Audience::Agent) {
-        let mut stdout = std::io::stdout().lock();
-        let _ = writeln!(stdout, "{}", render_json(error));
-        return;
-    }
-    eprintln!("{}", render_human(error, Style::stderr()));
+/// The command line, with help wrapped at 100 columns at every level.
+pub fn command() -> clap::Command {
+    hraness_cli_kit::clap::cap_help_width(<crate::Cli as clap::CommandFactory>::command(), 100)
+}
+
+/// Handle a clap parse failure: help and version on stdout with exit 0,
+/// otherwise `✗ Unknown command "x". Did you mean "y"?` and the help to
+/// read, exit 2, or the JSON error on stdout for `--json` and agents.
+pub fn clap_failure(error: clap::Error, root: &clap::Command, args: &[String]) -> i32 {
+    let options = hraness_cli_kit::clap::UsageOptions::default()
+        .cli("xcb")
+        .alias("login", "accounts login")
+        .alias("add", "accounts add");
+    hraness_cli_kit::clap::exit_on_parse_error(error, root, args, &options)
 }
 
 /// A closed pipe (`xcb accounts | head -1`) ends output quietly instead of
@@ -294,119 +176,85 @@ pub fn report_error(error: &Error, json: bool, protocol: bool) {
 /// broken-pipe panic from `println!` or a writer's `expect` exits 0 without a
 /// trace.
 pub fn restore_sigpipe() {
-    let default = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let message = info
-            .payload()
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| info.payload().downcast_ref::<&str>().copied())
-            .unwrap_or("");
-        if message.contains("Broken pipe") {
-            std::process::exit(0);
-        }
-        default(info);
-    }));
+    hraness_cli_kit::style::exit_quietly_on_broken_pipe();
+}
+
+/// Write `text` to stdout, ending quietly on a closed pipe (`| head -1`).
+pub fn write_stdout(text: &str) {
+    hraness_cli_kit::style::write_stdout(text);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
-        move |name| {
-            pairs
-                .iter()
-                .find(|(key, _)| *key == name)
-                .map(|(_, value)| (*value).to_owned())
-        }
-    }
-
-    #[test]
-    fn audience_follows_the_shared_rule() {
-        assert_eq!(detect_audience(&env_of(&[]), true), Audience::Human);
-        assert_eq!(detect_audience(&env_of(&[]), false), Audience::Quiet);
-        assert_eq!(
-            detect_audience(&env_of(&[("CLAUDECODE", "1")]), true),
-            Audience::Agent
-        );
-        assert_eq!(
-            detect_audience(&env_of(&[("CLAUDECODE", "")]), true),
-            Audience::Human
-        );
-        assert_eq!(
-            detect_audience(&env_of(&[("CODEX_HOME", "/x")]), true),
-            Audience::Human
-        );
-        assert_eq!(
-            detect_audience(
-                &env_of(&[("HRANESS_AUDIENCE", "human"), ("AI_AGENT", "1")]),
-                false
-            ),
-            Audience::Human
-        );
-        assert_eq!(
-            detect_audience(&env_of(&[("HRANESS_AUDIENCE", "off")]), true),
-            Audience::Quiet
-        );
-    }
-
-    #[test]
-    fn style_respects_no_color_term_and_locale() {
-        let utf8 = Style::detect(&env_of(&[("LANG", "en_US.UTF-8")]), true);
-        assert_eq!(
-            utf8,
-            Style {
-                color: true,
-                ascii: false
-            }
-        );
-        assert_eq!(utf8.sym(Symbol::Ok), "\x1b[32m✓\x1b[0m");
-        let no_color = Style::detect(&env_of(&[("LANG", "en_US.UTF-8"), ("NO_COLOR", "1")]), true);
-        assert_eq!(no_color.sym(Symbol::Fail), "✗");
-        let piped = Style::detect(&env_of(&[("LANG", "en_US.UTF-8")]), false);
-        assert_eq!(piped.sym(Symbol::Warn), "⚠");
-        let dumb = Style::detect(&env_of(&[("LANG", "en_US.UTF-8"), ("TERM", "dumb")]), true);
-        assert_eq!(dumb.sym(Symbol::Fail), "FAIL");
-        assert_eq!(dumb.sym(Symbol::Next), "->");
-        let c_locale = Style::detect(&env_of(&[("LANG", "C")]), false);
-        assert_eq!(c_locale.sym(Symbol::On), "*");
-        let forced = Style::detect(
-            &env_of(&[("LANG", "en_US.UTF-8"), ("FORCE_COLOR", "1")]),
-            false,
-        );
-        assert!(forced.color);
-    }
-
     #[test]
     fn errors_render_one_sentence_and_one_next_step() {
-        let plain = Style {
-            color: false,
-            ascii: false,
-        };
         let guided = Error::guided("No account matches \"zz\".", "xcb accounts");
         assert_eq!(
-            render_human(&guided, plain),
-            "✗ No account matches \"zz\".\n→ xcb accounts"
+            cli_error(&guided).render_human(Style::PLAIN),
+            "✗ No account matches \"zz\".\n→ xcb accounts\n"
         );
         assert_eq!(
             guided.to_string(),
             "No account matches \"zz\". Next: xcb accounts"
         );
         let internal = Error::Unavailable("no saved sessions");
-        assert_eq!(render_human(&internal, plain), "✗ No saved sessions.");
+        assert_eq!(
+            cli_error(&internal).render_human(Style::PLAIN),
+            "✗ No saved sessions.\n"
+        );
         let product = Error::Unavailable("xcb doctor found nothing");
         assert_eq!(sentence(&product), "xcb doctor found nothing.");
         assert_eq!(
-            render_json(&guided).to_string(),
+            cli_error(&guided).render_json(),
             r#"{"ok":false,"error":{"code":"unavailable","message":"No account matches \"zz\".","next":"xcb accounts"}}"#
+        );
+    }
+
+    #[test]
+    fn every_help_line_fits_100_columns() {
+        let over = hraness_cli_kit::clap::help_lines_over(&command(), 100);
+        assert!(
+            over.is_empty(),
+            "help lines over 100 columns:\n{}",
+            over.iter()
+                .map(|(path, line)| format!("{path}: {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 }
 
-/// `xcb --help`: commands grouped by what the reader is doing. Hidden
-/// internal and machine-only commands are left out. A unit test checks that
-/// every visible command is listed.
+/// What plain `xcb` prints when it can't open the chat (no terminal): at
+/// most 25 lines on stdout, exit 0.
+pub fn start_text() -> String {
+    format!(
+        "\
+xcb routes coding tasks across the Claude, Codex, and Devin subscriptions
+you already pay for.
+
+Start here
+  xcb setup claude       Add a Claude account, check Claude Code and sign in
+  xcb                    Open your thread (needs a terminal)
+  xcb run -p \"<task>\"    Run one task here and print the result
+  xcb doctor             Check providers, accounts and unfinished runs
+
+Everyday
+  xcb accounts           See your accounts and how much each has left
+  xcb conversations      List your thread and project views
+  xcb attention          Show questions and approvals waiting on you
+
+All commands: xcb --help · Advanced: xcb help advanced
+xcb {}
+",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// `xcb --help`: commands grouped by what the reader is doing, at most 60
+/// lines. Hidden internal commands are left out, and the rest that aren't
+/// here are in [`ADVANCED`]; a test keeps both lists in step with the parser.
 pub const ROOT_HELP: &str = "\
 xcb routes coding tasks across the Claude, Codex, and Devin subscriptions
 you already pay for. Plain `xcb` opens your thread from any directory; xcb
@@ -424,7 +272,6 @@ Accounts and models
   accounts       List accounts; add, sign in and manage them
   models         List models; refresh catalogs and set the default
   offers         Show public plan offers (not checked against your account)
-  reflex         Inspect and teach how xcb picks models and sorts turns
 
 Conversations and tasks
   conversations  List your thread and project views
@@ -438,31 +285,13 @@ Conversations and tasks
   inbox          See guidance and reports and whether they arrived
   attention      Show questions and approvals waiting on you
   schedules      Manage recurring wake-ups
-  daemons        Manage always-on project agents (ALGAL daemons)
-  projects       Set how much a project may do on its own
-  memory         Save notes to a project's local Wordcell vault
   sessions       List direct provider sessions
   resume         Reopen a direct provider session
 
-Other machines
-  link           Link this machine to your xcb fleet
-  fleet          List your linked devices
-  dispatch       Start a task on another device
-  send           Send text to an agent on another device
-  remote         Steer, cancel or answer work on another device
-
-Setup and maintenance
+Setup
   service        Start xcb's background supervisor at login (macOS)
   update         Check for updates and set the update policy
   upgrade        Install the latest verified release
-  panes          List, check and install terminal panes
-  plugins        Turn extensions on or off
-  hooks          Run your own programs on lifecycle events
-  judge          Set up the optional routing judge
-  config         Print the effective configuration as JSON
-  recover        Inspect or clean up unfinished runs
-  command        Inspect or archive offline command jobs
-  generate       Generate text for an app (no tools, no hooks)
   completions    Print shell completions
 
 Options
@@ -472,17 +301,54 @@ Options
                  chat --new and models route (default: .)
   -h, --help     Show help; xcb <command> --help shows a command's help
   -V, --version  Show the version
+
+More commands (other machines, project agents, extensions): xcb help advanced
+";
+
+/// `xcb help advanced`: the commands root help leaves out.
+pub const ADVANCED: &str = "\
+Advanced xcb commands. Each one's --help says more.
+
+Other machines
+  link           Link this machine to your xcb fleet
+  fleet          List your linked devices
+  dispatch       Start a task on another device
+  send           Send text to an agent on another device
+  remote         Steer, cancel or answer work on another device
+
+Project agents
+  daemons        Manage always-on project agents (ALGAL daemons)
+  projects       Set how much a project may do on its own
+  memory         Save notes to a project's local Wordcell vault
+  reflex         Inspect and teach how xcb picks models and sorts turns
+
+Extensions
+  panes          List, check and install terminal panes
+  plugins        Turn extensions on or off
+  hooks          Run your own programs on lifecycle events
+  judge          Set up the optional routing judge
+
+Maintenance
+  config         Print the effective configuration as JSON
+  recover        Inspect or clean up unfinished runs
+  command        Inspect or archive offline command jobs
+  generate       Generate text for an app (no tools, no hooks)
 ";
 
 #[cfg(test)]
 mod root_help_tests {
     #[test]
-    fn root_help_fits_the_terminal() {
-        assert!(
-            super::ROOT_HELP
-                .lines()
-                .all(|line| line.chars().count() <= 80)
-        );
+    fn help_screens_fit_the_contract() {
+        for (name, text, max_lines) in [
+            ("start", super::start_text(), 25),
+            ("root help", super::ROOT_HELP.to_owned(), 60),
+            ("help advanced", super::ADVANCED.to_owned(), 60),
+        ] {
+            assert!(text.lines().count() <= max_lines, "{name}: too many lines");
+            for line in text.lines() {
+                assert!(line.chars().count() <= 80, "{name}: {line}");
+            }
+        }
     }
 }
 
@@ -494,21 +360,18 @@ mod notice_tests {
     fn login_item_notice_follows_the_template() {
         assert_eq!(
             login_item_text(
-                "It checks once a day for a verified xcb release.",
-                "xcb update disable",
-                false
+                "It checks once a day for a verified xcb release, until you run xcb update disable.",
+                Style::PLAIN
             ),
-            "🔐 macOS will show a notice that xcb can open at login.\n   It checks once a day for a verified xcb release. Turn it off any time in System Settings › General › Login Items & Extensions, or run xcb update disable.\n"
+            "🔐 macOS will show a notice that xcb can open at login.\n   It checks once a day for a verified xcb release, until you run xcb update disable. Turn it off any time in System Settings › General › Login Items & Extensions.\n"
         );
-        assert!(login_item_text("x", "y", true).starts_with("NOTE macOS"));
+        assert!(login_item_text("x", Style::ASCII).starts_with("NOTE macOS"));
     }
 
     #[test]
     fn denial_block_names_the_folder_the_pane_and_the_link() {
-        let env = |name: &str| (name == "LANG").then(|| "en_US.UTF-8".to_owned());
-        let plain = Style::detect(&env, false);
         assert_eq!(
-            files_and_folders_denial(Some("Documents"), plain),
+            files_and_folders_denial(Some("Documents"), Style::PLAIN),
             "✗ xcb can't open files in ~/Documents: macOS access is off for xcb.\n  Turn on xcb under Documents in System Settings › Privacy & Security › Files & Folders.\n→ open 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders'\n"
         );
     }

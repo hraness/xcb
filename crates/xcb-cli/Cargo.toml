@@ -14,8 +14,9 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-clap = { version = "=4.5.48", features = ["derive"] }
+clap = { version = "=4.5.48", features = ["derive", "wrap_help"] }
 clap_complete = "=4.6.9"
+hraness-cli-kit = { git = "https://github.com/hraness/desktop-foundation", tag = "v0.8.1", features = ["clap"] }
 serde = "=1.0.229"
 serde_json = "=1.0.151"
 tokio = { version = "=1.47.1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
