@@ -440,9 +440,9 @@ struct SessionDraft {
 /// Bound on remembered per-context drafts; the least recently used is evicted.
 const MAX_DRAFT_SESSIONS: usize = 64;
 
-/// How long a notice stays on screen without any key press before it is
-/// dropped on the next refresh.
-const NOTICE_TTL: Duration = Duration::from_secs(8);
+/// How long a notice stays on screen without any key press before it clears
+/// itself.
+pub const NOTICE_TTL: Duration = Duration::from_secs(8);
 
 /// Byte bound of the Prompt/Pane editor dialog.
 const EDITOR_MAX: usize = 64 * 1024;
@@ -1115,25 +1115,32 @@ impl App {
     pub fn take_mouse_toggle(&mut self) -> Option<bool> {
         std::mem::take(&mut self.mouse_toggled).then_some(self.mouse_capture)
     }
-    /// Notices are transient: any key press dismisses one, and the periodic
-    /// view refresh drops one that has been on screen for `NOTICE_TTL`.
-    fn track_notice(&mut self) {
+    /// Notices are transient: any key press dismisses one, and one that has
+    /// been on screen for `NOTICE_TTL` clears itself.
+    fn track_notice(&mut self, now: Instant) {
         if self.notice != self.notice_seen {
             self.notice_seen.clone_from(&self.notice);
-            self.notice_since = (!self.notice.is_empty()).then(Instant::now);
+            self.notice_since = (!self.notice.is_empty()).then_some(now);
         }
     }
-    fn expire_notice(&mut self) {
-        self.track_notice();
+    fn expire_notice(&mut self, now: Instant) {
+        self.track_notice(now);
         if self
             .notice_since
-            .is_some_and(|since| since.elapsed() >= NOTICE_TTL)
+            .is_some_and(|since| now.saturating_duration_since(since) >= NOTICE_TTL)
         {
             self.notice.clear();
             self.notice_seen.clear();
             self.notice_since = None;
             self.dirty = true;
         }
+    }
+    /// Apply changes that depend only on time. The terminal loop calls this
+    /// on every pass (it already wakes at least every 50 ms to poll input),
+    /// so a notice clears at its deadline and repaints without a key press
+    /// or view update, and an idle terminal gains no extra wakeups.
+    pub fn tick(&mut self, now: Instant) {
+        self.expire_notice(now);
     }
     fn open_help(&mut self, via_question: bool) {
         self.modal = Some(Modal::Help { scroll: 0 });
@@ -1159,6 +1166,19 @@ impl App {
             self.view.managed_cancel_available
         } else {
             self.has_live_work()
+        }
+    }
+    /// What Ctrl-C on an empty prompt does now, for notices that say what a
+    /// second press will do.
+    fn next_ctrl_c(&self) -> &'static str {
+        if !self.can_cancel_work() {
+            "Press Ctrl-C again to quit."
+        } else if self.managed_mode() {
+            "Press Ctrl-C again to cancel running work."
+        } else if self.view.remote_active {
+            "The turn is running in another terminal; Ctrl-D quits."
+        } else {
+            "Press Ctrl-C again to stop the current turn."
         }
     }
     /// Absolute top line index rendered last frame; used to anchor PageUp.
@@ -1434,7 +1454,7 @@ impl App {
             } => self.accept_queued_draft(context, id, operation, text),
             Update::View(mut view) => {
                 self.initial_view_pending = false;
-                self.expire_notice();
+                self.expire_notice(Instant::now());
                 if view.pane_error.is_some() {
                     view.pane = self.view.pane.clone();
                     view.pane_revision = self.view.pane_revision.clone();
@@ -1773,9 +1793,7 @@ impl App {
             return;
         }
         if self.try_send(output, Intent::Cancel) {
-            self.notice = if self.managed_mode() {
-                "Cancellation requested for this conversation; check the task status for settlement."
-            } else if self.view.remote_active {
+            self.notice = if self.view.remote_active {
                 "This turn is running in another terminal; cancel it there."
             } else {
                 "Stopping the current turn and queued follow-ups."
@@ -2341,7 +2359,7 @@ impl App {
             || matches!(&event, Event::Paste(_))
         {
             self.notice.clear();
-            self.track_notice();
+            self.track_notice(Instant::now());
         }
         if self.modal.is_some() {
             return self.modal_event(event, output);
@@ -2443,7 +2461,7 @@ impl App {
                 if !self.composer.is_empty() {
                     self.composer.clear_to_history();
                     self.notice =
-                        "Draft cleared (Ctrl-R restores). Press Ctrl-C again to quit.".into();
+                        format!("Draft cleared (Ctrl-R restores). {}", self.next_ctrl_c());
                 } else if self.can_cancel_work() {
                     self.request_cancel(output);
                 } else {
@@ -2675,9 +2693,9 @@ impl App {
         if self.inspector_action(&event, output) {
             return true;
         }
-        // Ctrl-C inside a dialog keeps the composer's ordering: cancel a live
-        // run first; idle, it closes the dialog and warns, so a second press
-        // is what quits. Esc still only closes the dialog.
+        // Ctrl-C inside a dialog only closes it and says what a second press
+        // does: clear the draft, stop live work, or quit. Esc still only
+        // closes the dialog.
         if let Event::Key(key) = &event
             && key.kind != KeyEventKind::Release
             && key.code == KeyCode::Char('c')
@@ -2698,11 +2716,10 @@ impl App {
                 }
             }
             self.notice = if self.composer.is_empty() {
-                "Dialog closed. Press Ctrl-C again to quit."
+                format!("Dialog closed. {}", self.next_ctrl_c())
             } else {
-                "Dialog closed; draft kept. Ctrl-C again clears it (Ctrl-R restores)."
-            }
-            .into();
+                "Dialog closed; draft kept. Ctrl-C again clears it (Ctrl-R restores).".into()
+            };
             return true;
         }
         if let (Some(Modal::Help { .. }), Event::Key(key)) = (&self.modal, &event)
@@ -3185,9 +3202,10 @@ pub fn run_with_options(
             }
         }
         app.flush_recovery(false);
+        app.tick(Instant::now());
         needs_draw |= app.take_dirty();
-        // The attention blink and the working spinner/elapsed badge are the
-        // only states that change with time alone.
+        // Besides notice expiry above, the attention blink and the working
+        // spinner/elapsed badge are the only states that change with time.
         let phase = (ticks / 16) % 2;
         if !needs_draw && app.view.state.attention() && !app.view.reduced_motion && phase != blink {
             needs_draw = true;

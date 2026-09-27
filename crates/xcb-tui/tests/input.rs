@@ -284,6 +284,82 @@ fn ctrl_c_moves_the_draft_to_ctrl_r_history() {
 }
 
 #[test]
+fn ctrl_c_notices_name_what_the_next_press_does() {
+    use xcb_core::session::State;
+    let ctrl_c = || Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+
+    // A direct session's live turn: the second press stops it; it does not quit.
+    let (tx, rx) = sync_channel(4);
+    let mut app = App::default();
+    let mut view = view_for("s_one");
+    view.state = State::Working;
+    app.apply(Update::View(Box::new(view)));
+    app.composer.set_text("draft");
+    assert!(app.handle(ctrl_c(), &tx));
+    assert_eq!(
+        app.notice,
+        "Draft cleared (Ctrl-R restores). Press Ctrl-C again to stop the current turn."
+    );
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(matches!(rx.try_recv(), Ok(Intent::Cancel)));
+    app.modal = Some(Modal::Help { scroll: 0 });
+    assert!(app.handle(ctrl_c(), &tx));
+    assert_eq!(
+        app.notice,
+        "Dialog closed. Press Ctrl-C again to stop the current turn."
+    );
+
+    // Managed work: the second press requests cancellation.
+    let (tx, rx) = sync_channel(4);
+    let mut app = managed_fixture(State::Working);
+    app.composer.set_text("draft");
+    assert!(app.handle(ctrl_c(), &tx));
+    assert_eq!(
+        app.notice,
+        "Draft cleared (Ctrl-R restores). Press Ctrl-C again to cancel running work."
+    );
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(Intent::Habitat(HabitatCommand::CancelTask { .. }))
+    ));
+
+    // A turn owned by another terminal cannot be stopped from here.
+    let (tx, _rx) = sync_channel(4);
+    let mut app = App::default();
+    app.view.remote_active = true;
+    app.view.state = State::Working;
+    app.composer.set_text("draft");
+    assert!(app.handle(ctrl_c(), &tx));
+    assert!(app.notice.ends_with("Ctrl-D quits."), "{}", app.notice);
+}
+
+#[test]
+fn a_notice_clears_itself_at_its_deadline_without_input() {
+    use std::time::{Duration, Instant};
+    let start = Instant::now();
+    let mut app = App::default();
+    assert!(app.apply(Update::Notice("Copied the last assistant response.".into())));
+    app.tick(start);
+    app.take_dirty();
+    app.tick(start + xcb_tui::NOTICE_TTL - Duration::from_millis(1));
+    assert_eq!(app.notice, "Copied the last assistant response.");
+    assert!(!app.take_dirty(), "waiting alone does not repaint");
+    app.tick(start + xcb_tui::NOTICE_TTL);
+    assert!(app.notice.is_empty());
+    assert!(app.take_dirty(), "clearing the notice repaints");
+
+    // A newer notice gets its own full time.
+    app.notice = "Second notice".into();
+    let later = start + xcb_tui::NOTICE_TTL * 2;
+    app.tick(later);
+    app.tick(later + xcb_tui::NOTICE_TTL / 2);
+    assert_eq!(app.notice, "Second notice");
+    app.tick(later + xcb_tui::NOTICE_TTL);
+    assert!(app.notice.is_empty());
+}
+
+#[test]
 fn mouse_capture_is_off_until_slash_mouse_toggles_it() {
     let (tx, _rx) = sync_channel(4);
     let mut app = App::default();
