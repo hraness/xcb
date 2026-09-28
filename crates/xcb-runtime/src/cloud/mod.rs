@@ -20,4 +20,6 @@ pub mod crypto;
 pub mod custody;
 pub mod lane;
 pub mod link;
+pub mod reauth;
+pub(crate) mod relay_gate;
 pub mod wire;

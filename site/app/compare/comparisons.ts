@@ -355,7 +355,7 @@ export const comparisons: readonly Comparison[] = [
         title: "Building on xcb",
         paragraphs: [
           "`xcb --json route` reads one task as JSON and returns one JSON result: the account and model xcb picked, a session you can resume, and how the run ended. The request can pin a provider, account, or model and set a deadline, and it can’t carry tools, credentials, or provider flags.",
-          "Apps can embed the TypeScript SDK’s `createSubscriptionRouter` instead. There, your app names the account and model, and xcb holds that account while the task runs. The SDK ships as a release archive, not on npm, and your app supplies the provider adapters.",
+          "Apps can embed the TypeScript SDK’s `createSubscriptionRouter` instead. There, your app names the account and model, and xcb holds that account while the task runs. Install the SDK with `npm install @hraness/xcb` or download its release archive. Your app supplies the provider adapters.",
         ],
       },
     ],

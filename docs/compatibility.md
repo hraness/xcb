@@ -23,10 +23,10 @@ The retained application package provides:
 
 `src/index.ts` exports the complete current interface. `createPublicWeb()` provides bounded public HTTPS GETs with address pinning, redirect checks, no ambient authentication, a 15-second deadline, and a 256 KiB maximum text response. Run `bun test` from the repository root.
 
-The package ships as the `hraness-xcb-<version>.tgz` archive on each
-[GitHub release](https://github.com/hraness/xcb/releases), not on npm. Install
-it with `npm install <archive URL>` or `bun add <archive URL>`, as shown in the
-[SDK quickstart](sdk.md#install). Releases tagged `v0.3.0` and earlier are
+Install the package with `npm install @hraness/xcb` or `bun add @hraness/xcb`.
+Each [GitHub release](https://github.com/hraness/xcb/releases) also includes
+the same package as `hraness-xcb-<version>.tgz`; see the
+[SDK quickstart](sdk.md#install) for archive installation. Releases tagged `v0.3.0` and earlier are
 AgentMixer and keep that package name.
 
 ## Build from source
@@ -62,9 +62,9 @@ pinning is an admission invariant, not a portability gap. The repository gate
 packs the tarball, scans its contents, verifies the manifest contract and
 dependency completeness, installs it into an isolated consumer, and executes
 the public entry — including an account-lease custody round trip — under both
-runtimes. Each `v<version>` GitHub release carries the package archive. An
-npm mirror is planned but not published; see [publishing](publishing.md) for the
-release process.
+runtimes. Each `v<version>` GitHub release carries the package archive. The
+release workflow publishes the same package to npm with signed provenance;
+see [publishing](publishing.md) for the release process.
 
 ## Command-line interface
 

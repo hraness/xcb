@@ -10,6 +10,22 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.10.4 - 2026-09-27
+
+xcb renews an expired relay sign-in while keeping the same linked device and
+its queued work.
+
+- `xcb link --reauth` signs in again to the device's recorded relay. It keeps
+  the device ID, encryption keys, and pending remote commands.
+- Local coding tasks continue during renewal. The background relay finishes
+  its current cycle before xcb replaces the saved sign-in.
+- An interrupted renewal resumes from saved progress. xcb checks whether the
+  server completed the change before retrying, and refuses to restore local
+  state that was cleared or replaced.
+- Renewal requires an upgraded background supervisor. An older supervisor
+  must complete its normal upgrade before the sign-in can change.
+- SDK discovery and compatibility pages now describe its published npm package.
+
 ## 0.10.3 - 2026-09-27
 
 xcb supports Codex CLI 0.157.1, lets you reconnect an existing Codex account

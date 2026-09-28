@@ -15,7 +15,7 @@ fn invalid(what: &'static str) -> Error {
 /// Convex `v.number()` columns arrive as `Float64` — `1` comes back `1.0`,
 /// which serde refuses as `u64`. Every integer field that crosses in from
 /// the relay deserializes through this: integral floats only.
-mod de {
+pub(super) mod de {
     use serde::{Deserialize, Deserializer};
 
     pub fn u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
@@ -61,6 +61,7 @@ pub fn json_u64(value: &Value) -> Option<u64> {
 pub const NAMESPACE: &str = "xcb.relay.v1";
 /// The bind-challenge contract a device signs to finish enrollment.
 pub const DEVICE_BIND_CONTRACT: &str = "xcb.relay.v1:device-bind";
+pub const DEVICE_REAUTH_CONTRACT: &str = "xcb.relay.v1:device-reauth";
 
 /// The closed command union for `xcb.relay.v1`, frozen in
 /// `docs/plans/remote-access.md`.

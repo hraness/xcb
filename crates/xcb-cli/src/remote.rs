@@ -16,7 +16,7 @@ use xcb_runtime::cloud::{
     commands::{self, CommandBody},
     controller::Controller,
     crypto::DeviceIdentity,
-    custody, link as relay_link, wire,
+    custody, link as relay_link, reauth, wire,
 };
 use xcb_runtime::{Error, Result};
 
@@ -182,6 +182,7 @@ async fn open_controller(state_root: &Path) -> Result<Controller> {
 
 /// Options for `xcb link` — enrolment inputs plus the output flag.
 pub struct LinkOptions<'a> {
+    pub reauth: bool,
     pub code: Option<&'a str>,
     pub controller: bool,
     pub email: Option<&'a str>,
@@ -196,7 +197,11 @@ pub struct LinkOptions<'a> {
 /// device. A linked device that lacks the account key waits for a peer
 /// `xcb remote admit` before returning.
 pub async fn link(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
+    if options.reauth {
+        return reauthenticate(state_root, options).await;
+    }
     let LinkOptions {
+        reauth: _,
         code,
         controller,
         email,
@@ -321,6 +326,135 @@ pub async fn link(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
             wait_for_wrap(&mut client, state_root, &outcome.device, json_out).await
         }
     }
+}
+
+fn reauth_endpoint(state_root: &Path, explicit: Option<&str>) -> Result<String> {
+    let link = custody::load_link(state_root)?.ok_or_else(not_linked)?;
+    let from_env = std::env::var(RELAY_URL_ENV)
+        .ok()
+        .filter(|url| !url.is_empty());
+    for requested in [explicit.map(str::to_owned), from_env]
+        .into_iter()
+        .flatten()
+    {
+        if requested.trim_end_matches('/') != link.deployment_url.trim_end_matches('/') {
+            return Err(Error::Message(
+                "sign-in renewal must use this machine's original relay; remove the conflicting relay override",
+            ));
+        }
+    }
+    Ok(link.deployment_url)
+}
+
+async fn reauthenticate(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
+    // Validate overrides before resume too: an outstanding operation never
+    // sends its private credentials to a new flag/environment destination.
+    let endpoint = reauth_endpoint(state_root, options.relay)?;
+    if options.email.is_some_and(|email| !email_ok(email)) {
+        return Err(invalid("email"));
+    }
+    if let Some(code) = options.code {
+        validate_code(code)?;
+    }
+    if options.email.is_none()
+        && options.code.is_none()
+        && let Some(outcome) = reauth::completed(state_root)?
+    {
+        return renewed(state_root, outcome, options.json_out);
+    }
+    if let Some(outcome) = reauth::resume(state_root).await? {
+        return renewed(state_root, outcome, options.json_out);
+    }
+    let email = match options.email {
+        Some(email) => email.to_owned(),
+        None => prompt("Email:")?.ok_or_else(|| Error::Message("email required; pass --email"))?,
+    };
+    if !email_ok(&email) {
+        return Err(invalid("email"));
+    }
+    let intent = reauth::prepare(state_root)?;
+    if endpoint.trim_end_matches('/') != intent.endpoint().trim_end_matches('/') {
+        return Err(Error::Conflict("relay changed before sign-in renewal"));
+    }
+    // This client has never carried the old token. Convex signIn must not
+    // replace/delete the auth session the worker is still using during OTP.
+    let mut client = RelayClient::connect(intent.endpoint()).await?;
+    if options.code.is_none() {
+        relay_link::request_code(&mut client, &email, None).await?;
+    }
+    let code = match options.code {
+        Some(code) => code.to_owned(),
+        None => {
+            eprintln!("A sign-in code was emailed to {email}.");
+            prompt("Code:")?.ok_or_else(|| {
+                Error::Message("code required; rerun xcb link --reauth with --email and --code")
+            })?
+        }
+    };
+    validate_code(&code)?;
+    let session = relay_link::verify_code(&mut client, &email, &code).await?;
+    let outcome = reauth::complete(state_root, intent, session, &mut client).await?;
+    renewed(state_root, outcome, options.json_out)
+}
+
+fn renewed(state_root: &Path, outcome: reauth::ReauthOutcome, json_out: bool) -> Result<i32> {
+    renewed_with(outcome, json_out, || {
+        let executable = std::env::current_exe()?;
+        xcb_runtime::managed::ensure_daemon(state_root, &executable)
+    })
+}
+
+fn validate_code(code: &str) -> Result<()> {
+    if code.len() != 8 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid("code: the emailed code is 8 digits"));
+    }
+    Ok(())
+}
+
+const STARTUP_RETRY: &str = "Run `xcb chat` with the same --state folder to retry background startup; your relay sign-in is already saved.";
+
+fn renewed_with(
+    outcome: reauth::ReauthOutcome,
+    json_out: bool,
+    start_supervisor: impl FnOnce() -> Result<()>,
+) -> Result<i32> {
+    // An authentication-disabled supervisor may already have exited while
+    // idle. Startup failure must not turn a committed sign-in into a failed
+    // OTP operation that a script would attempt again.
+    let startup = (outcome.device_class == wire::EXECUTOR_CLASS).then(start_supervisor);
+    let warning = startup.as_ref().and_then(|result| result.as_ref().err());
+    print_json_or(
+        json_out,
+        || {
+            println!(
+                "Relay sign-in renewed for device {}. Your keys and local tasks are preserved.",
+                outcome.device
+            );
+            if let Some(error) = warning {
+                eprintln!(
+                    "Background startup needs attention: {}",
+                    crate::ux::sentence(error)
+                );
+                eprintln!("{STARTUP_RETRY}");
+            }
+        },
+        json!({
+            "version": 1,
+            "device": outcome.device,
+            "deviceClass": outcome.device_class,
+            "linked": true,
+            "reauthenticated": true,
+            "generation": outcome.generation,
+            "supervisor": startup.as_ref().map(|result| json!({
+                "available": result.is_ok(),
+                "warning": warning.map(|error| json!({
+                    "code": crate::ux::code(error),
+                    "message": crate::ux::sentence(error),
+                    "next": STARTUP_RETRY,
+                })),
+            })),
+        }),
+    )
 }
 
 fn hostname() -> Option<String> {
@@ -771,4 +905,47 @@ fn print_json_or(json_out: bool, text: impl FnOnce(), value: Value) -> Result<i3
         text();
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod reauth_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn saved_sign_in_succeeds_when_background_startup_needs_attention() {
+        let attempts = Cell::new(0);
+        let result = renewed_with(
+            reauth::ReauthOutcome {
+                device: "synthetic-device".into(),
+                device_class: wire::EXECUTOR_CLASS.into(),
+                generation: "synthetic-generation".into(),
+            },
+            true,
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(Error::Unavailable("synthetic supervisor startup failure"))
+            },
+        );
+        assert_eq!(
+            result.unwrap(),
+            0,
+            "committed sign-in must not request another OTP"
+        );
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn renewed_controller_does_not_start_a_workspace_supervisor() {
+        let result = renewed_with(
+            reauth::ReauthOutcome {
+                device: "synthetic-controller".into(),
+                device_class: wire::CONTROLLER_CLASS.into(),
+                generation: "synthetic-generation".into(),
+            },
+            true,
+            || panic!("controller reauthentication cannot start a workspace supervisor"),
+        );
+        assert_eq!(result.unwrap(), 0);
+    }
 }

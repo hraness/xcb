@@ -21,6 +21,7 @@ use xcb_core::Id;
 
 use crate::cloud::commands::{self, CommandBody};
 use crate::cloud::lane::{self, CommandOutcome, OpenedCommand, RelayLane};
+use crate::cloud::{reauth, relay_gate};
 use crate::managed::{
     Intake, IntakeCues, ManagedStore, Origin, clear_relay_connection_fault, clear_relay_fault,
     clear_relay_projection_fault, fault_text, record_relay_fault,
@@ -172,6 +173,10 @@ pub struct RelayHost {
     /// failures and resets on a healthy pump.
     boot_delay: Duration,
     disabled: bool,
+    /// Only an authentication failure may recover after an explicit,
+    /// committed sign-in. Device revocation and class rejection stay latched.
+    reauth_recoverable: bool,
+    reauth_generation: Option<String>,
     projection_due: bool,
     projection_next: Instant,
     /// Last published fleet revision — the CAS pin for the next write.
@@ -193,6 +198,8 @@ impl RelayHost {
             next_boot: Instant::now(),
             boot_delay: BOOT_RETRY,
             disabled: false,
+            reauth_recoverable: false,
+            reauth_generation: None,
             projection_due: false,
             projection_next: Instant::now() + PROJECTION_INTERVAL,
             fleet_revision: 0,
@@ -217,11 +224,46 @@ impl RelayHost {
     /// One relay pass: boot when needed, pump the command queue, publish
     /// the fleet projection when due.
     pub async fn tick(&mut self, managed: &Arc<ManagedStore>) {
+        self.tick_with(managed, RelayLane::boot).await;
+    }
+
+    async fn tick_with(
+        &mut self,
+        managed: &Arc<ManagedStore>,
+        boot: impl AsyncFnOnce(lane::LaneKeys) -> Result<RelayLane>,
+    ) {
+        // This guard spans every await in the pass, including boot,
+        // command effects, acknowledgements, and projection retries. A
+        // transition waits for completion; it never cancels this future.
+        let _pump = match relay_gate::try_pump(&self.root) {
+            Ok(Some(guard)) => guard,
+            Ok(None) => return,
+            Err(error) => {
+                relay_fault(
+                    managed.root(),
+                    &format!("relay pause check failed: {}", fault_text(&error)),
+                );
+                return;
+            }
+        };
+        match reauth::relay_state(&self.root) {
+            Ok(reauth::RelayReauthState::Pending) => return,
+            Ok(reauth::RelayReauthState::Ready { generation }) => {
+                self.observe_reauth(generation);
+            }
+            Err(error) => {
+                relay_fault(
+                    managed.root(),
+                    &format!("relay sign-in check failed: {}", fault_text(&error)),
+                );
+                return;
+            }
+        }
         if self.lane.is_none() {
             if self.disabled || Instant::now() < self.next_boot {
                 return;
             }
-            self.boot_with(managed, RelayLane::boot).await;
+            self.boot_with(managed, boot).await;
             return;
         }
 
@@ -235,6 +277,7 @@ impl RelayHost {
         if let Err(error) = lane.pump(&mut handler).await {
             if fatal(&error) {
                 self.disabled = true;
+                self.reauth_recoverable = authentication_failure(&error);
                 self.resident.store(false, Ordering::Relaxed);
             }
             relay_fault(
@@ -297,6 +340,7 @@ impl RelayHost {
                     Err(error) => {
                         if fatal(&error) {
                             self.disabled = true;
+                            self.reauth_recoverable = authentication_failure(&error);
                             self.resident.store(false, Ordering::Relaxed);
                             self.lane = None;
                         }
@@ -316,6 +360,29 @@ impl RelayHost {
                 self.projection_next = Instant::now() + PROJECTION_INTERVAL;
             }
         }
+    }
+
+    fn observe_reauth(&mut self, generation: Option<String>) {
+        let Some(generation) = generation else {
+            return;
+        };
+        if self.reauth_generation.as_ref() == Some(&generation) {
+            return;
+        }
+        self.reauth_generation = Some(generation);
+        if self.disabled && !self.reauth_recoverable {
+            return;
+        }
+        // The old lane holds the previous session in memory. Reboot with
+        // committed custody, resetting projection CAS state along with it.
+        self.lane = None;
+        self.disabled = false;
+        self.reauth_recoverable = false;
+        self.next_boot = Instant::now();
+        self.boot_delay = BOOT_RETRY;
+        self.projection_due = true;
+        self.fleet_revision = 0;
+        self.fleet_fingerprint = None;
     }
 
     async fn boot_with(
@@ -342,6 +409,7 @@ impl RelayHost {
                     Err(error) => {
                         if fatal(&error) {
                             self.disabled = true;
+                            self.reauth_recoverable = authentication_failure(&error);
                             self.resident.store(false, Ordering::Relaxed);
                         }
                         Some(format!("relay lane boot failed: {}", fault_text(&error)))
@@ -367,6 +435,19 @@ impl RelayHost {
     /// Drop the lane's presence row on supervisor shutdown.
     pub async fn shutdown(&mut self) {
         self.resident.store(false, Ordering::Relaxed);
+        // A transition owns session mutation. Dropping an old idle lane
+        // leaves presence to expire without racing its committed sign-in.
+        let Ok(Some(_pump)) = relay_gate::try_pump(&self.root) else {
+            self.lane = None;
+            return;
+        };
+        if !matches!(
+            reauth::relay_state(&self.root),
+            Ok(reauth::RelayReauthState::Ready { .. })
+        ) {
+            self.lane = None;
+            return;
+        }
         if let Some(mut lane) = self.lane.take() {
             let _ = lane.disconnect().await;
         }
@@ -389,6 +470,10 @@ fn fatal(error: &crate::Error) -> bool {
             "relay unauthenticated" | "relay forbidden-device-class" | "relay revoked-device"
         )
     )
+}
+
+fn authentication_failure(error: &crate::Error) -> bool {
+    matches!(error, Error::Protocol("relay unauthenticated"))
 }
 
 /// Map one opened command onto the managed surface and produce the sealed
@@ -1105,6 +1190,121 @@ mod tests {
             "linkage was removed"
         );
         assert!(crate::managed::relay_fault(f.store.root()).is_none());
+    }
+
+    #[tokio::test]
+    async fn reauth_waits_for_the_full_boot_pass_while_local_work_remains_available() {
+        let f = linked_fixture();
+        let root = f.base.join("state");
+        let managed = f.store.clone();
+        let pass_root = root.clone();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, finish) = tokio::sync::oneshot::channel();
+        let pass = async move {
+            let mut host = RelayHost::new(&pass_root);
+            host.tick_with(&managed, async move |_| {
+                entered.send(()).unwrap();
+                finish.await.unwrap();
+                Err(Error::Unavailable("synthetic completed boot"))
+            })
+            .await;
+            host
+        };
+        let handoff = async {
+            started.await.unwrap();
+            let waiting_root = root.clone();
+            let waiting = tokio::spawn(async move {
+                relay_gate::transition(&waiting_root, Duration::from_secs(2)).await
+            });
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            assert!(!waiting.is_finished(), "boot is still in flight");
+            let workspace = f.dir("local-work");
+            let conversation = f.store.create_conversation(&workspace).await.unwrap();
+            f.store
+                .submit_new(
+                    &conversation.id,
+                    Id::new("m_during_reauth").unwrap(),
+                    "local work during sign-in".into(),
+                    vec![],
+                    &workspace,
+                )
+                .await
+                .unwrap();
+            assert_eq!(f.store.tasks(16).unwrap().len(), 1);
+            release.send(()).unwrap();
+            waiting.await.unwrap().unwrap()
+        };
+        // Production polls this future on the relay's own thread/runtime;
+        // it does not require its borrowed command handler to be Send.
+        let (_host, guard) = tokio::join!(pass, handoff);
+        guard.check().unwrap();
+        assert!(relay_gate::try_pump(&root).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_transition_skips_boot_without_disabling_the_host() {
+        let f = linked_fixture();
+        let root = f.base.join("state");
+        let guard = relay_gate::transition(&root, Duration::from_secs(1))
+            .await
+            .unwrap();
+        let mut host = RelayHost::new(&root);
+        host.tick_with(&f.store, async |_| panic!("transition must exclude boot"))
+            .await;
+        assert!(!host.disabled);
+        assert!(!host.live());
+        guard.check().unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_a_new_committed_generation_recovers_authentication_failure() {
+        let f = linked_fixture();
+        let root = f.base.join("state");
+        let mut host = RelayHost::new(&root);
+        host.observe_reauth(Some("first-committed-generation".into()));
+        host.boot_with(&f.store, async |_| {
+            Err(Error::Protocol("relay unauthenticated"))
+        })
+        .await;
+        assert!(host.disabled);
+        host.observe_reauth(None);
+        host.observe_reauth(Some("first-committed-generation".into()));
+        assert!(
+            host.disabled,
+            "the same receipt cannot revive a rejected session"
+        );
+        crate::cloud::custody::store_session(
+            &root,
+            &crate::cloud::custody::CloudSession::issue(
+                "arbitrary-token".into(),
+                "arbitrary-refresh".into(),
+                now_ms(),
+            ),
+        )
+        .unwrap();
+        host.tick_with(&f.store, async |_| {
+            panic!("a token-file edit is not committed reauth")
+        })
+        .await;
+        assert!(host.disabled);
+        host.observe_reauth(Some("second-committed-generation".into()));
+        assert!(!host.disabled);
+        assert!(host.next_boot <= Instant::now());
+        assert_eq!(host.boot_delay, BOOT_RETRY);
+        assert!(host.projection_due);
+    }
+
+    #[tokio::test]
+    async fn committed_reauth_does_not_clear_device_revocation_or_class_failure() {
+        for reason in ["relay revoked-device", "relay forbidden-device-class"] {
+            let f = linked_fixture();
+            let mut host = RelayHost::new(&f.base.join("state"));
+            host.boot_with(&f.store, async |_| Err(Error::Protocol(reason)))
+                .await;
+            host.observe_reauth(Some("new-committed-generation".into()));
+            assert!(host.disabled, "{reason} is not an expired sign-in");
+            assert!(!host.resident.load(Ordering::Relaxed));
+        }
     }
 
     /// Local and relay failures are independently actionable: neither can

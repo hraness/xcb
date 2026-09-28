@@ -1,0 +1,20 @@
+{
+  "message": {
+    "authEpoch": 1,
+    "authSessionId": "session_fixture_00000000000000001",
+    "bindingRevision": 0,
+    "challengeId": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB",
+    "contract": "relay.dev.v1:device-reauth",
+    "deviceClass": "daemon",
+    "deviceId": "277d57ca953ff8d81015e59a45181fed",
+    "expiresAt": 1790546700000,
+    "keyVersion": 1,
+    "nonce": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI",
+    "userId": "user_fixture_00000000000000000001"
+  },
+  "canonical": "{\"authEpoch\":1,\"authSessionId\":\"session_fixture_00000000000000001\",\"bindingRevision\":0,\"challengeId\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB\",\"contract\":\"relay.dev.v1:device-reauth\",\"deviceClass\":\"daemon\",\"deviceId\":\"277d57ca953ff8d81015e59a45181fed\",\"expiresAt\":1790546700000,\"keyVersion\":1,\"nonce\":\"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI\",\"userId\":\"user_fixture_00000000000000000001\"}",
+  "signature": "QqxFGRVklQJw-paZWpMVNc-RBvQDnBBdjqnafzX2oLsZ8nigyJq3-FjvEamqnzSdhwcDU_45PyGc3x4w0NA63w",
+  "deviceId": "277d57ca953ff8d81015e59a45181fed",
+  "signingPublicKey": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAETdagvfDMnMRrM4aTW9XlkDekkLdr3hf-5NSHvClpoE2rjhQCQrM7-MxIU4XjS3xngAhh5zYv4de2zKybG6Urdw",
+  "signingScalar": "l6Kece-f_GFWH-iHcuEYRjUd5MWzWryPmptnwzKLgHE"
+}

@@ -166,18 +166,22 @@ enum Commands {
     },
     /// Link this machine into the xcb relay fleet via email one-time code.
     Link {
+        /// Sign in again to the same relay account, keeping this device's keys and tasks.
+        #[arg(long, conflicts_with_all = ["controller", "invite", "label"])]
+        reauth: bool,
         /// Email the sign-in code goes to; prompted when omitted.
         #[arg(long)]
         email: Option<String>,
-        /// The 8-digit code emailed after a previous `xcb link`; prompted
-        /// when omitted on a terminal.
+        /// The 8-digit code emailed by `xcb link` or `xcb link --reauth`;
+        /// prompted when omitted on a terminal.
         #[arg(long)]
         code: Option<String>,
         /// Bootstrap or invite token when the deployment gates enrollment.
         #[arg(long)]
         invite: Option<String>,
         /// Relay deployment URL; defaults to $XCB_RELAY_URL or the local
-        /// backend, and is saved with this machine's link at enrollment.
+        /// backend, and is saved at enrollment. With --reauth, it must match
+        /// this machine's saved relay.
         #[arg(long)]
         relay: Option<String>,
         /// Enroll as a dispatch-only controller instead of a workspace
@@ -1377,6 +1381,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
     // they never open the managed store.
     match &cli.command {
         Some(Commands::Link {
+            reauth,
             email,
             code,
             invite,
@@ -1387,6 +1392,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             return remote::link(
                 &root,
                 remote::LinkOptions {
+                    reauth: *reauth,
                     code: code.as_deref(),
                     controller: *controller,
                     email: email.as_deref(),
