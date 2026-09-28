@@ -756,7 +756,16 @@ pub(crate) fn recover_codex_auth(
         .as_ref()
         .is_some_and(|expected| *expected != identity.digest)
     {
-        return Err(Error::Conflict("Codex credential account identity changed"));
+        // A stopped login may have completed under another ChatGPT account.
+        // Its isolated profile has no authority to replace the saved account.
+        // Once the saved credential is proven unchanged, reconciliation may
+        // settle the receipt and release the lease without publishing it.
+        if current_revision != metadata.original_revision {
+            return Err(Error::Conflict(
+                "persistent credentials changed during login",
+            ));
+        }
+        return Ok(());
     }
     let refreshed_revision = crate::digest(&refreshed);
     if current_revision.as_ref() == Some(&refreshed_revision) {
@@ -990,6 +999,63 @@ pub fn prepare_codex_login(
 #[cfg(test)]
 mod auth_custody_tests {
     use super::*;
+    use base64::Engine;
+
+    fn synthetic_codex_auth(account: &str, access: &str) -> Vec<u8> {
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "sub": "synthetic-user",
+                "https://api.openai.com/auth": {"chatgpt_account_id": account}
+            }))
+            .unwrap(),
+        );
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": format!("synthetic.{claims}.signature"),
+                "access_token": access,
+                "refresh_token": "synthetic-refresh",
+                "account_id": account,
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn stopped_codex_login_can_discard_a_different_identity_only_with_unchanged_saved_auth() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().canonicalize().unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "ChatGPT", 1, None)
+            .unwrap();
+        let saved = synthetic_codex_auth("original-account", "original-access");
+        let other = synthetic_codex_auth("different-account", "other-access");
+        let target = codex_auth_path(&store, &account.id).unwrap();
+        private::create(&target, &saved).unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        let profile = store.root().join("runs/synthetic-login");
+        let snapshot = snapshot_codex_auth(&store, &run, &profile).unwrap();
+        private::replace(
+            &snapshot.profile().join("auth.json"),
+            &other,
+            &crate::digest(&saved),
+        )
+        .unwrap();
+        let metadata = private::read(&recovery_path(store.root(), &run.id), 32 * 1024).unwrap();
+        let metadata_digest = crate::digest(&metadata);
+
+        recover_codex_auth(store.root(), &run, &metadata_digest).unwrap();
+        assert_eq!(private::read(&target, MAX_CODEX_AUTH_BYTES).unwrap(), saved);
+
+        let concurrent = synthetic_codex_auth("original-account", "concurrent-access");
+        private::replace(&target, &concurrent, &crate::digest(&saved)).unwrap();
+        assert!(recover_codex_auth(store.root(), &run, &metadata_digest).is_err());
+        assert_eq!(
+            private::read(&target, MAX_CODEX_AUTH_BYTES).unwrap(),
+            concurrent
+        );
+    }
 
     #[test]
     fn claude_unproven_login_capture_retains_account_and_artifacts() {

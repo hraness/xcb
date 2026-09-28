@@ -2391,6 +2391,7 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
     use std::fs;
     use xcb_core::{
         Provider,
@@ -2427,6 +2428,123 @@ mod tests {
             )
             .unwrap();
         run
+    }
+
+    fn recovery_codex_auth(account: &str, access: &str) -> Vec<u8> {
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "sub": "synthetic-user",
+                "https://api.openai.com/auth": {"chatgpt_account_id": account}
+            }))
+            .unwrap(),
+        );
+        serde_json::to_vec(&serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": format!("synthetic.{claims}.signature"),
+                "access_token": access,
+                "refresh_token": "synthetic-refresh",
+                "account_id": account,
+            },
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn codex_login_recovery_child_fixture() {
+        let Ok(state) = std::env::var("XCB_SYNTHETIC_CODEX_RECOVERY_CHILD_STATE") else {
+            return;
+        };
+        let store = Store::open(Path::new(&state)).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "ChatGPT", 1, None)
+            .unwrap();
+        let original = recovery_codex_auth("original-account", "original-access");
+        let persistent = store
+            .account_root(&account.id)
+            .unwrap()
+            .join("profile/auth.json");
+        crate::private::create(&persistent, &original).unwrap();
+        crate::authentication_tests::fail_authentication(&store, &account.id);
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        let profile = store.root().join("runs/synthetic-other-account-login");
+        let (executable, sha256) = crate::process::host_identity().unwrap();
+        let pin = crate::process::Pin {
+            provider: Provider::Codex,
+            executable,
+            sha256: sha256.clone(),
+            version: "synthetic".into(),
+            host_sha256: sha256,
+            observed_at_ms: 2,
+        };
+        let plan = crate::auth::prepare_codex_login(&store, &run, &pin, &profile).unwrap();
+        crate::private::create(
+            &plan.credentials.profile().join("auth.json"),
+            &recovery_codex_auth("different-account", "new-access"),
+        )
+        .unwrap();
+        let started = store.mark_spawned(&run, i32::MAX as u32).unwrap();
+        let (_, run_digest) = store.recovery_candidate(&started.id).unwrap().unwrap();
+        assert!(store.recover_run(&started.id, &run_digest, 3).is_err());
+        // Exiting this helper leaves the owned run and isolated credential
+        // snapshot exactly as an interrupted interactive sign-in would.
+    }
+
+    #[test]
+    fn stopped_login_with_another_identity_releases_lease_without_replacing_auth() {
+        let dir = root();
+        let state = dir.path().canonicalize().unwrap().join("state");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "store::tests::codex_login_recovery_child_fixture",
+            ])
+            .env("XCB_SYNTHETIC_CODEX_RECOVERY_CHILD_STATE", &state)
+            .output()
+            .unwrap();
+        assert!(child.status.success());
+        let store = Store::open(&state).unwrap();
+        let account = store.accounts().unwrap().pop().unwrap();
+        let original = recovery_codex_auth("original-account", "original-access");
+        let persistent = store
+            .account_root(&account.id)
+            .unwrap()
+            .join("profile/auth.json");
+        let (run, run_digest) = store
+            .recovery_candidate(&store.unsettled_runs().unwrap()[0].id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.phase, "running");
+        assert!(store.authentication_required(&account.id).unwrap());
+
+        store.recover_run(&run.id, &run_digest, 4).unwrap();
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert_eq!(
+            store
+                .db()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM leases WHERE account=?1",
+                    [account.id.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+        );
+        assert_eq!(
+            store
+                .db()
+                .unwrap()
+                .query_row(
+                    "SELECT count(*) FROM tool_effects WHERE run=? AND settled=0",
+                    [run.id.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+        );
+        assert_eq!(crate::private::read(&persistent, 65536).unwrap(), original);
+        assert!(store.authentication_required(&account.id).unwrap());
     }
 
     fn quota_point(pool: &Id, window: &str, used: f64, observed: u64, reset: u64) -> QuotaPoint {

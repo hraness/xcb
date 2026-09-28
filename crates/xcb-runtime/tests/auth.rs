@@ -636,7 +636,6 @@ fn codex_recovery_rejects_missing_or_changed_evidence_and_never_releases_custody
         "changed-metadata",
         "profile",
         "persistent-profile",
-        "account",
         "cas",
         "owner",
         "live-owner",
@@ -689,12 +688,6 @@ fn codex_recovery_rejects_missing_or_changed_evidence_and_never_releases_custody
                 private::directory(parent).unwrap();
                 private::create(&target, &original).unwrap();
             }
-            "account" => private::replace(
-                &profile.join("auth.json"),
-                &codex_auth_fixture("other-account", "user-one", "synthetic-refreshed"),
-                &xcb_runtime::digest(&refreshed),
-            )
-            .unwrap(),
             "cas" => private::replace(
                 &target,
                 &codex_auth_fixture("account-one", "user-one", "external-rotation"),
