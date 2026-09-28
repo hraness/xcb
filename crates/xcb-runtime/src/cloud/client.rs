@@ -109,6 +109,8 @@ fn unwrap(result: FunctionResult) -> Result<Value> {
 /// before it is trusted, matching `client-ts` in the relay package.
 pub struct RelayClient {
     client: ConvexClient,
+    pub(super) deployment_url: String,
+    pub(super) session_binding: Option<super::custody::SessionBinding>,
 }
 
 impl RelayClient {
@@ -118,7 +120,29 @@ impl RelayClient {
             .await
             .map_err(|_| timed_out())?
             .map_err(|error| protocol(dynamic(format!("convex connect: {error}"))))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            deployment_url: deployment_url.to_owned(),
+            session_binding: None,
+        })
+    }
+
+    /// Bind the credentials a caller loaded before connecting. Re-reading
+    /// custody must never silently move an already-open device to new keys.
+    pub(super) fn bind_session_keys(
+        &mut self,
+        state_root: &std::path::Path,
+        session: &super::custody::CloudSession,
+        device: &super::crypto::DeviceIdentity,
+        account: &super::crypto::AccountKey,
+        key_version: u64,
+    ) -> Result<()> {
+        let binding =
+            super::custody::SessionBinding::capture(state_root, &self.deployment_url, session)?;
+        binding.expect_keys(state_root, device, account, key_version)?;
+        binding.check(state_root, session)?;
+        self.session_binding = Some(binding);
+        Ok(())
     }
 
     /// Attach the session token so authenticated calls carry it.

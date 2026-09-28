@@ -66,9 +66,9 @@ machine's thread and returns the task ID, the folder, and how it was chosen:
 
 ## Agents as controllers
 
-An agent drives the fleet through its own controller device and its own state
-folder. Don't share a workspace machine's state folder with an agent: two
-writers on one session file race each other's token refresh.
+Give each agent its own controller device and private state folder. A state
+folder contains the device identity and account key, so access to it grants
+that device's authority.
 
 ```sh
 xcb --state ~/.local/share/xcb-agent link --controller \
@@ -81,6 +81,19 @@ controller device reads fleet status and posts commands; nothing can be
 dispatched to it. Every command prints one JSON object on stdout with `--json`,
 diagnostics go to stderr, and the only interactive step is the `xcb link` code
 prompt.
+
+Your CLI and background supervisor coordinate sign-in refresh when they use
+the same state folder. Upgrade both before using them together; replacing the
+CLI executable does not immediately upgrade a supervisor that is finishing
+active work. Each process reloads a session saved by another process before
+requesting a refresh. A changed device, account, or relay stops the operation
+and asks you to rerun it with the current state. This coordination does not
+make a device's private state folder suitable for sharing with agents.
+
+An interrupted enrollment can resume without its device or account key when
+the saved sign-in identifies its relay. An older incomplete enrollment with
+no saved relay must sign in again through `xcb link`; xcb does not send that
+stored refresh token to an unconfirmed destination.
 
 A driving agent's loop:
 
@@ -109,8 +122,10 @@ target machine before retrying.
 - **Lost or retired machine:** run `xcb remote revoke <device>` from any other
   enrolled machine. The ID is retired for good; commands in flight finish or
   expire, and the revoked machine loses access on its next poll.
-- **Expired session:** xcb refreshes it before each call. A machine that was
-  offline past the refresh window signs in again on its next start.
+- **Expired session:** xcb attempts a refresh before an authenticated call.
+  If refresh is rejected, the remote operation stops. The CLI has no command
+  to sign out and replace the relay sign-in of a fully linked device; keep its
+  stored device and account keys while resolving the sign-in failure.
 - **Supervisor crash or restart:** the supervisor restarts its relay link, and
   commands left from before close as `failed` or `ambiguous`. Restarts back off
   up to five minutes after repeated failures.

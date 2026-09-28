@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -31,6 +32,10 @@ fn now_ms() -> u64 {
 }
 
 const AUTH_PROVIDER: &str = "xcb-otp-v1";
+
+#[cfg(test)]
+#[path = "session_refresh_tests.rs"]
+mod session_refresh_tests;
 
 /// Phase 1: request an OTP code for `email`. `invite` is the bootstrap or
 /// issued identity-invite token when closed sign-up gates first admission.
@@ -96,11 +101,11 @@ pub async fn verify_code(
         .get("refreshToken")
         .and_then(Value::as_str)
         .ok_or(protocol("auth:signIn missing refreshToken"))?;
-    Ok(CloudSession::issue(
-        token.to_string(),
-        refresh_token.to_string(),
-        now_ms(),
-    ))
+    let mut session = CloudSession::issue(token.to_string(), refresh_token.to_string(), now_ms());
+    session.deployment_url = Some(client.deployment_url.clone());
+    // An explicit OTP verification starts a new intended auth session.
+    client.session_binding = None;
+    Ok(session)
 }
 
 /// Refresh an expired session token via the auth:signIn refresh lane.
@@ -127,42 +132,100 @@ pub async fn refresh_session(
         .and_then(Value::as_str)
         .unwrap_or(&session.refresh_token)
         .to_string();
-    Ok(CloudSession::issue(
-        token.to_string(),
-        refresh_token,
-        now_ms(),
-    ))
+    let mut fresh = CloudSession::issue(token.to_string(), refresh_token, now_ms());
+    fresh.deployment_url = Some(client.deployment_url.clone());
+    Ok(fresh)
 }
 
-/// Clear auth, refresh regardless of local expiry, persist and
-/// re-authenticate in place.
-async fn force_refresh(
+const REFRESH_LOCK_WAIT: Duration = Duration::from_secs(35);
+
+/// Reload and spend a refresh token while holding one stable cross-process
+/// lock. The injectable request keeps concurrency tests entirely synthetic.
+async fn refresh_custody<F>(
+    state_root: &Path,
+    binding: &custody::SessionBinding,
+    previous: &CloudSession,
+    force: bool,
+    refresh: F,
+) -> Result<CloudSession>
+where
+    F: AsyncFnOnce(&CloudSession) -> Result<CloudSession>,
+{
+    let held = custody::session_refresh_lock(state_root, REFRESH_LOCK_WAIT).await?;
+    let snapshot = custody::session_snapshot(state_root)?;
+    binding.check(state_root, previous)?;
+    binding.check(state_root, &snapshot.session)?;
+    held.check()?;
+    let replaced = snapshot.session.token != previous.token
+        || snapshot.session.refresh_token != previous.refresh_token;
+    // A recovery retry belongs to the token that failed. A sibling's newer
+    // token gets a chance to work before any further rotation is considered.
+    if force && replaced {
+        if snapshot.session.due_for_refresh(now_ms()) {
+            return Err(Error::Conflict(
+                "replacement relay session needs refresh; retry the operation",
+            ));
+        }
+        return Ok(snapshot.session);
+    }
+    if !force && !snapshot.session.due_for_refresh(now_ms()) {
+        return Ok(snapshot.session);
+    }
+    let fresh = refresh(&snapshot.session).await?;
+    held.check()?;
+    binding.check(state_root, &fresh)?;
+    custody::replace_session(state_root, &snapshot, &fresh, || {
+        held.check()?;
+        binding.check(state_root, &fresh)
+    })?;
+    Ok(fresh)
+}
+
+async fn refresh_coordinated(
     client: &mut RelayClient,
     state_root: &Path,
     session: &mut CloudSession,
+    force: bool,
 ) -> Result<()> {
-    client.clear_auth().await;
-    let fresh = refresh_session(client, session).await?;
-    custody::store_session(state_root, &fresh)?;
-    client.authenticate(&fresh.token).await;
+    let binding = match &client.session_binding {
+        Some(binding) => binding.clone(),
+        None => {
+            let binding =
+                custody::SessionBinding::capture(state_root, &client.deployment_url, session)?;
+            client.session_binding = Some(binding.clone());
+            binding
+        }
+    };
+    let mut refreshed = false;
+    let fresh = refresh_custody(
+        state_root,
+        &binding,
+        session,
+        force,
+        async |current: &CloudSession| {
+            // An expired token can stall the sync worker and starve signIn.
+            client.clear_auth().await;
+            refreshed = true;
+            refresh_session(client, current).await
+        },
+    )
+    .await?;
+    if refreshed || fresh.token != session.token {
+        client.authenticate(&fresh.token).await;
+    }
     *session = fresh;
     Ok(())
 }
 
 /// Refresh `session` when it is inside the expiry lead, persisting and
-/// re-authenticating the client in place. A no-op for a fresh token.
+/// re-authenticating the client in place. Always reload custody: an in-memory
+/// token can be locally fresh while a sibling has already rotated it.
 pub async fn refresh_if_due(
     client: &mut RelayClient,
     state_root: &Path,
     session: &mut CloudSession,
 ) -> Result<()> {
-    if !session.due_for_refresh(now_ms()) {
-        return Ok(());
-    }
-    // An expired token stalls the sync worker — the server rejects it and
-    // the socket reconnects forever, which also starves action calls. Drop
-    // the dead token before refreshing so the sign-in action flows.
-    force_refresh(client, state_root, session).await
+    refresh_coordinated(client, state_root, session, false).await
 }
 
 /// Run `call`; on failure under a locally-fresh session, force a refresh
@@ -182,7 +245,7 @@ where
 {
     match call(client).await {
         Ok(value) => Ok(value),
-        Err(first) => match force_refresh(client, state_root, session).await {
+        Err(first) => match refresh_coordinated(client, state_root, session, true).await {
             Ok(()) => call(client).await,
             Err(_) => Err(first),
         },
@@ -501,6 +564,11 @@ pub async fn finish_link(
             deployment_url: deployment_url.to_string(),
         },
     )?;
+
+    // This explicit enrollment just changed the intended device/link/key
+    // records. Its next refresh pins those admitted records afresh (including
+    // the intentionally absent account key while waiting for a key wrap).
+    client.session_binding = None;
 
     Ok(LinkOutcome {
         device,

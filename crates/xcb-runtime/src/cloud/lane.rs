@@ -181,6 +181,13 @@ impl RelayLane {
     /// Boot the lane: connect, authenticate, register presence.
     pub async fn boot(keys: LaneKeys) -> Result<Self> {
         let mut client = RelayClient::connect(&keys.deployment_url).await?;
+        client.bind_session_keys(
+            &keys.state_root,
+            &keys.session,
+            &keys.device,
+            &keys.account_key,
+            keys.key_version,
+        )?;
         let mut session = keys.session;
         // Refresh before attaching: an expired token stalls the socket's
         // reconnect loop and starves the presence call below.

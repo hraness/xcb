@@ -299,14 +299,27 @@ pub fn create(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub fn replace(path: &Path, bytes: &[u8], expected: &str) -> Result<()> {
+    replace_guarded(path, bytes, expected, || Ok(()))
+}
+
+/// Add an operation's original-object/authority checks to the existing
+/// digest and inode guard, including the final check before publication.
+pub(crate) fn replace_guarded(
+    path: &Path,
+    bytes: &[u8],
+    expected: &str,
+    check: impl Fn() -> Result<()>,
+) -> Result<()> {
     let (parent, name) = publish_target(path)?;
     let current_file = open_file(path, 1024 * 1024)?;
     lock(&current_file)?;
+    let current_file = ExclusiveLock::held(current_file);
     same_file(path, &current_file)?;
     let current = read(path, 1024 * 1024)?;
     if crate::digest(&current) != expected {
         return Err(Error::Conflict("file revision changed"));
     }
+    check()?;
     // The flock on the current inode stays held across the guarded publish:
     // a sibling replace on the same inode serializes here or fails busy,
     // while the commit guard re-verifies digest and identity immediately
@@ -317,6 +330,7 @@ pub fn replace(path: &Path, bytes: &[u8], expected: &str) -> Result<()> {
     let published = {
         let guard = |_: &Path| -> std::result::Result<(), CustodyError> {
             let verdict = (|| -> Result<()> {
+                check()?;
                 if crate::digest(read(path, 1024 * 1024)?) != expected {
                     return Err(Error::Conflict("file revision changed"));
                 }
@@ -345,6 +359,38 @@ mod tests {
     use super::ExclusiveLock;
     use std::fs::OpenOptions;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn a_publication_time_guard_rejection_preserves_the_target_and_removes_staging() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = super::directory(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let target = root.join("guarded.json");
+        super::create(&target, b"original").unwrap();
+        let checks = std::cell::Cell::new(0);
+        let result =
+            super::replace_guarded(&target, b"replacement", &crate::digest(b"original"), || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 2 {
+                    Err(crate::Error::Conflict(
+                        "synthetic publication-time rejection",
+                    ))
+                } else {
+                    Ok(())
+                }
+            });
+        assert!(matches!(
+            result,
+            Err(crate::Error::Conflict(
+                "synthetic publication-time rejection"
+            ))
+        ));
+        assert_eq!(checks.get(), 2);
+        assert_eq!(super::read(&target, 64).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        let file = super::open_file(&target, 64).unwrap();
+        file.try_lock().unwrap();
+        file.unlock().unwrap();
+    }
 
     /// A child spawned while a lock is held can share its open file
     /// description through the pre-exec window; here the descriptor is shared
