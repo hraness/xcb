@@ -51,7 +51,7 @@ Applications can embed the TypeScript SDK instead. There the application names t
 
 ## Limits
 
-With the tested accounts, Claude and Devin have completed coding tasks through xcb on macOS on Apple silicon. Claude ran a failing test, fixed the code, passed the test, and checked Git status; Devin, on Devin CLI 3000.11.3, fixed a broken function and reported the change. On Linux only Claude runs, in a bwrap sandbox once xcb's checks pass, and a coding session there has not been confirmed. Codex and Devin need macOS, and Codex runs only on specific builds that xcb has checked; its last signed-in coding run used the previous supported build. The [providers page](/docs/providers) lists each supported build and its status.
+With the tested accounts, Claude and Devin have completed coding tasks through xcb on macOS on Apple silicon. Claude ran a failing test, fixed the code, passed the test, and checked Git status; Devin, on Devin CLI 3000.11.3, fixed a broken function and reported the change. On Linux only Claude runs, in a bwrap sandbox once xcb's checks pass, and a coding session there has not been confirmed. Codex and Devin need macOS, and Codex runs only on specific builds that xcb has checked; its last confirmed signed-in coding session used an older build. The [providers page](/docs/providers) lists each supported build and its status.
 
 Tests and builds run only in an offline Linux VM that you set up on macOS on Apple silicon; without it, agents can read and change files but cannot run commands. Git in that VM is read-only, so agents working through xcb do not commit or push, and native macOS or Xcode builds cannot run there.
 

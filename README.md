@@ -115,7 +115,7 @@ example.
 | Provider | Supported builds | Status |
 | --- | --- | --- |
 | Claude | Claude Code 2.1.268 or later within version 2 | Coding workflow passed on macOS ARM64 with the tested account. On Linux, Claude runs after you run xcb's sandbox checks on that machine. |
-| Codex | Codex CLI 0.157.1 or 0.156.1 on macOS ARM64 | Passes xcb's sandbox and tool checks. The recorded signed-in coding run used the previous supported build. |
+| Codex | Codex CLI 0.157.1 or 0.156.1 on macOS ARM64 | Passes xcb's sandbox and tool checks. A signed-in coding session was last confirmed on an older build. |
 | Devin | Devin CLI 3000.11.3, 3000.11.1, or 3000.10.31 on macOS ARM64 | Coding workflow passed on macOS ARM64 with the tested account and Devin CLI 3000.11.3. |
 
 xcb checks each provider executable's version, and for Codex and Devin its
@@ -157,9 +157,18 @@ command, setting, and exit code.
 - **Remote devices:** `xcb link` needs a relay deployed from this repository's `convex/` folder ([remote operations](docs/remote-operations.md)).
 - **Managed harness:** the self-tuning harness is in development; the current build does not run self-modifying routing policies ([design](docs/managed-harness.md)).
 
+## Compared with
+
+- **Claude Code, Codex, or the Devin CLI alone:** enough when one subscription covers your work, and you keep all of the tool's built-in tools, MCP servers, and plugins. In an xcb run, xcb's sandboxed file tools, and on macOS its offline command runner, replace them.
+- **Account switchers such as [claude-swap](https://github.com/realiti4/claude-swap):** change which login Claude Code uses. xcb picks an account for each task across Claude, Codex, and Devin, and sandboxes each run.
+- **[Claude Code Router](https://xcb.sh/compare/claude-code-router) and [OpenRouter](https://xcb.sh/compare/openrouter):** send each API request to a provider or model you choose, usually paid per token. xcb never touches API traffic; it routes whole tasks to subscriptions you already pay for.
+- **[Conductor](https://xcb.sh/compare/conductor) and Claude Squad:** give each agent a Git worktree and a merge flow. xcb has no worktree or pull request flow.
+
+[All comparisons](https://xcb.sh/compare)
+
 ## More
 
-xcb was formerly AgentMixer: `xcb accounts import-agentmixer --source <path>`
+The name xcb is short for Excalibur. xcb was formerly AgentMixer: `xcb accounts import-agentmixer --source <path>`
 copies one Claude credential ([migrating](docs/compatibility.md#migrating-from-agentmixer)).
 The [compatibility reference](docs/compatibility.md) covers the TypeScript
 package and its `xcb-compat` CLI. [Contributing](CONTRIBUTING.md) ·
