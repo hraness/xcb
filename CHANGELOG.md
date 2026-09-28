@@ -10,10 +10,11 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.10.6 - 2026-09-28
 
-`xcb link` on a new machine uses only the relay you name, and says which relay
-it is waiting on.
+`xcb link` on a new machine uses only the relay you name, and a task whose
+model the provider stopped listing is sent again on another route instead of
+failing.
 
 - A first link with no `--relay` and no `XCB_RELAY_URL` stops with a message
   that names both. Before, it contacted a local development backend at
