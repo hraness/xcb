@@ -59,7 +59,7 @@
   },
   "devDependencies": {
     "@convex-dev/auth": "0.0.95",
-    "@hraness/relay": "github:hraness/relay#2558a0d860d35ec2537cc135380ea4bd89db1c8f",
+    "@hraness/relay": "github:hraness/relay#5ef01b0613ac49c4da0fcb8d2ee81e667c592992",
     "@types/bun": "1.4.2",
     "@types/node": "26.6.2",
     "convex": "1.45.0",
