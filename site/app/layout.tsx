@@ -18,7 +18,7 @@ import "./calm.css";
  */
 const initialPalette = getDesignPaletteTheme("tokyo-night", "light");
 
-const title = "xcb · Keep coding when one subscription hits its limit.";
+const title = "xcb · Use your Claude, Codex, and Devin plans from one agent";
 const description =
   "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
 

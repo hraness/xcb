@@ -27,6 +27,6 @@ export default function OpengraphImage() {
       foreground: "#1C1A18",
       muted: "#6A655E",
     },
-    title: "Keep coding when one subscription hits its limit.",
+    title: "Use your Claude, Codex, and Devin plans from one agent.",
   });
 }

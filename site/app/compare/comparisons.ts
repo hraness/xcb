@@ -230,7 +230,7 @@ export const comparisons: readonly Comparison[] = [
         paragraphs: [
           "The same choice applies to Codex, OpenAI’s open-source coding agent for the terminal, IDE, and desktop, which signs in with a ChatGPT plan or an API key. Codex has its own sandbox and approval modes, subagents, skills, MCP servers, and cloud tasks. Use it on its own when one ChatGPT plan covers your work.",
           "xcb runs Codex through its [app-server](https://learn.chatgpt.com/docs/app-server), which OpenAI documents for building Codex into your own product, with ChatGPT device sign-in. Inside an xcb run, Codex’s own shell, web search, and subagents are off, and xcb’s file tools take their place.",
-          "xcb runs Codex on macOS only and supports specific Codex builds, adding new ones after they pass its checks, so it can trail the newest Codex release. A coding session on a signed-in Codex account passed on the previous supported build and hasn’t been rerun on the current one.",
+          "xcb runs Codex on macOS only and supports specific Codex builds, adding new ones after they pass its checks, so it can trail the newest Codex release. A coding session on a signed-in Codex account was last confirmed on an older build and hasn’t been rerun on the current ones.",
         ],
       },
       {

@@ -20,13 +20,13 @@ const repository = "https://github.com/hraness/xcb";
 
 // Hero heading and summary come from the portfolio registry's xcb messaging record.
 const heading = "Use your Claude, Codex, and Devin plans from one agent.";
-const summary = "Work in xcb’s terminal or call it from your own agent or app. Each task runs through the provider’s own tool on one of your accounts that is signed in, idle, and not at a known limit.";
+const summary = "xcb (Excalibur) is a terminal and router for developers who pay for more than one coding agent. Each task runs through Claude Code, Codex, or the Devin CLI on one of your accounts that is signed in, idle, and not at a known limit. Use its terminal or call it from your own agent or app.";
 const metaDescription = "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
 
 const questions = [
   { question: "Can I use the subscriptions I already have?", answer: "Yes. You sign in to your own Claude, Codex, and Devin accounts through each provider’s own tool, and xcb routes work among them. It has no model access of its own and does not lift provider usage limits; each provider’s pricing and terms still apply." },
   { question: "What happens when an account hits its limit?", answer: "While a provider reports a usage window for an account, xcb skips that account and sends the next task to another account that can take it. A task from your thread that stops on a reported limit can move to another account with its original instructions. If no account can take it, the task waits for the reset. xcb never falls back to an API key." },
-  { question: "How is xcb different from herdr, pi, or Conductor?", answer: "herdr keeps many agent terminals alive and visible; xcb decides which of your accounts runs each task and holds that account until the run ends, so the two work together. pi is a coding agent you rebuild with extensions; xcb runs the providers’ own agents and lets you reshape everything above a fixed permission boundary. Conductor gives parallel agents their own branches; xcb sandboxes each run and keeps tasks going after you close the terminal. The comparison pages cover each tool." },
+  { question: "How is xcb different from claude-swap, Claude Code Router, or herdr?", answer: "claude-swap changes which login Claude Code uses and keeps every Claude Code feature; xcb picks an account for each task across Claude, Codex, and Devin and sandboxes each run. Claude Code Router sends each API request to a provider you configure; xcb never touches API traffic and runs whole tasks on your subscriptions. herdr keeps many agent terminals alive and visible, and xcb can run inside a herdr pane. The comparison pages cover these and more." },
   { question: "What stays on my computer?", answer: "Accounts, credentials, sessions, and settings stay on your computer, outside your projects. Model requests go to the provider that runs the task. The optional judge, which is off by default, sends limited task context to TypeSafe’s System One service." },
   { question: "Is the self-tuning harness ready?", answer: "No. The managed harness is in development, and the current build does not run self-modifying routing policies. What learns today are two small reflexes: one picks a model tier for a new task and one notices when a task stopped early. You can inspect and roll back both." },
   { question: "What does it cost?", answer: "xcb is free and MIT licensed. You pay only for your provider subscriptions and any services you choose to use." },
@@ -45,8 +45,27 @@ const readiness = [
 ] as const;
 
 export default function Home() {
+  const publisher = { "@id": "https://hraness.com/#organization" };
   const structuredData = [
-    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: "xcb", description: metaDescription, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.sh" },
+    { "@context": "https://schema.org", "@type": "WebSite", "@id": "https://xcb.sh/#website", url: "https://xcb.sh/", name: "xcb", alternateName: ["Excalibur"], inLanguage: "en-US", publisher },
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "@id": "https://xcb.sh/#app",
+      name: "xcb",
+      alternateName: "Excalibur",
+      url: "https://xcb.sh/",
+      description: metaDescription,
+      applicationCategory: "DeveloperApplication",
+      operatingSystem: "macOS, Linux",
+      installUrl: "https://xcb.sh/install",
+      isAccessibleForFree: true,
+      offers: { "@type": "Offer", price: 0, priceCurrency: "USD" },
+      license: "https://opensource.org/license/mit",
+      publisher,
+      ...(publishedRelease === null ? {} : { softwareVersion: publishedRelease.version }),
+    },
+    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: "xcb", description: metaDescription, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.sh", targetProduct: { "@id": "https://xcb.sh/#app" } },
     { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: questions.map(({ question, answer }) => ({ "@type": "Question", name: question, acceptedAnswer: { "@type": "Answer", text: answer } })) },
   ];
   return (
@@ -65,7 +84,7 @@ export default function Home() {
             headingId="hero-title"
             summary={summary}
             actions={[{ href: "/install", label: "Install xcb" }, { href: repository, label: "View the source ↗" }]}
-            boundary={`Free and open source · macOS on Apple silicon and Linux x86_64 · ${releaseStatusLabel(publishedRelease)}`}
+            boundary={`Free and open source · macOS on Apple silicon · Linux x86_64 (Claude only) · ${releaseStatusLabel(publishedRelease)}`}
           />
 
           <MarketingInterfaceGrid
@@ -86,14 +105,14 @@ export default function Home() {
             ]}
           />
 
-          <MarketingSection id="router" heading="How xcb picks an account" headingId="router-title" summary="It filters your accounts, ranks what is left, and holds the one it picks until the provider process exits.">
+          <MarketingSection id="router" heading="How xcb picks an account" headingId="router-title" summary="It skips accounts that can’t take the task, ranks the rest, and gives the chosen account to that task alone.">
             <MarketingPillars
               ariaLabel="How xcb picks an account"
               columns={3}
               pillars={[
                 { label: "Only accounts that can work now", summary: "Signed in, idle, not at a known usage limit, and on a model xcb has recently seen from that provider." },
                 { label: "Ranked for the task", summary: "What is left is ranked by task type and by relative quality, cost, and speed." },
-                { label: "One task per account", summary: "The provider runs in a sandbox with xcb’s file tools, and xcb holds the account until the provider process exits." },
+                { label: "One task per account", summary: "The provider works in a sandbox through xcb’s file tools. No other task can use the account until the provider exits." },
               ]}
             />
             <a className="xcb-text-link" href="/docs/how-routing-works">How routing works →</a>
