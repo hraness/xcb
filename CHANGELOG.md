@@ -10,6 +10,23 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.10.3 - 2026-09-27
+
+xcb supports Codex CLI 0.157.1, lets you reconnect an existing Codex account
+from a newer sign-in, and shows relay errors alongside local supervisor errors.
+
+- Codex CLI 0.157.1 on macOS ARM64 passes the executable, tool, configuration,
+  and sandbox checks. The previous supported 0.156.1 build remains supported.
+  xcb disables Codex's new background daemon and guardian context features.
+- When a background service cannot find a provider on its PATH, it can keep
+  using its saved executable only if that copy still passes xcb's checks.
+  Upgrading xcb also rechecks builds the previous release did not support.
+- `xcb accounts import-codex --account <account-id> --source <auth.json>`
+  reconnects an existing account with newer credentials for the same identity.
+  It preserves the account's enabled state and usage limits.
+- Relay connection and publication failures remain visible when a local task
+  also fails. Each warning clears after the relevant operation succeeds.
+
 ## 0.10.2 - 2026-09-27
 
 xcb reconnects after a relay outage, recognizes accounts that need a fresh

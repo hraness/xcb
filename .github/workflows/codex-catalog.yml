@@ -1,7 +1,9 @@
 name: Codex catalog
 
 # Once a day, and on demand, checks whether the npm-published Codex build is
-# listed in qualified-builds.json. When it is not, the scripted native
+# listed in qualified-builds.json. Exact builds already supported by the
+# release adapter are excluded, since older clients also read that catalog.
+# For other candidates, the scripted native
 # inventory runs against the exact darwin-arm64 binary, its evidence is
 # uploaded to the run, and the outcome goes to one tracking issue per Codex
 # version (.github/scripts/codex-catalog.py):

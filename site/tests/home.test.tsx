@@ -133,3 +133,11 @@ test("the shared header keeps a named home link and exact-artwork foil fallback"
     expect(masks).toEqual(['--hraness-foil-mask:url("/marks/xcb.svg")']);
   }
 });
+
+test("shows an exact released CLI help excerpt without simulated routing results", () => {
+  const html = renderToStaticMarkup(<Home />);
+  expect(textOf(html)).toContain("xcb models route --help");
+  expect(textOf(html)).toContain("without reserving an account");
+  expect(html).toContain("Help excerpt from xcb 0.10.1");
+  expect(html).not.toContain("s_…");
+});

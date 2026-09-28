@@ -8,6 +8,7 @@ import {
   ProviderMark,
 } from "@hraness/design-kit/react/server";
 import { AskAiAboutThis } from "@hraness/ui";
+import { CliProof } from "./cli-proof";
 import { CodeBlock } from "./code-block";
 import { providerStatus } from "./docs/provider-status";
 import { installCommand } from "./install/commands";
@@ -34,13 +35,7 @@ const questions = [
 const agentExample = `$ xcb
 > Fix the failing parser test in ~/src/app`;
 
-const routeExample = `$ xcb --json route < task.json
-{ "status": "completed",
-  "session": "s_…",
-  "route": {
-    "provider": "claude",
-    "model": "claude/sonnet/low"
-  } }`;
+const routeExample = `$ xcb --json route < task.json`;
 
 const readiness = [
   { name: "Claude", mark: "claudecode", detail: providerStatus.claude },
@@ -64,6 +59,7 @@ export default function Home() {
             align="start"
             backdrop={false}
             className="xcb-hero"
+            frame={<CliProof />}
             name="xcb"
             heading={heading}
             headingId="hero-title"

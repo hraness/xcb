@@ -4,7 +4,8 @@
 resolve  Pick the npm `latest` Codex version, or REQUESTED_VERSION. When
          qualified-builds.json does not list it, download the darwin-arm64
          package, check its registry integrity, stage candidate/codex, and
-         write its SHA-256 to the step outputs.
+         write its SHA-256 to the step outputs. Exact release-supported
+         artifacts are excluded from shared-catalog proposals.
 report   Turn the inventory verdict into the run summary and one tracking
          issue per Codex version. The expected outcomes (passed, failed,
          incompatible) exit 0; a missing or inconsistent verdict exits 1.
@@ -55,6 +56,36 @@ def catalogued(catalog, version):
     return any(entry.get("version") == version for entry in catalog.get("codex", []))
 
 
+def release_builds(root):
+    """Exact source-baked pairs, including retained release-only adapters.
+
+    A new adapter can support a changed schema that older xcb releases cannot.
+    Those older clients also read the shared catalog, so these pairs must not
+    become catalog proposals merely because the current inventory now passes.
+    """
+    source = (root / "crates/xcb-runtime/src/codex/config.rs").read_text()
+    values = []
+    for name in ["VERSION", "BINARY_SHA256"]:
+        found = re.findall(r'^pub const ' + name + r': &str = "([^"]+)";', source, re.M)
+        if len(found) != 1:
+            fail("Codex release constants are missing or ambiguous")
+        values.append(found[0])
+    if not VERSION.fullmatch(values[0]) or not DIGEST.fullmatch(values[1]):
+        fail("Codex release constants are invalid")
+    pairs = {tuple(values)}
+    block = re.search(r'pub const REVIEWED_BUILDS: &\[\(&str, &str, &str\)\] = &\[(.*?)\];', source, re.S)
+    if block is None:
+        fail("Codex reviewed release builds are missing")
+    literals = re.findall(r'"([^"]*)"', block.group(1))
+    if len(literals) % 3:
+        fail("Codex reviewed release bindings are invalid")
+    for version, digest, schema in zip(*[iter(literals)] * 3):
+        if not VERSION.fullmatch(version) or not DIGEST.fullmatch(digest) or not DIGEST.fullmatch(schema):
+            fail("Codex reviewed release binding is invalid")
+        pairs.add((version, digest))
+    return pairs
+
+
 def integrity_matches(integrity, data):
     algorithm, _, encoded = integrity.partition("-")
     return algorithm == "sha512" and base64.b64encode(hashlib.sha512(data).digest()).decode() == encoded
@@ -89,11 +120,15 @@ def resolve(env, root=Path(".")):
         if not member.isfile():
             fail(f"{BINARY_MEMBER} is not a regular file")
         binary = archive.extractfile(member).read()
+    sha256 = hashlib.sha256(binary).hexdigest()
+    if (version, sha256) in release_builds(root):
+        print(f"codex {version} is handled by the release adapter; keep it out of the shared catalog")
+        write_outputs(env, needed="false", version=version, sha256=sha256, source=source)
+        return
     candidate = root / "candidate"
     candidate.mkdir(mode=0o700, exist_ok=True)
     (candidate / "codex").write_bytes(binary)
     (candidate / "codex").chmod(0o700)
-    sha256 = hashlib.sha256(binary).hexdigest()
     print(f"candidate codex {version} sha256 {sha256}")
     write_outputs(env, needed="true", version=version, sha256=sha256, package=url, source=source)
 
@@ -247,11 +282,20 @@ def report(env, github, root=Path(".")):
     version = env["VERSION"]
     issues = github.catalog_issues()
     catalog = json.loads((root / "qualified-builds.json").read_text())
-    if env["NEEDED"] == "false":
+    release_owned = (version, env.get("SHA256")) in release_builds(root)
+    if env["NEEDED"] == "false" or release_owned:
+        if not release_owned and not catalogued(catalog, version):
+            print("::error::the skipped candidate is neither catalogued nor an exact release-supported build")
+            return 1
         for issue in issues:
             if catalogued(catalog, issue["version"]):
                 github.close(issue["number"], f"Codex {issue['version']} is listed in `qualified-builds.json`. Closed by {env['RUN_URL']}.")
-        summarize(env, f"Codex {version} is listed in `qualified-builds.json`; nothing to do.")
+            elif release_owned and issue["version"] == version:
+                github.close(issue["number"], f"This exact Codex {version} build is handled by xcb's release adapter. Keep it out of the shared catalog: older xcb releases cannot enforce the newer adapter's controls. Closed by {env['RUN_URL']}.")
+        if release_owned:
+            summarize(env, f"Codex {version} matches the release adapter's exact executable; no shared-catalog proposal is needed.")
+        else:
+            summarize(env, f"Codex {version} is listed in `qualified-builds.json`; nothing to do.")
         return 0
     if not DIGEST.fullmatch(env.get("SHA256", "")):
         print("::error::the candidate has no SHA-256")

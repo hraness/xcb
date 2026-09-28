@@ -23,8 +23,8 @@
     "sync:installer": "bun scripts/sync-installer.ts"
   },
   "dependencies": {
-    "@hraness/design-kit": "github:hraness/design-kit#v0.21.0",
-    "@hraness/site-footer": "github:hraness/site-footer#v0.19.3",
+    "@hraness/design-kit": "github:hraness/design-kit#v0.23.0",
+    "@hraness/site-footer": "github:hraness/site-footer#v0.20.0",
     "@hraness/ui": "github:hraness/ui#v0.5.18",
     "@hraness/web-discovery": "github:hraness/web-discovery#v0.9.0",
     "next": "16.3.5",
@@ -39,6 +39,7 @@
     "@types/react-dom": "19.3.0",
     "eslint": "9.39.4",
     "eslint-config-next": "16.3.5",
+    "playwright-core": "1.58.2",
     "postcss": "8.5.28",
     "tailwindcss": "4.3.3",
     "typescript": "6.0.3"
