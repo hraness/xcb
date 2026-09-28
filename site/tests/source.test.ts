@@ -127,7 +127,7 @@ describe("xcb site source contract", () => {
       expect(llms).toContain(publicationMarkdown(publishedRelease));
       expect([...versions]).toEqual([publishedRelease.version]);
     }
-    for (const fact of ["xcb --json route", "dryRun", "createSubscriptionRouter", "not on npm", supportedBuilds.claudeMinimum, ...supportedBuilds.codex, ...supportedBuilds.devin, "does not run self-modifying routing policies"]) {
+    for (const fact of ["xcb --json route", "dryRun", "createSubscriptionRouter", "npm install @hraness/xcb", supportedBuilds.claudeMinimum, ...supportedBuilds.codex, ...supportedBuilds.devin, "does not run self-modifying routing policies"]) {
       expect(llms).toContain(fact);
     }
     for (const status of Object.values(providerStatus)) expect(llms.split(status).length - 1).toBe(1);

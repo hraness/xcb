@@ -5880,7 +5880,7 @@ impl Supervisor {
 struct Startup {
     managed: Arc<ManagedStore>,
     store: Arc<Store>,
-    lock: private::ExclusiveLock,
+    lock: crate::cloud::relay_gate::SupervisorLocks,
     identity: crate::managed_supervisor::SupervisorIdentity,
 }
 
@@ -5894,20 +5894,10 @@ fn start_supervisor(root: &Path) -> Result<Option<Startup>> {
     let managed = Arc::new(ManagedStore::open(root)?);
     let store = Arc::new(Store::open(root)?);
     let prepared = crate::managed_supervisor::SupervisorIdentity::prepare()?;
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(managed.root().join("supervisor.lock"))?;
-    private::check_file(&lock, 4096)?;
-    match lock.try_lock() {
-        Ok(()) => (),
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
-        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
-    }
-    let lock = private::ExclusiveLock::held(lock);
+    let Some(lock) = crate::cloud::relay_gate::supervisor_locks(root)? else {
+        return Ok(None);
+    };
+    lock.check()?;
     let identity = prepared.publish(root)?;
     Ok(Some(Startup {
         managed,
@@ -5915,6 +5905,29 @@ fn start_supervisor(root: &Path) -> Result<Option<Startup>> {
         lock,
         identity,
     }))
+}
+
+#[cfg(test)]
+mod relay_lock_tests {
+    use super::*;
+
+    #[test]
+    fn modern_supervisor_keeps_existing_health_and_migration_probes_exclusive() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let locks = crate::cloud::relay_gate::supervisor_locks(&root)
+            .unwrap()
+            .unwrap();
+        let _identity = crate::managed_supervisor::SupervisorIdentity::register(&root).unwrap();
+        let (executable, _) = crate::process::host_identity().unwrap();
+        // The unchanged health probe observes the legacy lock held and
+        // validates this owner, without spawning a competing supervisor.
+        ensure_daemon(&root, &executable).unwrap();
+        assert!(managed_migration_guard(&root.join("managed")).is_err());
+        locks.check().unwrap();
+        drop(locks);
+        assert!(managed_migration_guard(&root.join("managed")).is_ok());
+    }
 }
 
 pub async fn daemon(root: PathBuf) -> Result<i32> {

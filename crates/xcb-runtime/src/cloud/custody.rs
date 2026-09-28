@@ -27,13 +27,14 @@ use super::crypto::{AccountKey, DeviceIdentity};
 const MAX_FILE_BYTES: usize = 64 * 1024;
 
 /// The pinned file names — this module owns them all.
-mod name {
+pub(super) mod name {
     pub const DEVICE: &str = "device.json";
     pub const ACCOUNT: &str = "account.json";
     pub const SESSION: &str = "session.json";
     pub const REFRESH_LOCK: &str = "session.refresh.lock";
     pub const MUTATION_LOCK: &str = "custody.mutation.lock";
     pub const RELAY: &str = "relay.json";
+    pub const REAUTH: &str = "reauth.json";
 }
 
 /// The cloud custody directory, created (or verified) private on access.
@@ -41,7 +42,7 @@ pub fn cloud_dir(state_root: &Path) -> Result<PathBuf> {
     private::directory(&state_root.join("cloud"))
 }
 
-fn path(state_root: &Path, file: &str) -> Result<PathBuf> {
+pub(super) fn path(state_root: &Path, file: &str) -> Result<PathBuf> {
     Ok(cloud_dir(state_root)?.join(file))
 }
 
@@ -253,9 +254,18 @@ pub fn load_session(state_root: &Path) -> Result<Option<CloudSession>> {
 
 pub fn clear_session(state_root: &Path) -> Result<()> {
     let _mutation = mutation_lock(state_root)?;
+    // Clear the source durably before retiring the reauthentication intent.
+    // A crash must leave either its blocking journal or no old credentials.
+    let pending = path(state_root, name::REAUTH)?;
+    let has_pending = private::open_file_maybe_vanished(&pending, MAX_FILE_BYTES as u64)?.is_some();
     let target = path(state_root, name::SESSION)?;
-    if target.exists() {
+    if private::open_file_maybe_vanished(&target, MAX_FILE_BYTES as u64)?.is_some() {
         std::fs::remove_file(&target)?;
+        std::fs::File::open(cloud_dir(state_root)?)?.sync_all()?;
+    }
+    if has_pending {
+        std::fs::remove_file(&pending)?;
+        std::fs::File::open(cloud_dir(state_root)?)?.sync_all()?;
     }
     Ok(())
 }
@@ -363,7 +373,7 @@ pub(super) async fn session_refresh_lock(
 
 /// Lock order is refresh → mutation → session inode. Ordinary writes and
 /// clear only take mutation; logout can therefore complete during refresh.
-fn mutation_lock(state_root: &Path) -> Result<SessionRefreshLock> {
+pub(super) fn mutation_lock(state_root: &Path) -> Result<SessionRefreshLock> {
     let (path, file) = open_custody_lock(state_root, name::MUTATION_LOCK)?;
     private::lock(&file)?;
     let guard = SessionRefreshLock {
@@ -395,15 +405,16 @@ fn open_custody_lock(state_root: &Path, name: &str) -> Result<(PathBuf, std::fs:
 
 /// These decoded claims are identity comparisons, not JWT authentication.
 /// The relay still verifies the token. Expiry alone cannot bind an account.
-#[derive(Clone, PartialEq, Eq)]
-struct SessionIdentity {
-    issuer: String,
-    subject: String,
-    audience: Value,
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct SessionIdentity {
+    pub issuer: String,
+    pub subject: String,
+    pub audience: Value,
 }
 
 impl SessionIdentity {
-    fn of(session: &CloudSession) -> Result<Self> {
+    pub fn of(session: &CloudSession) -> Result<Self> {
         let rejected = || {
             Error::Conflict(
                 "stored relay session identity is invalid; credentials were not changed",
@@ -463,7 +474,7 @@ fn file_fingerprint(state_root: &Path, name: &str) -> Result<Option<String>> {
     }
 }
 
-fn same_endpoint(left: &str, right: &str) -> bool {
+pub(super) fn same_endpoint(left: &str, right: &str) -> bool {
     left.trim_end_matches('/') == right.trim_end_matches('/')
 }
 

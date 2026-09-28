@@ -35,6 +35,46 @@ login for this state folder (see [login startup](habitat-service.md)). Running
 `xcb link` again on a linked machine changes nothing, and a retried enrollment
 reuses the saved device identity.
 
+## Renew a relay sign-in
+
+If xcb cannot refresh a linked machine's expired sign-in, run:
+
+```sh
+xcb link --reauth --email you@example.com
+# Enter the emailed code at the terminal prompt, or finish with:
+xcb link --reauth --email you@example.com --code <8-digit-code>
+```
+
+Use the same account and state folder that linked this machine. Renewal keeps
+the device ID, device keys, account key, and local tasks. It uses the saved relay;
+any `--relay` or `XCB_RELAY_URL` override must match that address. `--controller`,
+`--invite`, and `--label` are enrollment options and cannot accompany `--reauth`.
+
+The relay finishes its current operation before switching sign-ins. Local
+provider tasks continue running. After an upgrade, an older background
+supervisor may need to finish its active tasks and exit before renewal can
+proceed. If xcb asks you to wait, let those tasks finish and repeat the command.
+
+If the connection drops or the command stops before reporting success, rerun
+`xcb link --reauth` with the same state folder and omit `--email` and `--code`.
+xcb reports a completed renewal while its saved sign-in is current, or
+continues an unfinished renewal before requesting another code. To start a
+new renewal after a successful one, supply `--email` again.
+
+If a pending sign-in has expired completely after seven days, xcb asks for a
+new emailed code. Remote work stays paused until renewal finishes; local
+work can continue.
+
+Outside a terminal, supply `--email`; the first invocation emails a code and
+asks you to repeat with `--code`. Supplying `--code` verifies that code without
+emailing a replacement. `--json` reports successful renewal with
+`"reauthenticated": true` and never includes tokens or keys.
+
+On a workspace machine, xcb also checks that its background supervisor can
+start. If startup fails after sign-in succeeds, the command reports the saved
+sign-in and a separate startup warning. Run `xcb chat` with the same state
+folder to retry startup. A controller device does not start a supervisor.
+
 ## Drive the fleet
 
 ```sh
@@ -123,13 +163,13 @@ target machine before retrying.
   enrolled machine. The ID is retired for good; commands in flight finish or
   expire, and the revoked machine loses access on its next poll.
 - **Expired session:** xcb attempts a refresh before an authenticated call.
-  If refresh is rejected, the remote operation stops. The CLI has no command
-  to sign out and replace the relay sign-in of a fully linked device; keep its
-  stored device and account keys while resolving the sign-in failure.
+  If refresh is rejected, [renew the relay sign-in](#renew-a-relay-sign-in)
+  with `xcb link --reauth` using the same account.
 - **Supervisor crash or restart:** the supervisor restarts its relay link, and
   commands left from before close as `failed` or `ambiguous`. Restarts back off
   up to five minutes after repeated failures.
 - **Relay unreachable:** every call gives up after 30 seconds and retries on
   the same backoff; presence returns when the relay does.
-- **Revoked device:** `xcb link` enrolls a fresh device identity; the old ID
-  stays retired.
+- **Revoked device:** renewal cannot restore a revoked ID. Use a new private
+  state folder with `xcb --state <new-folder> link` to enroll again, and keep
+  the old folder if it contains local work you need.

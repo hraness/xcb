@@ -81,6 +81,40 @@ describe("xcb relay instantiation", () => {
     expect(deviceId).toMatch(/^[0-9a-f]{32}$/);
   });
 
+  test("renews an existing daemon through the exported xcb endpoints", async () => {
+    const { device, deviceId, runtime, t, userId } = await enrolledWorld();
+    const nextSession = await t.run(async (ctx) => await ctx.db.insert("authSessions", {
+      expirationTime: Date.now() + 3_600_000, userId,
+    }));
+    const next = t.withIdentity({
+      issuer: "https://test.example", subject: `${userId}|${nextSession}`,
+      tokenIdentifier: `test|${nextSession}`,
+    });
+    const list = makeFunctionReference<"query">("relayDevices:list");
+    const before = await runtime.query(list, {});
+    const subject = await next.query(makeFunctionReference<"query">("auth:currentSubject"), {});
+    expect(subject.userId).toBe(userId);
+    const challenge = await next.mutation(makeFunctionReference<"mutation">("relayDevices:beginReauth"), { deviceId });
+    expect(challenge.contract).toBe("xcb.relay.v1:device-reauth");
+    const signature = await signCanonicalBase64(device.signing.privateKey, challenge);
+    const result = await next.mutation(makeFunctionReference<"mutation">("relayDevices:finishReauth"), {
+      deviceId, challengeId: challenge.challengeId, signature,
+    });
+    expect(result.deviceId).toBe(deviceId);
+    expect(result.authSessionId).toBe(nextSession);
+    expect(result.bindingRevision).toBe(1);
+    expect(await next.query(makeFunctionReference<"query">("relayDevices:reauthStatus"), {
+      deviceId, challengeId: challenge.challengeId,
+    })).toEqual({ status: "committed", result });
+    const after = await next.query(list, {});
+    expect(after).toEqual(before);
+    await t.run(async (ctx) => {
+      const bindings = await ctx.db.query("relayDeviceSessions").collect();
+      expect(bindings).toHaveLength(1);
+      expect(bindings[0]?.authSessionId).toBe(nextSession);
+    });
+  });
+
   test("rejects a device class outside the union", async () => {
     const t = convexTest(schema, modules);
     const now = Date.now();

@@ -28,7 +28,7 @@ Plain \`xcb\` opens one thread for all your projects. xcb picks each task's proj
 ## Build on it
 
 - Agents and scripts: \`xcb --json route\` reads one JSON task on stdin (\`version\`, \`workspace\`, \`task\`, optional \`provider\`, \`account\`, \`model\`, \`timeoutMs\`, \`dryRun\`), picks the account and model, runs one turn, and prints one JSON result. It exits 0 only for a completed turn; failures carry a \`code\` such as \`unavailable\`, \`busy\`, \`needs_input\`, or \`custody_unproven\`.
-- TypeScript apps: \`createSubscriptionRouter\` from the \`@hraness/xcb\` SDK runs a task on the account and model the app names and holds that account until the provider exits. It does not choose the account or model. The SDK ships as a release archive, not on npm.
+- TypeScript apps: \`createSubscriptionRouter\` from the \`@hraness/xcb\` SDK runs a task on the account and model the app names and holds that account until the provider exits. It does not choose the account or model. Install it with \`npm install @hraness/xcb\` or download its release archive.
 - Apps that need one tool-free model response: \`xcb --json generate\`, after the build, account, and model pass xcb's application checks.
 
 ## Providers and limits

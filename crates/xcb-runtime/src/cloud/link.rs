@@ -152,6 +152,7 @@ where
     F: AsyncFnOnce(&CloudSession) -> Result<CloudSession>,
 {
     let held = custody::session_refresh_lock(state_root, REFRESH_LOCK_WAIT).await?;
+    super::reauth::permit_refresh(state_root)?;
     let snapshot = custody::session_snapshot(state_root)?;
     binding.check(state_root, previous)?;
     binding.check(state_root, &snapshot.session)?;

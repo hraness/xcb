@@ -1,9 +1,9 @@
 //! Identity, liveness and graceful retirement for the detached managed
 //! supervisor.
 //!
-//! The supervisor lock remains the authority for exclusive ownership. This
-//! record explains which implementation owns it; a PID is never permission to
-//! signal a process. Call `register` (or publish a prepared identity) only
+//! The modern supervisor owner lock remains the exclusive ownership
+//! authority. This record explains which implementation owns it; a PID is
+//! never permission to signal a process. Call `register` (or publish a prepared identity) only
 //! after acquiring that lock, and call `check_running` only while another
 //! process holds it.
 //!
@@ -298,6 +298,35 @@ pub(crate) fn check_running(root: &Path, executable: &Path) -> Result<()> {
         ));
     }
     check_expected(root, &host_sha256)
+}
+
+/// Validate the complete-pass relay boundary using this client's exact
+/// executable, not a package version or an unbound capability flag. Called
+/// while the transition holds shared legacy exclusion and a modern owner
+/// holds its separate exclusive lock. No network or liveness wait occurs.
+pub(crate) fn check_relay_boundary(root: &Path) -> Result<()> {
+    let (_, expected_sha256) = process::host_identity()?;
+    let directory = private::check_directory(&root.join("managed"))?;
+    let bytes = match private::read(&directory.join(RECORD_NAME), MAX_RECORD) {
+        Ok(bytes) => bytes,
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::Unavailable(
+                "the background xcb supervisor is still starting or cannot pause its relay; let it finish starting or let its active tasks finish, then retry sign-in",
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let record: Record = serde_json::from_slice(&bytes).map_err(|_| {
+        Error::Unavailable("the running xcb supervisor cannot safely pause its relay; let its active tasks finish and retry sign-in")
+    })?;
+    record.validate()?;
+    if record.sha256 != expected_sha256 || record.package_version != env!("CARGO_PKG_VERSION") {
+        return Err(Error::Unavailable(
+            "the running xcb supervisor is a different build; let its active tasks finish and retry sign-in",
+        ));
+    }
+    verified_stamp(&record.executable, &record.sha256)?;
+    owner_alive(record.pid)
 }
 
 fn check_expected(root: &Path, expected_sha256: &str) -> Result<()> {
