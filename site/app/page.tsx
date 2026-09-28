@@ -8,7 +8,6 @@ import {
   ProviderMark,
 } from "@hraness/design-kit/react/server";
 import { AskAiAboutThis } from "@hraness/ui";
-import { CliProof } from "./cli-proof";
 import { CodeBlock } from "./code-block";
 import { providerStatus } from "./docs/provider-status";
 import { installCommand } from "./install/commands";
@@ -20,7 +19,7 @@ const repository = "https://github.com/hraness/xcb";
 
 // Hero heading and summary come from the portfolio registry's xcb messaging record.
 const heading = "Use your Claude, Codex, and Devin plans from one agent.";
-const summary = "xcb (Excalibur) is for developers who pay for more than one coding agent. Each task runs in Claude Code, Codex, or the Devin CLI on an account that is signed in, idle, and not at a known limit. Use its terminal or your own agent or app.";
+const summary = "Bring your coding subscriptions into one conversation. xcb picks an account and model for each task, helps you use quota before it resets, and lets you continue recent Claude and Codex conversations.";
 const metaDescription = "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
 
 const questions = [
@@ -28,12 +27,11 @@ const questions = [
   { question: "What happens when an account hits its limit?", answer: "When a provider reports an exhausted usage window for an account, xcb skips that account and sends the next task to another account that can take it. A task from your thread that stops on a reported limit can move to another account with its original instructions. If no account can take it, the task waits for the reset. xcb never falls back to an API key." },
   { question: "How is xcb different from claude-swap, Claude Code Router, or herdr?", answer: "claude-swap changes which login Claude Code uses and keeps every Claude Code feature; xcb picks an account for each task across Claude, Codex, and Devin and sandboxes each run. Claude Code Router sends each API request to a provider you configure; xcb never touches API traffic and runs whole tasks on your subscriptions. herdr keeps many agent terminals alive and visible, and xcb can run inside a herdr pane. The comparison pages cover these and more." },
   { question: "What stays on my computer?", answer: "Accounts, credentials, sessions, and settings stay on your computer, outside your projects. Model requests go to the provider that runs the task. The optional judge, which is off by default, sends limited task context to TypeSafe’s System One service." },
-  { question: "Is the self-tuning harness ready?", answer: "No. The managed harness is in development, and the current build does not run self-modifying routing policies. What learns today are two small reflexes: one picks a model tier for a new task and one notices when a task stopped early. You can inspect and roll back both." },
+  { question: "Can xcb run my tests and builds?", answer: "On macOS with Apple silicon, commands run offline in a Linux VM with public dependencies you prepare in advance. Git is read-only there, so you review and commit the changes yourself. Native macOS builds cannot run. Providers use xcb’s file tools in place of their own shells and plugins." },
   { question: "What does it cost?", answer: "xcb is free and MIT licensed. You pay only for your provider subscriptions and any services you choose to use." },
 ] as const;
 
-const agentExample = `$ xcb
-> Fix the failing parser test in ~/src/app`;
+const agentExample = "xcb";
 
 const routeExample = `$ xcb --json route < task.json`;
 
@@ -44,7 +42,6 @@ const readiness = [
   { name: "Claude", mark: "claudecode", detail: providerStatus.claude },
   { name: "Codex", mark: "codex", detail: providerStatus.codex },
   { name: "Devin", mark: "devin", detail: providerStatus.devin },
-  { name: "Tests and builds", mark: null, detail: "Commands run offline in a Linux VM on macOS on Apple silicon, with public dependencies you prepare in advance. Git is read-only there, so you review and commit the changes yourself." },
 ] as const;
 
 export default function Home() {
@@ -81,14 +78,26 @@ export default function Home() {
             align="start"
             backdrop={false}
             className="xcb-hero"
-            frame={<CliProof />}
             name="xcb"
             heading={heading}
             headingId="hero-title"
             summary={summary}
-            actions={[{ href: "/install", label: "Install xcb" }, { href: repository, label: "View the source ↗" }]}
-            boundary={`Free and open source · macOS on Apple silicon · Linux x86_64 (Claude only) · ${releaseStatusLabel(publishedRelease)}`}
+            actions={[{ href: "/install", label: "Install xcb" }, { href: "#use", label: "See how it works" }]}
+            boundary={`Free and open source · ${releaseStatusLabel(publishedRelease)}`}
           />
+
+          <MarketingSection id="router" heading="Use your quota before it resets" headingId="router-title" summary="Let xcb choose among your subscriptions when you send a task. It favors unused Claude and Codex quota approaching a reset when fresh usage reports are available.">
+            <MarketingPillars
+              ariaLabel="How xcb uses your subscriptions"
+              columns={3}
+              pillars={[
+                { label: "Keep work moving", summary: "When an account reaches a known limit, xcb can continue your task on another account that has room. If none can take it, the task waits for a reset." },
+                { label: "Use the capacity you have", summary: "Give work to accounts with quota to spare when their next reset is close. xcb takes weekly limits into account too." },
+                { label: "Keep the model your task needs", summary: "Quota timing works within the task’s quality requirements. Your choice of provider, account, or model comes first." },
+              ]}
+            />
+            <a className="xcb-text-link" href="/docs/how-routing-works">How routing works →</a>
+          </MarketingSection>
 
           <MarketingInterfaceGrid
             id="use"
@@ -98,51 +107,40 @@ export default function Home() {
               {
                 label: "As your coding agent",
                 summary: "Type work into one thread that spans your projects. xcb picks the project and an account that can take the task, and the task keeps running after you close the terminal.",
-                example: <><CodeBlock code={agentExample} language="text" copyValue="xcb" copyLabel="Copy command" /><a className="xcb-text-link" href="/docs/getting-started">Getting started →</a></>,
+                example: <><CodeBlock code={agentExample} copyLabel="Copy command" /><p>Then type a task, such as “Fix the failing parser test in ~/src/app”.</p><a className="xcb-text-link" href="/docs/getting-started">Getting started →</a></>,
               },
               {
                 label: "Inside your agent or app",
-                summary: "Your agent sends one JSON task to xcb --json route and gets back the result, the account and model xcb picked, and a session it can resume. Apps can embed the TypeScript SDK instead, where the app names the account and model.",
-                example: <><CodeBlock code={routeExample} copyValue="xcb --json route < task.json" copyLabel="Copy command" /><a className="xcb-text-link" href="/docs/route">Route tasks →</a></>,
+                summary: "Keep your existing agent or app and hand a task to xcb. It picks an account and model, runs the task, and returns the result as JSON.",
+                example: <><CodeBlock code={routeExample} copyValue="xcb --json route < task.json" copyLabel="Copy command" /><p>With the <a href="/docs/sdk">TypeScript SDK</a>, the app names the account and model.</p><a className="xcb-text-link" href="/docs/route">Route tasks →</a></>,
               },
             ]}
           />
 
-          <MarketingSection id="router" heading="Use your quota before it resets" headingId="router-title" summary="xcb favors unused subscription capacity approaching a reset while preserving the model quality your task needs and your account, provider, or model choices.">
-            <MarketingPillars
-              ariaLabel="How xcb picks an account"
-              columns={3}
-              pillars={[
-                { label: "Only accounts that can work now", summary: "Signed in, idle, not at a known usage limit, and on a model xcb has recently seen from that provider." },
-                { label: "Time left to use your quota", summary: "With fresh Claude or Codex usage data, xcb considers overlapping limits together, so a short window’s reset doesn’t outweigh a scarce weekly allowance. Stale or unknown usage data gets no extra priority." },
-                { label: "One task per account", summary: "The provider works in a sandbox through xcb’s file tools. No other task can use the account until the provider exits." },
-              ]}
-            />
-            <a className="xcb-text-link" href="/docs/how-routing-works">How routing works →</a>
-          </MarketingSection>
-
           <MarketingSection id="import-sessions" heading="Continue your Claude and Codex conversations" headingId="import-sessions-title" summary="Import conversations used in the last 24 hours by default, then continue with an account that can take the task.">
-            <CodeBlock code={importExample} copyLabel="Copy import commands" />
+            <CodeBlock code={importExample} copyLabel="Copy commands" />
             <p>xcb copies user and assistant messages as context. Choose an imported conversation with <code>/sessions</code> and send a new message to continue. Source files stay in place, and import does not take control of a running provider session.</p>
             <a className="xcb-text-link" href="/docs/projects-and-tasks#import-sessions">Import conversations →</a>
           </MarketingSection>
 
-          <MarketingSection id="readiness" heading="What works today" headingId="readiness-title">
+          <MarketingSection id="install" heading="Install xcb" headingId="install-title" summary={publishedRelease === null ? "No release is published yet; build from source with Git and Rust 1.97.1." : "Install the latest release, connect your Claude account, and open your thread."}>
+            <p>Available for macOS with Apple silicon and Linux x86_64. On Linux, Claude is the supported provider and needs the <a href="/docs/providers#claude-on-linux">sandbox setup</a> before your first task.</p>
+            <CodeBlock code={publishedRelease === null ? "git clone https://github.com/hraness/xcb.git && cd xcb\n./scripts/install-native.sh" : `${installCommand}\nxcb setup claude\nxcb`} copyLabel="Copy commands" />
+            <p className="xcb-install-links"><a className="xcb-text-link" href="/install">Install guide →</a></p>
+          </MarketingSection>
+
+          <details className="xcb-provider-details" id="readiness">
+            <summary>Provider support and tested builds</summary>
             <dl className="xcb-status-list">
               {readiness.map((row) => (
                 <div key={row.name}>
-                  <dt>{row.mark === null ? null : <span aria-hidden="true"><ProviderMark mark={row.mark} label={row.name} size={20} /></span>}{row.name}</dt>
+                  <dt><span aria-hidden="true"><ProviderMark mark={row.mark} label={row.name} size={20} /></span>{row.name}</dt>
                   <dd>{row.detail}</dd>
                 </div>
               ))}
             </dl>
             <a className="xcb-text-link" href="/docs/providers">Supported builds and setup →</a>
-          </MarketingSection>
-
-          <MarketingSection id="install" heading="Install xcb" headingId="install-title" summary={publishedRelease === null ? "No release is published yet; build from source with Git and Rust 1.97.1." : "On macOS with Apple silicon or Linux x86_64, one command installs the latest release. Then connect Claude and open your thread."}>
-            <CodeBlock code={publishedRelease === null ? "git clone https://github.com/hraness/xcb.git && cd xcb\n./scripts/install-native.sh" : `${installCommand}\nxcb setup claude\nxcb`} copyLabel="Copy commands" />
-            <p className="xcb-install-links"><a className="xcb-text-link" href="/install">Install guide, including a prompt for your agent →</a></p>
-          </MarketingSection>
+          </details>
 
           <MarketingQuestionList heading="Questions" headingId="questions-title" id="questions" questions={questions.map(({ question, answer }) => ({ question, answer: <p>{answer}</p> }))} />
         </MarketingPage>

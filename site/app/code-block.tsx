@@ -1,10 +1,9 @@
-import { highlightCode } from "@hraness/design-kit/syntax-highlighting";
+import { MarketingProofFrame, SyntaxCode } from "@hraness/design-kit/react/server";
+import type { SyntaxLanguage } from "@hraness/design-kit/syntax-highlighting";
 import { CopyButton } from "@hraness/ui";
 
-type Language = "shell" | "json" | "text";
-
 /** Shell prompts are shown for reading and dropped when copying. */
-function copyText(code: string, language: Language): string {
+function copyText(code: string, language: SyntaxLanguage): string {
   if (language !== "shell") return code;
   return code
     .split("\n")
@@ -23,14 +22,17 @@ export function CodeBlock({
   language = "shell",
   copyLabel = "Copy",
   copyValue,
-}: Readonly<{ code: string; language?: Language; copyLabel?: string; copyValue?: string }>) {
-  const highlighted = highlightCode(code, language, { styles: "classes" });
-  return (
-    <div className="xcb-code">
-      <pre className={`xcb-code-block ${highlighted.className}`} tabIndex={0}>
-        <code dangerouslySetInnerHTML={{ __html: highlighted.html }} />
+  terminal = language === "shell",
+}: Readonly<{ code: string; language?: SyntaxLanguage; copyLabel?: string; copyValue?: string; terminal?: boolean }>) {
+  const content = (
+    <>
+      <pre className={`xcb-code-block language-${language}`} tabIndex={0}>
+        <SyntaxCode code={code} language={language} styles="classes" />
       </pre>
       <CopyButton className="xcb-code-copy" copyLabel={copyLabel} value={copyValue ?? copyText(code, language)} />
-    </div>
+    </>
   );
+  return terminal
+    ? <MarketingProofFrame className="xcb-code xcb-code--terminal" title="Terminal">{content}</MarketingProofFrame>
+    : <div className="xcb-code">{content}</div>;
 }

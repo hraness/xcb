@@ -47,7 +47,7 @@ test("the homepage leads with the registry headline and installs with one comman
   expect(heroHeadings.join("").trim()).toBe("Use your Claude, Codex, and Devin plans from one agent.");
   const heroSummary: string[] = [];
   new HTMLRewriter().on('header[aria-labelledby="hero-title"] .hraness-marketing-hero__summary', { text(chunk) { heroSummary.push(chunk.text); } }).transform(html);
-  for (const provider of ["agent or app", "signed in, idle, and not at a known limit"]) expect(heroSummary.join("")).toContain(provider);
+  for (const feature of ["subscriptions", "quota", "Claude", "Codex"]) expect(heroSummary.join("")).toContain(feature);
   if (publishedRelease === null) {
     expect(html).toContain("./scripts/install-native.sh");
   } else {
@@ -70,14 +70,15 @@ test("the homepage gives both readers a way in and states each limit once", () =
   for (const status of Object.values(providerStatus)) expect(html).toContain(status.replaceAll("'", "&#x27;"));
   expect(html).toContain("offline in a Linux VM");
   expect(html).toContain("Git is read-only");
-  expect(html).toContain("does not run self-modifying routing policies");
+  expect(html).toContain("Native macOS builds cannot run");
   expect(html).toContain("herdr");
   expect(html).toContain("does not lift provider usage limits");
   for (const [before, after] of [
-    ['id="use"', 'id="router"'],
-    ['id="router"', 'id="readiness"'],
-    ['id="readiness"', 'id="install"'],
-    ['id="install"', 'id="questions"'],
+    ['id="router"', 'id="use"'],
+    ['id="use"', 'id="import-sessions"'],
+    ['id="import-sessions"', 'id="install"'],
+    ['id="install"', 'id="readiness"'],
+    ['id="readiness"', 'id="questions"'],
   ] as const) {
     expect(html.indexOf(before)).toBeLessThan(html.indexOf(after));
   }
@@ -134,11 +135,18 @@ test("the shared header keeps a named home link and exact-artwork foil fallback"
   }
 });
 
-test("shows an exact released CLI help excerpt without simulated routing results", () => {
+test("keeps help output out of the hero and shows highlighted commands in terminal frames", () => {
   const html = renderToStaticMarkup(<Home />);
-  expect(textOf(html)).toContain("xcb models route --help");
-  expect(textOf(html)).toContain("without reserving an account");
-  expect(html).toContain("Help excerpt from xcb 0.10.5");
+  const heroCode: string[] = [];
+  const terminalCode: string[] = [];
+  new HTMLRewriter()
+    .on('header[aria-labelledby="hero-title"] pre', { element(element) { heroCode.push(element.tagName); } })
+    .on('.xcb-code--terminal code.syntax-code', { element(element) { terminalCode.push(element.getAttribute("data-language") ?? ""); } })
+    .transform(html);
+  expect(heroCode).toEqual([]);
+  expect(terminalCode).toContain("shell");
+  expect(html).toContain("hraness-marketing-proof-frame__chrome");
+  expect(html).not.toContain("--help");
   expect(html).not.toContain("s_…");
 });
 
