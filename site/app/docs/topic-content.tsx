@@ -100,6 +100,7 @@ export PATH="$HOME/.local/bin:$PATH"`}</Code>
 function HowRoutingWorks() {
   return (
     <>
+      <p>Use xcb to send suitable work to unused subscription quota as resets approach. Fresh Claude and Codex usage reports adjust its account preference within the task’s quality requirements and your choice of provider, account, or model.</p>
       <p>Every task goes through the same four steps, whether you type it in the thread, run <code>xcb run</code>, or send it with <code>xcb --json route</code>: xcb filters your accounts, ranks the models they offer, holds the chosen account while the provider works, and records how the run ended.</p>
       <h2 id="filter">1. Find the accounts that can take the task</h2>
       <p>An account can take a task when all of these are true:</p>
@@ -173,6 +174,7 @@ function ProjectsAndTasks() {
   return (
     <>
       <p>Plain <code>xcb</code> opens your thread from any directory: one conversation for all your projects. Each prompt becomes a task in one project folder, and tasks keep running after you close the terminal.</p>
+      <p>You can also <a href="#import-sessions">continue recent Claude or Codex conversations</a> in xcb, using their saved messages as context for tasks routed across your subscriptions.</p>
       <h2 id="choose-folder">How xcb picks a task’s folder</h2>
       <p>A project is a folder. For each prompt in the thread, xcb uses the first of these that applies:</p>
       <ol>
@@ -207,12 +209,17 @@ xcb chat --resume <conversation-id>   # reopen one of them
 xcb workspaces                        # project folders the thread picks from
 xcb attention                         # questions and approvals waiting on you`}</Code>
       <p>Inside xcb, <code>/sessions</code> switches between the thread and project views. In the thread, <code>/new</code> clears the project focus; in a project view it starts another view.</p>
-      <h2 id="import-sessions">Bring in recent Claude and Codex conversations</h2>
+      <h2 id="import-sessions">Continue a Claude or Codex conversation</h2>
+      <p>Import saved messages, then continue with xcb choosing an account and model for your next task. Discovery and import look for conversations active in the last 24 hours by default.</p>
       <Code>{`xcb sessions discover                 # conversations active in the last 24 hours
 xcb sessions import --recent           # copy their user and assistant messages
+xcb conversations                     # saved conversations, including imports
 xcb chat --resume <conversation-id>     # continue an imported conversation`}</Code>
       <p>Add <code>--hours 48</code> to use a longer activity window, or <code>--provider codex</code> or <code>--provider claude</code> to select one provider. To copy just one result, use <code>xcb sessions import &lt;candidate-id&gt;</code>. Repeated imports add new messages without duplicating the history already copied.</p>
-      <p>Import preserves the original files and starts no work. Your next message uses xcb’s normal routing. Recent activity does not prove that the original provider process is still running, and xcb does not take control of it. xcb skips tool results and subagent logs, and does not read credential files or provider settings. See the <Ext href={`${repositoryDocs}/session-import.md`}>session import reference</Ext> for source locations and limits.</p>
+      <p>For a conversation started in your home folder, choose an existing project when importing it:</p>
+      <Code>{`xcb sessions import <candidate-id> --workspace /path/to/project`}</Code>
+      <p><code>--workspace</code> applies to one conversation and cannot be combined with <code>--recent</code>. xcb records the original folder in the imported history and keeps your chosen project on repeat imports.</p>
+      <p>Import preserves the original files and starts no work; send a new message to start a task. Recent activity does not prove that the original provider process is still running, and xcb does not take control of it. xcb skips tool results and subagent logs, and does not read credential files or provider settings. See the <Ext href={`${repositoryDocs}/session-import.md`}>session import reference</Ext> for source locations and limits.</p>
       <h2 id="direct-sessions">Direct provider sessions</h2>
       <p><code>xcb run</code> and <code>xcb --json route</code> save direct sessions, each on one account and model.</p>
       <Code>{`xcb sessions                 # direct provider sessions

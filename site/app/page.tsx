@@ -25,7 +25,7 @@ const metaDescription = "xcb routes coding tasks across the Claude, Codex, and D
 
 const questions = [
   { question: "Can I use the subscriptions I already have?", answer: "Yes. You sign in to your own Claude, Codex, and Devin accounts through each provider’s own tool, and xcb routes work among them. It has no model access of its own and does not lift provider usage limits; each provider’s pricing and terms still apply." },
-  { question: "What happens when an account hits its limit?", answer: "While a provider reports a usage window for an account, xcb skips that account and sends the next task to another account that can take it. A task from your thread that stops on a reported limit can move to another account with its original instructions. If no account can take it, the task waits for the reset. xcb never falls back to an API key." },
+  { question: "What happens when an account hits its limit?", answer: "When a provider reports an exhausted usage window for an account, xcb skips that account and sends the next task to another account that can take it. A task from your thread that stops on a reported limit can move to another account with its original instructions. If no account can take it, the task waits for the reset. xcb never falls back to an API key." },
   { question: "How is xcb different from claude-swap, Claude Code Router, or herdr?", answer: "claude-swap changes which login Claude Code uses and keeps every Claude Code feature; xcb picks an account for each task across Claude, Codex, and Devin and sandboxes each run. Claude Code Router sends each API request to a provider you configure; xcb never touches API traffic and runs whole tasks on your subscriptions. herdr keeps many agent terminals alive and visible, and xcb can run inside a herdr pane. The comparison pages cover these and more." },
   { question: "What stays on my computer?", answer: "Accounts, credentials, sessions, and settings stay on your computer, outside your projects. Model requests go to the provider that runs the task. The optional judge, which is off by default, sends limited task context to TypeSafe’s System One service." },
   { question: "Is the self-tuning harness ready?", answer: "No. The managed harness is in development, and the current build does not run self-modifying routing policies. What learns today are two small reflexes: one picks a model tier for a new task and one notices when a task stopped early. You can inspect and roll back both." },
@@ -36,6 +36,9 @@ const agentExample = `$ xcb
 > Fix the failing parser test in ~/src/app`;
 
 const routeExample = `$ xcb --json route < task.json`;
+
+const importExample = `xcb sessions discover
+xcb sessions import --recent`;
 
 const readiness = [
   { name: "Claude", mark: "claudecode", detail: providerStatus.claude },
@@ -105,17 +108,23 @@ export default function Home() {
             ]}
           />
 
-          <MarketingSection id="router" heading="How xcb picks an account" headingId="router-title" summary="It skips accounts that can’t take the task, ranks the rest, and gives the chosen account to that task alone.">
+          <MarketingSection id="router" heading="Use your quota before it resets" headingId="router-title" summary="xcb favors unused subscription capacity approaching a reset while preserving the model quality your task needs and your account, provider, or model choices.">
             <MarketingPillars
               ariaLabel="How xcb picks an account"
               columns={3}
               pillars={[
                 { label: "Only accounts that can work now", summary: "Signed in, idle, not at a known usage limit, and on a model xcb has recently seen from that provider." },
-                { label: "Ranked for the task", summary: "What is left is ranked by task type and by relative quality, cost, and speed." },
+                { label: "Time left to use your quota", summary: "With fresh Claude or Codex usage data, xcb considers overlapping limits together, so a short window’s reset doesn’t outweigh a scarce weekly allowance. Stale or unknown usage data gets no extra priority." },
                 { label: "One task per account", summary: "The provider works in a sandbox through xcb’s file tools. No other task can use the account until the provider exits." },
               ]}
             />
             <a className="xcb-text-link" href="/docs/how-routing-works">How routing works →</a>
+          </MarketingSection>
+
+          <MarketingSection id="import-sessions" heading="Continue your Claude and Codex conversations" headingId="import-sessions-title" summary="Import conversations used in the last 24 hours by default, then continue with an account that can take the task.">
+            <CodeBlock code={importExample} copyLabel="Copy import commands" />
+            <p>xcb copies user and assistant messages as context. Choose an imported conversation with <code>/sessions</code> and send a new message to continue. Source files stay in place, and import does not take control of a running provider session.</p>
+            <a className="xcb-text-link" href="/docs/projects-and-tasks#import-sessions">Import conversations →</a>
           </MarketingSection>
 
           <MarketingSection id="readiness" heading="What works today" headingId="readiness-title">

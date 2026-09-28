@@ -25,6 +25,14 @@ xcb, short for Excalibur, is a terminal and router for developers who pay for mo
 
 Plain \`xcb\` opens one thread for all your projects. xcb picks each task's project folder and says why, then picks an account and model. Tasks keep running after you close the terminal, and a turn that stops at a usage limit continues on another account or model. Set up with \`xcb setup claude\` or \`xcb setup codex\`; Devin connects by importing the Devin CLI's sign-in.
 
+## Use subscription capacity before it resets
+
+When Claude or Codex reports fresh usage data, xcb favors unused capacity approaching a reset among routes that meet the task's quality requirements. It considers overlapping usage windows and respects explicit account and model choices. Missing or stale meters add no preference. [How routing works](https://xcb.sh/docs/how-routing-works) explains the selection.
+
+## Continue conversations you already started
+
+\`xcb sessions discover\` finds Claude and Codex conversations active in the last 24 hours by default. \`xcb sessions import --recent\` copies their user and assistant messages into xcb, where your next message uses normal routing. Open an imported conversation with \`/sessions\` inside xcb. The original files stay in place; importing starts no tasks and does not take control of running provider sessions. [Session import](https://xcb.sh/docs/projects-and-tasks#import-sessions) covers the commands and workspace selection.
+
 ## Build on it
 
 - Agents and scripts: \`xcb --json route\` reads one JSON task on stdin (\`version\`, \`workspace\`, \`task\`, optional \`provider\`, \`account\`, \`model\`, \`timeoutMs\`, \`dryRun\`), picks the account and model, runs one turn, and prints one JSON result. It exits 0 only for a completed turn; failures carry a \`code\` such as \`unavailable\`, \`busy\`, \`needs_input\`, or \`custody_unproven\`.
