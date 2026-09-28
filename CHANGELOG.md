@@ -26,6 +26,9 @@ from a newer sign-in, and shows relay errors alongside local supervisor errors.
   It preserves the account's enabled state and usage limits.
 - Relay connection and publication failures remain visible when a local task
   also fails. Each warning clears after the relevant operation succeeds.
+- Remote commands and the background supervisor coordinate cloud sign-in
+  refreshes. They use the latest saved session and cannot restore a session
+  that was cleared or overwrite one that was replaced during a refresh.
 
 ## 0.10.2 - 2026-09-27
 
