@@ -64,24 +64,32 @@ impl QuotaPoint {
     }
 }
 
+/// The windows that carry account-scope quota for each provider. Claude uses
+/// `five_hour`/`seven_day`; Codex's account-level ChatGPT windows arrive as
+/// `codex.primary`/`codex.secondary`; Devin has no account-scope meter. The
+/// same vocabulary gates admission (`quota_blocked_until`) and feeds the
+/// read-only usage projection so a window that can block a lease is the same
+/// window a projection reports.
+pub fn account_windows(provider: Provider) -> &'static [&'static str] {
+    match provider {
+        Provider::Claude => &["five_hour", "seven_day"],
+        Provider::Codex => &["codex.primary", "codex.secondary"],
+        Provider::Devin => &[],
+    }
+}
+
 /// The latest observation in each known account-wide window is authoritative
 /// until its reported reset, even after percentage telemetry becomes stale.
-/// Claude uses `five_hour`/`seven_day`; Codex's account-level ChatGPT windows
-/// arrive as `codex.primary`/`codex.secondary`. Callers must bind `pool` to the
-/// current account credential generation; model-specific and other-provider
-/// windows are deliberately not inferred to have account scope.
+/// Callers must bind `pool` to the current account credential generation;
+/// model-specific and other-provider windows are deliberately not inferred
+/// to have account scope.
 pub fn quota_blocked_until(
     points: &[QuotaPoint],
     pool: &Id,
     provider: Provider,
     now: u64,
 ) -> Option<u64> {
-    let windows: &[&str] = match provider {
-        Provider::Claude => &["five_hour", "seven_day"],
-        Provider::Codex => &["codex.primary", "codex.secondary"],
-        Provider::Devin => &[],
-    };
-    windows
+    account_windows(provider)
         .iter()
         .copied()
         .filter_map(|window| {

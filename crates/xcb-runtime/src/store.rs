@@ -25,6 +25,9 @@ pub(crate) const AUTHENTICATION_REQUIRED: &str =
 #[path = "store_overview.rs"]
 mod overview;
 
+#[path = "host_contract.rs"]
+pub mod host_contract;
+
 fn authentication_required_from(db: &Connection, account: &Id) -> Result<bool> {
     let available: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_auth_failures')",
