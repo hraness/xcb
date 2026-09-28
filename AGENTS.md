@@ -147,6 +147,10 @@ descriptions, CLI help, and TUI text. Follow `STYLE.md` and `WRITING.md`.
 - State the release status once per page, from `site/published-release.json`
   through `site/app/release-state.tsx`. Put each other limit beside the feature
   it limits.
+- Share images come only from the shared `@hraness/web-discovery`
+  social-image template through the site's single `defineSocialImageSite`
+  declaration in `site/app/social.ts`. Pages pass copy only (headline,
+  description, eyebrow); add no per-site drawing code.
 - `xcb --json route` picks the account and model. The TypeScript SDK's
   `createSubscriptionRouter` does not: the host names the account and model,
   and the router holds that account while the task runs. Do not describe the
