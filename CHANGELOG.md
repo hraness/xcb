@@ -10,11 +10,18 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.11.0 - 2026-09-28
 
-`xcb link` on a new machine uses only the relay you name, and says which relay
-it is waiting on.
+xcb uses remaining subscription capacity and reset times when choosing a
+route, and brings recent Claude and Codex conversations into your workspace.
 
+- Automatic routing favors unused Claude and Codex quota approaching a reset,
+  while considering overlapping usage windows and preserving task-quality
+  requirements, explicit model choices, and known usage limits.
+- `xcb sessions discover` finds Claude and Codex conversations active in the
+  last 24 hours. `xcb sessions import --recent` copies their conversation
+  context into xcb, preserves the original files, and avoids duplicate
+  imports. Imported history starts no work until you send a new message.
 - A first link with no `--relay` and no `XCB_RELAY_URL` stops with a message
   that names both. Before, it contacted a local development backend at
   `127.0.0.1:3210`, which could wait 30 seconds and report only "relay request

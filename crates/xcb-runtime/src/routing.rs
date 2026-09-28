@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use xcb_core::{
     Id, Provider,
     models::{Mode, ModelChoice},
+    usage::QuotaSpendingPressure,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -84,6 +85,7 @@ struct Candidate {
     model: ModelChoice,
     profile: ModelProfile,
     utility: i32,
+    quota_pressure: Option<QuotaSpendingPressure>,
 }
 
 fn effort(model: &ModelChoice) -> String {
@@ -322,13 +324,17 @@ fn route_utility(
     profile: &ModelProfile,
     is_favorite: bool,
     is_preferred_provider: bool,
-    remaining: Option<f64>,
+    quota_pressure: Option<&QuotaSpendingPressure>,
 ) -> i32 {
     utility(class, profile)
         + if is_favorite { 20 } else { 0 }
         + if is_preferred_provider { 30 } else { 0 }
-        + remaining
-            .map(|value| (value / 2.0).round() as i32)
+        // At ten percentage points per hour the expiry preference reaches
+        // its 200-point cap. It can outweigh ordinary cost preferences,
+        // never the separately enforced quality tier or route constraints.
+        // Unknown capacity receives no measured-budget preference.
+        + quota_pressure
+            .map(|pressure| (pressure.percent_per_hour * 20.0).round().clamp(0.0, 200.0) as i32)
             .unwrap_or(0)
 }
 
@@ -499,6 +505,15 @@ async fn route_with_admitted(
     if accounts.is_empty() {
         return Err(Error::Unavailable(unavailable_reason()));
     }
+    let quota_pressure: BTreeMap<_, _> = accounts
+        .iter()
+        .map(|account| {
+            Ok((
+                account.id.clone(),
+                store.quota_spending_pressure(&account.id, now)?,
+            ))
+        })
+        .collect::<Result<_>>()?;
     let class = classify_task(task);
     let backend = if config.extensions.judge.enabled {
         judge::resolve(store.root(), &config.extensions.judge)
@@ -544,13 +559,14 @@ async fn route_with_admitted(
                 &profile,
                 favorite(config, model),
                 preferred_provider == Some(model.provider),
-                account.remaining_percent,
+                quota_pressure.get(&account.id).and_then(Option::as_ref),
             );
             candidates.push(Candidate {
                 account: account.id.clone(),
                 model: model.clone(),
                 profile: profile.clone(),
                 utility: score,
+                quota_pressure: quota_pressure.get(&account.id).cloned().flatten(),
             });
         }
     }
@@ -596,8 +612,18 @@ async fn route_with_admitted(
     );
     // A person reads this. Raw classifier scores and reflex generations stay
     // in the `reflex` decision, which callers record as an observation.
+    let quota_reason = match &candidate.quota_pressure {
+        Some(pressure) => format!(
+            " · subscription budget {:.1}% in {} · resets in {}m · pace {:.2} points/h",
+            pressure.remaining_percent,
+            pressure.window,
+            pressure.resets_at_ms.saturating_sub(now).div_ceil(60_000),
+            pressure.percent_per_hour,
+        ),
+        None => " · quota timing unmeasured".into(),
+    };
     let reason = format!(
-        "{}{} · {} tier · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}",
+        "{}{} · {} tier · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}{}",
         warning.unwrap_or_default(),
         classification.reason(),
         if classification.frontier {
@@ -614,6 +640,7 @@ async fn route_with_admitted(
         candidate.profile.quality,
         candidate.profile.relative_cost,
         candidate.profile.relative_latency,
+        quota_reason,
         candidate
             .profile
             .free_offer
@@ -1180,6 +1207,7 @@ mod tests {
                 model,
                 account: Id::new("account").unwrap(),
                 utility,
+                quota_pressure: None,
             }
         };
         let mut candidates = vec![build("future-model", 10000), build("claude-haiku", -100)];
@@ -1461,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_remaining_usage_and_soft_provider_preference_break_route_ties() {
+    fn quota_spending_pressure_and_soft_provider_preference_break_route_ties() {
         let profile = ModelProfile {
             quality: 90,
             relative_cost: 40,
@@ -1470,14 +1498,244 @@ mod tests {
             recognized: true,
             free_offer: None,
         };
-        let low = route_utility(TaskClass::Balanced, &profile, false, false, Some(10.0));
-        let high = route_utility(TaskClass::Balanced, &profile, false, false, Some(90.0));
-        let preferred = route_utility(TaskClass::Balanced, &profile, false, true, Some(10.0));
+        let pressure = |pace| QuotaSpendingPressure {
+            window: Id::new("seven_day").unwrap(),
+            remaining_percent: 30.0,
+            resets_at_ms: 10_800_001,
+            percent_per_hour: pace,
+        };
+        let low = route_utility(
+            TaskClass::Balanced,
+            &profile,
+            false,
+            false,
+            Some(&pressure(0.5)),
+        );
+        let high = route_utility(
+            TaskClass::Balanced,
+            &profile,
+            false,
+            false,
+            Some(&pressure(4.5)),
+        );
+        let preferred = route_utility(
+            TaskClass::Balanced,
+            &profile,
+            false,
+            true,
+            Some(&pressure(0.5)),
+        );
         assert!(high > low);
         assert!(preferred > low);
         assert_eq!(
             route_utility(TaskClass::Balanced, &profile, false, false, None),
             utility(TaskClass::Balanced, &profile)
+        );
+        assert_eq!(
+            route_utility(
+                TaskClass::Balanced,
+                &profile,
+                false,
+                false,
+                Some(&pressure(6000.0))
+            ),
+            utility(TaskClass::Balanced, &profile) + 200
+        );
+    }
+
+    fn record_spending_windows(
+        store: &Store,
+        account: &Id,
+        windows: &[(&str, f64, u64)],
+        now: u64,
+    ) {
+        let run = store.prepare_probe(account, None, now).unwrap();
+        for (window, remaining, hours) in windows {
+            store
+                .record_account_quota(
+                    &run,
+                    &xcb_core::usage::QuotaPoint {
+                        pool: store.account(account).unwrap().quota_pool,
+                        window: Id::new(*window).unwrap(),
+                        used_percent: 100.0 - remaining,
+                        observed_at_ms: now,
+                        resets_at_ms: now + hours * 3_600_000,
+                    },
+                )
+                .unwrap();
+        }
+        store
+            .settle(&run, xcb_core::session::State::Idle, now)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn quota_spending_pressure_routes_before_reset_and_preserves_constraints() {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let soon = account(&store, Provider::Codex);
+        let later = account(&store, Provider::Codex);
+        let choice = model(Provider::Codex, "gpt-5.6-sol", None, None);
+        let key = choice.key();
+        store.set_models(Provider::Codex, &[choice]).unwrap();
+        let now = now_ms().saturating_sub(1000);
+        record_spending_windows(
+            &store,
+            &soon,
+            &[("codex.primary", 80.0, 3), ("codex.secondary", 30.0, 3)],
+            now,
+        );
+        record_spending_windows(
+            &store,
+            &later,
+            &[("codex.primary", 100.0, 3), ("codex.secondary", 35.0, 144)],
+            now,
+        );
+        let mut config = Config::default();
+        config.extensions.judge.enabled = false;
+        let excluded = BTreeSet::new();
+        let excluded_accounts = BTreeSet::new();
+        let request = || RouteRequest {
+            task: "Fix a failing assertion",
+            required_provider: Some(Provider::Codex),
+            preferred_provider: None,
+            required_model: Some(&key),
+            excluded_routes: &excluded,
+            excluded_accounts: &excluded_accounts,
+            account: None,
+        };
+        let admitted = [Provider::Codex].into();
+        let selected = route_with_admitted(&store, &config, request(), &admitted)
+            .await
+            .unwrap();
+        assert_eq!(selected.account, soon);
+        assert!(
+            selected
+                .reason
+                .contains("subscription budget 30.0% in codex.secondary")
+        );
+        // A tight overlapping weekly allowance wins over the near reset of
+        // the short window; percentages and deadlines cannot be mixed.
+        record_spending_windows(&store, &soon, &[("codex.secondary", 1.0, 168)], now + 1);
+        assert_eq!(
+            route_with_admitted(&store, &config, request(), &admitted)
+                .await
+                .unwrap()
+                .account,
+            later
+        );
+        assert_eq!(
+            route_with_admitted(
+                &store,
+                &config,
+                RouteRequest {
+                    account: Some(&soon),
+                    ..request()
+                },
+                &admitted
+            )
+            .await
+            .unwrap()
+            .account,
+            soon
+        );
+        let held = store.prepare_probe(&later, None, now + 2).unwrap();
+        assert_eq!(
+            route_with_admitted(&store, &config, request(), &admitted)
+                .await
+                .unwrap()
+                .account,
+            soon
+        );
+        store
+            .settle(&held, xcb_core::session::State::Idle, now + 3)
+            .unwrap();
+        record_spending_windows(&store, &later, &[("codex.secondary", 0.0, 144)], now + 4);
+        assert_eq!(
+            route_with_admitted(&store, &config, request(), &admitted)
+                .await
+                .unwrap()
+                .account,
+            soon
+        );
+    }
+
+    #[tokio::test]
+    async fn quota_spending_pressure_crosses_providers_without_lowering_frontier_quality() {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let claude = account(&store, Provider::Claude);
+        let codex = account(&store, Provider::Codex);
+        store
+            .set_models(
+                Provider::Claude,
+                &[model(Provider::Claude, "claude-opus-5", None, None)],
+            )
+            .unwrap();
+        store
+            .set_models(
+                Provider::Codex,
+                &[model(Provider::Codex, "gpt-6-astra", None, None)],
+            )
+            .unwrap();
+        record_spending_windows(
+            &store,
+            &claude,
+            &[("five_hour", 80.0, 3), ("seven_day", 30.0, 3)],
+            now_ms(),
+        );
+        let mut config = Config::default();
+        config.extensions.judge.enabled = false;
+        let excluded = BTreeSet::new();
+        let excluded_accounts = BTreeSet::new();
+        let request = |task| RouteRequest {
+            task,
+            required_provider: None,
+            preferred_provider: None,
+            required_model: None,
+            excluded_routes: &excluded,
+            excluded_accounts: &excluded_accounts,
+            account: None,
+        };
+        let admitted = [Provider::Claude, Provider::Codex].into();
+        assert_eq!(
+            route_with_admitted(
+                &store,
+                &config,
+                request("Fix a failing assertion"),
+                &admitted
+            )
+            .await
+            .unwrap()
+            .account,
+            claude
+        );
+        let complex = route_with_admitted(
+            &store,
+            &config,
+            request("Review security architecture and concurrency"),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(complex.account, codex);
+        assert!(complex.reason.contains("quota timing unmeasured"));
+        assert_eq!(
+            route_with_admitted(
+                &store,
+                &config,
+                RouteRequest {
+                    required_provider: Some(Provider::Codex),
+                    ..request("Fix a failing assertion")
+                },
+                &admitted
+            )
+            .await
+            .unwrap()
+            .account,
+            codex
         );
     }
 

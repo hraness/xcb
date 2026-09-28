@@ -115,6 +115,74 @@ pub fn quota_blocked_until(
         .max()
 }
 
+/// A measured pace for spending one account's remaining quota before reset.
+/// Percentage points are a routing heuristic, not comparable token or money
+/// capacities across subscription plans. This never establishes entitlement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaSpendingPressure {
+    pub window: Id,
+    pub remaining_percent: f64,
+    pub resets_at_ms: u64,
+    pub percent_per_hour: f64,
+}
+
+/// The tightest fresh account-wide window limits the spending pace. Taking
+/// the minimum keeps an imminent short-window reset from draining a scarce
+/// weekly allowance. Every remaining percentage stays paired with its own
+/// reset; model-scoped meters are not inferred to be account-wide budgets.
+/// A still-active but stale known window makes the pace unknown, while a
+/// passed reset contributes nothing until a new observation arrives.
+pub fn quota_spending_pressure(
+    points: &[QuotaPoint],
+    pool: &Id,
+    provider: Provider,
+    now: u64,
+) -> Option<QuotaSpendingPressure> {
+    let mut pressure: Option<QuotaSpendingPressure> = None;
+    for window in account_windows(provider) {
+        let Some(point) = points
+            .iter()
+            .filter(|point| {
+                &point.pool == pool
+                    && point.window.as_str() == *window
+                    && point.validate().is_ok()
+                    && point.observed_at_ms <= now
+            })
+            .max_by(|a, b| {
+                a.observed_at_ms
+                    .cmp(&b.observed_at_ms)
+                    .then_with(|| a.used_percent.total_cmp(&b.used_percent))
+                    .then(a.resets_at_ms.cmp(&b.resets_at_ms))
+            })
+        else {
+            continue;
+        };
+        if point.resets_at_ms <= now {
+            continue;
+        }
+        if !point.fresh(now) {
+            return None;
+        }
+        let remaining_percent = 100.0 - point.used_percent;
+        // A one-minute floor prevents a nearly elapsed reset from creating
+        // an unbounded value or magnifying clock jitter.
+        let hours = (point.resets_at_ms - now).max(60_000) as f64 / 3_600_000.0;
+        let next = QuotaSpendingPressure {
+            window: point.window.clone(),
+            remaining_percent,
+            resets_at_ms: point.resets_at_ms,
+            percent_per_hour: remaining_percent / hours,
+        };
+        if pressure
+            .as_ref()
+            .is_none_or(|current| next.percent_per_hour < current.percent_per_hour)
+        {
+            pressure = Some(next);
+        }
+    }
+    pressure
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Estimate {
@@ -362,6 +430,148 @@ mod quota_availability_tests {
                 2
             ),
             None
+        );
+    }
+}
+
+#[cfg(test)]
+mod quota_spending_pressure_tests {
+    use super::*;
+
+    const NOW: u64 = 1_000_000;
+    const HOUR: u64 = 3_600_000;
+
+    fn point(window: &str, remaining: f64, hours: u64) -> QuotaPoint {
+        QuotaPoint {
+            pool: Id::new("bound").unwrap(),
+            window: Id::new(window).unwrap(),
+            used_percent: 100.0 - remaining,
+            observed_at_ms: NOW,
+            resets_at_ms: NOW + hours * HOUR,
+        }
+    }
+
+    #[test]
+    fn quota_spending_pressure_pairs_resets_and_respects_overlapping_windows() {
+        let soon = point("seven_day", 30.0, 3);
+        let later = point("seven_day", 35.0, 144);
+        let pool = soon.pool.clone();
+        let pressure = |points: &[QuotaPoint]| {
+            quota_spending_pressure(points, &pool, Provider::Claude, NOW).unwrap()
+        };
+        assert!(
+            pressure(std::slice::from_ref(&soon)).percent_per_hour
+                > pressure(&[later]).percent_per_hour
+        );
+        let weekly = point("seven_day", 10.0, 100);
+        let short = point("five_hour", 90.0, 1);
+        let result = pressure(&[short, weekly.clone()]);
+        assert_eq!(result.window, weekly.window);
+        assert_eq!(result.remaining_percent, 10.0);
+        assert_eq!(result.resets_at_ms, weekly.resets_at_ms);
+        assert_eq!(result.percent_per_hour, 0.1);
+        let short = point("five_hour", 1.0, 2);
+        assert_eq!(pressure(&[soon, short]).percent_per_hour, 0.5);
+    }
+
+    #[test]
+    fn quota_spending_pressure_requires_fresh_latest_known_window_evidence() {
+        let fresh = point("five_hour", 80.0, 3);
+        let mut stale = point("seven_day", 20.0, 100);
+        stale.observed_at_ms = NOW - QUOTA_FRESH_MS - 1;
+        let pool = fresh.pool.clone();
+        assert_eq!(
+            quota_spending_pressure(
+                &[fresh.clone(), stale.clone()],
+                &pool,
+                Provider::Claude,
+                NOW
+            ),
+            None
+        );
+        let latest = point("seven_day", 10.0, 100);
+        let mut points = vec![fresh, stale, latest];
+        let expected = quota_spending_pressure(&points, &pool, Provider::Claude, NOW);
+        assert_eq!(expected.as_ref().unwrap().percent_per_hour, 0.1);
+        points.reverse();
+        assert_eq!(
+            quota_spending_pressure(&points, &pool, Provider::Claude, NOW),
+            expected
+        );
+        assert_eq!(
+            quota_spending_pressure(
+                &[point("five_hour", 80.0, 3)],
+                &pool,
+                Provider::Claude,
+                NOW - 1
+            ),
+            None
+        );
+        assert_eq!(
+            quota_spending_pressure(&points, &pool, Provider::Claude, NOW + 100 * HOUR),
+            None
+        );
+    }
+
+    #[test]
+    fn quota_spending_pressure_rejects_unmeasured_and_foreign_scopes() {
+        let pool = Id::new("bound").unwrap();
+        let mut foreign = point("five_hour", 99.0, 1);
+        foreign.pool = Id::new("other").unwrap();
+        let mut invalid = point("seven_day", 80.0, 1);
+        invalid.used_percent = f64::NAN;
+        let points = [
+            foreign,
+            invalid,
+            point("seven_day_opus", 99.0, 1),
+            point("codex.primary", 40.0, 2),
+            point("codex.secondary", 20.0, 100),
+        ];
+        assert_eq!(
+            quota_spending_pressure(&points, &pool, Provider::Claude, NOW),
+            None
+        );
+        assert_eq!(
+            quota_spending_pressure(&points, &pool, Provider::Devin, NOW),
+            None
+        );
+        let codex = quota_spending_pressure(&points, &pool, Provider::Codex, NOW).unwrap();
+        assert_eq!(codex.window.as_str(), "codex.secondary");
+        assert_eq!(codex.percent_per_hour, 0.2);
+    }
+
+    #[test]
+    fn quota_spending_pressure_has_a_one_minute_floor_and_exact_reset_boundary() {
+        let mut point = point("five_hour", 100.0, 1);
+        point.resets_at_ms = NOW + 1;
+        let result = quota_spending_pressure(
+            std::slice::from_ref(&point),
+            &point.pool,
+            Provider::Claude,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(result.percent_per_hour, 6000.0);
+        assert_eq!(
+            quota_spending_pressure(
+                std::slice::from_ref(&point),
+                &point.pool,
+                Provider::Claude,
+                NOW + 1
+            ),
+            None
+        );
+        point.used_percent = 100.0;
+        assert_eq!(
+            quota_spending_pressure(
+                std::slice::from_ref(&point),
+                &point.pool,
+                Provider::Claude,
+                NOW
+            )
+            .unwrap()
+            .percent_per_hour,
+            0.0
         );
     }
 }

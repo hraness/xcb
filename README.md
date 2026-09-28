@@ -75,6 +75,12 @@ anything; the next `xcb` shows the results.
   provider. `/help` lists every command, and the
   [terminal guide](docs/terminal.md) covers keys and search.
 
+To bring over recent Claude or Codex conversations, run `xcb sessions discover`,
+then `xcb sessions import --recent`. Both use a 24-hour activity window by
+default. Open an imported conversation with `xcb chat --resume <conversation-id>`;
+your next message continues with xcb's routing. The original sessions stay in
+place. [Session import](docs/session-import.md) covers provider filters and limits.
+
 ## Build on it
 
 **From an agent or script,** `xcb --json route` reads one JSON task on stdin,
@@ -118,7 +124,7 @@ exact SHA-256, before it runs anything. `xcb doctor` shows what it found.
 ## How it works
 
 1. **Filter:** keep the accounts that can take the task now: supported provider build, signed in, enabled, idle, not at a known usage limit, with a recently seen model.
-2. **Rank:** order those models by relative quality, cost, and speed for the kind of task. Long prompts get the highest-quality model available.
+2. **Rank:** order those models by relative quality, cost, and speed for the kind of task, favoring fresh subscription capacity approaching a reset. Long prompts get the highest-quality model available.
 3. **Hold:** lock the chosen account so no other task can use it, and run the provider in an OS sandbox with xcb's file tools for one project folder.
 4. **Record:** when the provider process exits, record how the run ended. If xcb can't confirm that, it keeps the account held and doesn't retry.
 

@@ -71,6 +71,8 @@ pub use workspace::{
     validate_workspace_root,
 };
 pub use xcb_core::ui::GLOBAL_THREAD_ID;
+#[path = "managed_import.rs"]
+pub mod imports;
 
 #[cfg(test)]
 #[path = "managed_workspace_tests.rs"]
@@ -5577,7 +5579,10 @@ impl Supervisor {
                 Err(error) => Err(error),
             };
         }
-        let routing_prompt = worker_prompt(&prompt_task, &preferences, &[], false);
+        let imported_context =
+            managed.imported_session_context(&task.conversation, &task.source_message)?;
+        let mut routing_prompt = worker_prompt(&prompt_task, &preferences, &[], false);
+        append_context(&mut routing_prompt, &imported_context);
         let config = Config::load(store.root())?.0;
         let created_session = task.session.is_none();
         let mut route_reason = task
@@ -5721,6 +5726,7 @@ impl Supervisor {
         let mut prompt = worker_prompt(&prompt_task, &preferences, &[], carried);
         append_context(&mut prompt, &managed.project_context_in(&task.workspace)?);
         if !carried {
+            append_context(&mut prompt, &imported_context);
             append_context(
                 &mut prompt,
                 &managed.working_memory_context_in(&task.workspace, Some(&task.id))?,

@@ -1,8 +1,31 @@
 # Known quota limits and route selection
 
-Native xcb keeps known Claude account-wide exhaustion separate from short-lived
-usage percentages. A current-credential observation of 100% use in `five_hour`
-or `seven_day` prevents a new coding turn until the provider-reported reset,
+Automatic routing favors fresh subscription capacity that would otherwise go
+unused before a reset. For Claude and Codex, xcb divides the remaining
+percentage in each known account-wide window by the hours until that window
+resets, then uses the lowest rate across overlapping windows. This lets unused
+capacity influence the choice without treating a nearly renewed short window
+as permission to exhaust a weekly allowance. The route explanation includes
+the rate when it contributed to the choice.
+
+The rate adds a capped preference to the existing model score. It preserves
+explicit account, provider, and model choices, known usage blocks, and the
+highest-quality tier required by a substantial task. Measurements must be
+at most five minutes old and belong to the account's applicable quota pool.
+A stale active window makes the rate unknown; unknown capacity receives no
+bonus. Devin currently reports no comparable account-wide percentage meter.
+Percentages across subscriptions are a routing heuristic, not equal amounts of
+work or a promise about provider billing.
+
+This policy draws on the reset-aware scheduling approach in
+[llm-quota-router](https://github.com/tonygwu/llm-quota-router/tree/61d952568cdda6b661857cd96f6b9c8fc09a9cdf). xcb keeps its
+own provider checks, account ownership, and task-quality rules. No source code
+from that project was copied.
+
+Native xcb keeps known account-wide exhaustion separate from short-lived
+usage percentages. Claude uses `five_hour` and `seven_day`; Codex uses
+`codex.primary` and `codex.secondary`. An applicable observation of 100% use
+prevents a new coding turn until the provider-reported reset,
 even after the five-minute percentage freshness period. If both windows are
 exhausted, the later reset applies. A newer observation of the same window can
 supersede the old one. Reaching a reset permits another attempt; it does not
@@ -19,8 +42,8 @@ Managed tasks then rank the accounts and models that remain. xcb derives
 relative quality, cost, and latency profiles from observed model identities and
 sorts the models into Pareto layers: a model is in the first layer when no other
 model beats it on all three at once. It then scores the layers for routine,
-balanced, or complex work. Fresh remaining usage, configured favorites and a
-soft workspace-learned provider preference break ties. An explicit opening “Use
+balanced, or complex work. Fresh quota timing, configured favorites and a
+soft workspace-learned provider preference adjust the score. An explicit opening “Use
 Claude/Codex/Devin” directive remains a hard provider constraint. The optional
 judge classifies capability demand through the ALGAL fitted classifier; route
 selection then follows deterministic policy within already eligible candidates.
