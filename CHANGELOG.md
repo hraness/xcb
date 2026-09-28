@@ -21,6 +21,10 @@ it is waiting on.
   timed out".
 - `xcb link` prints the relay it asks for a sign-in code, and a relay timeout
   names the address that did not answer.
+- A task whose chosen model has left the provider's current model list is
+  sent again on another route, chosen from the refreshed list. Before, the
+  task failed without starting. The prompt was never sent, so nothing is
+  repeated, and the retry counts toward the task's usual limit of 4 attempts.
 
 ## 0.10.5 - 2026-09-27
 

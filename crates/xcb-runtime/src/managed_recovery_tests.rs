@@ -237,13 +237,21 @@ async fn runner_diagnostic_survives_restart_and_bounded_managed_message() {
         let store = Store::open(&state_root).unwrap();
         managed.reconcile_startup(&store).await.unwrap();
         let recovered = managed.task(&task.id).unwrap().unwrap();
-        assert_eq!(recovered.state, TaskState::Failed);
         assert_eq!(recovered.attempts, 1);
-        assert!(recovered.detail.ends_with(diagnostic.as_str()));
         assert_eq!(
             managed.verify_task(&task.id).await.unwrap()["verified"],
             true
         );
+        if stale_catalog {
+            // The prompt was never sent: the task picks another route from
+            // the refreshed catalog instead of failing.
+            assert_eq!(recovered.state, TaskState::Queued);
+            assert_eq!(recovered.session, None);
+            assert!(recovered.detail.contains("left the provider's model list"));
+            continue;
+        }
+        assert_eq!(recovered.state, TaskState::Failed);
+        assert!(recovered.detail.ends_with(diagnostic.as_str()));
         let messages = managed.messages(&task.conversation, 10).unwrap();
         let response = messages.last().unwrap();
         assert!(response.text.starts_with(&format!("**{}** · ", task.title)));
