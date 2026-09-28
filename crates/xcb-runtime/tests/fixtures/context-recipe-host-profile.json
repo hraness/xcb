@@ -1,0 +1,66 @@
+{
+  "contract": "algal.host-profile.v1",
+  "host": {
+    "id": "xcb-context-recipe",
+    "kind": "subscription-cli",
+    "version": "xcb.context-recipe.v1"
+  },
+  "runtime": {
+    "runtimeDigest": "sha256:905d9c070c0d41ef3886cd01ac4f9c904aeecbc98de5e3431eecf61613b4a686",
+    "evaluatorDigest": "sha256:377a9b31edaa14cab3a5fbbf52305d864a957d62c6995dfaae291a7d279bd135",
+    "supportedContracts": [
+      "algal.effect.v1",
+      "algal.host-lifecycle.v1",
+      "algal.host-profile.v1",
+      "algal.organism.v1",
+      "algal.run.v1",
+      "xcb.context-recipe.v1"
+    ]
+  },
+  "route": {
+    "profileDigest": "sha256:46129ba2cecde7ec24f056b2eb8ee6da6c82f443db06dcdd32c1dff041e7cca1",
+    "scopeDigest": "sha256:1d4f2401312784d8782ee7d8b35a5160ffded7847fc0fb01eefb8c92e3f4f9e7",
+    "accountScopeDigest": null
+  },
+  "limits": {
+    "maxConcurrent": 1,
+    "maxQueue": 8,
+    "maxInputBytes": 67108864,
+    "maxOutputBytes": 8192,
+    "maxWork": 8
+  },
+  "usageUnits": {
+    "name": "subscription-quota",
+    "semantics": "Provider-reported share of a live subscription quota window consumed by the leased account; subscription allowance only, never API dollars or token counters."
+  },
+  "resultRetention": {
+    "mode": "original",
+    "maxBytes": 67108864,
+    "originalRetrieval": true
+  },
+  "uncertainEffectPolicy": "reconcile-required",
+  "probes": [
+    {
+      "id": "live-provider-dispatch",
+      "status": "not-run",
+      "evidence": null
+    },
+    {
+      "id": "offline-replay",
+      "status": "passed",
+      "evidence": "sha256:b026bbd49c3c559164c3f2bcd82a24e8ee532fb43562e3d9be0aee9d0181cf8b"
+    },
+    {
+      "id": "uncertain-custody-recovery",
+      "status": "not-run",
+      "evidence": null
+    }
+  ],
+  "absentCapabilities": [
+    "api-dollar-metering",
+    "credential-material",
+    "host-messaging",
+    "uncertain-auto-retry"
+  ],
+  "digest": "sha256:ffb5392bb95eed2b912f495ea7e853ed3fcad35d14240752e73e107c6a8b9ef1"
+}

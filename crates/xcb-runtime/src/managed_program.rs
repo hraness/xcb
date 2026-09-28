@@ -30,7 +30,8 @@ pub const MAX_MANAGED_CALLS: u8 = 8;
 pub const MAX_CHECKPOINT_BYTES: usize = 512 * 1024;
 const MAX_RUN_TIME: Duration = Duration::from_secs(5);
 const EXECUTOR_NAME: &str = "xcb-managed-agent-v1";
-const EXECUTOR_PROFILE: &str = "xcb-managed-agent-v1:text:8192:lookup-or-suspend:no-retry";
+pub(crate) const EXECUTOR_PROFILE: &str =
+    "xcb-managed-agent-v1:text:8192:lookup-or-suspend:no-retry";
 
 fn is_zero(value: &u8) -> bool {
     *value == 0
