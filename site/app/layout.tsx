@@ -74,7 +74,7 @@ export default function RootLayout({
           <ThemeColorSync />
           {children}
           <div className="network-footer">
-            <HranessSiteFooter placement="flow" mailingList={{ kind: "none" }} support={supportProfile} />
+            <HranessSiteFooter mailingList={{ kind: "none" }} support={supportProfile} />
           </div>
         </DesignPaletteProvider>
       </body>
