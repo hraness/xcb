@@ -504,6 +504,46 @@ impl ManagedStore {
             receipt: parent.program_receipt.clone(),
         }))
     }
+
+    /// Export only a completed program's original results for offline replay.
+    /// Reading records grants no authority to dispatch or repeat its children.
+    pub fn program_record(&self, id: &Id) -> Result<Value> {
+        let db = self.db()?;
+        let task = task_from(&db, id)?.ok_or(Error::Unavailable("program task not found"))?;
+        let program = task
+            .program
+            .as_ref()
+            .ok_or(Error::Unavailable("task is not a program"))?;
+        if task.state != TaskState::Completed || task.program_waiting {
+            return Err(Error::Unavailable(
+                "program must finish before exporting its results",
+            ));
+        }
+        let execution =
+            read_execution(&db, &task.id)?.ok_or(Error::Conflict("program record missing"))?;
+        if task.program_receipt.as_ref() != Some(&execution.receipt)
+            || execution.checkpoint["outcome"] != "complete"
+        {
+            return Err(Error::Conflict("completed program record changed"));
+        }
+        let mut results = Vec::new();
+        let mut children = Vec::new();
+        for index in 1..=execution.calls {
+            let call = read_call(&db, &task.id, index)?;
+            let settled = call
+                .result
+                .ok_or(Error::Conflict("program result missing"))?;
+            results.push(ProgramCallResult {
+                request_digest: call.request.digest,
+                summary: settled.summary,
+            });
+            children.push(call.child);
+        }
+        Ok(
+            json!({"program":program,"results":results,"children":children,
+            "receiptDigest":execution.receipt}),
+        )
+    }
     pub(super) fn program_dependency_sessions(&self) -> Result<BTreeSet<Id>> {
         let db = self.db()?;
         let mut query = db.prepare("SELECT DISTINCT c.child FROM program_calls c JOIN tasks parent ON parent.id=c.parent WHERE parent.state NOT IN ('completed','failed','cancelled') LIMIT 1025")?;

@@ -1,0 +1,257 @@
+{
+  "study": "xcb coordination context recipe",
+  "design": "One adaptively tuned public-source diagnostic; fixed order with no repeated baseline or randomized control.",
+  "source": {
+    "repository": "hraness/xcb",
+    "commit": "54a8ea46b6655236afbf307df71c9a1cb7610c02",
+    "files": [
+      {
+        "path": "crates/xcb-runtime/src/managed_program.rs",
+        "sha256": "b9b4043d0fa33254e170c4175fe2d0330a192ed1ce76204ef13155f8c24d6931",
+        "bytes": 33639
+      },
+      {
+        "path": "crates/xcb-runtime/src/managed_program_state.rs",
+        "sha256": "759924fe19f2415fee1f431c1ad880188ad3a7a8ce436ec4c007f7f259e221ff",
+        "bytes": 43822
+      },
+      {
+        "path": "docs/plans/resumable-programs.md",
+        "sha256": "96892c2250323376223ea193135fec874b6a1a112231551f9535e9774d58ca24",
+        "bytes": 5706
+      },
+      {
+        "path": "docs/managed-harness.md",
+        "sha256": "e60f07528382fa6d49d4e9b860cebc85def85682e841a4d4d97280c4e63de248",
+        "bytes": 14892
+      }
+    ]
+  },
+  "question": "Why does xcb suspend an ALGAL controller before launching a worker, and what evidence allows it to resume an uncertain child?",
+  "originalRubric": [
+    "Parent releases account and workspace before child dispatch",
+    "Intent/checkpoint and exact child identity persisted before dispatch",
+    "Resume consumes exact conclusive settled child result",
+    "Uncertain results require independent process-exit evidence; no TTL or blind retry"
+  ],
+  "sourceCoverageLimit": "The supplied files describe joined outcomes, no unsettled linked runs, conservative reconciliation and no automatic retry. They do not explicitly state the independent process-exit-witness requirement in the fourth rubric item.",
+  "provider": "claude",
+  "modelSelection": "claude/haiku",
+  "sameModelAndAccountAcrossAllInvocations": true,
+  "routeInvocationCount": 6,
+  "internalModelApiRoundTrips": "unknown",
+  "timeoutMsPerRoute": 120000,
+  "automaticRetries": 0,
+  "attempts": [
+    {
+      "condition": "baseline",
+      "routeInvocations": 1,
+      "searchLimit": 2,
+      "readLimit": 2,
+      "outputInstructionBytes": 4000,
+      "outcome": "completed",
+      "observedTools": {
+        "workspace_list": 5,
+        "workspace_search": 2,
+        "workspace_read": 2
+      }
+    },
+    {
+      "condition": "recipe attempt 1",
+      "routeInvocations": 1,
+      "inspectionBudgetBytes": 768,
+      "observedReportUtf8Bytes": [
+        822
+      ],
+      "outcome": "stopped before later inspection and synthesis; oversized original report preserved privately"
+    },
+    {
+      "condition": "recipe attempt 2",
+      "routeInvocations": 2,
+      "inspectionBudgetBytes": 1024,
+      "observedReportUtf8Bytes": [
+        980,
+        1578
+      ],
+      "outcome": "stopped before synthesis; second oversized original report preserved privately"
+    },
+    {
+      "condition": "recipe attempt 3",
+      "routeInvocations": 2,
+      "inspectionCount": 1,
+      "combinedInspectionCanonicalJsonBudgetBytes": 6144,
+      "synthesisCanonicalJsonBudgetBytes": 4608,
+      "inspectionOutputInstructionBytes": 600,
+      "synthesisOutputInstructionBytes": 4000,
+      "observedReportUtf8Bytes": [
+        1514,
+        1963
+      ],
+      "outcome": "completed inspection and synthesis; offline replay completed with zero provider calls"
+    }
+  ],
+  "usage": {
+    "basis": "Provider-reported local counters for the six exact study sessions; all runs completed and joined with no uncertain effects. Raw route, account, session and provider records are excluded.",
+    "reasoningAlreadyIncludedInOutput": true,
+    "cacheCategoriesKeptSeparate": true,
+    "apiDollarCost": null,
+    "apiDollarCostReason": "Subscription route; no API-dollar estimate is available.",
+    "latencyBasis": "Wall interval around each xcb route subprocess. Sums exclude preparation, offline operations, repairs and gaps between attempts.",
+    "rows": [
+      {
+        "step": "baseline",
+        "counters": {
+          "input": 3900,
+          "cache_read": 31386,
+          "cache_write": 10658,
+          "output": 1874,
+          "reasoning": 837
+        },
+        "operations": {
+          "workspace_list": 5,
+          "workspace_search": 2,
+          "workspace_read": 2
+        },
+        "elapsedSeconds": 26.548802959,
+        "textBytes": 2000
+      },
+      {
+        "step": "recipe-0",
+        "counters": {
+          "input": 10,
+          "cache_read": 0,
+          "cache_write": 5024,
+          "output": 813,
+          "reasoning": 606
+        },
+        "operations": {},
+        "elapsedSeconds": 14.040647290999999,
+        "textBytes": 822
+      },
+      {
+        "step": "revision2/recipe-0",
+        "counters": {
+          "input": 10,
+          "cache_read": 0,
+          "cache_write": 5027,
+          "output": 797,
+          "reasoning": 507
+        },
+        "operations": {},
+        "elapsedSeconds": 12.65498675,
+        "textBytes": 980
+      },
+      {
+        "step": "revision2/recipe-1",
+        "counters": {
+          "input": 10,
+          "cache_read": 0,
+          "cache_write": 5042,
+          "output": 849,
+          "reasoning": 481
+        },
+        "operations": {},
+        "elapsedSeconds": 13.476429667000001,
+        "textBytes": 1578
+      },
+      {
+        "step": "revision3/recipe-0",
+        "counters": {
+          "input": 10,
+          "cache_read": 0,
+          "cache_write": 4934,
+          "output": 885,
+          "reasoning": 552
+        },
+        "operations": {},
+        "elapsedSeconds": 11.986939792,
+        "textBytes": 1514
+      },
+      {
+        "step": "revision3/recipe-1",
+        "counters": {
+          "input": 10,
+          "cache_read": 0,
+          "cache_write": 4309,
+          "output": 878,
+          "reasoning": 467
+        },
+        "operations": {},
+        "elapsedSeconds": 11.435225583,
+        "textBytes": 1963
+      }
+    ]
+  },
+  "qualityAssessment": {
+    "baseline": [
+      "covered",
+      "covered",
+      "covered",
+      "partial"
+    ],
+    "completedRecipe": [
+      "covered",
+      "covered",
+      "covered",
+      "partial"
+    ],
+    "scale": "Criterion coverage only; no predeclared numeric weights, quality equivalence or general effectiveness claim.",
+    "citationDefects": [
+      {
+        "stage": "inspection",
+        "claimedChunkPrefix": "c67890",
+        "claimedByteRange": [
+          1,
+          500
+        ],
+        "actualQuotedByteRanges": [
+          [
+            824,
+            890
+          ],
+          [
+            1288,
+            1358
+          ]
+        ]
+      },
+      {
+        "stage": "inspection",
+        "claimedChunkPrefix": "c78927",
+        "claimedChunkStartsAt": 1536,
+        "actualQuoteByteRange": [
+          1361,
+          1434
+        ],
+        "actualChunkPrefix": "c67890"
+      },
+      {
+        "stage": "synthesis",
+        "defect": "Preserves abbreviated chunk hashes but drops byte ranges."
+      }
+    ],
+    "consequence": "Deterministic replay succeeds while citation defects remain; execution evidence does not establish answer correctness."
+  },
+  "use": "Optional replay and evaluation fixture; not selected as a default recipe or promoted for answer quality.",
+  "provenance": {
+    "answersAuthor": "Claude provider via xcb",
+    "studyExecution": "Codex integration agent",
+    "assessmentAuthor": "Codex runtime review agent",
+    "assessmentKind": "Independent AI source and usage assessment",
+    "humanReview": null
+  },
+  "files": {
+    "recipe.json": {
+      "bytes": 108399,
+      "sha256": "27878e8b6545c74b727159543349d2d65ea30bd8118d368d615bfe5a318d9aaf"
+    },
+    "results.json": {
+      "bytes": 3775,
+      "sha256": "e89a35f535f09cf534ba313dbf5b9e7bdb759f32bc18b1bf767c15a0e777cff1"
+    },
+    "replay.json": {
+      "bytes": 2310,
+      "sha256": "5bd00393ecef1bad7575d10dce86b963c4b1dbdea4b678e33b5ce4ae2ac60581"
+    }
+  }
+}

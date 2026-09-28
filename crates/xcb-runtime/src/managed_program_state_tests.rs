@@ -246,6 +246,7 @@ async fn publication_is_atomic_replayed_once_and_budgeted() {
 async fn restart_preserves_wait_and_consumes_exact_settled_result_once() {
     let f = fixture().await;
     let (parent, child) = waiting(&f, 1).await;
+    assert!(f.managed.program_record(&parent.id).is_err());
     let reopened = ManagedStore::open(&f.state).unwrap();
     reopened.reconcile_startup(&f.store).await.unwrap();
     assert!(reopened.task(&parent.id).unwrap().unwrap().program_waiting);
@@ -274,6 +275,17 @@ async fn restart_preserves_wait_and_consumes_exact_settled_result_once() {
         .await
         .unwrap();
     assert_eq!(complete.state, TaskState::Completed);
+    let record = f.managed.program_record(&parent.id).unwrap();
+    assert_eq!(record["program"], serde_json::to_value(program(1)).unwrap());
+    assert_eq!(
+        record["results"][0]["summary"],
+        "Complete report, with exact provenance"
+    );
+    assert_eq!(
+        record["receiptDigest"],
+        complete.program_receipt.clone().unwrap()
+    );
+    assert_eq!(record["children"][0], child.id.as_str());
     assert_eq!(
         complete.last_output.as_deref(),
         Some("Complete report, with exact provenance")

@@ -13,6 +13,19 @@ use xcb_runtime::{
 
 #[derive(Subcommand)]
 pub enum BacklogCommand {
+    /// Run a prepared source-inspection recipe using this project's task grant.
+    Context {
+        /// Conversation id, project directory, or project name.
+        target: String,
+        /// Saved recipe.json from context prepare.
+        recipe: PathBuf,
+        /// Stable operation identity for an idempotent submission retry.
+        #[arg(long)]
+        id: Option<Id>,
+        /// Exact directory when the target is the thread.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
     /// Run a pinned ALGAL program now in a project.
     Program {
         /// Conversation id from `xcb conversations`, or a project directory or
@@ -713,6 +726,28 @@ pub async fn backlog(
     let store = ManagedStore::open(root)?;
     let mut runnable = false;
     let task = match command {
+        Some(BacklogCommand::Context {
+            target,
+            recipe,
+            id,
+            workspace,
+        }) => {
+            let recipe = crate::context::load(&recipe)?;
+            let (conversation, workspace) =
+                entry_target(&store, cwd, &target, workspace.as_deref()).await?;
+            let task = store
+                .enqueue_program_at(
+                    &conversation,
+                    workspace.as_deref(),
+                    BindingOrigin::Cli,
+                    id.unwrap_or_else(|| new_id("input")),
+                    recipe.plan.question,
+                    recipe.program,
+                )
+                .await?;
+            runnable = true;
+            task
+        }
         Some(BacklogCommand::Program {
             target,
             manifest,

@@ -295,6 +295,43 @@ fn walk(
     Ok(())
 }
 impl Workspace {
+    /// Capture only operator-selected text files for an offline context recipe.
+    /// This does not add a provider tool or expand the workspace tool inventory.
+    pub fn context_documents(
+        &self,
+        paths: &[String],
+    ) -> Result<Vec<crate::context_recipe::Document>> {
+        use crate::context_recipe::{Document, MAX_DOCUMENTS, MAX_SOURCE_BYTES};
+        if paths.is_empty() || paths.len() > MAX_DOCUMENTS {
+            return Err(Error::Unavailable("context requires 1 to 64 source paths"));
+        }
+        let _lock = coordination::WriteLock::acquire(&self.coordination)?;
+        self.check_root()?;
+        let mut documents = Vec::new();
+        let mut total = 0;
+        for path in paths {
+            if command_excluded(path) {
+                return Err(Error::Unavailable(
+                    "context source is an excluded workspace path",
+                ));
+            }
+            let (parent, name) = self.parent(path)?;
+            let (bytes, _) = read_binary(&parent, name)?;
+            total += bytes.len();
+            if total > MAX_SOURCE_BYTES {
+                return Err(Error::Unavailable("context sources exceed 8 MiB"));
+            }
+            let text = String::from_utf8(bytes)
+                .map_err(|_| Error::Unavailable("context sources must be UTF-8 text"))?;
+            documents.push(Document {
+                path: path.clone(),
+                text,
+            });
+        }
+        self.check_root()?;
+        Ok(documents)
+    }
+
     pub fn command_snapshot(&self) -> Result<CommandSnapshot> {
         self.check_root()?;
         let workspace_id = digest(self.root.to_str().ok_or(Error::PrivateState)?);
