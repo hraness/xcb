@@ -8,7 +8,11 @@ Preview managed routing for --cwd without reserving an account. Uses the configu
 enabled; selection may change before execution
 
 Usage: xcb models route [OPTIONS] --task <TASK>`}</code></pre>
-      <p>Help excerpt from xcb 0.10.1. <a href="https://github.com/hraness/xcb/releases/tag/v0.10.1">Inspect the release</a> or <a href="/docs/route">read the routing contract</a>.</p>
+      <p>Help excerpt from xcb 0.10.1.</p>
+      <nav className="xcb-cli-proof__links" aria-label="CLI proof references">
+        <a href="https://github.com/hraness/xcb/releases/tag/v0.10.1">Inspect the release</a>
+        <a href="/docs/route">Read the routing contract</a>
+      </nav>
     </figure>
   );
 }

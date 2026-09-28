@@ -427,3 +427,6 @@ body > div[data-hraness-marketing-preset] { flex: 1; }
   min-inline-size: max(2.75rem, var(--interactive-target-compact, 2.75rem));
   min-block-size: max(2.75rem, var(--interactive-target-compact, 2.75rem));
 }
+
+.xcb-cli-proof__links { display: flex; flex-wrap: wrap; gap: .25rem 1rem; margin-block-start: .5rem; }
+.xcb-cli-proof .xcb-cli-proof__links a { display: inline-flex; align-items: center; min-inline-size: max(2.75rem, var(--interactive-target-compact, 2.75rem)); min-block-size: max(2.75rem, var(--interactive-target-compact, 2.75rem)); }
