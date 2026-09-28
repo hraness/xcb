@@ -89,10 +89,6 @@ pub enum RemoteCommand {
     },
 }
 
-/// The relay the CLI reaches when nothing overrides it: the anonymous
-/// local Convex backend. Production linkage comes from `xcb link
-/// --relay` or `XCB_RELAY_URL`, persisted into custody at enrollment.
-pub const DEFAULT_DEPLOYMENT_URL: &str = "http://127.0.0.1:3210";
 const RELAY_URL_ENV: &str = "XCB_RELAY_URL";
 
 /// How long `xcb link` waits for an enrolled device to admit this one
@@ -109,20 +105,29 @@ fn not_linked() -> Error {
 }
 
 /// Resolve the relay URL: explicit flag, then environment, then the
-/// stored link, then the local-backend default.
+/// stored link. There is no default: each owner runs their own relay,
+/// and a first link that silently fell back to a local backend sent the
+/// owner's email to whatever answered on 127.0.0.1 and then timed out.
 fn deployment_url(flag: Option<&str>, state_root: &Path) -> Result<String> {
+    resolve_relay(flag, std::env::var(RELAY_URL_ENV).ok(), || {
+        Ok(custody::load_link(state_root)?.map(|link| link.deployment_url))
+    })
+}
+
+fn resolve_relay(
+    flag: Option<&str>,
+    env: Option<String>,
+    stored: impl FnOnce() -> Result<Option<String>>,
+) -> Result<String> {
     if let Some(url) = flag {
         return Ok(url.to_string());
     }
-    if let Ok(url) = std::env::var(RELAY_URL_ENV)
-        && !url.is_empty()
-    {
+    if let Some(url) = env.filter(|url| !url.is_empty()) {
         return Ok(url);
     }
-    if let Some(link) = custody::load_link(state_root)? {
-        return Ok(link.deployment_url);
-    }
-    Ok(DEFAULT_DEPLOYMENT_URL.to_string())
+    stored()?.ok_or(Error::Message(
+        "no relay configured; pass `xcb link --relay https://<deployment>.convex.cloud` or set XCB_RELAY_URL",
+    ))
 }
 
 /// One line of interactive input with the prompt on stderr — stdout is
@@ -266,6 +271,7 @@ pub async fn link(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
         // `--code` verifies a code an earlier `xcb link` already emailed —
         // a fresh request would invalidate it.
         if code.is_none() {
+            eprintln!("Requesting a sign-in code from {url}.");
             relay_link::request_code(&mut client, &email, invite).await?;
         }
 
@@ -380,6 +386,7 @@ async fn reauthenticate(state_root: &Path, options: LinkOptions<'_>) -> Result<i
     // replace/delete the auth session the worker is still using during OTP.
     let mut client = RelayClient::connect(intent.endpoint()).await?;
     if options.code.is_none() {
+        eprintln!("Requesting a sign-in code from {}.", intent.endpoint());
         relay_link::request_code(&mut client, &email, None).await?;
     }
     let code = match options.code {

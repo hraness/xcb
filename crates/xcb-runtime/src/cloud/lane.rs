@@ -709,7 +709,7 @@ mod tests {
         )));
         assert!(!presence_lapsed(&Error::Protocol("relay unauthenticated")));
         assert!(!presence_lapsed(&Error::Unavailable(
-            "relay request timed out"
+            "relay request timed out: https://relay.example did not answer within 30s"
         )));
     }
 

@@ -10,6 +10,18 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+`xcb link` on a new machine uses only the relay you name, and says which relay
+it is waiting on.
+
+- A first link with no `--relay` and no `XCB_RELAY_URL` stops with a message
+  that names both. Before, it contacted a local development backend at
+  `127.0.0.1:3210`, which could wait 30 seconds and report only "relay request
+  timed out".
+- `xcb link` prints the relay it asks for a sign-in code, and a relay timeout
+  names the address that did not answer.
+
 ## 0.10.5 - 2026-09-27
 
 xcb can recover a stopped Codex sign-in that used a different ChatGPT account

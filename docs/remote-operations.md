@@ -7,8 +7,9 @@ terminal, and task content crosses the relay end-to-end encrypted.
 
 The fleet needs a relay: a [Convex](https://convex.dev) deployment of this
 repository's `convex/` backend that you run. `xcb link --relay <url>` or
-`XCB_RELAY_URL` points xcb at it. [Relay deployment](relay-deployment.md) lists
-the settings a relay needs.
+`XCB_RELAY_URL` points xcb at it. The first link on a machine needs one of
+them; xcb saves the relay at enrollment and later commands use it.
+[Relay deployment](relay-deployment.md) lists the settings a relay needs.
 
 ## Enroll a machine
 
