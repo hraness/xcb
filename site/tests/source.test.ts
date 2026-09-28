@@ -94,6 +94,28 @@ describe("xcb site source contract", () => {
     expect(calm).toContain('[data-hraness-marketing-preset="minimal"]');
   });
 
+  test("renders the share card from the shared template and the one site declaration", async () => {
+    const [route, { socialImageAlt, socialImages, socialSite }, mark] = await Promise.all([
+      import("../app/opengraph-image"),
+      import("../app/social"),
+      read("public/marks/xcb.svg"),
+    ]);
+    const source = await read("app/opengraph-image.tsx");
+    expect(source).toContain("createSiteSocialImageResponse(socialSite)");
+    expect(source).not.toMatch(/<svg|<div|new ImageResponse|createSocialImageResponse/u);
+    expect(route.size).toEqual({ width: 1200, height: 630 });
+    expect(route.contentType).toBe("image/png");
+    expect(route.alt).toBe(socialImageAlt);
+    expect(socialSite.name).toBe("xcb");
+    expect(socialSite.domain).toBe("xcb.sh");
+    expect(socialSite.icon?.kind).toBe("mark");
+    expect(socialSite.icon?.src).toBe(`data:image/svg+xml;base64,${Buffer.from(mark).toString("base64")}`);
+    expect(socialSite.theme).toEqual({ accent: "#2e7de9", background: "#e1e2e7", foreground: "#3760bf", muted: "#6172b0" });
+    expect(socialImages).toEqual([{ url: "/opengraph-image", width: 1200, height: 630, alt: socialImageAlt }]);
+    const response = route.default();
+    expect(response.headers.get("content-type")).toBe("image/png");
+  });
+
   test("keeps the sitemap and robots on the canonical origin", async () => {
     const [sitemap, robots] = await Promise.all([read("public/sitemap.xml"), read("public/robots.txt")]);
     expect(sitemap).toContain("<loc>https://xcb.sh/</loc>");
