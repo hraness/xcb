@@ -1,0 +1,74 @@
+{
+  "schema": "xcb.codex-release-schema-review.v1",
+  "observedDate": "2026-09-27",
+  "previous": {
+    "version": "0.156.1",
+    "binarySha256": "0196e89fe5a7598f816ee54232c3d7c26d75e502ab5cfe2c9240e81d90f7255a",
+    "schemaSha256": "0f15f18e41d59367b3655adac23fe1525be483dc38f6fd56d07fc627eb802129"
+  },
+  "current": {
+    "version": "0.157.1",
+    "binarySha256": "27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+    "schemaSha256": "4da87cc14ef44c732db3404c0704a5eb902bb3a271151762052a785fdb2be056"
+  },
+  "schemaCommand": [
+    "app-server",
+    "generate-json-schema",
+    "--experimental",
+    "--out",
+    "DIR"
+  ],
+  "digestAlgorithm": "sha256(sorted relative schema path + NUL + raw generated JSON bytes + NUL)",
+  "addedFiles": [
+    "v2/GatewayOAuthCancelResponse.json",
+    "v2/GatewayOAuthChangedNotification.json",
+    "v2/GatewayOAuthLoginResponse.json",
+    "v2/GatewayOAuthReadResponse.json"
+  ],
+  "removedFiles": [],
+  "changedFiles": [
+    "ClientRequest.json",
+    "ServerNotification.json",
+    "codex_app_server_protocol.schemas.json",
+    "codex_app_server_protocol.v2.schemas.json",
+    "v1/InitializeParams.json",
+    "v2/ListMcpServerStatusResponse.json",
+    "v2/McpResourceReadParams.json",
+    "v2/PluginInstalledResponse.json",
+    "v2/PluginListResponse.json",
+    "v2/PluginReadResponse.json",
+    "v2/PluginSearchResponse.json",
+    "v2/PluginShareListResponse.json",
+    "v2/ThreadItemsListResponse.json",
+    "v2/ThreadRealtimeStartParams.json"
+  ],
+  "unchangedCoreFileSha256": {
+    "v2/ThreadStartParams.json": "80a40a7fac15b4bf70efb7f893fb353acc0a0d30c68f54aee4f01923deca85de",
+    "v2/ThreadStartResponse.json": "70ae37ceff100a8af817d7dc5f4fd58ef152d3201c1cedee0e40210f68f1fd2d",
+    "v2/TurnStartParams.json": "07771223642e1b61bd9aac0069fc0f98143a1c047724ca02c7ceb13653442738",
+    "v2/TurnStartResponse.json": "e3c4abb778e60adefef03d19d65ca20f741f37eea411098ad0485eaab61fa8f6",
+    "v2/AccountUpdatedNotification.json": "9bf450d9d9ea23a2bac9c9cb0a68c2de8f89a97bdeb4485c91762bb4d43295b8",
+    "v2/ConfigReadResponse.json": "4ec77e1a3eed746037149799c3b6bb8fe7b4b593e5930fc9f410e6282de9df50"
+  },
+  "reviewedChanges": [
+    "Gateway OAuth adds explicit login/read/cancel request methods and a status notification; the adapter calls none of these and rejects auth recovery requests or notices.",
+    "Initialize capabilities adds optional explicitGatewayOauth; xcb sets true so authorization requires an explicit host action.",
+    "MCP resource requests add an optional target and MCP server metadata adds an optional HTTP origin; MCP remains disabled.",
+    "Plugin responses add optional extension metadata; plugins remain disabled.",
+    "Thread list items add optional timestamps; realtime start adds optional backend reasoning status. Neither RPC is used by the adapter.",
+    "No removed schema files or changed existing required fields were observed in the nonaggregate schemas."
+  ],
+  "newFeatureControls": [
+    "daemon_auto_start=false",
+    "guardianv2.thread_context=false; literal quoted TOML key"
+  ],
+  "compatibility": "Each reviewed version and executable digest selects its own exact schema; unknown catalog candidates must match the current release schema. Both binaries passed the full scripted inventory and current native boundary.",
+  "documentation": "https://learn.chatgpt.com/docs/app-server#message-schema",
+  "runtimeEvidence": [
+    "codex-0.157.1-inventory.json",
+    "codex-0.157.1-boundary.json",
+    "codex-0.156.1-compatibility-inventory.json",
+    "codex-0.156.1-compatibility-boundary.json"
+  ],
+  "realProviderInference": false
+}

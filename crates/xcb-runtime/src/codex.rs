@@ -36,6 +36,12 @@ const WIRE_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const PROMPT_BYTES: usize = 1024 * 1024;
 const IMAGE_BASE64_BYTES: usize = (10 * 1024 * 1024_usize).div_ceil(3) * 4;
 
+fn initialize_params() -> Value {
+    // Gateway sign-in must be an explicit host action. The adapter never
+    // starts it; task initialization cannot open an authorization browser.
+    json!({"clientInfo":{"name":"xcb","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true,"requestAttestation":false,"explicitGatewayOauth":true}})
+}
+
 pub(crate) struct CodexOptions {
     pub cwd: PathBuf,
     /// The launched process's private CODEX_HOME, not its disposable HOME.
@@ -1301,7 +1307,7 @@ impl Protocol for CodexProtocol {
             config == configuration(&self.options.catalog_path)?.as_bytes(),
             "Codex launch configuration changed",
         )?;
-        let initialized = self.rpc(process, "initialize", json!({"clientInfo":{"name":"xcb","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true,"requestAttestation":false}})).await?;
+        let initialized = self.rpc(process, "initialize", initialize_params()).await?;
         require(
             initialized["codexHome"] == json!(self.options.account_home),
             "Codex account home changed",

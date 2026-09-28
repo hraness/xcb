@@ -35,6 +35,9 @@ pub struct Status {
     /// Where the supervisor's output goes; `None` for a service installed
     /// before 0.8.14, which discards it.
     pub log: Option<PathBuf>,
+    /// An unresolved remote-relay failure, independent of local worker faults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_fault: Option<String>,
 }
 
 fn xml(value: &str) -> String {
@@ -305,6 +308,7 @@ pub fn status(root: &Path, home: &Path) -> Result<Status> {
         supervisor_running,
         service,
         log,
+        relay_fault: crate::managed::relay_fault(&root.join("managed")),
     })
 }
 

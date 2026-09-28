@@ -718,21 +718,75 @@ async fn refresh_provider_inner(
         return Ok((RefreshOutcome::Unpinned, None));
     }
     let pin = Pin::load(root, provider).ok();
-    let executable = discover(provider, explicit)?;
+    let default_search = explicit.is_none()
+        && std::env::var_os(format!("XCB_{}", provider.as_str().to_uppercase())).is_none();
+    refresh_discovered_provider(
+        root,
+        provider,
+        home,
+        pin,
+        discover(provider, explicit),
+        default_search,
+    )
+    .await
+}
+
+fn retained_pin_status(root: &Path, pin: &Pin) -> Result<(RefreshOutcome, Option<String>)> {
+    if crate::catalog::denied(root, &pin.sha256) {
+        return Err(Error::Unavailable(
+            "saved provider build is denied by the reviewed-builds catalog",
+        ));
+    }
+    if crate::runner::provider_admitted(root, pin) {
+        return Ok((RefreshOutcome::Kept, None));
+    }
+    Ok((
+        RefreshOutcome::PendingCatalog,
+        Some(format!(
+            "saved {} {} is not supported on this host; run xcb doctor --provider {}",
+            pin.provider, pin.version, pin.provider
+        )),
+    ))
+}
+
+/// Discovery and the saved pin are independently verified. A launchd PATH
+/// without package-manager directories cannot invalidate an admitted private
+/// executable. An explicit path override still reports its own failure.
+async fn refresh_discovered_provider(
+    root: &Path,
+    provider: Provider,
+    home: &Path,
+    pin: Option<Pin>,
+    discovered: Result<PathBuf>,
+    default_search: bool,
+) -> Result<(RefreshOutcome, Option<String>)> {
+    let executable = match discovered {
+        Ok(executable) => executable,
+        Err(_) if default_search && pin.is_some() => {
+            return retained_pin_status(root, pin.as_ref().expect("verified saved pin"));
+        }
+        Err(error) => return Err(error),
+    };
     let discovered_sha = executable_digest(&executable)?;
     if let Some(pin) = &pin
         && pin.sha256 == discovered_sha
     {
-        return Ok((RefreshOutcome::Kept, None));
+        return retained_pin_status(root, pin);
     }
-    let marker = record.with_extension("rejected");
+    let marker = root.join("providers").join(format!("{provider}.rejected"));
     if let Some(rejected) = read_rejected(&marker)
         && rejected.sha256 == discovered_sha
         && !crate::catalog::listed(root, &discovered_sha)
+        && (crate::catalog::denied(root, &discovered_sha)
+            || rejected.reason == RejectedReason::Inspection
+            || (rejected.reason == RejectedReason::Unadmitted
+                && rejected.host_sha256.as_deref() == Some(host_executable()?.sha256.as_str())))
     {
         // The catalog still does not admit a build seen before. Inspection
         // failures stay terminal while the bytes are unchanged; a denied
-        // digest is rejected only while the catalog still denies it.
+        // digest is rejected only while the catalog still denies it. Pending
+        // decisions belong to the xcb executable that made them: a release
+        // can add support without publishing a shared catalog entry.
         return Ok(
             if crate::catalog::denied(root, &discovered_sha)
                 || rejected.reason == RejectedReason::Inspection
@@ -746,7 +800,7 @@ async fn refresh_provider_inner(
             },
         );
     }
-    match inspect(provider, explicit, home).await {
+    match inspect(provider, Some(&executable), home).await {
         Ok(mut fresh) if crate::runner::provider_admitted(root, &fresh) => {
             fresh.save(root)?;
             let _ = fs::remove_file(&marker);
@@ -808,8 +862,8 @@ pub fn pending_build(root: &Path, provider: Provider) -> Option<PendingBuild> {
 }
 
 /// A build the refresh pass already judged: pending builds wait on the
-/// catalog; inspection failures and catalog-denied builds are terminal
-/// until the bytes change.
+/// catalog or an xcb upgrade; failed inspections stay rejected while the
+/// bytes are unchanged, and denials stay rejected while the catalog denies.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Rejected {
@@ -817,6 +871,8 @@ struct Rejected {
     sha256: String,
     #[serde(default)]
     provider_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_sha256: Option<String>,
     reason: RejectedReason,
     observed_at_ms: u64,
 }
@@ -845,6 +901,7 @@ fn read_rejected(marker: &Path) -> Option<Rejected> {
             version: 1,
             sha256: sha256.to_owned(),
             provider_version: None,
+            host_sha256: None,
             reason: RejectedReason::Unadmitted,
             observed_at_ms: 0,
         })
@@ -860,6 +917,7 @@ fn write_rejected(
         version: 1,
         sha256: sha256.to_owned(),
         provider_version: provider_version.map(str::to_owned),
+        host_sha256: Some(host_executable()?.sha256.clone()),
         reason,
         observed_at_ms: crate::now_ms(),
     };
@@ -1839,6 +1897,125 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
+    async fn refresh_keeps_an_admitted_saved_pin_when_launchd_path_cannot_find_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        let pin = claude_pin(&root, &executable, "2.1.300");
+        fs::remove_file(&executable).unwrap();
+        let missing = || Error::guided("provider is not on PATH", "xcb doctor");
+        let report = refresh_discovered_provider(
+            &root,
+            Provider::Claude,
+            &home,
+            Pin::load(&root, Provider::Claude).ok(),
+            Err(missing()),
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(report, (RefreshOutcome::Kept, None));
+        assert_eq!(
+            Pin::load(&root, Provider::Claude).unwrap().sha256,
+            pin.sha256
+        );
+
+        // A supplied executable or XCB_CLAUDE override must report its own
+        // failure instead of silently using a different executable.
+        assert!(
+            refresh_discovered_provider(
+                &root,
+                Provider::Claude,
+                &home,
+                Pin::load(&root, Provider::Claude).ok(),
+                Err(missing()),
+                false,
+            )
+            .await
+            .is_err()
+        );
+        fs::write(&pin.executable, b"#!/bin/sh\necho changed\n").unwrap();
+        assert!(
+            refresh_discovered_provider(
+                &root,
+                Provider::Claude,
+                &home,
+                Pin::load(&root, Provider::Claude).ok(),
+                Err(missing()),
+                true,
+            )
+            .await
+            .is_err(),
+            "changed saved bytes never supply a fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_names_an_unsupported_saved_build_instead_of_missing_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "codex-cli 0.0.0");
+        codex_pin(&root, &executable, uncached_digest(&executable));
+        // The same unsupported bytes used to report Kept; a missing PATH
+        // used to obscure the real supported-build requirement.
+        for discovered in [
+            Ok(executable),
+            Err(Error::guided("provider is not on PATH", "xcb doctor")),
+        ] {
+            let (outcome, detail) = refresh_discovered_provider(
+                &root,
+                Provider::Codex,
+                &home,
+                Pin::load(&root, Provider::Codex).ok(),
+                discovered,
+                true,
+            )
+            .await
+            .unwrap();
+            assert_eq!(outcome, RefreshOutcome::PendingCatalog);
+            let detail = detail.unwrap();
+            assert!(detail.contains("codex 0.0.0"), "{detail}");
+            assert!(detail.contains("not supported"), "{detail}");
+            assert!(!detail.contains("PATH"), "{detail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn refresh_rechecks_denial_when_saved_bytes_are_unchanged_or_path_is_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let home = private::directory(&root.join("home")).unwrap();
+        let executable = version_script(&root, "2.1.300");
+        let pin = claude_pin(&root, &executable, "2.1.300");
+        private::create(
+            &root.join("providers/catalog.json"),
+            serde_json::json!({"version":1,"deny":{"claude":[pin.sha256]}})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        for discovered in [
+            Ok(executable),
+            Err(Error::guided("provider is not on PATH", "xcb doctor")),
+        ] {
+            let error = refresh_discovered_provider(
+                &root,
+                Provider::Claude,
+                &home,
+                Pin::load(&root, Provider::Claude).ok(),
+                discovered,
+                true,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("denied"), "{error}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
     async fn refresh_adopts_an_admitted_update_and_keeps_routes_on_the_pin() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
@@ -1895,6 +2072,52 @@ mod tests {
         assert_eq!(loaded.sha256, sha);
         assert_ne!(loaded.executable, pin.executable);
         assert!(!root.join("providers").join("codex.rejected").exists());
+    }
+
+    /// A release can add support for a protocol change without listing it in
+    /// the shared catalog (older xcb releases cannot enforce its controls).
+    /// Its old pending decision must not prevent fresh inspection/adoption.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn an_xcb_upgrade_reconsiders_pending_builds_without_a_catalog_entry() {
+        for prior in ["old-host", "missing-host", "raw-digest"] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let home = private::directory(&root.join("home")).unwrap();
+            let executable = version_script(&root, "2.1.300");
+            claude_pin(&root, &executable, "2.1.300");
+            fs::write(&executable, b"#!/bin/sh\necho 2.1.301\n").unwrap();
+            let sha = uncached_digest(&executable);
+            let marker = root.join("providers/claude.rejected");
+            let bytes = if prior == "raw-digest" {
+                sha.as_bytes().to_vec()
+            } else {
+                let mut record = serde_json::json!({
+                    "version": 1,
+                    "sha256": sha,
+                    // Fresh inspection must replace this stale observation.
+                    "providerVersion": "2.1.299",
+                    "reason": "unadmitted",
+                    "observedAtMs": 1,
+                });
+                if prior == "old-host" {
+                    record["hostSha256"] = serde_json::json!("0".repeat(64));
+                }
+                serde_json::to_vec(&record).unwrap()
+            };
+            private::create(&marker, &bytes).unwrap();
+            assert!(!crate::catalog::listed(&root, &sha));
+            let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+            assert_eq!(
+                report.outcome,
+                RefreshOutcome::Adopted,
+                "{prior}: {report:?}"
+            );
+            let loaded = Pin::load(&root, Provider::Claude).unwrap();
+            assert_eq!(loaded.version, "2.1.301");
+            assert_eq!(loaded.sha256, sha);
+            assert!(!marker.exists());
+        }
     }
 
     /// A build the host can inspect but no admission path accepts waits on
@@ -1987,8 +2210,8 @@ mod tests {
         assert_eq!(report.outcome, RefreshOutcome::Rejected);
     }
 
-    /// Markers written before the catalog flow stored the raw digest bytes;
-    /// they read as unadmitted builds awaiting review.
+    /// Legacy pending records are reconsidered once, then bound to the
+    /// current xcb host even when fresh inspection still finds no support.
     #[tokio::test]
     async fn a_raw_digest_marker_is_read_as_pending() {
         let directory = tempfile::tempdir().unwrap();
@@ -2007,8 +2230,18 @@ mod tests {
         assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
         assert_eq!(
             report.detail.as_deref(),
-            Some("discovered build awaiting catalog admission")
+            Some("9.9.9 awaiting catalog admission")
         );
+        let marker = root.join("providers/claude.rejected");
+        let rejected = read_rejected(&marker).unwrap();
+        assert_eq!(
+            rejected.host_sha256.as_deref(),
+            Some(host_executable().unwrap().sha256.as_str())
+        );
+        let first = private::read(&marker, 1024).unwrap();
+        let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
+        assert_eq!(report.outcome, RefreshOutcome::PendingCatalog);
+        assert_eq!(private::read(&marker, 1024).unwrap(), first);
     }
 
     #[tokio::test]

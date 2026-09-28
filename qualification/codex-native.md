@@ -1,10 +1,13 @@
 # Native Codex boundary qualification
 
-The Rust adapter admits the exact macOS Codex executable identified in
-`crates/xcb-runtime/src/codex/config.rs`. The inventory in
-`codex-0.156.1-inventory.json` records synthetic model requests and callback
-checks, and `codex-0.156.1-boundary.json` records the filesystem, process and
-kernel checks. These probes exercise the production Seatbelt policy. None of
+The Rust adapter supports the exact macOS Codex executables identified in
+`crates/xcb-runtime/src/codex/config.rs`. The current inventory in
+`codex-0.157.1-inventory.json` records synthetic model requests and callback
+checks, and `codex-0.157.1-boundary.json` records the filesystem, process and
+kernel checks. `codex-0.157.1-schema-review.json` records the protocol changes.
+The `codex-0.156.1-compatibility-*.json` files repeat the checks for the previous
+build with the current configuration; its historical receipts are retained.
+These probes exercise the production Seatbelt policy. None of
 them logs in, reads existing credentials, or sends a model request.
 
 Run on macOS with Python 3 and the admitted Codex executable:
@@ -18,10 +21,23 @@ python3 qualification/codex-inventory.py --executable /absolute/path/to/codex --
 
 ## Admitting a new Codex build
 
-Set `VERSION` and `BINARY_SHA256` in `config.rs` first; every fixture reads its
-expected executable from there. The inventory fixture fails with the observed
-digest until `SCHEMA_SHA256` matches the build's generated app-server schema.
-It serves a loopback Responses endpoint through the production configuration
+For a release, compare the new build's generated schemas with the previous
+build and review its feature defaults before updating `VERSION`,
+`BINARY_SHA256`, and `SCHEMA_SHA256` in `config.rs`. Keep each still-supported
+version, executable digest, and schema digest together in `REVIEWED_BUILDS`.
+The inventory fixture checks those exact triples. An unknown catalog candidate
+must match the current release's schema; a different schema requires adapter
+review and an xcb release. Do not publish such a build in the shared catalog:
+older xcb releases also read that catalog and cannot enforce newer controls.
+
+Both native and inventory fixtures accept `--expect-version` and
+`--expect-sha256` for compatibility checks. The native fixture requires a
+release-reviewed pair. Rerun both fixtures for each retained build when the
+shared configuration changes. Native `config/read` verifies all account
+features are disabled, including dotted feature names encoded as literal
+quoted TOML keys.
+
+The inventory fixture serves a loopback Responses endpoint through the production configuration
 and a copy of the production policy whose only network allowance is that port,
 and runs every catalog reasoning effort of each qualified model. Each case
 checks that a thread without host tools sends an empty tool manifest, that a
@@ -38,7 +54,8 @@ model can call.
 Each inventory run writes `verdict.json` beside its evidence. The outcome is
 `passed` (exit status 0), `failed` when a case fails (exit status 1), or
 `incompatible` (exit status 3) when the generated app-server schema differs
-from `SCHEMA_SHA256`, a qualified model is missing from the bundled catalog, or
+from the exact build's reviewed schema (or `SCHEMA_SHA256` for an unknown
+candidate), a qualified model is missing from the bundled catalog, or
 that catalog cannot be found. Only an xcb release can adopt an incompatible
 build. A run that stops without `verdict.json` is broken, not a verdict. The
 Codex catalog workflow (`.github/workflows/codex-catalog.yml`) runs the

@@ -52,6 +52,7 @@ class CatalogTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="xcb-codex-catalog-")
         self.root = Path(self.temp.name)
         (self.root / "qualified-builds.json").write_text(json.dumps(CATALOG))
+        self.release_source("0.156.1", "0" * 64)
         self.evidence = self.root / "inventory-out"
         self.evidence.mkdir()
         self.env = {"VERSION": "0.157.1", "SHA256": SHA, "NEEDED": "true", "SOURCE": "latest", "INVENTORY_DIR": str(self.evidence),
@@ -60,6 +61,27 @@ class CatalogTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def release_source(self, version, digest, retained=()):
+        path = self.root / "crates/xcb-runtime/src/codex/config.rs"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old = "\n".join(f'("{v}", "{d}", "{"f" * 64}"),' for v, d in retained)
+        path.write_text(f'pub const VERSION: &str = "{version}";\n'
+                        f'pub const BINARY_SHA256: &str = "{digest}";\n'
+                        'pub const REVIEWED_BUILDS: &[(&str, &str, &str)] = &[\n'
+                        '(VERSION, BINARY_SHA256, SCHEMA_SHA256),\n' + old + '\n];\n')
+
+    def registry_fixture(self, binary):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+            member = tarfile.TarInfo(c.BINARY_MEMBER)
+            member.size = len(binary)
+            archive.addfile(member, io.BytesIO(binary))
+        tarball = buffer.getvalue()
+        url = c.PACKAGE_URL.format(version="0.157.1")
+        integrity = "sha512-" + base64.b64encode(hashlib.sha512(tarball).digest()).decode()
+        metadata = {"dist-tags": {"latest": "0.157.1"}, "versions": {"0.157.1-darwin-arm64": {"dist": {"tarball": url, "integrity": integrity}}}}
+        return {c.REGISTRY: json.dumps(metadata).encode(), url: tarball}
 
     def verdict(self, outcome, status, **detail):
         record = {"schema": "xcb.codex-inventory-verdict.v1", "outcome": outcome, "version": "0.157.1", "binarySha256": SHA, **detail}
@@ -123,6 +145,18 @@ class CatalogTests(unittest.TestCase):
         self.assertLessEqual(len(entry["qualifiedBy"]), 64)
         self.assertIn("qualification/codex-0.157.1-inventory.json", body)
 
+    def test_release_supported_build_never_becomes_a_shared_catalog_proposal(self):
+        self.release_source("0.157.1", SHA)
+        self.verdict("passed", 0, cases=12, failures=[])
+        github = FakeGitHub([issue(10, "0.157.1"), issue(11, "0.158.0")])
+        # Even an inconsistent NEEDED=true output cannot create a passing
+        # proposal for an exact build already owned by the release adapter.
+        self.assertEqual(c.report(self.env, github, self.root), 0)
+        self.assertEqual([call[:2] for call in github.calls], [("close", 10)])
+        self.assertIn("older xcb releases", github.calls[0][2])
+        self.assertIn("no shared-catalog proposal", (self.root / "summary.md").read_text())
+        self.assertEqual(json.loads((self.root / "qualified-builds.json").read_text()), CATALOG)
+
     def test_failed_cases_are_listed_with_candidate_values_kept_inert(self):
         case = {"model": "gpt-5.5", "reasoningEffort": "high`](https://example.com)\n# x", "exactDynamicManifestVerified": False,
                 "emptyManifestVerified": True, "permittedCallbackVerified": True, "forgedBuiltinRejections": 8, "rootExitCode": 0}
@@ -165,16 +199,8 @@ class CatalogTests(unittest.TestCase):
 
     def test_resolve_stages_the_exact_binary_after_the_registry_integrity_check(self):
         binary = b"\xcf\xfa\xed\xfe synthetic codex"
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-            member = tarfile.TarInfo(c.BINARY_MEMBER)
-            member.size = len(binary)
-            archive.addfile(member, io.BytesIO(binary))
-        tarball = buffer.getvalue()
+        responses = self.registry_fixture(binary)
         url = c.PACKAGE_URL.format(version="0.157.1")
-        integrity = "sha512-" + base64.b64encode(hashlib.sha512(tarball).digest()).decode()
-        metadata = {"dist-tags": {"latest": "0.157.1"}, "versions": {"0.157.1-darwin-arm64": {"dist": {"tarball": url, "integrity": integrity}}}}
-        responses = {c.REGISTRY: json.dumps(metadata).encode(), url: tarball}
         outputs = self.root / "outputs"
         with patch.object(c, "fetch", lambda address, limit=0: responses[address]):
             c.resolve({"GITHUB_OUTPUT": str(outputs)}, self.root)
@@ -185,11 +211,40 @@ class CatalogTests(unittest.TestCase):
             outputs.write_text("")
             c.resolve({"GITHUB_OUTPUT": str(outputs), "REQUESTED_VERSION": "0.156.1"}, self.root)
             self.assertIn("needed=false", outputs.read_text())
-            responses[url] = tarball + b"tampered"
+            responses[url] += b"tampered"
             with self.assertRaises(SystemExit):
                 c.resolve({"GITHUB_OUTPUT": str(outputs)}, self.root)
             with self.assertRaises(SystemExit):
                 c.resolve({"GITHUB_OUTPUT": str(outputs), "REQUESTED_VERSION": "latest"}, self.root)
+
+    def test_resolve_skips_only_exact_current_and_retained_release_artifacts(self):
+        binary = b"\xcf\xfa\xed\xfe synthetic release codex"
+        digest = hashlib.sha256(binary).hexdigest()
+        responses = self.registry_fixture(binary)
+        outputs = self.root / "outputs"
+        with patch.object(c, "fetch", lambda address, limit=0: responses[address]):
+            for retained in [False, True]:
+                with self.subTest(retained=retained):
+                    if retained:
+                        self.release_source("0.158.0", "1" * 64, [("0.157.1", digest)])
+                    else:
+                        self.release_source("0.157.1", digest)
+                    outputs.write_text("")
+                    c.resolve({"GITHUB_OUTPUT": str(outputs)}, self.root)
+                    written = dict(line.split("=", 1) for line in outputs.read_text().splitlines())
+                    self.assertEqual(written, {"needed": "false", "version": "0.157.1", "sha256": digest, "source": "latest"})
+                    self.assertFalse((self.root / "candidate").exists())
+            # A reused version with different bytes is a new candidate.
+            self.release_source("0.157.1", "1" * 64)
+            outputs.write_text("")
+            c.resolve({"GITHUB_OUTPUT": str(outputs)}, self.root)
+            self.assertIn("needed=true", outputs.read_text())
+            self.assertEqual((self.root / "candidate/codex").read_bytes(), binary)
+            # A known tuple still requires registry integrity verification.
+            self.release_source("0.157.1", digest)
+            responses[c.PACKAGE_URL.format(version="0.157.1")] += b"tampered"
+            with self.assertRaises(SystemExit):
+                c.resolve({"GITHUB_OUTPUT": str(outputs)}, self.root)
 
 
 if __name__ == "__main__":

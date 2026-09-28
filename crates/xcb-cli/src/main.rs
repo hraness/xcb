@@ -523,11 +523,15 @@ enum AccountCommand {
         #[arg(long)]
         source: PathBuf,
     },
-    /// Copy an existing Codex CLI sign-in (auth.json) into a new account.
+    /// Copy an existing Codex CLI sign-in (auth.json) into xcb.
     ImportCodex {
         /// Absolute path to the Codex auth.json to copy.
         #[arg(long)]
         source: PathBuf,
+        /// Update this account's sign-in; creates an account when omitted.
+        /// The imported sign-in must belong to the same Codex account and user.
+        #[arg(long)]
+        account: Option<String>,
     },
     /// Copy one existing Devin sign-in into a private xcb account.
     ImportDevin {
@@ -1017,6 +1021,9 @@ fn service_text(status: &xcb_runtime::habitat_service::Status, style: ux::Style)
         format!("{} supervisor idle", style.symbol(ux::Symbol::Off))
     };
     out.push_str(&format!("{login} · {supervisor}\n"));
+    if let Some(fault) = &status.relay_fault {
+        out.push_str(&format!("Remote relay: {fault}\n"));
+    }
     if let Some(service) = &status.service {
         out.push_str(&format!("File: {}\n", service.manifest.display()));
     }
@@ -1738,10 +1745,19 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                         );
                     }
                 }
-                Some(AccountCommand::ImportCodex { source }) => {
-                    let id = auth::import_codex_account(&store, &source)?;
+                Some(AccountCommand::ImportCodex { source, account }) => {
+                    let updating = account.is_some();
+                    let id = if let Some(account) = account {
+                        let id = store.resolve_account(&account)?.id;
+                        auth::import_codex_auth(&store, &id, &source)?;
+                        id
+                    } else {
+                        auth::import_codex_account(&store, &source)?
+                    };
                     if cli.json {
                         print_json(import_acknowledgement(&id))?;
+                    } else if updating {
+                        println!("Updated the Codex sign-in for {id}.");
                     } else {
                         println!(
                             "Imported one Codex account as {id}. Original state and sessions are unchanged."
@@ -3540,6 +3556,214 @@ fn automatic_route_notice(reason: &str) -> &'static str {
 }
 
 #[cfg(test)]
+mod codex_import_tests {
+    use super::*;
+
+    struct Fixture(PathBuf);
+
+    impl Fixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(xcb_runtime::new_id("xcb_codex_import").as_str());
+            private::directory(&root.join("source")).unwrap();
+            let fixture = Self(root);
+            private::create(&fixture.source(), &Self::bytes("account-one", "original")).unwrap();
+            fixture
+        }
+
+        fn source(&self) -> PathBuf {
+            self.0.join("source/auth.json")
+        }
+
+        fn bytes(account: &str, access: &str) -> Vec<u8> {
+            // Synthetic JWT payload is {"sub":"synthetic-user"}.
+            serde_json::to_vec(&json!({
+                "auth_mode":"chatgpt",
+                "tokens":{
+                    "id_token":"synthetic.eyJzdWIiOiJzeW50aGV0aWMtdXNlciJ9.signature",
+                    "access_token":access,
+                    "refresh_token":"synthetic-refresh",
+                    "account_id":account
+                }
+            }))
+            .unwrap()
+        }
+
+        fn replace_source(&self, bytes: &[u8]) {
+            let current = private::read(&self.source(), 65536).unwrap();
+            private::replace(&self.source(), bytes, &xcb_runtime::digest(current)).unwrap();
+        }
+
+        async fn import(&self, account: Option<&str>) -> Result<i32> {
+            let mut args = vec![
+                "xcb".to_owned(),
+                "--state".to_owned(),
+                self.0.join("state").to_str().unwrap().to_owned(),
+                "--json".to_owned(),
+                "accounts".to_owned(),
+                "import-codex".to_owned(),
+                "--source".to_owned(),
+                self.source().to_str().unwrap().to_owned(),
+            ];
+            if let Some(account) = account {
+                args.extend(["--account".to_owned(), account.to_owned()]);
+            }
+            dispatch(Cli::try_parse_from(args).unwrap()).await
+        }
+
+        fn store(&self) -> Store {
+            Store::open(&self.0.join("state")).unwrap()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_import_updates_sign_in_without_duplicate_accounts_or_lost_limits() {
+        let fixture = Fixture::new();
+        assert_eq!(fixture.import(None).await.unwrap(), 0);
+        let store = fixture.store();
+        let account = store.accounts().unwrap().remove(0);
+        store.set_account_enabled(&account.id, false).unwrap();
+        let now = now_ms();
+        let reset = now + 3_600_000;
+        let quota = xcb_core::usage::QuotaPoint {
+            pool: account.quota_pool.clone(),
+            window: Id::new("codex.primary").unwrap(),
+            used_percent: 100.0,
+            resets_at_ms: reset,
+            observed_at_ms: now,
+        };
+        store.record_quota(&quota).unwrap();
+        let before = serde_json::to_value(store.account(&account.id).unwrap()).unwrap();
+        let db = rusqlite::Connection::open(store.root().join("xcb.sqlite")).unwrap();
+        db.execute(
+            "INSERT INTO account_auth_failures(account,generation,run) VALUES(?1,NULL,'r_fixture')",
+            [account.id.as_str()],
+        )
+        .unwrap();
+        drop(db);
+        assert!(store.authentication_required(&account.id).unwrap());
+
+        assert!(fixture.import(Some(account.id.as_str())).await.is_err());
+        assert_eq!(
+            serde_json::to_value(store.account(&account.id).unwrap()).unwrap(),
+            before
+        );
+        assert!(store.authentication_required(&account.id).unwrap());
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        store.set_account_enabled(&account.id, true).unwrap();
+        let before = serde_json::to_value(store.account(&account.id).unwrap()).unwrap();
+        fixture.import(Some(account.id.as_str())).await.unwrap();
+        assert!(store.authentication_required(&account.id).unwrap());
+        let changed = Fixture::bytes("account-one", "refreshed");
+        fixture.replace_source(&changed);
+        fixture.import(Some(account.id.as_str())).await.unwrap();
+
+        assert_eq!(store.accounts().unwrap().len(), 1);
+        assert_eq!(
+            serde_json::to_value(store.account(&account.id).unwrap()).unwrap(),
+            before
+        );
+        assert!(!store.authentication_required(&account.id).unwrap());
+        assert_eq!(
+            store.quota_blocked_until(&account.id, now).unwrap(),
+            Some(reset)
+        );
+        assert_eq!(store.quotas(&account.quota_pool).unwrap(), vec![quota]);
+        assert_eq!(private::read(&fixture.source(), 65536).unwrap(), changed);
+        assert_eq!(
+            private::read(
+                &store
+                    .account_root(&account.id)
+                    .unwrap()
+                    .join("profile/auth.json"),
+                65536
+            )
+            .unwrap(),
+            changed
+        );
+        assert!(store.unsettled_runs().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn codex_import_existing_rejects_identity_changes_wrong_provider_and_active_account() {
+        let fixture = Fixture::new();
+        fixture.import(None).await.unwrap();
+        let store = fixture.store();
+        let account = store.accounts().unwrap().remove(0);
+        let claude = store
+            .add_account(Provider::Claude, "Synthetic", now_ms(), None)
+            .unwrap();
+        let stored = store
+            .account_root(&account.id)
+            .unwrap()
+            .join("profile/auth.json");
+        let original = private::read(&stored, 65536).unwrap();
+        let generation = store
+            .account_root(&account.id)
+            .unwrap()
+            .join("application-generation.json");
+        let original_generation = private::read(&generation, 1024).unwrap();
+        fixture.replace_source(&Fixture::bytes("another-account", "refreshed"));
+        assert!(
+            fixture
+                .import(Some(account.id.as_str()))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("identity changed")
+        );
+        assert!(fixture.import(Some(claude.id.as_str())).await.is_err());
+        assert!(fixture.import(Some("a_missing")).await.is_err());
+        assert_eq!(private::read(&stored, 65536).unwrap(), original);
+        assert_eq!(
+            private::read(&generation, 1024).unwrap(),
+            original_generation
+        );
+        assert!(store.unsettled_runs().unwrap().is_empty());
+
+        fixture.replace_source(&Fixture::bytes("account-one", "refreshed"));
+        let workspace = private::directory(&fixture.0.join("work")).unwrap();
+        let session = store
+            .create_session(
+                &account.id,
+                xcb_core::models::ModelChoice {
+                    provider: Provider::Codex,
+                    id: Id::new("synthetic-model").unwrap(),
+                    label: "Synthetic model".into(),
+                    mode: xcb_core::models::Mode::Fixed,
+                    resolved: None,
+                    effort: None,
+                    observed_at_ms: now_ms(),
+                },
+                &workspace,
+                now_ms(),
+            )
+            .unwrap();
+        let held = store
+            .prepare_run(&session.id, session.revision, now_ms())
+            .unwrap();
+        assert!(fixture.import(Some(account.id.as_str())).await.is_err());
+        assert_eq!(private::read(&stored, 65536).unwrap(), original);
+        assert_eq!(
+            private::read(&generation, 1024).unwrap(),
+            original_generation
+        );
+        let pending = store.unsettled_runs().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, held.id);
+        assert_eq!(store.accounts().unwrap().len(), 2);
+    }
+}
+
+#[cfg(test)]
 mod setup_tests {
     use super::*;
 
@@ -3865,6 +4089,7 @@ mod tests {
                 supervisor_running: false,
                 service: Some(service),
                 log: Some(log.clone()),
+                relay_fault: None,
             },
             style,
         );
@@ -3887,6 +4112,7 @@ mod tests {
                 supervisor_running: true,
                 service: None,
                 log: None,
+                relay_fault: None,
             },
             style,
         );
@@ -3902,10 +4128,26 @@ mod tests {
                 supervisor_running: false,
                 service: None,
                 log: None,
+                relay_fault: None,
             },
             style,
         );
         assert_eq!(absent, "○ Doesn't start at login · ○ supervisor idle\n");
+        let relay_failure = Status {
+            installed: true,
+            registered: true,
+            supervisor_running: true,
+            service: None,
+            log: None,
+            relay_fault: Some("relay projection failed: relay invalid-argument: scope".into()),
+        };
+        let text = super::service_text(&relay_failure, style);
+        assert!(text.contains("supervisor running"));
+        assert!(
+            text.contains("Remote relay: relay projection failed: relay invalid-argument: scope")
+        );
+        let json = serde_json::to_value(&relay_failure).unwrap();
+        assert_eq!(json["relay_fault"], relay_failure.relay_fault.unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4263,10 +4505,30 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Commands::Accounts {
-                command: Some(AccountCommand::ImportCodex { source }),
+                command: Some(AccountCommand::ImportCodex { source, account: None }),
             }) if source == std::path::Path::new("/private/source/auth.json")
         ));
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "accounts",
+            "import-codex",
+            "--source",
+            "/private/source/auth.json",
+            "--account",
+            "a_existing",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Accounts {
+                command: Some(AccountCommand::ImportCodex { source, account: Some(account) }),
+            }) if source == std::path::Path::new("/private/source/auth.json") && account == "a_existing"
+        ));
         assert!(Cli::try_parse_from(["xcb", "accounts", "import-codex"]).is_err());
+        assert!(
+            Cli::try_parse_from(["xcb", "accounts", "import-codex", "--account", "a_existing"])
+                .is_err()
+        );
         assert!(
             Cli::try_parse_from(["xcb", "accounts", "import-codex", "--label", "Work account"])
                 .is_err()

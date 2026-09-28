@@ -510,6 +510,8 @@ fn native_configuration_readback_detects_authority_changes() {
     config::validate_config(&native, catalog).unwrap();
     for pointer in [
         "/config/features/shell_tool",
+        "/config/features/daemon_auto_start",
+        "/config/features/guardianv2.thread_context",
         "/config/apps/_default/enabled",
         "/config/analytics/enabled",
     ] {
@@ -533,10 +535,30 @@ fn native_configuration_readback_detects_authority_changes() {
 }
 
 #[test]
+fn initialization_requires_explicit_gateway_sign_in() {
+    let params = initialize_params();
+    assert_eq!(params["capabilities"]["explicitGatewayOauth"], true);
+    assert_eq!(params["capabilities"]["requestAttestation"], false);
+    // New auth messages do not grant the provider an implicit recovery path.
+    let notice = json!({"method":"account/gatewayOAuth/changed","params":{"providerId":"openai","status":"started","authUrl":"https://synthetic.invalid/auth","error":null}});
+    assert!(codec().startup_notice(&notice).is_err());
+    assert!(started().accept(notice).is_err());
+}
+
+#[test]
 fn exact_native_echo_trace_replays_with_current_wire_shapes() {
+    replay_native_echo_trace(include_str!("wire-echo-frames.json"));
+}
+
+#[test]
+fn previous_supported_build_echo_trace_replays_with_current_controls() {
+    replay_native_echo_trace(include_str!("wire-echo-frames-0.156.1.json"));
+}
+
+fn replay_native_echo_trace(trace: &str) {
     // Recorded from the qualified binary; IDs and the synthetic echo tool are
     // mapped to stable local names. No account data or model prompts retained.
-    let frames: Vec<Value> = serde_json::from_str(include_str!("wire-echo-frames.json")).unwrap();
+    let frames: Vec<Value> = serde_json::from_str(trace).unwrap();
     let mut c = codec();
     c.initialized = true;
     c.thread_id = Some("thread1".into());
