@@ -23,9 +23,9 @@ Set the relay's environment with `npx convex env set <KEY> <value>`:
   forced refresh signs a new session, and the call retries.
 - `XCB_RELAY_BOOTSTRAP`: a one-time invite for the first owner. It stops working
   once an owner is verified; set a fresh value only when rebuilding a fleet.
-- `XCB_RELAY_EMAIL`: how sign-in codes are delivered: `log`, `sendgrid`,
-  `resend`, or `webhook`. `sendgrid` needs `XCB_SENDGRID_API_KEY` and
-  `XCB_SENDGRID_FROM` (a verified sender); `resend` needs `XCB_RESEND_API_KEY`
-  and `XCB_RESEND_FROM`; `webhook` needs `XCB_OTP_WEBHOOK_URL` and
-  `XCB_OTP_WEBHOOK_TOKEN`. With `log`, codes are printed to the function log,
-  which you read from an authenticated Convex session with `npx convex logs`.
+- `XCB_RELAY_EMAIL`: how sign-in codes are delivered: `log`, `resend`, or
+  `webhook`. `resend` needs `XCB_RESEND_API_KEY` and `XCB_RESEND_FROM` (a
+  branded sender on a verified domain, e.g. `xcb <xcb@auth.hraness.com>`);
+  `webhook` needs `XCB_OTP_WEBHOOK_URL` and `XCB_OTP_WEBHOOK_TOKEN`. With
+  `log`, codes are printed to the function log, which you read from an
+  authenticated Convex session with `npx convex logs`.
