@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 import { ProviderMark } from "@hraness/design-kit/react/server";
+import type { SyntaxLanguage } from "@hraness/design-kit/syntax-highlighting";
+import { CodeBlock } from "../code-block";
 import { publishedRelease } from "../publication";
 import { providerStatus, supportedBuilds } from "./provider-status";
 import { sdkExample, sdkExampleOutput } from "./sdk-example";
@@ -8,8 +10,8 @@ import type { DocsSlug } from "./topics";
 const repository = "https://github.com/hraness/xcb";
 const repositoryDocs = `${repository}/blob/main/docs`;
 
-function Code({ children }: { children: string }) {
-  return <pre tabIndex={0}><code>{children}</code></pre>;
+function Code({ children, language = "shell" }: { children: string; language?: SyntaxLanguage }) {
+  return <CodeBlock code={children} language={language} />;
 }
 
 function Note({ children }: { children: ReactNode }) {
@@ -421,10 +423,9 @@ xcb reflex train settle`}</Code>
       <p>A turn sorted as confirm (“Should I open the PR and merge it?”) is answered “yes, go ahead” only when the <code>confirm</code> head acts too. xcb never answers a request whose report mentions deleting, dropping, deploying, releasing, production, spending, credentials, or sending something, or that hands a step to you. That check is in the runtime, so a replaced program can’t remove it.</p>
       <p>By default, settle and confirm use <code>auto</code>: sorted categories appear on tasks and xcb learns from your replies, but a head acts only after a replay of your own replies shows its precision is at least 0.75 for continuing a stopped turn and 0.85 for answering a go-ahead, as a 99% lower bound. It goes back to observing if precision falls, and about one acting turn in ten is still left for you so the measurement stays current.</p>
       <h2 id="configure">Configure, roll back, or replace</h2>
-      <Code>{`# Defaults in config.json → extensions.reflexes
-{ "route": "active", "settle": "auto", "confirm": "auto", "learn": true }
-
-xcb reflex rollback route 0                         # back to the shipped parameters
+      <p>The defaults in <code>config.json</code> under <code>extensions.reflexes</code> are:</p>
+      <Code language="json">{`{ "route": "active", "settle": "auto", "confirm": "auto", "learn": true }`}</Code>
+      <Code>{`xcb reflex rollback route 0                         # back to the shipped parameters
 xcb reflex import settle history.jsonl --dry-run    # replay your history first
 xcb reflex check my-route.algal.json`}</Code>
       <p>Each reflex can be <code>off</code>, <code>observe</code>, <code>active</code>, or, for settle and confirm, <code>auto</code>. To change the decision logic itself, put a program at <code>reflexes/route.algal.json</code> or <code>reflexes/settle.algal.json</code> in the state folder. xcb uses it only if it has no side effects and makes no agent calls; otherwise <code>xcb reflex status</code> reports why and the shipped program runs.</p>
@@ -549,7 +550,7 @@ EOF`}</Code>
       <p>The request is limited to 1 MiB, and <code>task</code> to 256 KiB. With no pins, xcb chooses the way <a href="/docs/how-routing-works">routing works</a> everywhere else.</p>
       <h2 id="response">Read the result</h2>
       <p>A dry run returns <code>status: &quot;selected&quot;</code> and the route. A run returns <code>status: &quot;completed&quot;</code> only when the turn finished, the provider has exited, and nothing is waiting for an answer:</p>
-      <Code>{`{
+      <Code language="json">{`{
   "version": 1,
   "status": "completed",
   "requestId": "route_…",
@@ -598,9 +599,9 @@ bun add @hraness/xcb`}</Code>
       <p>The package also installs the <code>xcb-compat</code> command, which is separate from the native <code>xcb</code>.</p>
       <h2 id="example">A complete example</h2>
       <p>This program runs as is. It uses a stand-in adapter that starts no provider and echoes the prompt, so you can watch the router hold the account during the task and release it after. Save it as <code>router-demo.ts</code> in the project where you installed the SDK:</p>
-      <Code>{sdkExample}</Code>
+      <Code language="typescript">{sdkExample}</Code>
       <p>Run it with <code>node router-demo.ts</code> (Node 24 or later runs TypeScript directly) or <code>bun router-demo.ts</code>. It prints:</p>
-      <Code>{sdkExampleOutput}</Code>
+      <Code language="text">{sdkExampleOutput}</Code>
       <h2 id="parts">What each part does</h2>
       <ul>
         <li><strong>Account store:</strong> <code>SqliteAccountLeases</code> records which task holds each account. While one task holds an account, another <code>run</code> on it fails with <code>ACCOUNT_BUSY_OR_RECOVERY_REQUIRED</code>.</li>
@@ -634,7 +635,7 @@ function ApplicationApi() {
       <Note>Application checks are separate from coding support. A fresh install reports <code>supported: false</code> until that xcb build, provider, account, and model pass xcb’s application checks. Signing in or a passing <code>doctor</code> isn’t enough, and <code>xcb run</code> is not a substitute when generation is unavailable.</Note>
       <h2 id="generate">Generate one response</h2>
       <p>Start xcb with <code>--json generate</code>, write one UTF-8 JSON document to stdin, close stdin, and drain stdout and stderr while waiting for the result. Use the account and model values from capabilities:</p>
-      <Code>{`{
+      <Code language="json">{`{
   "version": 1,
   "account": "<available-account-id>",
   "model": "<full-model-key>",
@@ -769,7 +770,7 @@ function Reference() {
       ]} />
       <h2 id="json">JSON output</h2>
       <p>With <code>--json</code>, or when xcb detects that an agent is running it, a failed command prints one line on stdout:</p>
-      <Code>{`{"ok":false,"error":{"code":"unavailable","message":"No account matches \\"zz\\".","next":"xcb accounts"}}`}</Code>
+      <Code language="json">{`{"ok":false,"error":{"code":"unavailable","message":"No account matches \\"zz\\".","next":"xcb accounts"}}`}</Code>
       <p><code>code</code> is one of <code>usage</code>, <code>invalid-input</code>, <code>unavailable</code>, <code>conflict</code>, <code>local-io</code>, <code>local-database</code>, <code>invalid-record</code>, <code>private-state</code>, <code>provider-not-started</code>, <code>provider-protocol</code>, or <code>cleanup-unproven</code>; <code>next</code> is the command to run next, or <code>null</code>. Successful JSON output carries <code>&quot;version&quot;: 1</code>. <code>xcb --json run</code> prints the <code>session</code>, <code>state</code>, <code>outcome</code>, and <code>text</code>; see <a href="/docs/route#response">route results</a> for the same fields.</p>
     </>
   );

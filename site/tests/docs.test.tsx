@@ -8,6 +8,7 @@ import { providerStatus, supportedBuilds } from "../app/docs/provider-status";
 import { sdkExample, sdkExampleOutput } from "../app/docs/sdk-example";
 import { docsGroups, docsTopics } from "../app/docs/topics";
 import { publishedRelease } from "../app/publication";
+import { headingText as textOf } from "../scripts/readme-html";
 
 const repository = join(import.meta.dir, "..", "..");
 
@@ -51,6 +52,7 @@ describe("organized documentation", () => {
       expect(html.match(/<main\b/gu)).toHaveLength(1);
       expect(html).toContain('id="main"');
       expect(attributeValues(html, "pre", "tabindex").every((value) => value === "0")).toBe(true);
+      expect(attributeValues(html, "pre > code", "class").every((value) => value.includes("syntax-code"))).toBe(true);
       expect(attributeValues(html, '.xcb-docs-table-wrap', "tabindex").every((value) => value === "0")).toBe(true);
       expect(attributeValues(html, '.skip-link', 'href')).toEqual(['#main']);
       expect(attributeValues(html, 'nav[aria-label="Documentation"] a[aria-current="page"]', "href"))
@@ -101,14 +103,14 @@ describe("organized documentation", () => {
     if (publishedRelease === null) {
       expect(html).toContain("No verified release is published yet");
     } else {
-      expect(html).toContain("curl -fsSL https://xcb.sh/install.sh | sh");
+      expect(textOf(html)).toContain("curl -fsSL https://xcb.sh/install.sh | sh");
       expect(html).toContain(`v${publishedRelease.version}`);
     }
-    expect(html).toContain("rustup toolchain install 1.97.1 --profile minimal");
-    expect(html).toContain("./scripts/install-native.sh");
-    expect(html).toContain("xcb setup claude");
-    expect(html).toContain("git init -q");
-    expect(html).toContain("xcb models route --task");
+    expect(textOf(html)).toContain("rustup toolchain install 1.97.1 --profile minimal");
+    expect(textOf(html)).toContain("./scripts/install-native.sh");
+    expect(textOf(html)).toContain("xcb setup claude");
+    expect(textOf(html)).toContain("git init -q");
+    expect(textOf(html)).toContain("xcb models route --task");
     expect(html).toContain("/tasks");
     expect(html).toContain(`Claude Code ${supportedBuilds.claudeMinimum} or later`);
     expect(html).not.toContain("--label");
@@ -117,9 +119,9 @@ describe("organized documentation", () => {
 
   test("documents the thread, task controls, and direct sessions", async () => {
     const html = await renderTopic("projects-and-tasks");
-    expect(html).toContain("xcb chat --resume &lt;conversation-id&gt;");
-    expect(html).toContain("xcb --cwd /absolute/path/to/your/project");
-    expect(html).toContain("xcb chat --new");
+    expect(textOf(html)).toContain("xcb chat --resume <conversation-id>");
+    expect(textOf(html)).toContain("xcb --cwd /absolute/path/to/your/project");
+    expect(textOf(html)).toContain("xcb chat --new");
     for (const command of ["/sessions", "/new", "/accounts", "/model", "/tasks", "/attention", "/workspace add &lt;dir&gt;", "/steer &lt;task-id&gt; &lt;guidance&gt;", "/cancel &lt;task-id&gt;"]) {
       expect(html).toContain(`<code>${command}</code>`);
     }
@@ -134,12 +136,12 @@ describe("organized documentation", () => {
     expect(provider).toContain(`Claude Code ${supportedBuilds.claudeMinimum} or later within version 2`);
     for (const build of [...supportedBuilds.codex, ...supportedBuilds.devin]) expect(provider).toContain(build);
     for (const status of Object.values(providerStatus)) expect(occurrences(provider, rendered(status))).toBe(1);
-    expect(provider).toContain("xcb setup codex");
-    expect(provider).toContain("xcb accounts add claude --plan Max");
-    expect(provider).toContain("xcb accounts login &lt;account-id&gt;");
-    expect(provider).toContain("xcb accounts refresh &lt;account-id&gt;");
-    expect(provider).toContain("xcb accounts import-codex --source");
-    expect(provider).toContain("xcb accounts import-devin --source");
+    expect(textOf(provider)).toContain("xcb setup codex");
+    expect(textOf(provider)).toContain("xcb accounts add claude --plan Max");
+    expect(textOf(provider)).toContain("xcb accounts login <account-id>");
+    expect(textOf(provider)).toContain("xcb accounts refresh <account-id>");
+    expect(textOf(provider)).toContain("xcb accounts import-codex --source");
+    expect(textOf(provider)).toContain("xcb accounts import-devin --source");
     expect(provider).toContain("qualification/build-receipt.ts");
     expect(provider).toContain("~/.local/share/xcb/qualification/linux.json");
     expect(provider).toContain('id="devin"');
@@ -167,7 +169,7 @@ describe("organized documentation", () => {
 
   test("keeps the application route separate from coding sessions", async () => {
     const application = await renderTopic("application-api");
-    expect(application).toContain("xcb --json generate --capabilities");
+    expect(textOf(application)).toContain("xcb --json generate --capabilities");
     expect(application).toContain("without provider refresh or inference");
     expect(application).toContain("available: true");
     expect(application).toContain("supported: false");
@@ -192,10 +194,10 @@ describe("organized documentation", () => {
     }
     expect(html).toContain("Generation uses the selected account and model");
     expect(html).toContain("next idle boundary");
-    expect(html).toContain("xcb plugins disable auto-continue");
+    expect(textOf(html)).toContain("xcb plugins disable auto-continue");
     expect(html).toContain("turn_timeout_ms");
     expect(html).toContain("1,000 to 3,600,000 milliseconds");
-    expect(html).toContain("xcb judge token &lt; /secure/path/to/judge-key");
+    expect(textOf(html)).toContain("xcb judge token < /secure/path/to/judge-key");
   });
 
   test("documents offline command-runner setup and its limits without internal tools", async () => {
@@ -205,20 +207,20 @@ describe("organized documentation", () => {
     expect(html).toContain("Lima 2.2 or later");
     expect(html).toContain("--dry-run");
     expect(html).toContain("--prepare");
-    expect(html).toContain("--status --cache-key CACHE_KEY_FROM_PLAN");
+    expect(textOf(html)).toContain("--status --cache-key CACHE_KEY_FROM_PLAN");
     expect(html).toContain("10 minutes");
     expect(html).toContain("macOS ARM64 only");
     expect(html).toContain("Each file replacement is atomic; the entire batch is not a transaction");
-    if (publishedRelease !== null) expect(html).toContain(`--branch v${publishedRelease.version}`);
+    if (publishedRelease !== null) expect(textOf(html)).toContain(`--branch v${publishedRelease.version}`);
     expect(html).not.toContain("host-run");
   });
 
   test("gives recovery steps without deleting state", async () => {
     const html = await renderTopic("troubleshooting");
-    expect(html).toContain("xcb recover &lt;run-id&gt; --yes");
+    expect(textOf(html)).toContain("xcb recover <run-id> --yes");
     expect(html).toContain("Do not delete lock files");
-    expect(html).toContain("xcb doctor --provider claude --executable /absolute/path/to/claude");
-    expect(html).toContain("xcb accounts login &lt;account&gt;");
+    expect(textOf(html)).toContain("xcb doctor --provider claude --executable /absolute/path/to/claude");
+    expect(textOf(html)).toContain("xcb accounts login <account>");
     expect(html).toContain("x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders");
     // xcb installs with curl; there is no browser download to unblock.
     expect(html).not.toContain("xattr -d com.apple.quarantine");
@@ -226,10 +228,10 @@ describe("organized documentation", () => {
 
   test("covers upgrades, uninstall, and every folder xcb creates", async () => {
     const html = await renderTopic("upgrade-and-uninstall");
-    expect(html).toContain("xcb update check");
-    expect(html).toContain("xcb upgrade &lt;version&gt;");
-    expect(html).toContain("xcb service uninstall");
-    expect(html).toContain("rm ~/.local/bin/xcb");
+    expect(textOf(html)).toContain("xcb update check");
+    expect(textOf(html)).toContain("xcb upgrade <version>");
+    expect(textOf(html)).toContain("xcb service uninstall");
+    expect(textOf(html)).toContain("rm ~/.local/bin/xcb");
     for (const path of ["~/.local/bin/xcb", "~/.local/share/xcb", "~/.local/share/xcb-command", "~/.local/share/xcb-coordination", "dev.hraness.xcb.update.plist", "dev.hraness.xcb.habitat.*.plist", "~/.xcb"]) {
       expect(html).toContain(path);
     }
@@ -239,6 +241,7 @@ describe("organized documentation", () => {
 
   test("describes the route request, results, and every failure code", async () => {
     const html = await renderTopic("route");
+    expect(attributeValues(html, "pre > code", "data-language")).toContain("json");
     expect(html).toContain("xcb --json route");
     expect(html).toContain("dryRun");
     expect(html).toContain("256 KiB");
@@ -253,8 +256,9 @@ describe("organized documentation", () => {
 
   test("installs the SDK from npm and imports only exported names", async () => {
     const html = await renderTopic("sdk");
-    expect(html).toContain("npm install @hraness/xcb");
-    expect(html).toContain("bun add @hraness/xcb");
+    expect(attributeValues(html, "pre > code", "data-language")).toEqual(["shell", "typescript", "text"]);
+    expect(textOf(html)).toContain("npm install @hraness/xcb");
+    expect(textOf(html)).toContain("bun add @hraness/xcb");
     expect(html).not.toMatch(/npm install -g @hraness\/xcb/u);
     expect(html).toContain("createSubscriptionRouter");
     expect(html).toContain('href="/docs/route"');
@@ -265,7 +269,7 @@ describe("organized documentation", () => {
     const exported = (name: string): boolean =>
       new RegExp(`export (?:type )?\\{[^}]*\\b${name}\\b[^}]*\\}`, "u").test(index)
       || starSources.some((source) => new RegExp(`export (?:async )?(?:class|function|type|interface|const) ${name}\\b`, "u").test(source));
-    const example = html.match(/import \{([^}]+)\} from &quot;@hraness\/xcb&quot;/u);
+    const example = textOf(html).match(/import \{([^}]+)\} from "@hraness\/xcb"/u);
     expect(example).not.toBeNull();
     const names = example![1]!.split(",").map((name) => name.replace(/^\s*type\s+/u, "").trim()).filter(Boolean);
     expect(names).toContain("createSubscriptionRouter");

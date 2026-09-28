@@ -44,8 +44,12 @@
 .xcb-status-list > div:first-child { border-block-start: 1px solid var(--line); }
 .xcb-status-list dt { display: flex; align-items: center; gap: 0.6rem; font-weight: 600; }
 .xcb-status-list dd { margin: 0; line-height: 1.6; }
-.xcb-home #readiness .xcb-text-link,
+.xcb-home .xcb-provider-details .xcb-text-link,
 .xcb-home #router .xcb-text-link { margin-block-start: 1.5rem; }
+.xcb-provider-details { inline-size: min(100% - 2 * var(--xcb-gutter), var(--xcb-measure)); margin: 0 auto; padding-block: 1rem; }
+.xcb-provider-details summary { inline-size: fit-content; cursor: pointer; min-block-size: 2.75rem; padding-block: .65rem; font-weight: 500; }
+.xcb-provider-details[open] summary { margin-block-end: 1rem; }
+.xcb-provider-details summary:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 .xcb-install-links { display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; margin: 1.5rem 0 0; }
 .xcb-home .hraness-marketing-flow { max-inline-size: 52rem; }
 
@@ -102,5 +106,10 @@
 .xcb-code .xcb-code-block { margin: 0; padding-block-start: 3.25rem; padding-inline-end: 1.15rem; }
 .xcb-code .xcb-code-block.language-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .xcb-code-copy { position: absolute; inset-block-start: 0.55rem; inset-inline-end: 0.55rem; }
+.xcb-code--terminal .hraness-marketing-proof-frame__chrome { min-block-size: 3.25rem; padding-inline-end: 8rem; }
+.xcb-code--terminal .hraness-marketing-proof-frame__lights { flex-shrink: 0; }
+.xcb-code--terminal .hraness-marketing-proof-frame__content { overflow: visible; }
+.xcb-code--terminal .xcb-code-block { padding: 1.1rem 1.15rem; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.xcb-code--terminal .xcb-code-copy { inset-block-start: .35rem; }
 .xcb-install-page ul, .xcb-picks ul, .xcb-compare-page #elsewhere ul { margin: 0 0 1rem; padding-inline-start: 1.25rem; display: grid; gap: 0.5rem; list-style: disc; }
 .xcb-install-page .xcb-page-section li, .xcb-picks li { line-height: 1.6; }
