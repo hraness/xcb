@@ -1,4 +1,5 @@
 mod application;
+mod context;
 mod doctor;
 mod habitat;
 mod health;
@@ -58,6 +59,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Inspect large source snapshots with resumable ALGAL programs.
+    Context {
+        #[command(subcommand)]
+        command: context::ContextCommand,
+    },
     /// Add an account, check the provider, sign in and load its models, in
     /// one command.
     Setup {
@@ -2415,6 +2421,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             )
             .await
         }
+        Some(Commands::Context { command }) => context::run(store.root(), &cli.cwd, command).await,
         Some(Commands::Daemons { command }) => {
             habitat::daemons(store.root(), &cli.cwd, command, cli.json).await
         }

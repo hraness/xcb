@@ -317,6 +317,7 @@ Other machines
   remote         Steer, cancel or answer work on another device
 
 Project agents
+  context        Inspect saved source chunks and replay research programs
   daemons        Manage always-on project agents (ALGAL daemons)
   projects       Set how much a project may do on its own
   memory         Save notes to a project's local Wordcell vault

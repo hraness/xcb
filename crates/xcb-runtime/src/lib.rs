@@ -14,6 +14,7 @@ pub mod command;
 pub mod command_tool;
 pub mod config;
 pub mod context;
+pub mod context_recipe;
 mod coordination;
 pub mod devin;
 pub mod egress;

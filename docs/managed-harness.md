@@ -14,6 +14,10 @@ originating conversation, workspace, original goal, follow-ups, worker history,
 and a local record that `xcb tasks verify` replays. A task's workspace never
 changes after it is created.
 
+[Source-inspection recipes](context-recipes.md) use resumable ALGAL programs to
+answer subquestions over saved excerpts and combine their reports. The children
+use the same project grants, provider checks and account controls as other tasks.
+
 ## Choosing a task's directory
 
 In a project view every task runs in the view's directory. In the thread, xcb
