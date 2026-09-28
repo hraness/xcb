@@ -1310,7 +1310,13 @@ fn parse_expected_generation(value: &str) -> std::result::Result<String, &'stati
         .map_err(|_| "expected generation must be 64 lowercase hexadecimal characters")
 }
 
-async fn dispatch(cli: Cli) -> Result<i32> {
+fn dispatch(cli: Cli) -> impl std::future::Future<Output = Result<i32>> {
+    // Allocate the command state once. Embedding it in each caller's async
+    // frame can overflow a normal 2 MiB stack before any command runs.
+    Box::pin(dispatch_inner(cli))
+}
+
+async fn dispatch_inner(cli: Cli) -> Result<i32> {
     process::initialize_host()?;
     // The provider's MCP helper must not open application state or emit any
     // ordinary CLI output on its protocol-only standard streams.
@@ -3574,6 +3580,43 @@ fn automatic_route_notice(reason: &str) -> &'static str {
 }
 
 #[cfg(test)]
+mod async_stack_tests {
+    use super::*;
+
+    #[test]
+    fn relay_renewal_rejection_fits_a_normal_thread_stack() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                let directory = std::env::temp_dir()
+                    .canonicalize()
+                    .unwrap()
+                    .join(xcb_runtime::new_id("xcb_renewal_stack").as_str());
+                private::directory(&directory).unwrap();
+                let root = directory.join("state");
+                let cli = Cli::try_parse_from([
+                    "xcb",
+                    "--state",
+                    root.to_str().unwrap(),
+                    "link",
+                    "--reauth",
+                ])
+                .unwrap();
+                let result = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(dispatch(cli));
+                std::fs::remove_dir_all(&directory).unwrap();
+                assert!(result.unwrap_err().to_string().contains("not linked"));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
 mod codex_import_tests {
     use super::*;
 
@@ -3710,8 +3753,25 @@ mod codex_import_tests {
         assert!(store.unsettled_runs().unwrap().is_empty());
     }
 
-    #[tokio::test]
-    async fn codex_import_existing_rejects_identity_changes_wrong_provider_and_active_account() {
+    #[test]
+    fn codex_import_existing_rejects_identity_changes_wrong_provider_and_active_account() {
+        // Linux test threads use a 2 MiB stack. Enforce that budget on macOS
+        // too: an unrelated async command must not inflate every dispatch.
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(rejects_identity_changes_wrong_provider_and_active_account());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    async fn rejects_identity_changes_wrong_provider_and_active_account() {
         let fixture = Fixture::new();
         fixture.import(None).await.unwrap();
         let store = fixture.store();
