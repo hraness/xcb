@@ -113,7 +113,8 @@ function HowRoutingWorks() {
       <p>Your constraints narrow the list first. A prompt that starts with <code>Use Claude</code>, <code>Use Codex</code>, or <code>Use Devin</code> requires that provider, and <code>xcb run --account</code> or a pinned <code>provider</code>, <code>account</code>, or <code>model</code> in a route request does the same. xcb never falls back outside a constraint.</p>
       <h2 id="rank">2. Rank the models</h2>
       <p>xcb gives each model relative quality, cost, and latency scores and sorts the models into tiers: a model is in the first tier when no other model beats it on all three at once. It then scores the tiers for routine, balanced, or complex work.</p>
-      <p>The kind of task comes from the <a href="/docs/reflexes">route reflex</a>, a small classifier that learns from the model tiers you ask for. If you turn on the <a href="/docs/security#judge">optional judge</a>, its answers feed the same classifier. A prompt of at least 400 words or 8 KiB always gets the highest-quality model available, whatever its price. Remaining usage, your <code>favorites</code> in <a href="/docs/reference#configuration">config.json</a>, and the provider you usually pick for that project break ties.</p>
+      <p>The kind of task comes from the <a href="/docs/reflexes">route reflex</a>, a small classifier that learns from the model tiers you ask for. If you turn on the <a href="/docs/security#judge">optional judge</a>, its answers feed the same classifier. A prompt of at least 400 words or 8 KiB always gets the highest-quality model available, whatever its price. Quota timing, your <code>favorites</code> in <a href="/docs/reference#configuration">config.json</a>, and the provider you usually pick for that project adjust the score.</p>
+      <p>Fresh Claude and Codex usage meters also favor unused capacity approaching a reset. xcb divides each window’s remaining percentage by its time to reset and uses the lowest rate across overlapping windows, so a short window cannot hide a tight weekly allowance. Stale or missing meters add no preference. This changes the ranking within the task’s quality requirements; it does not predict the provider’s bill.</p>
       <p>The scores are heuristics, not measured quality or prices. When a usage limit rules out a stronger model, the chosen route says so.</p>
       <h2 id="hold">3. Hold the account</h2>
       <p>Before the provider starts, xcb holds the account so no other task can use it. Each account runs one provider turn at a time, and tasks in the same project folder, or in a folder inside it, take turns. Tasks in different folders on different accounts run at the same time.</p>
@@ -206,6 +207,12 @@ xcb chat --resume <conversation-id>   # reopen one of them
 xcb workspaces                        # project folders the thread picks from
 xcb attention                         # questions and approvals waiting on you`}</Code>
       <p>Inside xcb, <code>/sessions</code> switches between the thread and project views. In the thread, <code>/new</code> clears the project focus; in a project view it starts another view.</p>
+      <h2 id="import-sessions">Bring in recent Claude and Codex conversations</h2>
+      <Code>{`xcb sessions discover                 # conversations active in the last 24 hours
+xcb sessions import --recent           # copy their user and assistant messages
+xcb chat --resume <conversation-id>     # continue an imported conversation`}</Code>
+      <p>Add <code>--hours 48</code> to use a longer activity window, or <code>--provider codex</code> or <code>--provider claude</code> to select one provider. To copy just one result, use <code>xcb sessions import &lt;candidate-id&gt;</code>. Repeated imports add new messages without duplicating the history already copied.</p>
+      <p>Import preserves the original files and starts no work. Your next message uses xcb’s normal routing. Recent activity does not prove that the original provider process is still running, and xcb does not take control of it. xcb skips tool results and subagent logs, and does not read credential files or provider settings. See the <Ext href={`${repositoryDocs}/session-import.md`}>session import reference</Ext> for source locations and limits.</p>
       <h2 id="direct-sessions">Direct provider sessions</h2>
       <p><code>xcb run</code> and <code>xcb --json route</code> save direct sessions, each on one account and model.</p>
       <Code>{`xcb sessions                 # direct provider sessions
@@ -657,7 +664,7 @@ const commandGroups: readonly Readonly<{ id: string; title: string; commands: re
     ["inbox", "See guidance and reports and whether they arrived"],
     ["attention", "Show questions and approvals waiting on you"],
     ["schedules", "Manage recurring prompts"],
-    ["sessions", "List direct provider sessions; rm, prune, export"],
+    ["sessions", "List direct sessions; discover and import recent Claude or Codex history; rm, prune, export"],
     ["resume [id]", "Reopen a direct provider session"],
   ] },
   { id: "commands-setup", title: "Setup", commands: [

@@ -219,7 +219,7 @@ enum Commands {
         #[command(subcommand)]
         command: remote::RemoteCommand,
     },
-    /// List direct provider sessions (use conversations for managed chat).
+    /// List provider sessions; discover and import recent Codex or Claude history.
     Sessions {
         #[command(subcommand)]
         command: Option<SessionCommand>,
@@ -646,6 +646,33 @@ impl From<ReflexName> for xcb_core::reflex::Reflex {
 }
 #[derive(Subcommand)]
 enum SessionCommand {
+    /// Find Codex and Claude conversations active within the last 24 hours.
+    Discover {
+        /// Look back this many hours (1–8760).
+        #[arg(long, default_value_t = 24, value_parser = clap::value_parser!(u16).range(1..=8760))]
+        hours: u16,
+        /// Read one provider's history: codex or claude.
+        #[arg(long, value_parser = ["codex", "claude"])]
+        provider: Option<String>,
+    },
+    /// Copy recent conversation text into xcb; original sessions keep running independently.
+    Import {
+        /// Candidate id from `xcb sessions discover`.
+        #[arg(required_unless_present = "recent", conflicts_with = "recent")]
+        id: Option<Id>,
+        /// Import every conversation found in the selected time window.
+        #[arg(long)]
+        recent: bool,
+        /// Use this project for one imported conversation; required when its source started at home.
+        #[arg(long, conflicts_with = "recent")]
+        workspace: Option<PathBuf>,
+        /// Look back this many hours (1–8760).
+        #[arg(long, default_value_t = 24, value_parser = clap::value_parser!(u16).range(1..=8760))]
+        hours: u16,
+        /// Read one provider's history: codex or claude.
+        #[arg(long, value_parser = ["codex", "claude"])]
+        provider: Option<String>,
+    },
     /// Write local aiCharts session observations to an export file.
     Export,
     /// Remove one session and its transcript.
@@ -2304,6 +2331,61 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         }
         Some(Commands::Sessions { command }) => {
             match command {
+                Some(SessionCommand::Discover { hours, provider }) => {
+                    let report = discover_provider_sessions(provider.as_deref(), hours)?;
+                    if cli.json {
+                        print_json(&report)?;
+                    } else {
+                        println!("{} recent conversation(s) in the last {hours} hours.", report.sessions.len());
+                        for session in &report.sessions {
+                            println!("{}  {}  {}  {} message(s){}\n  {}", session.id, session.provider, human_age(now_ms(), session.last_active_at_ms), session.message_count, if session.truncated { " (partial history)" } else { "" }, table::fit(&session.workspace, 160));
+                        }
+                        if report.skipped_files > 0 || report.truncated {
+                            println!("Skipped {} unreadable, unsupported, or excluded file(s).{}", report.skipped_files, if report.truncated { " Scan limit reached; the newest files were read first." } else { "" });
+                        }
+                        println!("Recent activity does not establish whether a provider process is running.");
+                        ux::next("xcb sessions import --recent");
+                    }
+                }
+                Some(SessionCommand::Import { id, recent: _, workspace, hours, provider }) => {
+                    let mut report = discover_provider_sessions(provider.as_deref(), hours)?;
+                    if let Some(id) = id {
+                        report.sessions.retain(|session| session.id == id);
+                        if report.sessions.is_empty() {
+                            return Err(Error::Unavailable("session candidate not found; run xcb sessions discover with the same --hours and --provider options"));
+                        }
+                    }
+                    let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
+                    let workspace = workspace.map(|path| cli.cwd.join(path));
+                    let mut results = Vec::new();
+                    let mut failed = Vec::new();
+                    for session in &report.sessions {
+                        match managed.import_session_into(session, workspace.as_deref()).await {
+                            Ok(result) => results.push(result),
+                            Err(error) => failed.push(json!({"id":session.id,"reason":error.to_string()})),
+                        }
+                    }
+                    let created = results.iter().filter(|result| result.created).count();
+                    let updated = results.iter().filter(|result| !result.created && result.added_messages > 0).count();
+                    let unchanged = results.len() - created - updated;
+                    let added_messages: usize = results.iter().map(|result| result.added_messages).sum();
+                    if cli.json {
+                        print_json(json!({"version":1,"created":created,"updated":updated,"unchanged":unchanged,"added_messages":added_messages,"skipped_files":report.skipped_files,"truncated":report.truncated,"source_preserved":true,"tasks_started":0,"results":results,"failed":failed}))?;
+                    } else {
+                        println!("Imported {created} new conversation(s), updated {updated}, unchanged {unchanged}; added {added_messages} message(s).");
+                        println!("Original files are unchanged. No tasks were started.");
+                        for result in &results {
+                            println!("xcb chat --resume {}", result.conversation);
+                        }
+                        for failure in &failed {
+                            println!("Skipped {}: {}", failure["id"].as_str().unwrap_or("session"), failure["reason"].as_str().unwrap_or("import failed"));
+                        }
+                        if report.skipped_files > 0 || report.truncated {
+                            println!("Discovery skipped {} file(s).{}", report.skipped_files, if report.truncated { " Scan limit reached." } else { "" });
+                        }
+                    }
+                    if !failed.is_empty() { return Ok(1); }
+                }
                 None => {
                     let sessions = store.sessions(64)?;
                     if cli.json {
@@ -3248,6 +3330,19 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
     }
 }
 
+fn discover_provider_sessions(
+    provider: Option<&str>,
+    hours: u16,
+) -> Result<xcb_runtime::managed::imports::Discovery> {
+    use xcb_runtime::managed::imports::{Sources, discover};
+    discover(
+        &Sources::from_environment()?,
+        provider.map(str::parse).transpose()?,
+        hours,
+        now_ms(),
+    )
+}
+
 fn preview_provider_preferences(
     preference: Option<Provider>,
     required: bool,
@@ -4132,6 +4227,77 @@ mod help_tests {
                     .any(|line| line.split_whitespace().next() == Some(name)),
                 "{name} is missing from xcb --help and xcb help advanced"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod recent_session_cli_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_to_24_hours_and_requires_an_import_selection() {
+        let discover = Cli::try_parse_from(["xcb", "sessions", "discover"]).unwrap();
+        assert!(matches!(
+            discover.command,
+            Some(Commands::Sessions {
+                command: Some(SessionCommand::Discover {
+                    hours: 24,
+                    provider: None
+                })
+            })
+        ));
+        let import = Cli::try_parse_from([
+            "xcb",
+            "sessions",
+            "import",
+            "--recent",
+            "--provider",
+            "codex",
+        ])
+        .unwrap();
+        assert!(
+            matches!(import.command, Some(Commands::Sessions { command: Some(SessionCommand::Import { id: None, recent: true, workspace: None, hours: 24, provider: Some(provider) }) }) if provider == "codex")
+        );
+        assert!(
+            Cli::try_parse_from([
+                "xcb",
+                "sessions",
+                "import",
+                "c_import_example",
+                "--hours",
+                "48"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "xcb",
+                "sessions",
+                "import",
+                "c_import_example",
+                "--workspace",
+                "/work/project"
+            ])
+            .is_ok()
+        );
+        for args in [
+            vec!["xcb", "sessions", "import"],
+            vec!["xcb", "sessions", "import", "c_import_example", "--recent"],
+            vec![
+                "xcb",
+                "sessions",
+                "import",
+                "--recent",
+                "--workspace",
+                "/work/project",
+            ],
+            vec!["xcb", "sessions", "import", "--workspace", "/work/project"],
+            vec!["xcb", "sessions", "discover", "--hours", "0"],
+            vec!["xcb", "sessions", "discover", "--hours", "8761"],
+            vec!["xcb", "sessions", "discover", "--provider", "devin"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
         }
     }
 }

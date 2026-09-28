@@ -285,7 +285,7 @@ Conversations and tasks
   inbox          See guidance and reports and whether they arrived
   attention      Show questions and approvals waiting on you
   schedules      Manage recurring wake-ups
-  sessions       List direct provider sessions
+  sessions       List provider sessions; discover and import recent history
   resume         Reopen a direct provider session
 
 Setup

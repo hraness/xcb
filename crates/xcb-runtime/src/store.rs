@@ -105,12 +105,11 @@ fn quotas_from(db: &Connection, pool: &Id) -> Result<Vec<QuotaPoint>> {
     Ok(points)
 }
 
-fn blocked_until_from(
+fn current_quota_points_from(
     db: &Connection,
     root: &Path,
     account: &Account,
-    now: u64,
-) -> Result<Option<u64>> {
+) -> Result<Option<Vec<QuotaPoint>>> {
     // Claude binds quota to the live credential generation so a rotated
     // sign-in cannot inherit another identity's block; an absent generation
     // stays unbound. Other providers use the account's own stable pool.
@@ -131,12 +130,25 @@ fn blocked_until_from(
     {
         return Err(Error::Conflict("account credential generation changed"));
     }
-    Ok(xcb_core::usage::quota_blocked_until(
-        &points,
-        &pool,
-        account.provider,
-        now,
-    ))
+    Ok(Some(points))
+}
+
+fn blocked_until_from(
+    db: &Connection,
+    root: &Path,
+    account: &Account,
+    now: u64,
+) -> Result<Option<u64>> {
+    Ok(
+        current_quota_points_from(db, root, account)?.and_then(|points| {
+            xcb_core::usage::quota_blocked_until(
+                &points,
+                &account.quota_pool,
+                account.provider,
+                now,
+            )
+        }),
+    )
 }
 
 /// A quota meter update buffered during streaming. The account's pool is
@@ -2214,6 +2226,36 @@ impl Store {
         blocked_until_from(&db, &self.root, &account, now)
     }
 
+    /// Fresh spending pressure follows the same account/credential binding
+    /// as quota admission. Old identity telemetry cannot improve a route.
+    pub fn quota_spending_pressure(
+        &self,
+        id: &Id,
+        now: u64,
+    ) -> Result<Option<xcb_core::usage::QuotaSpendingPressure>> {
+        let db = self.db()?;
+        let payload: String = db.query_row(
+            "SELECT payload FROM accounts WHERE id=?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )?;
+        let account: Account = decode(&payload)?;
+        account.validate()?;
+        if &account.id != id {
+            return Err(Error::Conflict("account identity changed"));
+        }
+        Ok(
+            current_quota_points_from(&db, &self.root, &account)?.and_then(|points| {
+                xcb_core::usage::quota_spending_pressure(
+                    &points,
+                    &account.quota_pool,
+                    account.provider,
+                    now,
+                )
+            }),
+        )
+    }
+
     pub(crate) fn require_quota_available(&self, id: &Id, now: u64) -> Result<()> {
         if self.quota_blocked_until(id, now)?.is_some() {
             return Err(Error::Unavailable(
@@ -2823,6 +2865,51 @@ mod tests {
             Some(1000)
         );
         assert_eq!(store.quota_blocked_until(&account.id, 1000).unwrap(), None);
+    }
+
+    #[test]
+    fn quota_spending_pressure_follows_generation_and_provider_scope() {
+        let dir = root();
+        let store = Store::open(&dir.path().canonicalize().unwrap().join("state")).unwrap();
+        let claude = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let point = quota_point(&claude.quota_pool, "seven_day", 70.0, 3, 10_800_003);
+        store.record_quota(&point).unwrap();
+        assert_eq!(store.quota_spending_pressure(&claude.id, 3).unwrap(), None);
+        let run = store.prepare_probe(&claude.id, None, 2).unwrap();
+        crate::application_qualification::ensure_generation(&store, &run).unwrap();
+        store.record_account_quota(&run, &point).unwrap();
+        assert_eq!(
+            store
+                .quota_spending_pressure(&claude.id, 3)
+                .unwrap()
+                .unwrap()
+                .percent_per_hour,
+            10.0
+        );
+        store.settle(&run, State::Idle, 4).unwrap();
+        let run = store.prepare_probe(&claude.id, None, 4).unwrap();
+        crate::application_qualification::rotate_generation(&store, &run).unwrap();
+        assert_eq!(store.quota_spending_pressure(&claude.id, 4).unwrap(), None);
+        store.settle(&run, State::Idle, 5).unwrap();
+        for provider in [Provider::Codex, Provider::Devin] {
+            let account = store.add_account(provider, "Test", 1, None).unwrap();
+            store
+                .record_quota(&quota_point(
+                    &account.quota_pool,
+                    "codex.secondary",
+                    70.0,
+                    3,
+                    10_800_003,
+                ))
+                .unwrap();
+            let pressure = store.quota_spending_pressure(&account.id, 3).unwrap();
+            assert_eq!(pressure.is_some(), provider == Provider::Codex);
+            if let Some(pressure) = pressure {
+                assert_eq!(pressure.percent_per_hour, 10.0);
+            }
+        }
     }
 
     #[test]
