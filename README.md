@@ -16,6 +16,12 @@ for macOS ARM64 and Linux x86_64; other hosts build from source. MIT licensed.
 [Route contract](docs/route.md) · [TypeScript SDK](docs/sdk.md) ·
 [Compare](https://xcb.sh/compare) · [Changelog](CHANGELOG.md)
 
+With fresh Claude and Codex usage reports, xcb favors unused quota approaching
+a reset while preserving the task's quality requirements and your chosen
+provider, account, or model. You can also [continue a Claude or Codex
+conversation](#continue-a-claude-or-codex-conversation) by importing work
+active in the last 24 hours.
+
 ## Install
 
 ### Install a verified release
@@ -75,11 +81,23 @@ anything; the next `xcb` shows the results.
   provider. `/help` lists every command, and the
   [terminal guide](docs/terminal.md) covers keys and search.
 
-To bring over recent Claude or Codex conversations, run `xcb sessions discover`,
-then `xcb sessions import --recent`. Both use a 24-hour activity window by
-default. Open an imported conversation with `xcb chat --resume <conversation-id>`;
-your next message continues with xcb's routing. The original sessions stay in
-place. [Session import](docs/session-import.md) covers provider filters and limits.
+## Continue a Claude or Codex conversation
+
+Bring conversation context into xcb so your next task can use its account and
+model selection. Discovery and import use a 24-hour activity window by default:
+
+```sh
+xcb sessions discover
+xcb sessions import --recent
+xcb conversations                           # saved conversations, including imports
+xcb chat --resume <conversation-id>
+```
+
+Send a new message in the imported view to start work. Import copies user and
+assistant text, preserves the original files, and does not take over the
+provider process. For a conversation started in your home folder, select one
+result with `xcb sessions import <candidate-id> --workspace /path/to/project`.
+[Session import](docs/session-import.md) covers provider filters and limits.
 
 ## Build on it
 
@@ -121,10 +139,10 @@ example.
 xcb checks each provider executable's version, and for Codex and Devin its
 exact SHA-256, before it runs anything. `xcb doctor` shows what it found.
 
-## How it works
+## Use available quota before it resets
 
 1. **Filter:** keep the accounts that can take the task now: supported provider build, signed in, enabled, idle, not at a known usage limit, with a recently seen model.
-2. **Rank:** order those models by relative quality, cost, and speed for the kind of task, favoring fresh subscription capacity approaching a reset. Long prompts get the highest-quality model available.
+2. **Rank:** order those models by relative quality, cost, and speed for the kind of task. Fresh Claude and Codex usage reports favor unused quota approaching a reset within the task's quality requirements. Long prompts get the highest-quality model available.
 3. **Hold:** lock the chosen account so no other task can use it, and run the provider in an OS sandbox with xcb's file tools for one project folder.
 4. **Record:** when the provider process exits, record how the run ended. If xcb can't confirm that, it keeps the account held and doesn't retry.
 
