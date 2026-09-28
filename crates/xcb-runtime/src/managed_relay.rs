@@ -22,10 +22,10 @@ use xcb_core::Id;
 use crate::cloud::commands::{self, CommandBody};
 use crate::cloud::lane::{self, CommandOutcome, OpenedCommand, RelayLane};
 use crate::managed::{
-    Intake, IntakeCues, ManagedStore, Origin, fault_text, record_supervisor_fault,
-    supervisor_fault_record,
+    Intake, IntakeCues, ManagedStore, Origin, clear_relay_connection_fault, clear_relay_fault,
+    clear_relay_projection_fault, fault_text, record_relay_fault,
 };
-use crate::{Error, Result, digest, now_ms};
+use crate::{Error, Result, digest};
 
 /// Remote commands land at most this long after a controller posts them.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -47,25 +47,24 @@ const PROJECTION_TASK_ROWS: usize = 64;
 const PROJECTION_FIELD_CHARS: usize = 200;
 /// The projection scope controllers read for fleet state.
 const FLEET_SCOPE: &str = "fleet";
-/// A fault from local work stays the visible supervisor fault for this long
-/// before relay retry noise may replace it.
-const LOCAL_FAULT_PRIORITY_MS: u64 = 60 * 60 * 1000;
-
-/// Relay faults are advisory — the lane is optional infrastructure that
-/// retries on its own — so a recent fault from local work is never replaced
-/// by one. Repeats of the same relay fault are coalesced by the recorder.
+/// Relay failures remain visible independently of local worker failures.
+/// Repeats are coalesced by the recorder; recovery only clears this record.
 fn relay_fault(root: &Path, message: &str) {
-    if let Some((at_ms, current)) = supervisor_fault_record(root)
-        && !is_relay_fault(&current)
-        && now_ms().saturating_sub(at_ms) < LOCAL_FAULT_PRIORITY_MS
-    {
-        return;
-    }
-    record_supervisor_fault(root, message);
+    record_relay_fault(
+        root,
+        message,
+        message.starts_with("relay projection ") || message.starts_with("fleet projection "),
+    );
 }
 
-fn is_relay_fault(message: &str) -> bool {
-    message.starts_with("relay ") || message.starts_with("fleet projection ")
+/// A healthy command pump proves the connection recovered, but says nothing
+/// about a failed fleet publication. Only an actual publication clears that
+/// failure; otherwise every healthy poll would hide it between publish retries.
+fn relay_recovered(root: &Path, projection_published: bool) {
+    clear_relay_connection_fault(root);
+    if projection_published {
+        clear_relay_projection_fault(root);
+    }
 }
 
 /// The relay lane on its own thread and runtime beside the supervisor loop.
@@ -86,6 +85,7 @@ impl RelayTask {
         let (stop, stopped) = watch::channel(false);
         let (finished, done) = tokio::sync::oneshot::channel();
         let root = root.to_path_buf();
+        let fault_root = managed.root().to_path_buf();
         let lane_resident = resident.clone();
         let spawned = std::thread::Builder::new()
             .name("xcb-relay".into())
@@ -107,6 +107,10 @@ impl RelayTask {
             });
         if spawned.is_err() {
             resident.store(false, Ordering::Relaxed);
+            relay_fault(
+                &fault_root,
+                "relay lane could not start its thread; remote commands are unavailable until the supervisor restarts",
+            );
         }
         Self {
             resident,
@@ -245,6 +249,7 @@ impl RelayHost {
         // A full pump without an error proves the lane healthy — reset
         // the reboot delay.
         self.boot_delay = BOOT_RETRY;
+        relay_recovered(managed.root(), false);
         if refresh.load(Ordering::Relaxed) {
             self.projection_due = true;
         }
@@ -287,6 +292,7 @@ impl RelayHost {
                         self.projection_written = Instant::now();
                         self.projection_due = false;
                         self.projection_next = Instant::now() + PROJECTION_INTERVAL;
+                        relay_recovered(managed.root(), true);
                     }
                     Err(error) => {
                         if fatal(&error) {
@@ -344,6 +350,7 @@ impl RelayHost {
             }
             Ok(None) => {
                 self.resident.store(false, Ordering::Relaxed);
+                clear_relay_fault(managed.root());
                 None
             }
             Err(error) => Some(format!("relay lane custody failed: {}", fault_text(&error))),
@@ -625,6 +632,7 @@ fn fleet_body(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::now_ms;
     use crate::workspace_infer::{BindingConfidence, BindingOrigin, BindingSource};
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -1077,6 +1085,11 @@ mod tests {
         .await;
         assert!(host.disabled);
         assert!(!host.resident.load(Ordering::Relaxed));
+        assert!(
+            crate::managed::relay_fault(f.store.root())
+                .is_some_and(|fault| fault.contains("revoked-device")),
+            "a revoked device remains visible until linkage is removed"
+        );
 
         let mut host = RelayHost::new(&root);
         host.boot_with(&f.store, async |_| {
@@ -1091,46 +1104,79 @@ mod tests {
             !host.resident.load(Ordering::Relaxed),
             "linkage was removed"
         );
+        assert!(crate::managed::relay_fault(f.store.root()).is_none());
     }
 
-    /// Relay retry noise never replaces a recent fault from local work, and
-    /// the protocol's revoked-device code disables the lane.
+    /// Local and relay failures are independently actionable: neither can
+    /// hide the other, even when both keep recurring.
     #[test]
-    fn relay_faults_never_hide_a_recent_local_fault() {
+    fn relay_and_local_faults_remain_visible_together() {
         let f = fixture();
         let root = f.store.root();
-        record_supervisor_fault(root, "worker outcome could not be recorded: synthetic");
+        crate::managed::record_supervisor_fault(
+            root,
+            "worker outcome could not be recorded: synthetic",
+        );
         relay_fault(root, "relay lane pump failed: synthetic");
         assert_eq!(
             crate::managed::supervisor_fault(root).as_deref(),
             Some("worker outcome could not be recorded: synthetic")
         );
-        // An hour-old local fault gives way.
-        let path = root.join("supervisor.fault.json");
-        let aged = serde_json::to_vec(&json!({
-            "version": 1,
-            "at_ms": now_ms() - LOCAL_FAULT_PRIORITY_MS - 1,
-            "message": "worker outcome could not be recorded: synthetic",
-        }))
-        .unwrap();
-        crate::private::replace(
-            &path,
-            &aged,
-            &digest(crate::private::read(&path, 4096).unwrap()),
-        )
-        .unwrap();
-        relay_fault(root, "relay lane pump failed: synthetic");
         assert_eq!(
-            crate::managed::supervisor_fault(root).as_deref(),
+            crate::managed::relay_fault(root).as_deref(),
             Some("relay lane pump failed: synthetic")
         );
-        // One relay fault replaces another.
+        let status = f.store.status_text().unwrap();
+        assert!(status.contains("worker outcome could not be recorded: synthetic"));
+        assert!(status.contains("Remote relay: relay lane pump failed: synthetic"));
+        let first = crate::private::read(&root.join("relay.fault.json"), 4096).unwrap();
+        relay_fault(root, "relay lane pump failed: synthetic");
+        assert_eq!(
+            crate::private::read(&root.join("relay.fault.json"), 4096).unwrap(),
+            first,
+            "repeated relay failures are coalesced"
+        );
         relay_fault(root, "relay lane boot failed: synthetic");
         assert_eq!(
-            crate::managed::supervisor_fault(root).as_deref(),
+            crate::managed::relay_fault(root).as_deref(),
             Some("relay lane boot failed: synthetic")
+        );
+        assert_eq!(
+            crate::managed::supervisor_fault(root).as_deref(),
+            Some("worker outcome could not be recorded: synthetic")
         );
         assert!(fatal(&Error::Protocol("relay revoked-device")));
         assert!(!fatal(&Error::Protocol("relay invalid-argument: device")));
+    }
+
+    #[test]
+    fn recovery_clears_only_the_relay_operation_that_succeeded() {
+        let f = fixture();
+        let root = f.store.root();
+        crate::managed::record_supervisor_fault(root, "local failure: synthetic");
+        relay_fault(root, "relay lane pump failed: synthetic");
+        relay_recovered(root, false);
+        assert!(crate::managed::relay_fault(root).is_none());
+        // Recovery also resets coalescing: a new occurrence is visible.
+        relay_fault(root, "relay lane pump failed: synthetic");
+        assert!(crate::managed::relay_fault(root).is_some());
+        for message in [
+            "relay projection failed: synthetic",
+            "fleet projection build failed: synthetic",
+        ] {
+            relay_fault(root, message);
+            relay_fault(root, "relay lane pump failed: synthetic");
+            let pending = crate::managed::relay_fault(root).unwrap();
+            assert!(pending.contains(message));
+            assert!(pending.contains("relay lane pump failed: synthetic"));
+            relay_recovered(root, false);
+            assert_eq!(crate::managed::relay_fault(root).as_deref(), Some(message));
+            relay_recovered(root, true);
+            assert!(crate::managed::relay_fault(root).is_none());
+        }
+        assert_eq!(
+            crate::managed::supervisor_fault(root).as_deref(),
+            Some("local failure: synthetic")
+        );
     }
 }

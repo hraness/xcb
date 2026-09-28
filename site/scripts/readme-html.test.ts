@@ -47,7 +47,16 @@ test("extracts the landing block between the shared Hraness markers", async () =
   expect(landing.lead.startsWith("xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.")).toBe(true);
   // The README never types the current version; the site inserts the verified release.
   const { version } = JSON.parse(await readFile(join(repository, "package.json"), "utf8")) as { version: string };
-  expect(source).not.toContain(version);
+  const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  // A provider version may contain the xcb version as a numeric substring.
+  // A sentence-ending period still belongs outside the release version.
+  const releaseVersion = new RegExp(`(?<![0-9.])${escapedVersion}(?![0-9]|\\.[0-9])`, "u");
+  expect(`xcb v${version}.`).toMatch(releaseVersion);
+  expect(`npm install @hraness/xcb@${version}`).toMatch(releaseVersion);
+  expect(`provider 300${version}1`).not.toMatch(releaseVersion);
+  expect(`provider 1.${version}`).not.toMatch(releaseVersion);
+  expect(`provider ${version}.1`).not.toMatch(releaseVersion);
+  expect(source).not.toMatch(releaseVersion);
   expect(source).toContain("https://github.com/hraness/xcb/releases/latest");
 });
 

@@ -75,9 +75,14 @@ def schema_digest():
     return digest.hexdigest()
 SCHEMA = schema_digest()
 # A changed wire protocol is never admitted through the catalog; it ships in an xcb release.
-if SCHEMA != const('SCHEMA_SHA256'):
+reviewed = [(BAKED_VERSION, BAKED_SHA256, const('SCHEMA_SHA256'))]
+reviewed_literals = strings(config_source.split('pub const REVIEWED_BUILDS: &[(&str, &str, &str)] = &[', 1)[1].split('];', 1)[0])
+assert len(reviewed_literals) % 3 == 0, 'invalid reviewed Codex schema bindings'
+reviewed += list(zip(*[iter(reviewed_literals)] * 3))
+expected_schema = next((schema for version, digest, schema in reviewed if (version, digest) == (VERSION, EXPECTED)), const('SCHEMA_SHA256'))
+if SCHEMA != expected_schema:
     incompatible('schema-drift', 'app-server schema digest differs from config.rs SCHEMA_SHA256: observed ' + SCHEMA,
-                 observedSchemaSha256=SCHEMA, bakedSchemaSha256=const('SCHEMA_SHA256'), bakedVersion=BAKED_VERSION)
+                 observedSchemaSha256=SCHEMA, expectedSchemaSha256=expected_schema, bakedSchemaSha256=const('SCHEMA_SHA256'), bakedVersion=BAKED_VERSION)
 
 def configuration(catalog, port):
     body = config_source.split('pub fn configuration(', 1)[1].split('\npub fn thread_configuration(', 1)[0]
@@ -86,7 +91,7 @@ def configuration(catalog, port):
     first, last = [strings(block) for block in blocks]
     assert first.count('model_provider = "openai"') == 1 and first[-1] == '[features]'
     first = ['model_provider = "qualification"' if line == 'model_provider = "openai"' else line for line in first]
-    lines = ['model_catalog_json = ' + json.dumps(str(catalog))] + first + [name + ' = false' for name in ACCOUNT_FEATURES]
+    lines = ['model_catalog_json = ' + json.dumps(str(catalog))] + first + [json.dumps(name) + ' = false' for name in ACCOUNT_FEATURES]
     lines += ['enable_request_compression = false'] + last
     return '\n'.join(lines + ['[model_providers.qualification]', 'name = "qualification"', f'base_url = "http://127.0.0.1:{port}/v1"',
                               'wire_api = "responses"', 'requires_openai_auth = false', 'supports_websockets = false', ''])
@@ -249,7 +254,7 @@ def run_case(model, effort, trace=False):
             if p.poll() is not None: raise RuntimeError('native exited during turn')
         raise RuntimeError('turn timeout')
     try:
-        rpc('initialize', {'clientInfo': {'name': 'xcb', 'version': 'qualification'}, 'capabilities': {'experimentalApi': True, 'requestAttestation': False}})
+        rpc('initialize', {'clientInfo': {'name': 'xcb', 'version': 'qualification'}, 'capabilities': {'experimentalApi': True, 'requestAttestation': False, 'explicitGatewayOauth': True}})
         send({'method': 'initialized'})
         evidence['emptyTurnStatus'] = 'skipped' if trace else turn([])
         evidence['toolTurnStatus'] = turn([ECHO])

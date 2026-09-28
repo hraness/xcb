@@ -541,6 +541,8 @@ struct ViewStamp {
     workspaces: (i64, i64, i64),
     config: Option<std::time::SystemTime>,
     fault: Option<std::time::SystemTime>,
+    relay_fault: Option<std::time::SystemTime>,
+    relay_projection_fault: Option<std::time::SystemTime>,
     progress: Option<std::time::SystemTime>,
     progress_time: Option<u64>,
     direct_database: Option<std::time::SystemTime>,
@@ -1379,6 +1381,8 @@ impl ManagedStore {
             workspaces,
             config: modified(state_root.join("config.json")),
             fault: modified(self.root.join(SUPERVISOR_FAULT_FILE)),
+            relay_fault: modified(self.root.join(RELAY_FAULT_FILE)),
+            relay_projection_fault: modified(self.root.join(RELAY_PROJECTION_FAULT_FILE)),
             progress,
             // Expired heartbeats stop presenting a stale thinking/tool phase
             // even when a supervisor stopped without rewriting the file.
@@ -3418,6 +3422,9 @@ impl ManagedStore {
         if let Some(fault) = supervisor_fault(&self.root) {
             lines.push(format!("Last supervisor fault: {fault}"));
         }
+        if let Some(fault) = relay_fault(&self.root) {
+            lines.push(format!("Remote relay: {fault}"));
+        }
         Ok(lines.join("\n"))
     }
 
@@ -4811,6 +4818,8 @@ struct PendingUncertain {
 }
 
 const SUPERVISOR_FAULT_FILE: &str = "supervisor.fault.json";
+const RELAY_FAULT_FILE: &str = "relay.fault.json";
+const RELAY_PROJECTION_FAULT_FILE: &str = "relay.projection.fault.json";
 const MAX_FAULT_BYTES: usize = 4096;
 /// An unchanged fault is rewritten at most this often, so a row that fails
 /// on every 250 ms tick costs one small write a minute, not four a second.
@@ -4854,16 +4863,31 @@ pub(crate) fn record_supervisor_fault(root: &Path, message: &str) {
 }
 
 fn write_supervisor_fault(root: &Path, message: &str, coalesce: bool) {
+    write_fault(root, SUPERVISOR_FAULT_FILE, message, coalesce);
+}
+
+/// Relay failures have their own record: neither local worker faults nor
+/// repeated connection failures may hide the other kind of problem.
+pub(crate) fn record_relay_fault(root: &Path, message: &str, projection: bool) {
+    let filename = if projection {
+        RELAY_PROJECTION_FAULT_FILE
+    } else {
+        RELAY_FAULT_FILE
+    };
+    write_fault(root, filename, message, true);
+}
+
+fn write_fault(root: &Path, filename: &str, message: &str, coalesce: bool) {
     let now = now_ms();
     let message = xcb_core::display_text(message, 512);
-    let path = root.join(SUPERVISOR_FAULT_FILE);
+    let path = root.join(filename);
     let previous = private::read(&path, MAX_FAULT_BYTES).ok();
     // Skipped: the file already holds this fault from moments ago, or this
     // process wrote it moments ago while other faults interleaved (two rows
     // failing every tick would otherwise rewrite the file 8 times a second).
     // A cleared file is always written again.
     if coalesce {
-        let recent = recently_recorded(root, &message, now);
+        let recent = recently_recorded(&path, &message, now);
         if let Some(bytes) = previous.as_deref()
             && (recent
                 || serde_json::from_slice::<SupervisorFault>(bytes).is_ok_and(|fault| {
@@ -4917,6 +4941,19 @@ fn recently_recorded(root: &Path, message: &str, now: u64) -> bool {
 
 fn clear_supervisor_fault(root: &Path) {
     let _ = fs::remove_file(root.join(SUPERVISOR_FAULT_FILE));
+}
+
+pub(crate) fn clear_relay_fault(root: &Path) {
+    clear_relay_connection_fault(root);
+    clear_relay_projection_fault(root);
+}
+
+pub(crate) fn clear_relay_connection_fault(root: &Path) {
+    let _ = fs::remove_file(root.join(RELAY_FAULT_FILE));
+}
+
+pub(crate) fn clear_relay_projection_fault(root: &Path) {
+    let _ = fs::remove_file(root.join(RELAY_PROJECTION_FAULT_FILE));
 }
 
 /// A supervisor that fails before it holds its lock exits with stderr going
@@ -5008,7 +5045,21 @@ pub fn supervisor_fault(root: &Path) -> Option<String> {
 /// The last recorded supervisor fault with the wall-clock time it was
 /// written.
 pub(crate) fn supervisor_fault_record(root: &Path) -> Option<(u64, String)> {
-    let bytes = private::read(&root.join(SUPERVISOR_FAULT_FILE), MAX_FAULT_BYTES).ok()?;
+    read_fault(root, SUPERVISOR_FAULT_FILE)
+}
+
+/// The unresolved relay failure, independent of the local supervisor fault.
+/// A successful relay operation clears only the failure it proves recovered.
+pub fn relay_fault(root: &Path) -> Option<String> {
+    let faults: Vec<_> = [RELAY_FAULT_FILE, RELAY_PROJECTION_FAULT_FILE]
+        .into_iter()
+        .filter_map(|filename| read_fault(root, filename).map(|(_, message)| message))
+        .collect();
+    (!faults.is_empty()).then(|| faults.join("; "))
+}
+
+fn read_fault(root: &Path, filename: &str) -> Option<(u64, String)> {
+    let bytes = private::read(&root.join(filename), MAX_FAULT_BYTES).ok()?;
     let fault: SupervisorFault = serde_json::from_slice(&bytes).ok()?;
     (fault.version == 1 && !fault.message.is_empty())
         .then(|| (fault.at_ms, xcb_core::display_text(&fault.message, 512)))
@@ -6342,6 +6393,9 @@ fn managed_view(
     }
     if let Some(fault) = supervisor_fault(managed.root()) {
         status.push_str(&format!(" · last supervisor fault: {fault}"));
+    }
+    if let Some(fault) = relay_fault(managed.root()) {
+        status.push_str(&format!(" · remote relay: {fault}"));
     }
     view.extensions
         .insert(0, ("algal supervisor".into(), status));
