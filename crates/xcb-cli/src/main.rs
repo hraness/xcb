@@ -3134,7 +3134,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                         )?;
                     } else {
                         println!(
-                            "Would recover run {} (phase {}, process group {}).\nRepeat with --yes to confirm the provider and any command it ran have stopped, restore the account's sign-in, and free the account. Recovery never applies staged command edits.",
+                            "Would recover run {} (phase {}, process group {}).\nRepeat with --yes to confirm the provider and any command it ran have stopped, keep the account's saved sign-in or a verified same-account refresh, and free the account. Recovery never applies staged command edits.",
                             run.id, run.phase, pid
                         );
                     }

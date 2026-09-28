@@ -10,6 +10,17 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.10.5 - 2026-09-27
+
+xcb can recover a stopped Codex sign-in that used a different ChatGPT account
+without replacing the account you already saved.
+
+- After confirming the sign-in process has exited, `xcb recover` can release
+  the held account. It discards credentials from a different ChatGPT identity
+  and keeps the account's existing sign-in and authentication status.
+- Recovery still refuses to proceed if the saved credentials changed while
+  the sign-in was open.
+
 ## 0.10.4 - 2026-09-27
 
 xcb renews an expired relay sign-in while keeping the same linked device and
