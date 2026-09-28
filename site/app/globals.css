@@ -422,7 +422,7 @@ body > div[data-hraness-marketing-preset] { flex: 1; }
 .xcb-cli-proof p { margin-block-end: 0; font-size: .875rem; color: var(--muted); }
 
 /* Primary actions and native appearance controls keep their phone hit area. */
-.xcb-opening .hraness-marketing-action,
+.xcb-home .hraness-marketing-action,
 .xcb-header-wrap .hraness-design-palette-menu > summary {
   min-inline-size: max(2.75rem, var(--interactive-target-compact, 2.75rem));
   min-block-size: max(2.75rem, var(--interactive-target-compact, 2.75rem));

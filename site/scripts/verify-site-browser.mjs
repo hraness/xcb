@@ -56,7 +56,7 @@ try {
         const state = await page.evaluate(() => {
           const footer = document.querySelector("#hraness-site-footer");
           return {
-            overflow: document.documentElement.scrollWidth > innerWidth,
+            overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth,
             heading: document.querySelector("h1")?.textContent?.trim(),
             theme: document.documentElement.dataset.theme,
             footerPositions: [footer, footer?.querySelector(".hraness-site-footer__inner")].map(element => element ? getComputedStyle(element).position : null),
@@ -64,9 +64,11 @@ try {
           };
         });
         const name = `${width}-${theme}-${route === "/" ? "home" : route.slice(1).replaceAll("/", "_")}`;
-        await page.screenshot({ path: resolve(artifacts, `${name}.png`), fullPage: true, animations: "disabled" });
+        const screenshot = await page.screenshot({ path: resolve(artifacts, `${name}.png`), fullPage: true, animations: "disabled" });
+        state.screenshotWidth = screenshot.readUInt32BE(16);
         await writeFile(resolve(artifacts, `${name}.json`), JSON.stringify({ route, state, errors }, null, 2));
         assert.ok(!state.overflow, `${route}: horizontal overflow at ${width}`);
+        assert.equal(state.screenshotWidth, width, `${route}: full-page capture exceeds viewport`);
         assert.ok(state.heading, `${route}: missing heading`);
         assert.equal(state.theme, theme, `${route}: system appearance`);
         assert.ok(state.footerPositions.every(position => position === "static" || position === "relative"), `${route}: footer not in normal flow`);
