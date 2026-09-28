@@ -1496,12 +1496,14 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 .ok_or(Error::Unavailable("session not found"))?;
             direct_chat(store, PathBuf::from(session.workspace), Some(id), cli.json).await
         }
+        // Keep routing and execution temporaries out of unrelated commands'
+        // poll frames, which must fit the default thread stack.
         Some(Commands::Run {
             prompt,
             account,
             model,
             images,
-        }) => {
+        }) => Box::pin(async move {
             let prompt = match prompt {
                 Some(prompt) => prompt,
                 None if !io::stdin().is_terminal() => {
@@ -1612,7 +1614,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
                 println!("{}", result.text);
             }
             Ok(run_exit_code(&result))
-        }
+        })
+        .await,
         Some(Commands::Accounts { command }) => {
             match command {
                 None => accounts(&store, &config, cli.json)?,
@@ -1783,7 +1786,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Some(Commands::Setup { provider, plan }) => {
+        // Setup can recursively dispatch login, so it needs a separate frame.
+        Some(Commands::Setup { provider, plan }) => Box::pin(async move {
             if cli.json {
                 return Err(Error::guided(
                     "xcb setup is interactive, so it has no --json output",
@@ -1882,7 +1886,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             println!("{ok} {name} is set up.");
             ux::next("xcb");
             Ok(0)
-        }
+        })
+        .await,
         Some(Commands::Doctor {
             provider,
             executable,
