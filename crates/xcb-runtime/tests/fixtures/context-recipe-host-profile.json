@@ -7,7 +7,7 @@
   },
   "runtime": {
     "runtimeDigest": "sha256:905d9c070c0d41ef3886cd01ac4f9c904aeecbc98de5e3431eecf61613b4a686",
-    "evaluatorDigest": "sha256:377a9b31edaa14cab3a5fbbf52305d864a957d62c6995dfaae291a7d279bd135",
+    "evaluatorDigest": "sha256:8222963f1a2158eda3025a30c90266628a08f0b4f0749a2e99171fa34dd7ee4b",
     "supportedContracts": [
       "algal.effect.v1",
       "algal.host-lifecycle.v1",
@@ -62,5 +62,5 @@
     "host-messaging",
     "uncertain-auto-retry"
   ],
-  "digest": "sha256:ffb5392bb95eed2b912f495ea7e853ed3fcad35d14240752e73e107c6a8b9ef1"
+  "digest": "sha256:4df743e02b0e842389ac6b7c067317026c9b35f67c0702155a1c1bd816465a25"
 }

@@ -21,7 +21,7 @@ const QUOTA_UNIT: &str = "subscription-quota";
 /// The evaluator revision the context-recipe host pins; the fixture test
 /// asserts it stays in lockstep with the `algal` dependency in
 /// `crates/xcb-runtime/Cargo.toml`.
-const ALGAL_EVALUATOR_REV: &str = "9922202a2da45bb1f7e0db82c0be5a1c6770c21b";
+const ALGAL_EVALUATOR_REV: &str = "0f73388df2093c52291687a9fccb6d170bdf2928";
 
 /// The contract's integer ceiling (`algal` rejects larger values).
 const RECORD_INT_MAX: u64 = 4_294_967_295;
