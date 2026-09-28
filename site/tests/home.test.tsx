@@ -138,6 +138,30 @@ test("shows an exact released CLI help excerpt without simulated routing results
   const html = renderToStaticMarkup(<Home />);
   expect(textOf(html)).toContain("xcb models route --help");
   expect(textOf(html)).toContain("without reserving an account");
-  expect(html).toContain("Help excerpt from xcb 0.10.1");
+  expect(html).toContain("Help excerpt from xcb 0.10.5");
   expect(html).not.toContain("s_…");
+});
+
+test("the homepage declares one website and one application for xcb, published by Hraness", () => {
+  const html = renderToStaticMarkup(<Home />);
+  const scripts = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/gu)].map((match) => match[1] ?? "");
+  expect(scripts.length).toBeGreaterThan(0);
+  const nodes = scripts.flatMap((script) => {
+    const parsed: unknown = JSON.parse(script);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  }) as Record<string, unknown>[];
+  const ofType = (type: string) => nodes.filter((node) => node["@type"] === type);
+  const [website] = ofType("WebSite");
+  const [app] = ofType("SoftwareApplication");
+  expect(ofType("WebSite")).toHaveLength(1);
+  expect(ofType("SoftwareApplication")).toHaveLength(1);
+  expect(ofType("SoftwareSourceCode")).toHaveLength(1);
+  expect(ofType("FAQPage")).toHaveLength(1);
+  expect(website?.["alternateName"]).toEqual(["Excalibur"]);
+  expect(website?.["publisher"]).toEqual({ "@type": "Organization", "@id": "https://hraness.com/#organization", name: "Hraness", url: "https://hraness.com/" });
+  expect(app?.["@id"]).toBe("https://xcb.sh/#app");
+  expect(app?.["publisher"]).toEqual({ "@type": "Organization", "@id": "https://hraness.com/#organization", name: "Hraness", url: "https://hraness.com/" });
+  expect(app?.["softwareVersion"]).toBe(publishedRelease?.version);
+  expect(app).not.toHaveProperty("aggregateRating");
+  expect(ofType("SoftwareSourceCode")[0]?.["targetProduct"]).toEqual({ "@id": "https://xcb.sh/#app" });
 });

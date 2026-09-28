@@ -246,6 +246,13 @@ function Providers() {
         </tbody>
       </table></div>
       <p>For Codex and Devin, xcb checks the executable’s SHA-256 as well as its version. When a provider updates itself to a build xcb hasn’t reviewed, <code>xcb doctor</code> says it is waiting for review and xcb keeps using the build it already checked. Reviewed builds are published in the repository’s <Ext href={`${repository}/blob/main/qualified-builds.json`}>qualified-builds.json</Ext>, and xcb picks them up within an hour without an upgrade.</p>
+      <h2 id="more-than-one-account">Use more than one account per provider</h2>
+      <p><code>xcb setup</code> reuses the account it already has for that provider. To add another Claude or Codex account, add it, then sign in with a different login:</p>
+      <Code>{`xcb accounts add claude
+xcb accounts login <account-id>
+xcb accounts refresh <account-id>
+xcb accounts`}</Code>
+      <p>For Codex, <code>xcb accounts import-codex</code> without <code>--account</code> also creates a new account from another ChatGPT sign-in, and each <code>xcb accounts import-devin</code> adds one Devin account. <code>xcb accounts</code> lists every account with its known usage and when it resets, and the thread and <code>xcb run</code> pick among them for each task. When every account is at a known limit, xcb reports the limit and a task from your thread waits for the reset; xcb never falls back to an API key. Each provider’s terms decide whether you may use more than one personal account, so check them before you add a second.</p>
       <h2 id="claude" className="xcb-provider-heading"><ProviderMark mark="claudecode" label="Claude Code" size={24} />Claude</h2>
       <Code>{`xcb setup claude`}</Code>
       <p>Setup runs these steps, which you can also run one at a time:</p>

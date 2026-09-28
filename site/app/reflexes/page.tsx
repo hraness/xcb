@@ -4,8 +4,8 @@ import { AskAiAboutThis } from "@hraness/ui";
 import { SiteHeader } from "../site-header";
 import { socialImages } from "../social";
 
-const title = "Routing that learns how you work · xcb";
-const description = "xcb learns which model tier you want and when a worker stopped early or needs your go-ahead, and adopts a change only after it wins on new labels.";
+const title = "Stop typing “continue” to your coding agent · xcb";
+const description = "xcb learns from your replies when a coding agent stopped short or is waiting for a go-ahead, and which model tier you want. It answers for you only after your own replies certify it.";
 const reference = "https://github.com/hraness/xcb/blob/main/docs/reflexes.md";
 
 export const metadata: Metadata = {
@@ -31,19 +31,19 @@ export default function Reflexes() {
             heading="Stop typing “continue”."
             headingId="reflexes-title"
             summary="Workers end turns early: “Waiting on CI; I’ll merge on green.” “Should I open the PR?” And you pick a bigger model for the hard tasks. xcb learns all of it from what you already do, and shows its evidence."
-            actions={[{ href: "/docs/reflexes", label: "Read how it works" }, { href: "/docs/getting-started", label: "Try the source preview" }]}
-            boundary="Auto-certification ships in v0.6.0. Settle and confirm default to auto and observe until local evidence certifies them. Earlier v0.5.0 downloads default both to observe and require explicit opt-in to act. Learning stays local and never widens a route or continuation's authority."
+            actions={[{ href: "/docs/reflexes", label: "Read how it works" }, { href: "/install", label: "Install xcb" }]}
+            boundary="Continuing a stopped turn and answering a go-ahead start out only watching, and act after your own replies certify them. Learning stays on your machine and never gives a task more access."
           />
 
           <MarketingSection
             id="what-it-learns"
             heading="Small decisions, made many times a day."
             headingId="what-it-learns-title"
-            summary="Each is a reflex: a small ALGAL program over deterministic features and learned weights. The program has no effects and makes no model calls, so every decision is a receipt you can replay."
+            summary="Each is a small ALGAL program that does arithmetic on features of the turn and learned weights. It makes no model calls and changes nothing, so xcb can replay any past decision and get the same answer."
           >
             <div className="xcb-readiness">
-              <div><h3>Which tier this task deserves</h3><p>The route reflex reads the shape of your request (an imperative opening, resume language, how many different actions it asks for) and, if configured, a judge&apos;s assessment. It chooses frontier or standard among routes that are already eligible. Large prompts always get the highest tier.</p></div>
-              <div><h3>Whether the worker actually finished</h3><p>The settle reflex categorizes how each turn ended: done, stopped short, waiting for your go-ahead, asked a question, blocked, interrupted. Its defaults are fitted on 2,428 real follow-ups, where how much work a turn did was the strongest signal: “continue” followed 15% of turns with no tool calls and 45% of turns with 40 or more.</p></div>
+              <div><h3>Which tier this task deserves</h3><p>The route reflex reads the shape of your request (an imperative opening, resume language, how many different actions it asks for) and, if configured, a judge&apos;s assessment. It chooses frontier or standard among accounts and models that can take the task now. Large prompts always get the highest tier.</p></div>
+              <div><h3>Whether the worker actually finished</h3><p>The settle reflex categorizes how each turn ended: done, stopped short, waiting for your go-ahead, asked a question, blocked, interrupted. Its defaults are fitted on <a href={`${reference}#measured-on-operator-history`}>one operator’s 2,428 follow-ups</a>, where how much work a turn did was the strongest signal: “continue” followed 15% of turns with no tool calls and 45% of turns with 40 or more.</p></div>
               <div><h3>What you do next is the label</h3><p>Reply “continue” and xcb learns the turn stopped short; “yes, go ahead” teaches it the turn was asking; moving on means it was done. Ask for “opus” and the route learns you wanted more. When xcb continues for you, the continuation labels itself: real work confirms it, cancelling it counts against it.</p></div>
             </div>
           </MarketingSection>
@@ -79,7 +79,7 @@ export default function Reflexes() {
             <div className="xcb-readiness">
               <div><h3>Replace a program</h3><p>Drop an organism at <code>reflexes/route.algal.json</code> in the state directory to add a gate or combine heads differently. xcb admits it only if it has no effects and no agent calls. Every observation records the digest of the program that made it.</p></div>
               <div><h3>Bootstrap from history</h3><p><code>xcb reflex import</code> replays your own labeled history in order, reports how the reflex would have done, and adopts only heads that won a trial. It keeps derived features, not text.</p></div>
-              <div><h3>Acts once it has earned it</h3><p>In v0.6.0, continuing a stopped-short turn and answering a go-ahead default to <code>auto</code>. Each acts only after your own replies certify its precision (0.75 and 0.85 as a 99% lower bound), leaves about one turn in ten to you, and goes back to observing if it slips. The deterministic safety gates, a risk veto for deletion, deployment, spending and credentials, and a configured judge&apos;s veto still apply. Earlier v0.5.0 downloads use <code>observe</code> defaults and do not accept <code>auto</code>.</p></div>
+              <div><h3>Acts once it has earned it</h3><p>Continuing a stopped-short turn and answering a go-ahead default to <code>auto</code>. Each acts only after your own replies certify its precision (0.75 and 0.85 as a 99% lower bound), leaves about one turn in ten to you, and goes back to observing if it slips. The deterministic safety gates, a risk veto for deletion, deployment, spending and credentials, and a configured judge&apos;s veto still apply.</p></div>
               <a className="xcb-compare-guide-link" href="/docs/reflexes">Read the reflex guide ↗</a>
             </div>
           </MarketingSection>

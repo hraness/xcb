@@ -28,7 +28,7 @@ export const hubDescription = "xcb runs each coding task on one of your own Clau
 export const hubHeading = "How xcb compares";
 export const hubLead = "xcb runs each coding task on one of your own Claude, Codex, or Devin subscriptions, through that provider’s own tool. It holds the account until the run ends, sandboxes the run, and returns the result to you or to another agent.";
 /** The day the tool descriptions below were last read against their sources. */
-export const hubUpdated: ArticleIsoDate = "2026-09-27";
+export const hubUpdated: ArticleIsoDate = "2026-09-28";
 
 export const hubGroups: readonly HubGroup[] = [
   {
@@ -71,6 +71,17 @@ export const hubGroups: readonly HubGroup[] = [
       { name: "Superset", href: `${comparisonPath("conductor")}#others`, summary: "A desktop workspace for CLI agents with terminals, code review, and browser previews." },
       { name: "Emdash", href: `${comparisonPath("conductor")}#others`, summary: "A desktop app that runs each agent task in its own worktree, locally or over SSH." },
       { name: "OpenChamber", href: "https://github.com/openchamber/openchamber", summary: "An open-source workspace for running and reviewing agent work on desktop, web, VS Code, and mobile." },
+      { name: "CLI Agent Orchestrator", href: "https://github.com/awslabs/cli-agent-orchestrator", summary: "Runs Claude Code, Codex, Kiro, and other CLIs in separate terminal sessions, with a supervisor agent handing work to workers." },
+    ],
+  },
+  {
+    id: "account-switchers",
+    title: "Account switchers",
+    summary: "These change which login your usual Claude Code or Codex uses, by hand or before a usage limit, and you keep every feature of the provider’s tool. xcb keeps each account in its own private profile, picks one per task across Claude, Codex, and Devin, and replaces the provider’s built-in tools with its own file tools in each run.",
+    tools: [
+      { name: "claude-swap", href: "https://github.com/realiti4/claude-swap", summary: "Switches Claude Code between saved logins and can rotate before you hit a rate limit." },
+      { name: "aisw", href: "https://github.com/burakdede/aisw", summary: "Named account profiles for Claude Code, Codex CLI, Gemini CLI, and Antigravity CLI." },
+      { name: "CLAUDE_CONFIG_DIR", href: "https://code.claude.com/docs/en/env-vars", summary: "Claude Code’s own environment variable for keeping each account’s settings and sessions in a separate folder." },
     ],
   },
   {
