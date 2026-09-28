@@ -179,9 +179,9 @@ enum Commands {
         /// Bootstrap or invite token when the deployment gates enrollment.
         #[arg(long)]
         invite: Option<String>,
-        /// Relay deployment URL; defaults to $XCB_RELAY_URL or the local
-        /// backend, and is saved at enrollment. With --reauth, it must match
-        /// this machine's saved relay.
+        /// Relay deployment URL; defaults to $XCB_RELAY_URL, and is saved at
+        /// enrollment. A first link needs one of them. With --reauth, it must
+        /// match this machine's saved relay.
         #[arg(long)]
         relay: Option<String>,
         /// Enroll as a dispatch-only controller instead of a workspace

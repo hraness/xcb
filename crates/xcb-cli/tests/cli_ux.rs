@@ -233,6 +233,20 @@ fn reauth_requires_a_linked_device_without_starting_local_stores() {
 }
 
 #[test]
+fn a_first_link_without_a_relay_refuses_instead_of_guessing_a_local_backend() {
+    let sandbox = Sandbox::new("link-no-relay");
+    for env in [&[][..], &[("XCB_RELAY_URL", "")][..]] {
+        let output = sandbox.run(&["--json", "link", "--email", "owner@example.test"], env);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let message = value["error"]["message"].as_str().unwrap().to_lowercase();
+        assert!(message.contains("no relay configured"), "{message}");
+        assert!(message.contains("--relay"), "{message}");
+        assert!(!text(&output.stderr).contains("Requesting a sign-in code"));
+    }
+}
+
+#[test]
 fn ordinary_link_keeps_a_linked_device_and_session_byte_for_byte() {
     let sandbox = Sandbox::new("link-existing");
     let device = sandbox.linked_relay();

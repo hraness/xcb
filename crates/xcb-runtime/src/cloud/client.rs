@@ -30,8 +30,13 @@ fn protocol(what: &'static str) -> Error {
     Error::Protocol(what)
 }
 
-fn timed_out() -> Error {
-    Error::Unavailable("relay request timed out")
+/// Names the relay, so a stall against the wrong deployment says which
+/// address never answered.
+fn timed_out(deployment_url: &str) -> Error {
+    Error::Unavailable(dynamic(format!(
+        "relay request timed out: {deployment_url} did not answer within {}s",
+        REQUEST_TIMEOUT.as_secs()
+    )))
 }
 
 /// A bounded protocol detail for errors that arrive from the relay or
@@ -118,7 +123,7 @@ impl RelayClient {
     pub async fn connect(deployment_url: &str) -> Result<Self> {
         let client = tokio::time::timeout(REQUEST_TIMEOUT, ConvexClient::new(deployment_url))
             .await
-            .map_err(|_| timed_out())?
+            .map_err(|_| timed_out(deployment_url))?
             .map_err(|error| protocol(dynamic(format!("convex connect: {error}"))))?;
         Ok(Self {
             client,
@@ -162,7 +167,7 @@ impl RelayClient {
             self.client.mutation(path, object_args(args)?),
         )
         .await
-        .map_err(|_| timed_out())?
+        .map_err(|_| timed_out(&self.deployment_url))?
         .map_err(|error| protocol(dynamic(format!("relay mutation {path}: {error}"))))?;
         unwrap(result)
     }
@@ -172,7 +177,7 @@ impl RelayClient {
         let result =
             tokio::time::timeout(REQUEST_TIMEOUT, self.client.query(path, object_args(args)?))
                 .await
-                .map_err(|_| timed_out())?
+                .map_err(|_| timed_out(&self.deployment_url))?
                 .map_err(|error| protocol(dynamic(format!("relay query {path}: {error}"))))?;
         unwrap(result)
     }
@@ -184,7 +189,7 @@ impl RelayClient {
             self.client.action(path, object_args(args)?),
         )
         .await
-        .map_err(|_| timed_out())?
+        .map_err(|_| timed_out(&self.deployment_url))?
         .map_err(|error| protocol(dynamic(format!("relay action {path}: {error}"))))?;
         unwrap(result)
     }
