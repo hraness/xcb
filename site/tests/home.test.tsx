@@ -158,9 +158,9 @@ test("the homepage declares one website and one application for xcb, published b
   expect(ofType("SoftwareSourceCode")).toHaveLength(1);
   expect(ofType("FAQPage")).toHaveLength(1);
   expect(website?.["alternateName"]).toEqual(["Excalibur"]);
-  expect(website?.["publisher"]).toEqual({ "@id": "https://hraness.com/#organization" });
+  expect(website?.["publisher"]).toEqual({ "@type": "Organization", "@id": "https://hraness.com/#organization", name: "Hraness", url: "https://hraness.com/" });
   expect(app?.["@id"]).toBe("https://xcb.sh/#app");
-  expect(app?.["publisher"]).toEqual({ "@id": "https://hraness.com/#organization" });
+  expect(app?.["publisher"]).toEqual({ "@type": "Organization", "@id": "https://hraness.com/#organization", name: "Hraness", url: "https://hraness.com/" });
   expect(app?.["softwareVersion"]).toBe(publishedRelease?.version);
   expect(app).not.toHaveProperty("aggregateRating");
   expect(ofType("SoftwareSourceCode")[0]?.["targetProduct"]).toEqual({ "@id": "https://xcb.sh/#app" });

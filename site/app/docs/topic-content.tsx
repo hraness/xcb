@@ -247,8 +247,8 @@ function Providers() {
       </table></div>
       <p>For Codex and Devin, xcb checks the executable’s SHA-256 as well as its version. When a provider updates itself to a build xcb hasn’t reviewed, <code>xcb doctor</code> says it is waiting for review and xcb keeps using the build it already checked. Reviewed builds are published in the repository’s <Ext href={`${repository}/blob/main/qualified-builds.json`}>qualified-builds.json</Ext>, and xcb picks them up within an hour without an upgrade.</p>
       <h2 id="more-than-one-account">Use more than one account per provider</h2>
-      <p><code>xcb setup</code> reuses the account it already has for that provider. To add another Claude or Codex account, add it and sign in with a different login:</p>
-      <Code>{`xcb accounts add claude --plan Pro
+      <p><code>xcb setup</code> reuses the account it already has for that provider. To add another Claude or Codex account, add it, then sign in with a different login:</p>
+      <Code>{`xcb accounts add claude
 xcb accounts login <account-id>
 xcb accounts refresh <account-id>
 xcb accounts`}</Code>

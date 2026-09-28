@@ -5,7 +5,7 @@ import { SiteHeader } from "../site-header";
 import { socialImages } from "../social";
 
 const title = "Stop typing “continue” to your coding agent · xcb";
-const description = "xcb learns from your replies when a coding agent stopped short and which model tier you want, and acts only after your own history shows it gets them right.";
+const description = "xcb learns from your replies when a coding agent stopped short or is waiting for a go-ahead, and which model tier you want. It answers for you only after your own replies certify it.";
 const reference = "https://github.com/hraness/xcb/blob/main/docs/reflexes.md";
 
 export const metadata: Metadata = {

@@ -45,7 +45,7 @@ const readiness = [
 ] as const;
 
 export default function Home() {
-  const publisher = { "@id": "https://hraness.com/#organization" };
+  const publisher = { "@type": "Organization", "@id": "https://hraness.com/#organization", name: "Hraness", url: "https://hraness.com/" };
   const structuredData = [
     { "@context": "https://schema.org", "@type": "WebSite", "@id": "https://xcb.sh/#website", url: "https://xcb.sh/", name: "xcb", alternateName: ["Excalibur"], inLanguage: "en-US", publisher },
     {
@@ -65,7 +65,7 @@ export default function Home() {
       publisher,
       ...(publishedRelease === null ? {} : { softwareVersion: publishedRelease.version }),
     },
-    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: "xcb", description: metaDescription, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.sh", targetProduct: { "@id": "https://xcb.sh/#app" } },
+    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: "xcb", description: metaDescription, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.sh/", targetProduct: { "@id": "https://xcb.sh/#app" } },
     { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: questions.map(({ question, answer }) => ({ "@type": "Question", name: question, acceptedAnswer: { "@type": "Answer", text: answer } })) },
   ];
   return (
