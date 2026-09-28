@@ -20,7 +20,7 @@ const repository = "https://github.com/hraness/xcb";
 
 // Hero heading and summary come from the portfolio registry's xcb messaging record.
 const heading = "Use your Claude, Codex, and Devin plans from one agent.";
-const summary = "xcb (Excalibur) is a terminal and router for developers who pay for more than one coding agent. Each task runs through Claude Code, Codex, or the Devin CLI on one of your accounts that is signed in, idle, and not at a known limit. Use its terminal or call it from your own agent or app.";
+const summary = "xcb (Excalibur) is for developers who pay for more than one coding agent. Each task runs in Claude Code, Codex, or the Devin CLI on an account that is signed in, idle, and not at a known limit. Use its terminal or your own agent or app.";
 const metaDescription = "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
 
 const questions = [
