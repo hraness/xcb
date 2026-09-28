@@ -38,6 +38,10 @@ pub enum Progress {
 }
 pub type Observer = Arc<dyn Fn(Progress) + Send + Sync>;
 
+/// Diagnostic for a turn refused before its prompt was sent because the
+/// session's model left the freshly discovered provider catalog.
+pub const STALE_MODEL: &str = "selected model or effort is not in the fresh provider catalog";
+
 /// A bounded host-selected explanation, never a raw provider/OS error payload.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(transparent)]
@@ -2001,9 +2005,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
             choice.id == session.model.id
                 && (session.model.effort.is_none() || choice.effort == session.model.effort)
         }) {
-            return Err(Error::Unavailable(
-                "selected model or effort is not in the fresh provider catalog",
-            ));
+            return Err(Error::Unavailable(STALE_MODEL));
         }
         let (email, plan) = protocol.account_identity();
         if email.is_some() || plan.is_some() {

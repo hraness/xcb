@@ -3618,6 +3618,22 @@ impl ManagedStore {
                         Some(Failure::AccountQuota | Failure::ModelQuota)
                     )
             });
+        // The catalog check runs before the prompt is sent, and the runner has
+        // already stored the refreshed catalog, so a fresh session on another
+        // route cannot repeat any effect.
+        let stale_model = !task.cancel_requested
+            && !unsettled
+            && task.attempts.saturating_add(1) < task.max_attempts
+            && result.as_ref().is_ok_and(|outcome| {
+                outcome.facts.joined
+                    && outcome.facts.effects == EffectState::None
+                    && !outcome.facts.pending_attention
+                    && outcome.facts.failure == Some(Failure::Unknown)
+                    && outcome
+                        .diagnostic
+                        .as_ref()
+                        .is_some_and(|d| d.as_str().contains(crate::runner::STALE_MODEL))
+            });
         let failed_account = if failover_route
             && result
                 .as_ref()
@@ -3744,6 +3760,11 @@ impl ManagedStore {
             Ok(outcome) if failover_route => (
                 TaskState::Queued,
                 format!("Usage limit interrupted {}; selecting another eligible route", task.route.as_deref().unwrap_or("the previous route")),
+                Some(outcome.text.clone()),
+            ),
+            Ok(outcome) if stale_model => (
+                TaskState::Queued,
+                format!("{} left the provider's model list before the prompt was sent; selecting another eligible route", task.route.as_deref().unwrap_or("the previous route")),
                 Some(outcome.text.clone()),
             ),
             Ok(outcome) if continue_task => (
@@ -3884,6 +3905,12 @@ impl ManagedStore {
                     8192
                 )
             );
+        } else if state == TaskState::Queued && stale_model {
+            // The refused session never received the prompt.
+            next.session = None;
+            next.delivered_inputs = 0;
+            next.delivered_preferences.clear();
+            next.context_carried = false;
         } else if state == TaskState::Queued && continue_task {
             next.next_prompt = if inbox_continue {
                 inbox::CONTINUATION_PROMPT.into()
@@ -8167,6 +8194,77 @@ mod tests {
             )
             .unwrap();
         assert_eq!(failed, 1);
+    }
+
+    #[tokio::test]
+    async fn stale_model_refusal_requeues_on_a_new_route() {
+        use xcb_core::models::{Mode, ModelChoice};
+        let state_root = root();
+        let workspace_root = root();
+        let state =
+            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let workspace = workspace_root.path().canonicalize().unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let account = xcb.add_account(Provider::Devin, "Test", 1, None).unwrap();
+        let model = ModelChoice {
+            provider: Provider::Devin,
+            id: Id::new("swe-2").unwrap(),
+            label: "SWE-2".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: Some(Id::new("high").unwrap()),
+            observed_at_ms: 1,
+        };
+        let session = xcb
+            .create_session(&account.id, model.clone(), &workspace, 1)
+            .unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = managed
+            .create_task(
+                &chat,
+                message("m_stale_model"),
+                "write answer.sh".into(),
+                vec![],
+                &workspace,
+            )
+            .await
+            .unwrap();
+        let route = format!("{} · {}", model.key(), account.id);
+        let task = managed
+            .prepare(
+                &task,
+                session.id,
+                route.clone(),
+                "fixture".into(),
+                0,
+                String::new(),
+            )
+            .await
+            .unwrap();
+        let outcome = Outcome {
+            tool_calls: Some(0),
+            diagnostic: Some(crate::runner::Diagnostic::from_error(&Error::Unavailable(
+                crate::runner::STALE_MODEL,
+            ))),
+            text: String::new(),
+            facts: xcb_core::policy::TurnFacts {
+                terminal: Terminal::Failed,
+                joined: true,
+                effects: EffectState::None,
+                pending_attention: false,
+                failure: Some(Failure::Unknown),
+            },
+            state: State::Failed,
+        };
+        let task = managed.finish(&xcb, &task.id, Ok(outcome)).await.unwrap();
+        assert_eq!(task.state, TaskState::Queued);
+        assert_eq!(task.session, None);
+        assert!(!task.context_carried);
+        assert_eq!(task.tried_routes, vec![route]);
+        assert!(task.failed_accounts.is_empty());
+        assert_eq!(task.attempts, 1);
+        assert!(task.detail.contains("left the provider's model list"));
     }
 
     #[test]
