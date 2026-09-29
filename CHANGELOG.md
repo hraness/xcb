@@ -10,6 +10,15 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+xcb now runs GPT-6-Sol on Codex.
+
+- GPT-6-Sol (`gpt-6-sol`) on Codex CLI 0.159.0 passes the tool, callback, and
+  sandbox checks at every reasoning level, so `xcb models` lists it and routing
+  can pick it. GPT-6.1-Sol follows once a stable Codex build bundles it; Codex
+  0.159.0 does not.
+
 ## 0.13.1 - 2026-09-29
 
 xcb now runs Codex CLI 0.159.0, so Codex accounts take tasks again on

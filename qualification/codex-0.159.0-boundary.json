@@ -5,10 +5,10 @@
   "version": "0.159.0",
   "binarySha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
   "sandboxFunctionSha256": "3d1f1500b33e1f192f2304dedd53d5e31cbea5e46e54bd5d04778490fc770a75",
-  "providerProbeSha256": "7e98dc9ce8918eb64297b311ebec3159e9d7fec53a5095983c638d83240a27af",
-  "providerReceiptSha256": "0d969d1a569a1199e3bf9f356779f2a7f2331747d17631ed72964389d5128bb1",
+  "providerProbeSha256": "676f5d1b5053932fc0c0cf306d019317414d7752b64a7f38d263be785cf24006",
+  "providerReceiptSha256": "b68ff05de257766f03c23375a5e58bfe81a76440434717454c8cdf1cefd92222",
   "kernelProbeSha256": "68b0f415a4a913477a3677b39f264d11d42ed40758588590d5a61eafc44abae1",
-  "kernelReceiptSha256": "0ab29fb3eccd514d23ef4aaef2a67cf703c64e0fedc8c2b227a768a7a429fa72",
+  "kernelReceiptSha256": "90cd13a557e2c5aca667713ac9548adc2afcd5dd6aaa2f6dc665ce4afe73f93c",
   "providerChecks": [
     {
       "label": "scratch read",

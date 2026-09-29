@@ -87,9 +87,11 @@ exe.chmod(0o500)
 ca_bundle=run/'public-ca.pem'
 ca_bytes=public_ca_copy(ca_bundle)
 catalog = run/'models.json'
+qualified=[json.loads(x) for x in re.findall(r'"(?:[^"\\]|\\.)*"',config_source.split('pub const QUALIFIED_MODELS: &[&str] = &[',1)[1].split('];',1)[0])]
+assert all(any(row['slug']==slug for row in data['models']) for slug in qualified), 'qualified model missing from the bundled catalog'
 rows=[]
 for row in data['models']:
-    if row['slug'] not in ['gpt-6-astra','gpt-5.6-sol']: continue
+    if row['slug'] not in qualified: continue
     row.update(tool_mode='direct',shell_type='disabled',apply_patch_tool_type=None,
                experimental_supported_tools=[],supports_search_tool=False,
                supports_experimental_context=False,multi_agent_version='disabled',node_repl_disabled=True)
