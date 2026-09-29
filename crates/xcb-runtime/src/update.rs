@@ -535,68 +535,204 @@ fn xml_escape(value: &str) -> String {
 }
 
 const SCHEDULER_LABEL: &str = "dev.hraness.xcb.update";
+/// The systemd user units on Linux: `xcb-update.timer` starts
+/// `xcb-update.service`.
+const SYSTEMD_UNIT: &str = "xcb-update";
+/// The first line of each systemd unit xcb writes. A unit without it is
+/// someone else's and is never replaced or removed.
+const SYSTEMD_MARKER: &str = "# Written by xcb update enable; xcb update disable removes it.";
+const SYSTEMD: bool = cfg!(target_os = "linux");
 
-/// Whether this platform has the daily update LaunchAgent (macOS only).
+/// Whether this platform has the daily update check: a LaunchAgent on
+/// macOS, a systemd user timer on Linux.
 pub fn scheduler_supported() -> bool {
-    cfg!(target_os = "macos")
+    cfg!(any(target_os = "macos", target_os = "linux"))
 }
 
-/// Where the daily update LaunchAgent lives under `home`.
+/// Where the daily update check lives under `home`: the LaunchAgent plist
+/// on macOS, the timer unit on Linux.
 pub fn scheduler_path(home: &Path) -> PathBuf {
-    home.join("Library/LaunchAgents")
-        .join(format!("{SCHEDULER_LABEL}.plist"))
+    if SYSTEMD {
+        crate::systemd::unit_dir(home).join(format!("{SYSTEMD_UNIT}.timer"))
+    } else {
+        home.join("Library/LaunchAgents")
+            .join(format!("{SCHEDULER_LABEL}.plist"))
+    }
+}
+
+/// Every file of the daily update check under `home`.
+fn scheduler_files(home: &Path) -> Vec<PathBuf> {
+    let mut files = vec![scheduler_path(home)];
+    if SYSTEMD {
+        files.push(crate::systemd::unit_dir(home).join(format!("{SYSTEMD_UNIT}.service")));
+    }
+    files
 }
 
 fn launchd_domain() -> String {
     format!("gui/{}", rustix::process::getuid().as_raw())
 }
 
-/// Remove the daily update LaunchAgent under `home` when it is there, and
-/// report whether it was. A missing agent is not an error, so this works on
-/// every platform; it never touches a LaunchAgent it did not find.
+/// Remove the daily update check under `home` when it is there, and report
+/// whether it was. A missing check is not an error, so this works on every
+/// platform; it never touches a file it did not write.
 pub fn remove_scheduler(home: &Path) -> Result<bool> {
-    remove_scheduler_with(home, |plist| {
+    let removed = remove_scheduler_with(home, |plist| {
         // The agent may already be unloaded; removing the file is what
         // keeps it from loading at the next login.
+        if SYSTEMD {
+            crate::systemd::systemctl(&["disable", "--now", &format!("{SYSTEMD_UNIT}.timer")]);
+            return;
+        }
         let _ = Command::new("/bin/launchctl")
             .args(["bootout", &launchd_domain(), &plist.to_string_lossy()])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
-    })
+    })?;
+    if removed && SYSTEMD {
+        crate::systemd::systemctl(&["daemon-reload"]);
+    }
+    Ok(removed)
 }
 
 /// [`remove_scheduler`] with the unload step supplied, so tests never reach
-/// the user's real launchd session.
+/// the user's real launchd session or systemd user manager.
 pub fn remove_scheduler_with(home: &Path, unload: impl FnOnce(&Path)) -> Result<bool> {
-    let plist = scheduler_path(home);
-    match std::fs::symlink_metadata(&plist) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+    let mut found = Vec::new();
+    for file in scheduler_files(home) {
+        match std::fs::symlink_metadata(&file) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+            Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
+                return Err(Error::PrivateState);
+            }
+            Ok(_) => {}
+        }
+        if SYSTEMD && !written_by_xcb(&file)? {
+            return Err(Error::Conflict(
+                "a systemd unit named xcb-update was not written by xcb; it was left in place",
+            ));
+        }
+        found.push(file);
+    }
+    let Some(first) = found.first() else {
+        return Ok(false);
+    };
+    if scheduler_supported() {
+        unload(first);
+    }
+    for file in &found {
+        std::fs::remove_file(file)?;
+    }
+    Ok(true)
+}
+
+fn written_by_xcb(unit: &Path) -> Result<bool> {
+    crate::systemd::has_marker(unit, SYSTEMD_MARKER)
+}
+
+/// The systemd service and timer for the daily update check. The timer runs
+/// the check five minutes after the user manager starts and then once a
+/// day; the check itself skips a run within a day of the last one.
+fn systemd_units(binary: &Path, home: &Path) -> Result<(String, String)> {
+    use crate::systemd::{environment, exec_arg};
+    let service = format!(
+        "{SYSTEMD_MARKER}\n\
+         [Unit]\n\
+         Description=xcb daily update check\n\
+         \n\
+         [Service]\n\
+         Type=oneshot\n\
+         ExecStart={} update daemon --quiet\n\
+         {}\n\
+         StandardOutput=null\n\
+         StandardError=null\n",
+        exec_arg(binary)?,
+        environment("HOME", home)?
+    );
+    let timer = format!(
+        "{SYSTEMD_MARKER}\n\
+         [Unit]\n\
+         Description=xcb daily update check\n\
+         \n\
+         [Timer]\n\
+         OnStartupSec=5min\n\
+         OnUnitActiveSec=1d\n\
+         \n\
+         [Install]\n\
+         WantedBy=timers.target\n"
+    );
+    Ok((service, timer))
+}
+
+/// Write one file of the daily update check, replacing only a file xcb
+/// wrote.
+fn write_unit(path: &Path, body: &str) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
         Ok(meta) if meta.file_type().is_symlink() || !meta.is_file() => {
             return Err(Error::PrivateState);
         }
+        Ok(_) if !written_by_xcb(path)? => {
+            return Err(Error::Conflict(
+                "a systemd unit named xcb-update was not written by xcb; it was left in place",
+            ));
+        }
         Ok(_) => {}
     }
-    if scheduler_supported() {
-        unload(&plist);
-    }
-    std::fs::remove_file(&plist)?;
-    Ok(true)
+    let parent = path.parent().ok_or(Error::PrivateState)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::Write::write_all(&mut staged, body.as_bytes())?;
+    staged.as_file().sync_all()?;
+    staged
+        .persist(path)
+        .map_err(|error| Error::Io(error.error))?;
+    Ok(())
 }
 
-/// Install the per-user macOS scheduler. It invokes the already-installed
+fn install_systemd_scheduler(binary: &Path, home: &Path) -> Result<()> {
+    for directory in crate::systemd::unit_dir_chain(home) {
+        crate::habitat_service::private_directory(&directory)?;
+    }
+    let (service, timer) = systemd_units(binary, home)?;
+    let files = scheduler_files(home);
+    // Check both before writing either, so a foreign unit changes nothing.
+    for file in &files {
+        if std::fs::symlink_metadata(file).is_ok() && !written_by_xcb(file)? {
+            return Err(Error::Conflict(
+                "a systemd unit named xcb-update was not written by xcb; it was left in place",
+            ));
+        }
+    }
+    write_unit(&files[1], &service)?;
+    write_unit(&files[0], &timer)?;
+    if !crate::systemd::systemctl(&["daemon-reload"])
+        || !crate::systemd::systemctl(&["enable", "--now", &format!("{SYSTEMD_UNIT}.timer")])
+    {
+        return Err(Error::Unavailable(
+            "the update timer files are written but systemd could not enable them; run xcb update enable again from a login session with a systemd user manager (systemctl --user)",
+        ));
+    }
+    Ok(())
+}
+
+/// Install the per-user daily update check. It invokes the already-installed
 /// binary once a day; it never runs a shell or follows a project-local
 /// setting.
 pub fn install_scheduler(binary: &Path) -> Result<()> {
     if !scheduler_supported() {
         return Err(Error::Unavailable(
-            "the daily update check runs on macOS only; on Linux, run xcb update daemon from a user timer",
+            "the daily update check runs on macOS and Linux; elsewhere, run xcb update daemon once a day from your own scheduler",
         ));
     }
     let home = std::env::var_os("HOME").ok_or(Error::PrivateState)?;
     let home = PathBuf::from(home);
+    if SYSTEMD {
+        return install_systemd_scheduler(binary, &home);
+    }
     let agents = home.join("Library/LaunchAgents");
     let plist = scheduler_path(&home);
     let label = SCHEDULER_LABEL;
@@ -731,10 +867,15 @@ mod tests {
         assert!(!unloaded, "nothing to unload without the agent file");
         let plist = scheduler_path(home.path());
         std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
-        std::fs::write(&plist, "<plist/>").unwrap();
+        let (service, timer) = systemd_units(Path::new("/bin/xcb"), home.path()).unwrap();
+        std::fs::write(&plist, &timer).unwrap();
+        let files = scheduler_files(home.path());
+        if SYSTEMD {
+            std::fs::write(&files[1], &service).unwrap();
+        }
         let mut seen = None;
         assert!(remove_scheduler_with(home.path(), |path| seen = Some(path.to_owned())).unwrap());
-        assert!(!plist.exists());
+        assert!(files.iter().all(|file| !file.exists()));
         assert_eq!(seen.is_some(), scheduler_supported());
         // Something else in its place is refused and left alone.
         let target = home.path().join("elsewhere.plist");
@@ -742,6 +883,46 @@ mod tests {
         std::os::unix::fs::symlink(&target, &plist).unwrap();
         assert!(remove_scheduler_with(home.path(), |_| panic!("must not unload")).is_err());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    }
+
+    #[test]
+    fn systemd_update_units_run_the_binary_daily_and_leave_foreign_units_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let (service, timer) =
+            systemd_units(Path::new("/opt/x%b/xcb"), Path::new("/home/me")).unwrap();
+        for unit in [&service, &timer] {
+            assert!(unit.starts_with(&format!("{SYSTEMD_MARKER}\n")));
+        }
+        assert!(service.contains("ExecStart=\"/opt/x%%b/xcb\" update daemon --quiet\n"));
+        assert!(service.contains("Environment=\"HOME=/home/me\"\n"));
+        assert!(service.contains("Type=oneshot\n"));
+        assert!(timer.contains("OnUnitActiveSec=1d\n"));
+        assert!(timer.contains("WantedBy=timers.target\n"));
+        assert!(systemd_units(Path::new("/bin/xcb\nExecStartPre=/bin/sh"), home.path()).is_err());
+
+        // A unit xcb did not write is neither replaced nor removed.
+        let unit = home.path().join("xcb-update.timer");
+        std::fs::write(&unit, "[Timer]\nOnCalendar=hourly\n").unwrap();
+        assert!(!written_by_xcb(&unit).unwrap());
+        assert!(matches!(write_unit(&unit, &timer), Err(Error::Conflict(_))));
+        assert_eq!(
+            std::fs::read_to_string(&unit).unwrap(),
+            "[Timer]\nOnCalendar=hourly\n"
+        );
+        std::fs::write(&unit, &timer).unwrap();
+        assert!(written_by_xcb(&unit).unwrap());
+        write_unit(&unit, &timer.replace("5min", "6min")).unwrap();
+        assert!(std::fs::read_to_string(&unit).unwrap().contains("6min"));
+        if SYSTEMD {
+            let installed = scheduler_path(home.path());
+            std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+            std::fs::write(&installed, "[Timer]\n").unwrap();
+            assert!(matches!(
+                remove_scheduler_with(home.path(), |_| panic!("must not unload")),
+                Err(Error::Conflict(_))
+            ));
+            assert!(installed.exists());
+        }
     }
 
     fn write_manifest(root: &Path, body: serde_json::Value) {

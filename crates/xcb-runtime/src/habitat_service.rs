@@ -1,6 +1,7 @@
-//! Opt-in login startup for an exact native habitat state root.
+//! Opt-in login startup for an exact native habitat state root: a
+//! LaunchAgent on macOS, a systemd user unit on Linux.
 //! Service removal never signals an active managed supervisor.
-use crate::{Error, Result, digest, private};
+use crate::{Error, Result, digest, private, systemd};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
@@ -86,13 +87,7 @@ impl Service {
             return Err(Error::PrivateState);
         }
         let home = home.canonicalize()?;
-        let label = format!(
-            "dev.hraness.xcb.habitat.{}",
-            &digest(state.as_os_str().as_encoded_bytes())[..24]
-        );
-        let manifest = home
-            .join("Library/LaunchAgents")
-            .join(format!("{label}.plist"));
+        let (label, manifest) = identity(&state, &home);
         let coordination_root = std::env::var_os("XCB_COORDINATION_ROOT")
             .map(PathBuf::from)
             .map(|path| {
@@ -113,20 +108,65 @@ impl Service {
         })
     }
 
-    /// The supervisor's log: `~/Library/Logs/xcb/<label>.log`.
+    /// The supervisor's log: `~/Library/Logs/xcb/<label>.log` on macOS,
+    /// `~/.local/state/xcb/<label>.log` on Linux.
     pub fn log_path(&self) -> PathBuf {
-        self.home
-            .join("Library/Logs/xcb")
+        log_folders(&self.home)
+            .last()
+            .expect("log folder")
             .join(format!("{}.log", self.label))
     }
 
     pub fn render(&self) -> Result<String> {
+        if SYSTEMD {
+            return self.render_unit();
+        }
         let log = self
             .log_path()
             .to_str()
             .map(xml)
             .ok_or(Error::PrivateState)?;
         self.render_with_output(&log)
+    }
+
+    /// The systemd user unit. systemd has no start interval for a service,
+    /// so `Restart=always` with `RestartSec=60` restarts the supervisor a
+    /// minute after it exits, the way launchd's `StartInterval` does.
+    /// `KillMode=process` keeps a stop from signalling anything but the
+    /// supervisor process itself.
+    fn render_unit(&self) -> Result<String> {
+        let coordination = self
+            .coordination_root
+            .as_ref()
+            .map(|root| systemd::environment("XCB_COORDINATION_ROOT", root))
+            .transpose()?
+            .map(|line| format!("{line}\n"))
+            .unwrap_or_default();
+        let log = systemd::path(&self.log_path())?;
+        Ok(format!(
+            "# Written by xcb service install for one xcb state folder.\n\
+             # xcb service uninstall removes it; xcb leaves an edited copy alone.\n\
+             [Unit]\n\
+             Description=xcb supervisor ({label})\n\
+             \n\
+             [Service]\n\
+             Type=exec\n\
+             ExecStart={} --state {} managed-daemon\n\
+             {}\n\
+             {coordination}\
+             Restart=always\n\
+             RestartSec=60\n\
+             KillMode=process\n\
+             StandardOutput=append:{log}\n\
+             StandardError=append:{log}\n\
+             \n\
+             [Install]\n\
+             WantedBy=default.target\n",
+            systemd::exec_arg(&self.executable)?,
+            systemd::exec_arg(&self.state)?,
+            systemd::environment("HOME", &self.home)?,
+            label = self.label,
+        ))
     }
 
     /// The manifest xcb wrote before 0.8.14, which sent output to
@@ -140,7 +180,7 @@ impl Service {
     fn recognize(&self, bytes: &[u8]) -> Result<Option<Option<PathBuf>>> {
         if bytes == self.render()?.as_bytes() {
             Ok(Some(Some(self.log_path())))
-        } else if bytes == self.render_legacy()?.as_bytes() {
+        } else if !SYSTEMD && bytes == self.render_legacy()?.as_bytes() {
             Ok(Some(None))
         } else {
             Ok(None)
@@ -171,13 +211,7 @@ impl Service {
     fn verify(&self, root: &Path, home: &Path) -> Result<()> {
         let state = root.canonicalize()?;
         let home = home.canonicalize()?;
-        let label = format!(
-            "dev.hraness.xcb.habitat.{}",
-            &digest(state.as_os_str().as_encoded_bytes())[..24]
-        );
-        let manifest = home
-            .join("Library/LaunchAgents")
-            .join(format!("{label}.plist"));
+        let (label, manifest) = identity(&state, &home);
         let canonical_shape = |p: &Path| {
             p.is_absolute()
                 && !p.components().any(|c| {
@@ -204,6 +238,59 @@ impl Service {
         }
         Ok(())
     }
+}
+
+/// Linux uses systemd user units; every other supported host is macOS.
+const SYSTEMD: bool = cfg!(target_os = "linux");
+
+/// The service name and file for one canonical state root: a LaunchAgent
+/// label and plist on macOS, a unit name and file on Linux.
+fn identity(state: &Path, home: &Path) -> (String, PathBuf) {
+    let id = &digest(state.as_os_str().as_encoded_bytes())[..24];
+    if SYSTEMD {
+        let label = format!("xcb-habitat-{id}");
+        let manifest = systemd::unit_dir(home).join(format!("{label}.service"));
+        (label, manifest)
+    } else {
+        let label = format!("dev.hraness.xcb.habitat.{id}");
+        let manifest = home
+            .join("Library/LaunchAgents")
+            .join(format!("{label}.plist"));
+        (label, manifest)
+    }
+}
+
+/// The folders from `home` down to the supervisor's log folder, outermost
+/// first.
+fn log_folders(home: &Path) -> Vec<PathBuf> {
+    if SYSTEMD {
+        vec![
+            home.join(".local"),
+            home.join(".local/state"),
+            home.join(".local/state/xcb"),
+        ]
+    } else {
+        vec![home.join("Library/Logs"), home.join("Library/Logs/xcb")]
+    }
+}
+
+/// The folders from `home` down to the service file's folder, outermost
+/// first.
+fn manifest_folders(home: &Path) -> Vec<PathBuf> {
+    if SYSTEMD {
+        systemd::unit_dir_chain(home).to_vec()
+    } else {
+        vec![home.join("Library"), home.join("Library/LaunchAgents")]
+    }
+}
+
+fn unit_file(service: &Service) -> Result<String> {
+    service
+        .manifest
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
+        .ok_or(Error::PrivateState)
 }
 
 fn load(root: &Path, home: &Path) -> Result<Option<Service>> {
@@ -256,6 +343,13 @@ fn domain() -> String {
 }
 
 fn registered(service: &Service) -> Result<bool> {
+    if SYSTEMD {
+        return Ok(systemd::systemctl(&[
+            "is-enabled",
+            "--quiet",
+            &unit_file(service)?,
+        ]));
+    }
     Ok(Command::new("/bin/launchctl")
         .args(["print", &format!("{}/{}", domain(), service.label)])
         .stdin(Stdio::null())
@@ -266,12 +360,23 @@ fn registered(service: &Service) -> Result<bool> {
 }
 
 fn supported() -> Result<()> {
-    if cfg!(target_os = "macos") {
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
         Ok(())
     } else {
         Err(Error::Unavailable(
-            "login service installation currently supports macOS; on Linux run xcb --state <root> managed-daemon from your user service manager",
+            "login service installation supports macOS and Linux; elsewhere run xcb --state <root> managed-daemon from your own service manager",
         ))
+    }
+}
+
+/// Whether a stopped user manager keeps the supervisor from running while
+/// this user is logged out: `Some(false)` on Linux without
+/// `loginctl enable-linger`, `None` where the question does not apply.
+pub fn stops_at_logout() -> Option<bool> {
+    if SYSTEMD {
+        systemd::lingering().map(|lingering| !lingering)
+    } else {
+        None
     }
 }
 
@@ -336,7 +441,7 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
     let parent = service.manifest.parent().ok_or(Error::PrivateState)?;
     // Check each ancestor before creating the next directory; do not create a
     // LaunchAgents directory through a symlinked Library and reject it afterward.
-    for directory in [service.home.join("Library"), parent.to_path_buf()] {
+    for directory in manifest_folders(&service.home) {
         private_directory(&directory)?;
     }
     let meta = fs::symlink_metadata(parent)?;
@@ -349,12 +454,9 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
     }
     let body = service.render()?;
     let log_folders = || -> Result<()> {
-        // launchd creates the log file but not its folder. Check each level
-        // the way the LaunchAgents folder is checked.
-        for directory in [
-            service.home.join("Library/Logs"),
-            service.home.join("Library/Logs/xcb"),
-        ] {
+        // launchd and systemd create the log file but not its folder. Check
+        // each level the way the service file's folder is checked.
+        for directory in log_folders(&service.home) {
             private_directory(&directory)?;
         }
         Ok(())
@@ -381,7 +483,18 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
         }
         Err(e) => return Err(e),
     }
-    if !registered(&service)? {
+    if SYSTEMD {
+        // `enable --now` is idempotent: it links the unit into
+        // default.target and starts it if it is not running.
+        let unit = unit_file(&service)?;
+        if !systemd::systemctl(&["daemon-reload"])
+            || !systemd::systemctl(&["enable", "--now", &unit])
+        {
+            return Err(Error::Unavailable(
+                "service file retained but systemd could not enable it; run xcb service install again from a login session with a systemd user manager (systemctl --user)",
+            ));
+        }
+    } else if !registered(&service)? {
         let loaded = Command::new("/bin/launchctl")
             .arg("bootstrap")
             .arg(domain())
@@ -401,7 +514,7 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
 
 /// Create `directory` (mode 0700) if it is missing, then require a real,
 /// canonical directory owned by this user that others can't write.
-fn private_directory(directory: &Path) -> Result<()> {
+pub(crate) fn private_directory(directory: &Path) -> Result<()> {
     match fs::symlink_metadata(directory) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             use std::os::unix::fs::DirBuilderExt;
@@ -486,7 +599,14 @@ pub fn uninstall(root: &Path, home: &Path) -> Result<Status> {
         Err(e) => Err(e),
     };
     matching_manifest()?;
-    if registered(&service)? {
+    if SYSTEMD {
+        // The supervisor lock is held, so nothing but an idle supervisor
+        // that is about to exit can be running under the unit.
+        if matching_manifest()? && !systemd::systemctl(&["disable", "--now", &unit_file(&service)?])
+        {
+            return Err(Error::Unavailable("service unload failed; files preserved"));
+        }
+    } else if registered(&service)? {
         let stopped = Command::new("/bin/launchctl")
             .arg("bootout")
             .arg(format!("{}/{}", domain(), service.label))
@@ -501,6 +621,11 @@ pub fn uninstall(root: &Path, home: &Path) -> Result<Status> {
     if matching_manifest()? {
         fs::remove_file(&service.manifest)?;
         File::open(service.manifest.parent().ok_or(Error::PrivateState)?)?.sync_all()?;
+        if SYSTEMD {
+            // Forget the removed unit; a failure here leaves only a stale
+            // entry that the next reload drops.
+            systemd::systemctl(&["daemon-reload"]);
+        }
     }
     fs::remove_file(root.join(RECORD))?;
     File::open(root)?.sync_all()?;
@@ -519,7 +644,7 @@ mod tests {
             private::directory(&root.path().canonicalize().unwrap().join("state<&")).unwrap();
         let exe = std::env::current_exe().unwrap();
         let service = Service::plan(&state, &exe, root.path()).unwrap();
-        let text = service.render().unwrap();
+        let text = service.render_with_output("/dev/null").unwrap();
         assert!(text.contains("state&lt;&amp;"));
         assert!(text.contains("<integer>60</integer>"));
         assert!(!text.contains("KeepAlive"));
@@ -555,6 +680,9 @@ mod tests {
 
     #[test]
     fn manifest_logs_to_a_file_and_legacy_manifests_stay_recognized() {
+        if SYSTEMD {
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let state = private::directory(&home.path().canonicalize().unwrap().join("state")).unwrap();
         let executable = std::env::current_exe().unwrap();
@@ -637,7 +765,7 @@ mod tests {
             let service = Service::plan(&state, &invoked, &home).unwrap();
             assert_eq!(service.executable, stable);
             assert!(service.verify(&state, &home).is_ok());
-            let text = service.render().unwrap();
+            let text = service.render_with_output("/dev/null").unwrap();
             assert!(text.contains(&format!(
                 "<key>ProgramArguments</key><array><string>{}</string>",
                 stable.display()
@@ -678,10 +806,98 @@ mod tests {
         service.executable = state.join("removed-xcb");
         service.coordination_root = Some(state.join("coordination<&"));
         assert!(service.verify(&state, root.path()).is_ok());
-        let rendered = service.render().unwrap();
+        let rendered = service.render_with_output("/dev/null").unwrap();
         assert!(rendered.contains("XCB_COORDINATION_ROOT"));
         assert!(rendered.contains("coordination&lt;&amp;"));
+        let unit = service.render_unit().unwrap();
+        assert!(unit.contains(&format!(
+            "Environment=\"XCB_COORDINATION_ROOT={}\"\n",
+            state.join("coordination<&").display()
+        )));
         service.executable = PathBuf::from("relative");
         assert!(service.verify(&state, root.path()).is_err());
+    }
+    #[test]
+    fn systemd_unit_restarts_the_supervisor_and_quotes_its_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().canonicalize().unwrap();
+        let state = private::directory(&home.join("state 100% $HOME")).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let mut service = Service::plan(&state, &exe, &home).unwrap();
+        let unit = service.render_unit().unwrap();
+        assert!(
+            unit.contains(&format!(
+                "ExecStart={} --state {} managed-daemon\n",
+                systemd::exec_arg(&service.executable).unwrap(),
+                systemd::exec_arg(&service.state).unwrap()
+            )),
+            "{unit}"
+        );
+        assert!(
+            unit.contains("state 100%% $$HOME\" managed-daemon\n"),
+            "{unit}"
+        );
+        assert!(unit.contains(&format!("Environment=\"HOME={}\"\n", home.display())));
+        for line in [
+            "Type=exec\n",
+            "Restart=always\n",
+            "RestartSec=60\n",
+            "KillMode=process\n",
+            "WantedBy=default.target\n",
+        ] {
+            assert!(unit.contains(line), "{line}");
+        }
+        assert!(!unit.contains("/bin/sh") && !unit.contains("XCB_COORDINATION_ROOT"));
+        // Every line is one directive, a section, a comment, or blank.
+        assert!(unit.lines().all(|line| line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with('[')
+            || line.contains('=')));
+        // A path cannot add a directive.
+        service.executable = PathBuf::from("/bin/xcb\nExecStartPre=/bin/sh");
+        assert!(service.render_unit().is_err());
+    }
+
+    #[test]
+    fn systemd_service_lives_in_the_user_unit_folder_and_logs_to_state() {
+        if !SYSTEMD {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().canonicalize().unwrap();
+        let state = private::directory(&home.join("state")).unwrap();
+        let service = Service::plan(&state, &std::env::current_exe().unwrap(), &home).unwrap();
+        assert!(service.label.starts_with("xcb-habitat-"));
+        assert_eq!(
+            service.manifest,
+            home.join(format!(".config/systemd/user/{}.service", service.label))
+        );
+        assert_eq!(
+            service.log_path(),
+            home.join(format!(".local/state/xcb/{}.log", service.label))
+        );
+        let text = service.render().unwrap();
+        assert!(text.contains(&format!(
+            "StandardOutput=append:{}\n",
+            service.log_path().display()
+        )));
+        assert_eq!(
+            service.recognize(text.as_bytes()).unwrap(),
+            Some(Some(service.log_path()))
+        );
+        // A plist or an edited unit is foreign; there is no legacy unit.
+        assert_eq!(
+            service
+                .recognize(service.render_legacy().unwrap().as_bytes())
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            service
+                .recognize(text.replace("RestartSec=60", "RestartSec=5").as_bytes())
+                .unwrap(),
+            None
+        );
+        assert!(service.verify(&state, &home).is_ok());
     }
 }

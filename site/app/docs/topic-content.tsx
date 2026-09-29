@@ -232,7 +232,7 @@ xcb resume <session-id>`}</Code>
       <p>Each project keeps a backlog and work history shared by the thread and every project view over its folder.</p>
       <ul>
         <li><code>/backlog add &lt;work&gt;</code> saves work for later; <code>/backlog</code> shows this project’s queue and <code>/backlog all</code> every project’s.</li>
-        <li><code>/schedule every &lt;seconds&gt; &lt;prompt&gt;</code> repeats a prompt. Schedules run while the background supervisor runs; on macOS, <code>xcb service install</code> starts it at login.</li>
+        <li><code>/schedule every &lt;seconds&gt; &lt;prompt&gt;</code> repeats a prompt. Schedules run while the background supervisor runs; on macOS and Linux, <code>xcb service install</code> starts it at login.</li>
         <li><code>/project grant &lt;tasks&gt; &lt;hours&gt; &lt;goal&gt;</code> lets a project start a limited number of follow-up tasks on its own; <code>/project pause</code> stops that. A grant covers only its own folder.</li>
       </ul>
       <p>These commands never guess a project: without one you named, the focus, or a selected task, they ask and save nothing. The <Ext href={`${repositoryDocs}/project-agents.md`}>project agents reference</Ext> covers programs, daemons, and Wordcell memory, and the <Ext href={`${repositoryDocs}/terminal.md`}>terminal guide</Ext> covers keys, search, Vim editing, and draft recovery.</p>
@@ -446,12 +446,11 @@ xcb upgrade             # install the latest verified release
 xcb upgrade <version>   # install a specific release`}</Code>
       <p><code>xcb upgrade</code> reruns the installer that <code>install-native.sh</code> recorded, so it needs an install made with that script. If you built from source, update the checkout and run <code>./scripts/install-native.sh</code> again. The binary being replaced is kept as <code>~/.local/bin/xcb.previous.&lt;sha256&gt;</code>.</p>
       <h2 id="automatic-checks">Automatic checks</h2>
-      <p>On macOS, xcb can check once a day with a login item:</p>
+      <p>xcb can check once a day, with a login item on macOS or a systemd user timer on Linux:</p>
       <Code>{`xcb update enable --policy notify   # record a newer release (the default policy)
 xcb update enable --policy auto     # also install it
 xcb update status                   # the policy, the last check, and any newer release
 xcb update disable`}</Code>
-      <p>Scheduled checks are macOS-only. On Linux, run <code>xcb update check</code> yourself or from your own user timer.</p>
       <h2 id="after-upgrade">After an upgrade</h2>
       <ol>
         <li>Restart open xcb terminals. A terminal started from the old binary keeps using it.</li>
@@ -463,7 +462,7 @@ xcb update disable`}</Code>
       <p>To go back to an earlier release, run <code>xcb upgrade &lt;version&gt; --allow-downgrade</code>. An older build may refuse state written by a newer one, so keep your state folder and read the <Ext href={`${repository}/blob/main/CHANGELOG.md`}>changelog</Ext> first.</p>
       <h2 id="uninstall">Uninstall</h2>
       <p>Let running tasks finish or cancel them, then remove the login items and the binary:</p>
-      <Code>{`xcb service uninstall   # macOS: stop starting the supervisor at login
+      <Code>{`xcb service uninstall   # stop starting the supervisor at login
 xcb update disable      # stop the daily update check
 rm ~/.local/bin/xcb`}</Code>
       <p>Your accounts, credentials, and history stay in <code>~/.local/share/xcb</code> until you delete that folder. The table lists everything xcb creates.</p>
@@ -475,6 +474,8 @@ rm ~/.local/bin/xcb`}</Code>
         ["State folder", <code key="s">~/.local/share/xcb</code>, <>Accounts, credentials, conversations, tasks, settings. Or the folder in <code>XCB_STATE</code>.</>],
         ["Update check (macOS)", <code key="u">~/Library/LaunchAgents/dev.hraness.xcb.update.plist</code>, <>Run <code>xcb update disable</code> first, or unload it with <code>launchctl bootout</code>.</>],
         ["Login service (macOS)", <code key="h">~/Library/LaunchAgents/dev.hraness.xcb.habitat.*.plist</code>, <>Run <code>xcb service uninstall</code> while idle. Its log is in <code>~/Library/Logs/xcb</code>.</>],
+        ["Update check (Linux)", <code key="ul">~/.config/systemd/user/xcb-update.timer</code>, <>And <code>xcb-update.service</code>. Run <code>xcb update disable</code> first, or <code>systemctl --user disable --now xcb-update.timer</code>.</>],
+        ["Login service (Linux)", <code key="hl">~/.config/systemd/user/xcb-habitat-*.service</code>, <>Run <code>xcb service uninstall</code> while idle. Its log is in <code>~/.local/state/xcb</code>.</>],
         ["Command runner", <code key="c">~/.local/share/xcb-command</code>, <>Stop the VM first: <code>LIMA_HOME=~/.local/share/xcb-command/lima limactl stop worker</code>.</>],
         ["Write locks", <code key="w">~/.local/share/xcb-coordination</code>, <>Or the folder in <code>XCB_COORDINATION_ROOT</code>. Remove it only when no xcb process is running.</>],
         ["PATH line", <><code>~/.zprofile</code>, <code>~/.bash_profile</code>, or <code>~/.profile</code></>, <>Only if you installed with <code>XCB_ADD_PATH=yes</code>.</>],
@@ -761,7 +762,7 @@ function Reference() {
         <li><code>~/.local/share/xcb</code>: accounts, credentials, conversations, tasks, <code>config.json</code>, the update policy, and, for installer installs, <code>install.json</code> and a copy of the installer. <code>qualification/linux.json</code> holds the Linux sandbox check, and <code>reflexes/</code> any replacement reflex programs.</li>
         <li><code>~/.local/share/xcb-command</code>: the command runner’s VM, caches, and job records.</li>
         <li><code>~/.local/share/xcb-coordination</code>: write locks shared by every xcb process.</li>
-        <li><code>~/Library/LaunchAgents/dev.hraness.xcb.update.plist</code> and <code>dev.hraness.xcb.habitat.*.plist</code> (macOS): the daily update check and the login service, when you turn them on.</li>
+        <li><code>~/Library/LaunchAgents/dev.hraness.xcb.update.plist</code> and <code>dev.hraness.xcb.habitat.*.plist</code> (macOS), or <code>~/.config/systemd/user/xcb-update.*</code> and <code>xcb-habitat-*.service</code> (Linux): the daily update check and the login service, when you turn them on.</li>
       </ul>
       <p>The TypeScript <code>xcb-compat</code> CLI uses <code>~/.xcb</code>. Keep the two state folders separate.</p>
       <h2 id="exit-codes">Exit codes</h2>

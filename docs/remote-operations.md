@@ -31,8 +31,9 @@ xcb remote admit <device>
 ```
 
 Then keep the background supervisor running, because it serves remote commands
-and publishes the machine's status. On macOS, `xcb service install` starts it at
-login for this state folder (see [login startup](habitat-service.md)). Running
+and publishes the machine's status. On macOS and Linux, `xcb service install`
+starts it at login for this state folder (see [login startup](habitat-service.md);
+on a headless Linux host also run `loginctl enable-linger "$USER"`). Running
 `xcb link` again on a linked machine changes nothing, and a retried enrollment
 reuses the saved device identity.
 

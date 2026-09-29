@@ -43,6 +43,7 @@ pub mod runner;
 pub mod sandbox;
 pub mod store;
 pub mod summary;
+pub mod systemd;
 mod task_classifier;
 mod transcript;
 pub mod update;

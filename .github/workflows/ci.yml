@@ -147,6 +147,13 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
       - run: cargo test --workspace --locked
+      # The runner has no login session; lingering starts its systemd user
+      # manager. Reuses the xcb binary the tests above built.
+      - name: systemd user service round trip
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          ./scripts/check-systemd-service.sh target/debug/xcb
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
         if: runner.os == 'Linux'
 
