@@ -10,7 +10,14 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.13.0 - 2026-09-29
+
+xcb now rotates subscriptions when a provider reports a usage limit. An
+account whose limit came without a reset time stays at a known limit for a
+configurable cooldown instead of being routed to again, and failover picks
+its next route with the same rules as automatic routing, rotating equal
+accounts least-recently-used first.
+
 
 - The GitHub release step checks each uploaded file once instead of downloading every uploaded file again after each upload, which made a failed GitHub API call likely once releases carried eleven files.
 - An account whose provider refuses a turn for its usage limit without saying when the limit resets (every Codex `usageLimitExceeded` and Devin resource-exhaustion error, and a Claude rejection without a reset time) now stays at a known usage limit for `quota_limit_cooldown_ms` (default 30 minutes, 1 minute to 7 days in `config.json`) instead of reading as ready and being routed to again. Automatic routing, `xcb --json route`, other terminals, and `xcb accounts` (`quotaBlockedUntilMs`) all see the limit; a reset the provider reports later replaces it, even when sooner. Limits on one model only are still not recorded against the whole account.
