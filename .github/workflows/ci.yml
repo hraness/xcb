@@ -571,6 +571,9 @@ jobs:
           toolchain: 1.97.1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          # Same reason as the Check job: the key must change with the
+          # dependency debuginfo setting in Cargo.toml.
+          key: deps-line-tables
           save-if: ${{ github.ref == 'refs/heads/main' }}
           # Keep the dependency builds warm while the workspace is still red.
           cache-on-failure: true
