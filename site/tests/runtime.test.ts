@@ -122,10 +122,10 @@ describe("built xcb site", () => {
       expect(llms).toContain("https://xcb.sh/docs");
       expect(readmeResponse.status).toBe(200);
       expect(readmeResponse.headers.get("content-type")).toContain("text/markdown");
-      expect(readme).toContain("# xcb");
+      expect(readme).toContain("# Excalibur (xcb)");
       expect(readme).not.toContain("hraness:xcb-landing");
-      expect(docs).toContain('og:site_name" content="xcb"');
-      expect(docs).toContain('twitter:title" content="Documentation · xcb"');
+      expect(docs).toContain('og:site_name" content="Excalibur (xcb)"');
+      expect(docs).toContain('twitter:title" content="Documentation · Excalibur (xcb)"');
       expect(docs).toContain('twitter:card" content="summary_large_image"');
       expect(missingResponse.status).toBe(404);
 

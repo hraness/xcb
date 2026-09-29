@@ -12,7 +12,7 @@ export const metadata: Metadata = {
   title: hubTitle,
   description: hubDescription,
   alternates: { canonical: "/compare" },
-  openGraph: { title: hubTitle, description: hubDescription, siteName: "xcb", type: "website", url: "/compare", images: socialImages },
+  openGraph: { title: hubTitle, description: hubDescription, siteName: "Excalibur (xcb)", type: "website", url: "/compare", images: socialImages },
   twitter: { card: "summary_large_image", title: hubTitle, description: hubDescription, images: socialImages },
 };
 

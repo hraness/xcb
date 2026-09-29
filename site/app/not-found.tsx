@@ -6,7 +6,7 @@ import { docsTopics } from "./docs/topics";
 import { SiteHeader } from "./site-header";
 
 export const metadata: Metadata = {
-  title: "Page not found · xcb",
+  title: "Page not found · Excalibur (xcb)",
 };
 
 // The hint shows at most 48 characters; cut longer post titles at a word.
@@ -18,7 +18,7 @@ function routeLabel(title: string): string {
 
 // Known pages for "Did you mean": the fixed pages, every docs topic, the blog, and every listed post.
 const routes = [
-  { href: "/", label: "xcb" },
+  { href: "/", label: "Excalibur (xcb)" },
   { href: "/docs", label: "Documentation" },
   { href: "/compare", label: "Compare" },
   { href: "/install", label: "Install" },
@@ -34,7 +34,7 @@ export default function NotFound() {
       <SiteHeader />
       <main id="main" tabIndex={-1}>
         <RouteNotFoundPage
-          siteName="xcb"
+          siteName="Excalibur (xcb)"
           primaryAction={{ href: "/docs/getting-started", label: "Install xcb" }}
           next={[
             {

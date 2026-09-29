@@ -14,7 +14,7 @@ export const socialSite = defineSocialImageSite({
   description: "Route coding tasks across the Claude, Codex, and Devin plans you pay for.",
   domain: "xcb.sh",
   icon: { kind: "mark", src: `data:image/svg+xml;base64,${markSvg.toString("base64")}` },
-  name: "xcb",
+  name: "Excalibur (xcb)",
   theme: {
     accent: "#2e7de9",
     background: "#e1e2e7",

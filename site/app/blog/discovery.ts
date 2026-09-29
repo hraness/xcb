@@ -4,7 +4,7 @@ import { socialImageAlt } from "../social";
 import { blogAuthor, blogDescription, blogFeedPath, blogPath, blogPostPath, blogTimestamp, blogTitle, type BlogPost } from "./posts";
 
 export const blogSite: SearchSite = {
-  name: "xcb",
+  name: "Excalibur (xcb)",
   origin: "https://xcb.sh",
   title: blogTitle,
   description: blogDescription,

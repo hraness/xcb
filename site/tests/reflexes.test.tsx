@@ -15,7 +15,7 @@ test("reflexes use case has one heading, canonical metadata, and reference links
 
 test("reflexes metadata and hero describe the current release without version history", () => {
   const html = renderToStaticMarkup(<Reflexes />);
-  expect(metadata.title).toBe("Stop typing “continue” to your coding agent · xcb");
+  expect(metadata.title).toBe("Stop typing “continue” to your coding agent · Excalibur (xcb)");
   expect(String(metadata.description)).toContain("only after your own replies certify it");
   expect(html).toContain('href="/install"');
   expect(html).toContain("docs/reflexes.md#measured-on-operator-history");

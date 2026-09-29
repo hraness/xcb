@@ -68,7 +68,7 @@ describe("xcb site source contract", () => {
     expect(home).toContain('import { AskAiAboutThis } from "@hraness/ui"');
     expect(home).toContain('<AskAiAboutThis className="ask-ai" url="https://xcb.sh" />');
     expect(docs).toContain('<AskAiAboutThis className="ask-ai" url="https://xcb.sh/docs" />');
-    expect(generated).toContain('export const readmeTitle = "xcb";');
+    expect(generated).toContain('export const readmeTitle = "Excalibur (xcb)";');
     expect(generated).toContain("export const readmeHtml = ");
   });
 
@@ -106,7 +106,7 @@ describe("xcb site source contract", () => {
     expect(route.size).toEqual({ width: 1200, height: 630 });
     expect(route.contentType).toBe("image/png");
     expect(route.alt).toBe(socialImageAlt);
-    expect(socialSite.name).toBe("xcb");
+    expect(socialSite.name).toBe("Excalibur (xcb)");
     expect(socialSite.domain).toBe("xcb.sh");
     expect(socialSite.icon?.kind).toBe("mark");
     expect(socialSite.icon?.src).toBe(`data:image/svg+xml;base64,${Buffer.from(mark).toString("base64")}`);
@@ -136,7 +136,7 @@ describe("xcb site source contract", () => {
     expect(llms).toContain("https://xcb.sh/README.md");
     expect(llms).not.toContain("http://");
     // The canonical one-line description leads, verbatim.
-    expect(llms.split("\n")[2]).toBe("> xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.");
+    expect(llms.split("\n")[2]).toBe("> Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.");
     // Every current docs page is listed, and repository links follow main, not an old tag.
     for (const topic of docsTopics) expect(llms).toContain(`(https://xcb.sh/docs/${topic.slug})`);
     expect(llms).not.toMatch(/github\.com\/hraness\/xcb\/blob\/v\d/u);
@@ -153,7 +153,7 @@ describe("xcb site source contract", () => {
       expect(llms).toContain(fact);
     }
     for (const status of Object.values(providerStatus)) expect(llms.split(status).length - 1).toBe(1);
-    expect(docs).toContain('siteName: "xcb"');
+    expect(docs).toContain('siteName: "Excalibur (xcb)"');
     expect(docs).toContain('card: "summary_large_image"');
   });
 });

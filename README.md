@@ -1,11 +1,11 @@
 <!-- hraness:xcb-landing:start -->
-# xcb
+# Excalibur (xcb)
 
-xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you
-already pay for. Each task runs on an account that is signed in, idle, and not
-at a known usage limit, on a model that fits the work. Type work into xcb's
-terminal thread, where tasks keep running after you close the terminal, or
-hand it one task at a time from another agent or your own code.
+Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+subscriptions you already pay for. Each task runs on an account that is signed
+in, idle, and not at a known usage limit, on a model that fits the work. Type
+work into xcb's terminal thread, where tasks keep running after you close the
+terminal, or hand it one task at a time from another agent or your own code.
 <!-- hraness:xcb-landing:end -->
 
 **Status:** [Latest release](https://github.com/hraness/xcb/releases/latest)

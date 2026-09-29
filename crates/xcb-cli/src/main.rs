@@ -37,7 +37,7 @@ use xcb_runtime::{
 #[command(
     name = "xcb",
     version,
-    about = "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for",
+    about = "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for",
     override_help = ux::ROOT_HELP
 )]
 struct Cli {
@@ -673,7 +673,7 @@ enum SessionCommand {
         #[arg(long, value_parser = ["codex", "claude"])]
         provider: Option<String>,
     },
-    /// Write local aiCharts session observations to an export file.
+    /// Write local aicharts session observations to an export file.
     Export,
     /// Remove one session and its transcript.
     Rm {
@@ -2464,7 +2464,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                         )?;
                     } else {
                         println!(
-                            "Exported local aiCharts session observations to {}",
+                            "Exported local aicharts session observations to {}",
                             path.display()
                         );
                     }
@@ -2879,7 +2879,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     "aicharts-export" => fresh.extensions.aicharts_export = enabled,
                     "aicharts" | "aicharts-upload" => {
                         return Err(Error::Unavailable(
-                            "automatic posting awaits a supported enrolled aiCharts ingress; local exports remain available",
+                            "automatic posting awaits a supported enrolled aicharts ingress; local exports remain available",
                         ));
                     }
                     _ => return Err(Error::Unavailable("unknown or not-yet-available extension")),

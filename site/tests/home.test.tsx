@@ -108,23 +108,23 @@ test("the shared header keeps a named home link and exact-artwork foil fallback"
     const fallbackImages: string[] = [];
     const masks: string[] = [];
     new HTMLRewriter()
-      .on('header a[aria-label="xcb home"]', {
+      .on('header a[aria-label="Excalibur (xcb) home"]', {
         element(element) {
           homeLinks.push(element.getAttribute("href") ?? "");
           expect(element.hasAttribute("data-foil")).toBe(true);
         },
       })
-      .on('header a[aria-label="xcb home"] .hraness-foil-mark', {
+      .on('header a[aria-label="Excalibur (xcb) home"] .hraness-foil-mark', {
         element(element) { marks.push(element.getAttribute("aria-hidden") ?? ""); },
       })
-      .on('header a[aria-label="xcb home"] .hraness-foil-mark img', {
+      .on('header a[aria-label="Excalibur (xcb) home"] .hraness-foil-mark img', {
         element(element) {
           fallbackImages.push(element.getAttribute("src") ?? "");
           expect(element.hasAttribute("alt")).toBe(true);
           expect(element.getAttribute("alt") ?? "").toBe("");
         },
       })
-      .on('header a[aria-label="xcb home"] .hraness-foil-mark__paint', {
+      .on('header a[aria-label="Excalibur (xcb) home"] .hraness-foil-mark__paint', {
         element(element) { masks.push((element.getAttribute("style") ?? "").replaceAll("&quot;", '"')); },
       })
       .transform(html);
@@ -165,7 +165,7 @@ test("the homepage declares one website and one application for xcb, published b
   expect(ofType("SoftwareApplication")).toHaveLength(1);
   expect(ofType("SoftwareSourceCode")).toHaveLength(1);
   expect(ofType("FAQPage")).toHaveLength(1);
-  expect(website?.["alternateName"]).toEqual(["Excalibur"]);
+  expect(website?.["alternateName"]).toEqual(["xcb", "Excalibur"]);
   expect(website?.["publisher"]).toEqual({ "@type": "Organization", "@id": "https://hraness.com/#organization", name: "Hraness", url: "https://hraness.com/" });
   expect(app?.["@id"]).toBe("https://xcb.sh/#app");
   expect(app?.["publisher"]).toEqual({ "@type": "Organization", "@id": "https://hraness.com/#organization", name: "Hraness", url: "https://hraness.com/" });

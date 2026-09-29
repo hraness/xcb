@@ -26,9 +26,9 @@ import { dim, green, red, yellow, printRemainingText } from "./cli/tui.ts";
 
 const VERSION = "0.11.2";
 
-const USAGE = `xcb-compat: the TypeScript compatibility CLI for xcb, which routes coding tasks
-across the Claude, Codex, and Devin subscriptions you already pay for
-(the native Rust CLI installs separately as \`xcb\`)
+const USAGE = `xcb-compat: the TypeScript compatibility CLI for Excalibur (xcb), which routes
+coding tasks across the Claude, Codex, and Devin subscriptions you already pay
+for (the native Rust CLI installs separately as \`xcb\`)
 
 Usage:
   xcb-compat [path]            open the chat in a workspace (default: .)

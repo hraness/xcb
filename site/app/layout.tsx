@@ -18,9 +18,9 @@ import "./calm.css";
  */
 const initialPalette = getDesignPaletteTheme("tokyo-night", "light");
 
-const title = "xcb · Use your Claude, Codex, and Devin plans from one agent";
+const title = "Excalibur (xcb) · Use your Claude, Codex, and Devin plans from one agent";
 const description =
-  "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
+  "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://xcb.sh"),
@@ -33,7 +33,7 @@ export const metadata: Metadata = {
   openGraph: {
     title,
     description,
-    siteName: "xcb",
+    siteName: "Excalibur (xcb)",
     type: "website",
     url: "/",
   },

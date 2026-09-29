@@ -231,8 +231,8 @@ mod tests {
 pub fn start_text() -> String {
     format!(
         "\
-xcb routes coding tasks across the Claude, Codex, and Devin subscriptions
-you already pay for.
+Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+subscriptions you already pay for.
 
 Start here
   xcb setup claude       Add a Claude account, check Claude Code and sign in
@@ -256,9 +256,9 @@ xcb {}
 /// lines. Hidden internal commands are left out, and the rest that aren't
 /// here are in [`ADVANCED`]; a test keeps both lists in step with the parser.
 pub const ROOT_HELP: &str = "\
-xcb routes coding tasks across the Claude, Codex, and Devin subscriptions
-you already pay for. Plain `xcb` opens your thread from any directory; xcb
-picks each task's project directory and says which.
+Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+subscriptions you already pay for. Plain `xcb` opens your thread from any
+directory; xcb picks each task's project directory and says which.
 
 Usage: xcb [command] [options]
 

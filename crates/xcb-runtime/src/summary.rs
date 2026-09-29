@@ -168,7 +168,7 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
             .into(),
         ),
         (
-            "aiCharts export".into(),
+            "aicharts export".into(),
             if config.extensions.aicharts_export && config.extensions.usage {
                 "on · local idle"
             } else if config.extensions.aicharts_export {
@@ -179,7 +179,7 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
             .into(),
         ),
         (
-            "aiCharts upload".into(),
+            "aicharts upload".into(),
             if config.extensions.aicharts_upload {
                 "waiting for supported enrolled ingress"
             } else {
