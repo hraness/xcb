@@ -130,6 +130,10 @@ pub(crate) mod category {
     pub const DEVIN_RESOURCE_LIMIT: &str = "provider quota or resource limit reached";
     pub const TLS: &str = "TLS certificate or transport failure";
     pub const NETWORK: &str = "provider request or network failure";
+    /// The provider reported a temporary capacity shortage for the request
+    /// (an overloaded service or an unavailable Flex processing tier). It is
+    /// a transient provider-side condition, never the account's own quota.
+    pub const PROVIDER_CAPACITY: &str = "provider capacity temporarily unavailable";
 }
 
 impl Error {
@@ -147,7 +151,7 @@ impl Error {
         match category {
             category::AUTHENTICATION => Failure::Authentication,
             category::CODEX_USAGE_LIMIT | category::DEVIN_RESOURCE_LIMIT => Failure::AccountQuota,
-            category::TLS | category::NETWORK => Failure::Transport,
+            category::TLS | category::NETWORK | category::PROVIDER_CAPACITY => Failure::Transport,
             _ => Failure::Unknown,
         }
     }

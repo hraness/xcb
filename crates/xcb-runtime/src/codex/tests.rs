@@ -331,6 +331,21 @@ fn failed_turns_preserve_fixed_diagnostics_and_terminal_classification() {
             Some(Failure::Policy),
             "provider policy rejected",
         ),
+        // Codex 0.158.0 reports an unavailable Flex tier separately from an
+        // overloaded service. Both are transient provider capacity, not the
+        // account's usage limit, so neither triggers quota failover.
+        (
+            "flexUnavailable",
+            Terminal::Failed,
+            Some(Failure::Transport),
+            "provider capacity temporarily unavailable",
+        ),
+        (
+            "serverOverloaded",
+            Terminal::Failed,
+            Some(Failure::Transport),
+            "provider capacity temporarily unavailable",
+        ),
         (
             "SYNTHETIC_UNKNOWN_SECRET",
             Terminal::Failed,
@@ -550,6 +565,7 @@ fn exact_native_echo_trace_replays_with_current_wire_shapes() {
     replay_native_echo_trace(include_str!("wire-echo-frames.json"));
 }
 
+// Codex 0.157.1 recorded the current echo trace apart from timestamps and IDs.
 #[test]
 fn previous_supported_build_echo_trace_replays_with_current_controls() {
     replay_native_echo_trace(include_str!("wire-echo-frames-0.156.1.json"));
@@ -1036,6 +1052,11 @@ fn init_phase_account_notices_are_bounded_and_informational() {
         .unwrap();
     c.startup_notice(
         &json!({"method":"account/updated","params":{"authMode":null,"planType":null}}),
+    )
+    .unwrap();
+    // Codex 0.158.0 adds the `promax` plan; plan names stay display text.
+    c.startup_notice(
+        &json!({"method":"account/updated","params":{"authMode":"chatgpt","planType":"promax"}}),
     )
     .unwrap();
     c.startup_notice(&json!({"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":100.0}}}}))

@@ -1,0 +1,93 @@
+{
+  "schema": "xcb.codex-release-schema-review.v1",
+  "observedDate": "2026-09-29",
+  "previous": {
+    "version": "0.157.1",
+    "binarySha256": "27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+    "schemaSha256": "4da87cc14ef44c732db3404c0704a5eb902bb3a271151762052a785fdb2be056"
+  },
+  "current": {
+    "version": "0.158.0",
+    "binarySha256": "788a818fbb9596869c7a487554507cb8bdca17584b8671112b23f9e225ba35c8",
+    "schemaSha256": "b245d4b027cf8d1624c0c6733e6918c042bc278886251e7f2d90a3f29abfac2d"
+  },
+  "schemaCommand": [
+    "app-server",
+    "generate-json-schema",
+    "--experimental",
+    "--out",
+    "DIR"
+  ],
+  "digestAlgorithm": "sha256(sorted relative schema path + NUL + raw generated JSON bytes + NUL)",
+  "addedFiles": [],
+  "removedFiles": [],
+  "changedFiles": [
+    "ClientRequest.json",
+    "ServerNotification.json",
+    "codex_app_server_protocol.schemas.json",
+    "codex_app_server_protocol.v2.schemas.json",
+    "v2/AccountRateLimitsUpdatedNotification.json",
+    "v2/AccountUpdatedNotification.json",
+    "v2/EnvironmentAddParams.json",
+    "v2/ErrorNotification.json",
+    "v2/GetAccountRateLimitsResponse.json",
+    "v2/GetAccountResponse.json",
+    "v2/PluginInstalledResponse.json",
+    "v2/PluginListResponse.json",
+    "v2/PluginReadResponse.json",
+    "v2/PluginSearchResponse.json",
+    "v2/PluginShareListResponse.json",
+    "v2/ReviewStartResponse.json",
+    "v2/ThreadForkResponse.json",
+    "v2/ThreadListResponse.json",
+    "v2/ThreadMetadataUpdateResponse.json",
+    "v2/ThreadQueueStartResponse.json",
+    "v2/ThreadReadResponse.json",
+    "v2/ThreadResumeResponse.json",
+    "v2/ThreadRevertResponse.json",
+    "v2/ThreadSearchResponse.json",
+    "v2/ThreadStartResponse.json",
+    "v2/ThreadStartedNotification.json",
+    "v2/ThreadTimelineListResponse.json",
+    "v2/ThreadTurnsListResponse.json",
+    "v2/ThreadUnarchiveResponse.json",
+    "v2/TurnCompletedNotification.json",
+    "v2/TurnStartResponse.json",
+    "v2/TurnStartedNotification.json"
+  ],
+  "unchangedCoreFileSha256": {
+    "v2/ThreadStartParams.json": "80a40a7fac15b4bf70efb7f893fb353acc0a0d30c68f54aee4f01923deca85de",
+    "v2/TurnStartParams.json": "07771223642e1b61bd9aac0069fc0f98143a1c047724ca02c7ceb13653442738",
+    "v2/ConfigReadResponse.json": "4ec77e1a3eed746037149799c3b6bb8fe7b4b593e5930fc9f410e6282de9df50",
+    "v1/InitializeParams.json": "b55124e7c0f36a1789396daa5578217a92be67f053903696236686e59f6f212e"
+  },
+  "reviewedChanges": [
+    "CodexErrorInfo adds the string variant flexUnavailable. It appears in every thread, turn and error payload that embeds a turn error, which accounts for all changed thread and turn response files. xcb classifies flexUnavailable, like serverOverloaded, as a transient provider capacity failure (Failure::Transport, category 'provider capacity temporarily unavailable'), never as the account's usage limit, so it neither marks the account exhausted nor triggers quota failover.",
+    "PlanType adds promax in account, account-updated and rate-limit payloads. xcb treats the plan as bounded display text and does not enumerate plan values.",
+    "EnvironmentAddParams adds optional authBearerToken. The adapter never calls environment/add; thread environments stay empty.",
+    "Plugin responses drop the extension metadata types added in 0.157.1 (PluginEntrypoint, PluginExtensions, PluginIcon, PluginQuickAction, PluginQuickActionTarget, PluginSearchProvider, PluginSearchProviderCall, PluginSettings, PluginSummary.extensions). Plugins remain disabled and no plugin RPC is used.",
+    "Thread start, turn start, initialize and config/read request or response shapes used by the adapter are otherwise unchanged; the recorded echo trace differs from 0.157.1 only in timestamps and identifiers."
+  ],
+  "featureReview": {
+    "command": "codex features list (empty disposable CODEX_HOME)",
+    "added": [
+      "defer_mailbox_preemption: under development, default false; not enabled"
+    ],
+    "changedDefaults": [
+      "guardianv2.thread_context: stable/true -> removed/false; xcb still writes it false for the retained 0.157.1 build and 0.158.0 accepts and reads it back false",
+      "write_stdin_approval: under development/false -> stable/true; an approval gate on writes to exec sessions. Shell and unified exec stay disabled and the forged-builtin checks remain unsupported, so the gate is left at its default rather than removed"
+    ]
+  },
+  "newFeatureControls": [],
+  "compatibility": "Each reviewed version and executable digest selects its own exact schema; unknown catalog candidates must match the current release schema. The launch configuration is unchanged from 0.157.1. 0.158.0 passed the full scripted inventory and native boundary; retained 0.157.1 passed both again with this source.",
+  "documentation": "https://learn.chatgpt.com/docs/app-server#message-schema",
+  "runtimeEvidence": [
+    "codex-0.158.0-inventory.json",
+    "codex-0.158.0-boundary.json",
+    "codex-0.157.1-inventory.json",
+    "codex-0.157.1-boundary.json",
+    "codex-0.156.1-compatibility-inventory.json",
+    "codex-0.156.1-compatibility-boundary.json"
+  ],
+  "realProviderInference": false
+}
