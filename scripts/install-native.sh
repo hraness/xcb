@@ -76,26 +76,33 @@ if [ -z "$sha256_cmd" ]; then
 fi
 [ -n "$sha256_cmd" ] || fail "neither sha256sum nor shasum found"
 
-os=$(uname -s | tr '[:upper:]' '[:lower:]')
-case "$os" in
-  darwin|linux) ;;
-  *) fail "unsupported operating system: $os (release archives exist for darwin and linux)" ;;
-esac
-arch=$(uname -m)
-case "$arch" in
-  x86_64) arch=x86_64 ;;
+host_os=$(uname -s)
+host_arch=$(uname -m)
+os=$(printf '%s' "$host_os" | tr '[:upper:]' '[:lower:]')
+case "$host_arch" in
+  x86_64|amd64) arch=x86_64 ;;
   arm64|aarch64) arch=aarch64 ;;
-  *) fail "unsupported architecture: $arch" ;;
+  *) arch=$host_arch ;;
 esac
+
+# The hosts with release archives. scripts/install.sh accepts the same set.
+release_platform() {
+  case "$os-$arch" in
+    darwin-aarch64|linux-x86_64|linux-aarch64) ;;
+    darwin-x86_64) fail "there is no release build for Intel Macs yet; install from source instead (unset XCB_VERSION in a source checkout)" ;;
+    *) fail "there is no release build for $host_os/$host_arch yet; install from source instead (unset XCB_VERSION in a source checkout)" ;;
+  esac
+}
 
 install_from_release() {
   expected_version=$XCB_VERSION
   version_valid "$expected_version" || fail "release version must be a stable semantic version"
+  release_platform
   command -v curl >/dev/null 2>&1 || fail "curl is required to fetch release archives (or install from source: unset XCB_VERSION)"
   asset="xcb-${expected_version}-${os}-${arch}.tar.gz"
   base_url="https://github.com/$XCB_GITHUB/releases/download/v$expected_version"
   curl -fsSL --proto '=https' --connect-timeout 15 --max-time 600 -o "$stage/archive.tar.gz" "$base_url/$asset" \
-    || fail "download failed for $asset"
+    || fail "download failed for $asset; v$expected_version may have no $os-$arch build (see https://github.com/$XCB_GITHUB/releases/tag/v$expected_version)"
   curl -fsSL --proto '=https' --connect-timeout 15 --max-time 60 -o "$stage/checksum" "$base_url/$asset.sha256" \
     || fail "download failed for $asset.sha256"
   expected=$(tr -d '[:space:]' < "$stage/checksum")

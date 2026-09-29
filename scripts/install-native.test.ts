@@ -14,6 +14,36 @@ afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: 
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const binary = (version: string, label = "candidate") => `#!/bin/sh\n[ "$#" = 1 ] && [ "$1" = --version ] || exit 17\nprintf 'xcb ${version}\\n'\n# ${label}\n`;
 
+/** `uname` reporting FIXTURE_UNAME_S / FIXTURE_UNAME_M when set, so one host
+ * can exercise every platform's archive selection. */
+const unameStub = `#!/bin/sh
+case "$1" in
+  -s) if [ -n "\${FIXTURE_UNAME_S:-}" ]; then printf '%s\\n' "$FIXTURE_UNAME_S"; exit 0; fi ;;
+  -m) if [ -n "\${FIXTURE_UNAME_M:-}" ]; then printf '%s\\n' "$FIXTURE_UNAME_M"; exit 0; fi ;;
+esac
+exec /usr/bin/uname "$@"
+`;
+
+/** Hosts with release archives, as `uname -s`/`uname -m` report them, and the
+ * archive platform each installs. install.sh and install-native.sh must agree
+ * on this table. */
+const releaseHosts = [
+  ["Darwin", "arm64", "darwin-aarch64"],
+  ["Darwin", "aarch64", "darwin-aarch64"],
+  ["Linux", "x86_64", "linux-x86_64"],
+  ["Linux", "amd64", "linux-x86_64"],
+  ["Linux", "aarch64", "linux-aarch64"],
+  ["Linux", "arm64", "linux-aarch64"],
+] as const;
+
+/** Hosts without release archives, and the refusal each gets. */
+const refusedHosts = [
+  ["Darwin", "x86_64", "no release build for Intel Macs"],
+  ["Linux", "riscv64", "no release build for Linux/riscv64"],
+  ["Linux", "armv7l", "no release build for Linux/armv7l"],
+  ["FreeBSD", "amd64", "no release build for FreeBSD/amd64"],
+] as const;
+
 type Entry = { name: string; type?: string; contents?: string; link?: string };
 function archive(entries: readonly Entry[]): Buffer {
   const blocks: Buffer[] = [];
@@ -72,7 +102,8 @@ if [ -n "$install_root" ] && [ "\${FIXTURE_CARGO_SKIP_INSTALL:-}" != yes ]; then
   cp "$artifact_dir/xcb" "$install_root/bin/xcb"
 fi
 `, { mode: 0o755 });
-  writeFileSync(join(stubs, "curl"), `#!/bin/sh\n[ "$1" = -fsSL ] || exit 19\nout=\nurl=\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in\n    -o) out=$2; shift 2 ;;\n    *) url=$1; shift ;;\n  esac\ndone\n[ -n "$out" ] || exit 19\ncase "$url" in\n *.tar.gz.sha256) cp "$FIXTURE_CHECKSUM" "$out" ;;\n *.tar.gz) cp "$FIXTURE_ARCHIVE" "$out" ;;\n *) exit 20 ;;\nesac\n`, { mode: 0o755 });
+  writeFileSync(join(stubs, "curl"), `#!/bin/sh\n[ "$1" = -fsSL ] || exit 19\nout=\nurl=\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in\n    -o) out=$2; shift 2 ;;\n    *) url=$1; shift ;;\n  esac\ndone\n[ -n "$out" ] || exit 19\nprintf '%s\\n' "$url" >> "$FIXTURE_CURL_LOG"\ncase "$url" in\n *.tar.gz.sha256) cp "$FIXTURE_CHECKSUM" "$out" ;;\n *.tar.gz) cp "$FIXTURE_ARCHIVE" "$out" ;;\n *) exit 20 ;;\nesac\n`, { mode: 0o755 });
+  writeFileSync(join(stubs, "uname"), unameStub, { mode: 0o755 });
   writeFileSync(join(stubs, "tar"), `#!/bin/sh\nif [ "$1" = -xzOf ]; then printf 'extract\\n' > "$FIXTURE_EXTRACT_LOG"; fi\nexec /usr/bin/tar "$@"\n`, { mode: 0o755 });
   const archivePath = join(root, "archive.tar.gz"), checksum = join(root, "checksum");
   function release(entries: readonly Entry[] = [{ name: "xcb", contents: binary(version) }], corruptChecksum = false) {
@@ -87,7 +118,8 @@ fi
         PATH: `${stubs}:/usr/bin:/bin`, HOME: join(root, "home"), LC_ALL: "C",
         CARGO: join(stubs, "cargo"), XCB_INSTALL_PREFIX: prefix, XCB_VERSION: fromRelease ? "v0.4.0" : "", XCB_ADD_PATH: "ask",
         FIXTURE_BINARY: candidate, FIXTURE_CARGO_LOG: join(root, "cargo.log"),
-        FIXTURE_ARCHIVE: archivePath, FIXTURE_CHECKSUM: checksum, FIXTURE_EXTRACT_LOG: join(root, "extract.log"), ...extra,
+        FIXTURE_ARCHIVE: archivePath, FIXTURE_CHECKSUM: checksum, FIXTURE_EXTRACT_LOG: join(root, "extract.log"),
+        FIXTURE_CURL_LOG: join(root, "curl.log"), ...extra,
       },
     });
   }
@@ -218,6 +250,39 @@ test("native release installs only the verified regular binary without invoking 
   expect(readdirSync(join(f.prefix, "bin"))).toEqual(["xcb"]);
 });
 
+for (const [system, machine, platform] of releaseHosts) {
+  test(`native release on ${system}/${machine} installs the ${platform} archive`, () => {
+    const f = fixture();
+    f.release();
+    const result = f.run(true, { FIXTURE_UNAME_S: system, FIXTURE_UNAME_M: machine });
+    expect(result.status).toBe(0);
+    expect(readFileSync(join(f.root, "curl.log"), "utf8").trim().split("\n")).toEqual([
+      `https://github.com/hraness/xcb/releases/download/v0.4.0/xcb-0.4.0-${platform}.tar.gz`,
+      `https://github.com/hraness/xcb/releases/download/v0.4.0/xcb-0.4.0-${platform}.tar.gz.sha256`,
+    ]);
+  });
+}
+
+for (const [system, machine, refusal] of refusedHosts) {
+  test(`native release on ${system}/${machine} refuses before downloading anything`, () => {
+    const f = fixture();
+    f.release();
+    const result = f.run(true, { FIXTURE_UNAME_S: system, FIXTURE_UNAME_M: machine });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(refusal);
+    expect(existsSync(join(f.root, "curl.log"))).toBe(false);
+    expect(existsSync(join(f.root, "cargo.log"))).toBe(false);
+    f.unchanged();
+  });
+}
+
+test("native source install still builds on a host without release archives", () => {
+  const f = fixture();
+  const result = f.run(false, { FIXTURE_UNAME_S: "Darwin", FIXTURE_UNAME_M: "x86_64" });
+  expect(result.status).toBe(0);
+  expect(existsSync(join(f.root, "cargo.log"))).toBe(true);
+});
+
 test("native invalid release coordinate never falls back to a source build", () => {
   const f = fixture();
   expect(f.run(true, { XCB_VERSION: "v" }).status).not.toBe(0);
@@ -322,4 +387,84 @@ test("native install reclaims a lock whose owner died before recording its pid",
   const result = f.run();
   expect(result.status).toBe(0);
   expect(readFileSync(f.destination, "utf8")).toBe(binary("0.4.0"));
+});
+
+// scripts/install.sh, the xcb.sh bootstrap, must accept exactly the hosts the
+// tag-pinned installer can install, and stop early when the requested release
+// has no archive for this host.
+function bootstrap(system: string, machine: string, assetStatus = "200") {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "xcb-bootstrap-")));
+  roots.push(root);
+  const stubs = join(root, "stubs");
+  mkdirSync(stubs);
+  writeFileSync(join(stubs, "uname"), unameStub, { mode: 0o755 });
+  // HEAD probes (-I) answer FIXTURE_ASSET_STATUS; the installer download
+  // serves a stand-in that records the environment it ran with.
+  writeFileSync(join(stubs, "curl"), `#!/bin/sh
+out=
+url=
+head=no
+for argument do
+  case "$argument" in -sIL) head=yes ;; esac
+done
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o|-w|--proto|--connect-timeout|--max-time) [ "$1" = -o ] && out=$2; shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+printf '%s %s\\n' "$head" "$url" >> "$FIXTURE_CURL_LOG"
+if [ "$head" = yes ]; then printf '%s' "$FIXTURE_ASSET_STATUS"; exit 0; fi
+printf '#!/bin/sh\\n# Install native xcb stand-in\\nprintf "%%s\\\\n" "$XCB_VERSION" > "$FIXTURE_INSTALLER_LOG"\\n' > "$out"
+`, { mode: 0o755 });
+  const result = spawnSync("/bin/sh", [new URL("./install.sh", import.meta.url).pathname], {
+    encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024,
+    env: {
+      PATH: `${stubs}:/usr/bin:/bin`, HOME: join(root, "home"), LC_ALL: "C", TMPDIR: root,
+      XCB_VERSION: "0.4.0", XCB_INSTALL_PREFIX: join(root, "prefix"),
+      FIXTURE_UNAME_S: system, FIXTURE_UNAME_M: machine, FIXTURE_ASSET_STATUS: assetStatus,
+      FIXTURE_CURL_LOG: join(root, "curl.log"), FIXTURE_INSTALLER_LOG: join(root, "installer.log"),
+    },
+  });
+  const read = (name: string) => existsSync(join(root, name)) ? readFileSync(join(root, name), "utf8") : null;
+  return { result, curl: read("curl.log"), installer: read("installer.log") };
+}
+
+for (const [system, machine, platform] of releaseHosts) {
+  test(`bootstrap on ${system}/${machine} checks the ${platform} archive, then runs the tag's installer`, () => {
+    const { result, curl, installer } = bootstrap(system, machine);
+    expect(result.status).toBe(0);
+    expect(curl?.trim().split("\n")).toEqual([
+      `yes https://github.com/hraness/xcb/releases/download/v0.4.0/xcb-0.4.0-${platform}.tar.gz`,
+      "no https://raw.githubusercontent.com/hraness/xcb/v0.4.0/scripts/install-native.sh",
+    ]);
+    expect(installer).toBe("0.4.0\n");
+  });
+}
+
+for (const [system, machine] of refusedHosts) {
+  test(`bootstrap on ${system}/${machine} refuses before any download`, () => {
+    const { result, curl } = bootstrap(system, machine);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("no release build for");
+    expect(result.stderr).toContain("https://xcb.sh/install#source");
+    expect(curl).toBeNull();
+  });
+}
+
+test("bootstrap stops when the release has no archive for this host", () => {
+  const { result, curl, installer } = bootstrap("Linux", "aarch64", "404");
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain("xcb 0.4.0 has no release build for Linux aarch64");
+  expect(curl?.trim().split("\n")).toHaveLength(1);
+  expect(installer).toBeNull();
+});
+
+test("bootstrap leaves an inconclusive archive probe to the installer", () => {
+  for (const status of ["000", "403", "500"]) {
+    const { result, installer } = bootstrap("Linux", "aarch64", status);
+    expect(result.status).toBe(0);
+    expect(installer).toBe("0.4.0\n");
+  }
 });

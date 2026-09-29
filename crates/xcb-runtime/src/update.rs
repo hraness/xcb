@@ -130,16 +130,22 @@ fn version_tuple(version: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(tuple)
 }
 
-fn platform_asset(version: &str) -> String {
+/// The release platform this build installs, such as `linux-aarch64`: the
+/// `<os>-<arch>` part of `xcb-<version>-<os>-<arch>.tar.gz`.
+pub fn platform() -> String {
     let os = match std::env::consts::OS {
         "macos" => "darwin",
         value => value,
     };
-    let arch = std::env::consts::ARCH;
-    format!("xcb-{version}-{os}-{arch}.tar.gz")
+    format!("{os}-{}", std::env::consts::ARCH)
 }
 
-fn release_from_value(value: &Value) -> Option<Release> {
+fn platform_asset(version: &str) -> String {
+    format!("xcb-{version}-{}.tar.gz", platform())
+}
+
+/// The version of a published, stable release entry, whatever it carries.
+fn stable_version(value: &Value) -> Option<String> {
     if value.get("draft")?.as_bool()? || value.get("prerelease")?.as_bool()? {
         return None;
     }
@@ -149,6 +155,25 @@ fn release_from_value(value: &Value) -> Option<Release> {
         .strip_prefix('v')?
         .to_owned();
     version_tuple(&version)?;
+    Some(version)
+}
+
+/// The refusal for a release that exists but carries no archive for this
+/// host, so an update never reports it as a network or install failure.
+fn no_platform_build(version: Option<&str>) -> Error {
+    let platform = platform();
+    let message = match version {
+        Some(version) => format!("xcb {version} has no release build for {platform}"),
+        None => format!("no xcb release has a build for {platform} yet"),
+    };
+    Error::guided(
+        format!("{message}; build from source to update this install"),
+        "https://xcb.sh/install#source",
+    )
+}
+
+fn release_from_value(value: &Value) -> Option<Release> {
+    let version = stable_version(value)?;
     let asset = platform_asset(&version);
     value
         .get("assets")?
@@ -202,14 +227,29 @@ fn fetch_release_metadata(url: &str) -> Result<Value> {
     })
 }
 
-fn fetch_releases() -> Result<Vec<Release>> {
-    let value = fetch_release_metadata(API_URL)?;
+/// The newest stable release carrying this platform's archive, and the
+/// newest stable release of any kind (to tell "no release" from "no build
+/// for this platform").
+#[derive(Debug, Default)]
+struct Latest {
+    release: Option<Release>,
+    newest: Option<String>,
+}
+
+fn latest_from_list(value: &Value) -> Result<Latest> {
     let releases = value.as_array().ok_or_else(|| {
         Error::Io(std::io::Error::other(
             "GitHub returned an invalid release list",
         ))
     })?;
-    Ok(releases.iter().filter_map(release_from_value).collect())
+    let order = |version: &String| version_tuple(version).unwrap_or((0, 0, 0));
+    Ok(Latest {
+        release: releases
+            .iter()
+            .filter_map(release_from_value)
+            .max_by_key(|release| order(&release.version)),
+        newest: releases.iter().filter_map(stable_version).max_by_key(order),
+    })
 }
 
 fn requested_release_with(
@@ -226,18 +266,22 @@ fn requested_release_with(
         ));
     }
     let url = format!("https://api.github.com/repos/hraness/xcb/releases/tags/v{version}");
-    Ok(release_from_value(&fetch(&url)?).filter(|release| release.version == version))
+    let value = fetch(&url)?;
+    if stable_version(&value).as_deref() != Some(version) {
+        return Ok(None);
+    }
+    release_from_value(&value)
+        .map(Some)
+        .ok_or_else(|| no_platform_build(Some(version)))
 }
 
-fn latest_release() -> Result<Option<Release>> {
-    Ok(fetch_releases()?
-        .into_iter()
-        .max_by_key(|release| version_tuple(&release.version).unwrap_or((0, 0, 0))))
+fn latest() -> Result<Latest> {
+    latest_from_list(&fetch_release_metadata(API_URL)?)
 }
 
 pub fn status(root: &Path, current: &str) -> Result<Status> {
     let state = load(root)?;
-    let latest = latest_release()?;
+    let latest = latest()?.release;
     let latest_version = latest.as_ref().map(|release| release.version.clone());
     let release_available = latest
         .as_ref()
@@ -255,7 +299,10 @@ pub fn status(root: &Path, current: &str) -> Result<Status> {
 
 pub fn check(root: &Path, current: &str, quiet: bool) -> Result<Status> {
     let mut state = load(root)?;
-    let latest = latest_release()?;
+    let Latest {
+        release: latest,
+        newest,
+    } = latest()?;
     let latest_version = latest.as_ref().map(|release| release.version.clone());
     state.last_check_ms = now_ms();
     state.available_version = latest_version.clone();
@@ -279,6 +326,10 @@ pub fn check(root: &Path, current: &str, quiet: bool) -> Result<Status> {
             ),
             (Some(version), false) => eprintln!(
                 "xcb: current {current} is up to date (latest verified release {version})."
+            ),
+            (None, _) if newest.is_some() => eprintln!(
+                "xcb: no release has a build for {} yet; build from source to update.",
+                platform()
             ),
             (None, _) => eprintln!(
                 "xcb: no verified native release is published yet; source install remains current."
@@ -395,14 +446,26 @@ pub fn upgrade(
         check_downgrade(current, requested, allow_downgrade)?;
     }
     let release = match requested {
-        Some(requested) => requested_release_with(requested, fetch_release_metadata)?,
-        None => latest_release()?,
-    }
-    .ok_or_else(|| {
-        Error::Io(std::io::Error::other(
-            "no verified native xcb release matches that version and this platform",
-        ))
-    })?;
+        Some(requested) => {
+            requested_release_with(requested, fetch_release_metadata)?.ok_or_else(|| {
+                Error::Io(std::io::Error::other(
+                    "no verified native xcb release matches that version",
+                ))
+            })?
+        }
+        None => {
+            let latest = latest()?;
+            match latest.release {
+                Some(release) => release,
+                None if latest.newest.is_some() => return Err(no_platform_build(None)),
+                None => {
+                    return Err(Error::Io(std::io::Error::other(
+                        "no verified native xcb release is published yet",
+                    )));
+                }
+            }
+        }
+    };
     if requested.is_none() && version_tuple(&release.version) <= version_tuple(current) {
         if !quiet {
             eprintln!("xcb: current {current} is already up to date.");
@@ -609,12 +672,23 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        // A release without this platform's archive and checksum is refused
+        // by name instead of looking like a missing release.
         let mut missing_checksum = value.clone();
         missing_checksum["assets"].as_array_mut().unwrap().pop();
+        let refusal = requested_release_with(version, |_| Ok(missing_checksum))
+            .unwrap_err()
+            .to_string();
         assert!(
-            requested_release_with(version, |_| Ok(missing_checksum))
-                .unwrap()
-                .is_none()
+            refusal.contains(&format!(
+                "xcb 0.4.0 has no release build for {}",
+                platform()
+            )),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("https://xcb.sh/install#source"),
+            "{refusal}"
         );
         for invalid in [
             "latest",
@@ -738,6 +812,65 @@ mod tests {
         let missing =
             serde_json::json!({"tag_name":"v0.5.0","draft":false,"prerelease":false,"assets":[]});
         assert!(release_from_value(&missing).is_none());
+    }
+
+    #[test]
+    fn platform_names_match_the_release_archives() {
+        let expected = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("macos", "aarch64") => "darwin-aarch64",
+            ("linux", "x86_64") => "linux-x86_64",
+            ("linux", "aarch64") => "linux-aarch64",
+            // Hosts without a release archive keep Rust's own names.
+            (os, arch) => &format!("{os}-{arch}"),
+        };
+        assert_eq!(platform(), expected);
+        assert_eq!(
+            platform_asset("0.5.0"),
+            format!("xcb-0.5.0-{expected}.tar.gz")
+        );
+    }
+
+    #[test]
+    fn latest_tells_a_missing_platform_build_from_no_release() {
+        let entry = |tag: &str, assets: &[String]| {
+            serde_json::json!({
+                "tag_name": tag, "draft": false, "prerelease": false,
+                "assets": assets.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
+            })
+        };
+        let pair = |version: &str| {
+            let asset = platform_asset(version);
+            vec![format!("{asset}.sha256"), asset]
+        };
+        let foreign = vec![
+            "xcb-0.7.0-plan9-mips.tar.gz".to_owned(),
+            "xcb-0.7.0-plan9-mips.tar.gz.sha256".to_owned(),
+        ];
+        // The newest release lacks this platform: the newest one with it wins.
+        let latest = latest_from_list(&serde_json::json!([
+            entry("v0.7.0", &foreign),
+            entry("v0.6.0", &pair("0.6.0")),
+            entry("v0.5.0", &pair("0.5.0")),
+        ]))
+        .unwrap();
+        assert_eq!(latest.release.unwrap().version, "0.6.0");
+        assert_eq!(latest.newest.as_deref(), Some("0.7.0"));
+        // Releases exist, none for this platform.
+        let latest = latest_from_list(&serde_json::json!([entry("v0.7.0", &foreign)])).unwrap();
+        assert!(latest.release.is_none());
+        assert_eq!(latest.newest.as_deref(), Some("0.7.0"));
+        // Drafts and prereleases count as neither.
+        let latest = latest_from_list(&serde_json::json!([
+            {"tag_name": "v0.8.0", "draft": true, "prerelease": false, "assets": []},
+            {"tag_name": "v0.9.0", "draft": false, "prerelease": true, "assets": []},
+        ]))
+        .unwrap();
+        assert!(latest.release.is_none() && latest.newest.is_none());
+        assert!(latest_from_list(&serde_json::json!({})).is_err());
+        assert!(no_platform_build(None).to_string().contains(&format!(
+            "no xcb release has a build for {} yet",
+            platform()
+        )));
     }
 
     #[test]
