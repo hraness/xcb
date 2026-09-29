@@ -15,6 +15,7 @@
 @import "../vendor/hraness-marketing/product-marketing-preset.css";
 @import "../vendor/hraness-lantern/lantern-material.css";
 @import "@hraness/site-footer/styles.css";
+@import "../vendor/hraness-forced-colors/marketing-forced-colors.css";
 
 :root {
   --hraness-site-accent: var(--primary);
