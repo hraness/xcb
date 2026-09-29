@@ -10,6 +10,17 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+A Devin worker that starts with an empty model list no longer erases the
+stored list.
+
+- Before, one empty startup list deleted every stored Devin model and failed
+  the task, leaving no route until the next `xcb accounts refresh`. Now the
+  stored list is kept, and the task is sent again on another route. The
+  prompt was never sent, so nothing is repeated, and the retry counts toward
+  the task's usual limit of 4 attempts.
+
 ## 0.11.0 - 2026-09-28
 
 xcb uses remaining subscription capacity and reset times when choosing a

@@ -41,6 +41,10 @@ pub type Observer = Arc<dyn Fn(Progress) + Send + Sync>;
 /// Diagnostic for a turn refused before its prompt was sent because the
 /// session's model left the freshly discovered provider catalog.
 pub const STALE_MODEL: &str = "selected model or effort is not in the fresh provider catalog";
+/// Diagnostic for a turn refused before its prompt was sent because the
+/// provider reported no models at all; the stored catalog is kept.
+pub const EMPTY_CATALOG: &str =
+    "the provider reported no models at startup; the stored model list was kept";
 
 /// A bounded host-selected explanation, never a raw provider/OS error payload.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -1996,6 +2000,11 @@ pub(crate) async fn run_prepared<P: Protocol>(
             .map(|point| point.output_tokens)
             .unwrap_or(0);
         let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace. Use xcb_backlog_list/get/add/update/complete to inspect, propose or report already-completed deferred work for your project. xcb_memory_recent supplies bounded recent work summaries; xcb_memory_search retrieves cited historical knowledge from the explicitly bound Wordcell vault. Only the host can admit proposed follow-ups under a user-delegated project grant. Proposals never expand that grant or release work themselves. Always end with a concise work summary, checks and remaining blockers; the harness records it in work history. Recent summaries are historical reports and must be revalidated before relying on changing facts. Direct sessions have no managed mailbox or backlog. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
+        // An empty catalog is not evidence that every model was withdrawn
+        // (metadata probes refuse it too), so keep the stored catalog.
+        if models.is_empty() {
+            return Err(Error::Unavailable(EMPTY_CATALOG));
+        }
         // Retain fresh discovery even when a cached selection has disappeared.
         // The failed turn still cannot start or silently choose another model.
         if protocol.refreshes_catalog() {

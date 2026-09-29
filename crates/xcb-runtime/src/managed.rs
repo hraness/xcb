@@ -3620,9 +3620,9 @@ impl ManagedStore {
                         Some(Failure::AccountQuota | Failure::ModelQuota)
                     )
             });
-        // The catalog check runs before the prompt is sent, and the runner has
-        // already stored the refreshed catalog, so a fresh session on another
-        // route cannot repeat any effect.
+        // The catalog checks run before the prompt is sent, so a fresh session
+        // on another route cannot repeat any effect. A stale selection has
+        // already stored the refreshed catalog; an empty one kept the old.
         let stale_model = !task.cancel_requested
             && !unsettled
             && task.attempts.saturating_add(1) < task.max_attempts
@@ -3631,10 +3631,10 @@ impl ManagedStore {
                     && outcome.facts.effects == EffectState::None
                     && !outcome.facts.pending_attention
                     && outcome.facts.failure == Some(Failure::Unknown)
-                    && outcome
-                        .diagnostic
-                        .as_ref()
-                        .is_some_and(|d| d.as_str().contains(crate::runner::STALE_MODEL))
+                    && outcome.diagnostic.as_ref().is_some_and(|d| {
+                        d.as_str().contains(crate::runner::STALE_MODEL)
+                            || d.as_str().contains(crate::runner::EMPTY_CATALOG)
+                    })
             });
         let failed_account = if failover_route
             && result
@@ -3766,7 +3766,7 @@ impl ManagedStore {
             ),
             Ok(outcome) if stale_model => (
                 TaskState::Queued,
-                format!("{} left the provider's model list before the prompt was sent; selecting another eligible route", task.route.as_deref().unwrap_or("the previous route")),
+                format!("{} was not in the provider's model list when the worker started, so the prompt was not sent; selecting another eligible route", task.route.as_deref().unwrap_or("the previous route")),
                 Some(outcome.text.clone()),
             ),
             Ok(outcome) if continue_task => (
@@ -8270,7 +8270,7 @@ mod tests {
         assert_eq!(task.tried_routes, vec![route]);
         assert!(task.failed_accounts.is_empty());
         assert_eq!(task.attempts, 1);
-        assert!(task.detail.contains("left the provider's model list"));
+        assert!(task.detail.contains("so the prompt was not sent"));
     }
 
     #[test]
