@@ -276,7 +276,7 @@ fn fresh(model: &ModelChoice, now: u64) -> bool {
 /// read, or generated text. Credential presence is not live authentication.
 pub fn capabilities(store: &Store) -> Result<Capabilities> {
     let mut result = empty_capabilities();
-    let models = store.models()?;
+    let catalog = store.model_catalog()?;
     let busy: BTreeSet<_> = store
         .unsettled_runs()?
         .into_iter()
@@ -285,6 +285,7 @@ pub fn capabilities(store: &Store) -> Result<Capabilities> {
     let now = now_ms();
     for account in store.accounts()? {
         let connected = auth::has_credentials(store, &account.id).unwrap_or(false);
+        let models = catalog.for_account(&account.id, account.provider);
         let pin = Pin::load(store.root(), account.provider).ok();
         let runtime_admitted = pin
             .as_ref()
@@ -292,7 +293,7 @@ pub fn capabilities(store: &Store) -> Result<Capabilities> {
         let qualified = pin
             .as_ref()
             .filter(|_| runtime_admitted)
-            .and_then(|pin| admission(store, pin, &account.id, &models).ok());
+            .and_then(|pin| admission(store, pin, &account.id, models).ok());
         result.supported |= qualified.is_some();
         let models: Vec<_> = models
             .iter()
@@ -397,7 +398,7 @@ pub fn qualification_context(
     pin.verify()?;
     if !account.enabled
         || !runner::provider_admitted(store.root(), &pin)
-        || !store.models()?.iter().any(|choice| {
+        || !store.account_models(&account.id)?.iter().any(|choice| {
             choice.provider == account.provider && choice.key() == model && fresh(choice, now_ms())
         })
     {
@@ -446,7 +447,7 @@ pub async fn generate(
         .require_authenticated_account(&account.id)
         .map_err(|_| failure(FailureCode::Unavailable))?;
     let observed = store
-        .models()
+        .account_models(&account.id)
         .map_err(|_| failure(FailureCode::Unavailable))?;
     let model = observed
         .iter()
@@ -587,7 +588,9 @@ pub async fn qualify_with_expected_generation(
     store
         .require_authenticated_account(&account.id)
         .map_err(|_| fail(FailureCode::Unavailable))?;
-    let observed = store.models().map_err(|_| fail(FailureCode::Unavailable))?;
+    let observed = store
+        .account_models(&account.id)
+        .map_err(|_| fail(FailureCode::Unavailable))?;
     let model = observed
         .iter()
         .find(|model| {

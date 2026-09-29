@@ -17,6 +17,81 @@ use xcb_core::{
 };
 
 const MAX_ACCOUNTS: i64 = 128;
+/// One provider catalog (fallback or one account's own) holds at most this many rows.
+const MAX_ACCOUNT_MODELS: usize = 4096;
+/// Every account's own catalog together holds at most this many rows.
+const MAX_CATALOG_ROWS: usize = 16_384;
+
+/// Observed models per account, with the provider-wide catalog as the
+/// fallback for accounts that have not reported their own list yet.
+#[derive(Debug, Clone, Default)]
+pub struct ModelCatalog {
+    accounts: BTreeMap<Id, Provider>,
+    fallback: Vec<ModelChoice>,
+    observed: BTreeMap<Id, Vec<ModelChoice>>,
+}
+
+impl ModelCatalog {
+    /// The models `account` can be routed with: its own observation, else
+    /// the provider-wide fallback for its provider.
+    pub fn for_account(&self, account: &Id, provider: Provider) -> &[ModelChoice] {
+        match self.observed.get(account) {
+            Some(own) if !own.is_empty() => own,
+            _ => {
+                let start = self.fallback.partition_point(|m| m.provider < provider);
+                let end = self.fallback.partition_point(|m| m.provider <= provider);
+                &self.fallback[start..end]
+            }
+        }
+    }
+    /// True when `account` of `provider` has `model` in its catalog.
+    pub fn offers(&self, account: &Id, provider: Provider, model: &ModelChoice) -> bool {
+        model.provider == provider
+            && self
+                .for_account(account, provider)
+                .iter()
+                .any(|choice| choice.key() == model.key())
+    }
+    /// Accounts whose catalog contains `model`, in id order.
+    pub fn accounts_offering(&self, model: &ModelChoice) -> Vec<Id> {
+        self.accounts
+            .iter()
+            .filter(|(id, provider)| self.offers(id, **provider, model))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+    fn fallback_reachable(&self, provider: Provider) -> bool {
+        let mut accounts = self.accounts.iter().filter(|(_, p)| **p == provider);
+        let mut any = false;
+        let reachable = accounts.any(|(id, _)| {
+            any = true;
+            self.observed.get(id).is_none_or(Vec::is_empty)
+        });
+        reachable || !any
+    }
+    /// One row per model key across every reachable catalog, ordered by
+    /// provider then key. The provider-wide fallback is left out only when
+    /// every account of that provider reported its own list.
+    pub fn union(&self) -> Vec<ModelChoice> {
+        let mut rows: BTreeMap<(Provider, String), ModelChoice> = BTreeMap::new();
+        for choice in &self.fallback {
+            if self.fallback_reachable(choice.provider) {
+                rows.entry((choice.provider, choice.key()))
+                    .or_insert_with(|| choice.clone());
+            }
+        }
+        for (account, own) in &self.observed {
+            if !self.accounts.contains_key(account) {
+                continue;
+            }
+            for choice in own {
+                rows.entry((choice.provider, choice.key()))
+                    .or_insert_with(|| choice.clone());
+            }
+        }
+        rows.into_values().collect()
+    }
+}
 const MAX_SESSIONS: i64 = 10_000;
 const MAX_MESSAGES: i64 = 10_000;
 pub(crate) const AUTHENTICATION_REQUIRED: &str =
@@ -673,6 +748,17 @@ impl Store {
             account TEXT PRIMARY KEY REFERENCES accounts(id),
             generation TEXT,
             run TEXT NOT NULL);",
+        )?;
+        // Additive: each account's own observed catalog. The version-one
+        // `models` table stays the provider-wide catalog that account-less
+        // writers maintain and that older readers keep using; accounts with
+        // no rows here fall back to it (`ModelCatalog::for_account`).
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS account_models(
+            account TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            id TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            PRIMARY KEY(account, id));",
         )?;
         Ok(Self {
             root,
@@ -1971,20 +2057,108 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// Replace one account's own catalog. Other accounts' catalogs and the
+    /// provider-wide fallback are untouched. An empty list removes the
+    /// account's observation, so it falls back to the provider-wide catalog.
+    pub fn set_account_models(&self, account: &Id, choices: &[ModelChoice]) -> Result<()> {
+        if choices.len() > MAX_ACCOUNT_MODELS {
+            return Err(xcb_core::Error::Limit("models").into());
+        }
+        let provider = self.account(account)?.provider;
+        for choice in choices {
+            choice.validate()?;
+            if choice.provider != provider {
+                return Err(Error::Conflict("model provider mismatch"));
+            }
+        }
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM account_models WHERE account=?1",
+            [account.as_str()],
+        )?;
+        let others: i64 =
+            tx.query_row("SELECT count(*) FROM account_models", [], |row| row.get(0))?;
+        if others as usize + choices.len() > MAX_CATALOG_ROWS {
+            return Err(xcb_core::Error::Limit("models").into());
+        }
+        for choice in choices {
+            tx.execute(
+                "INSERT OR REPLACE INTO account_models VALUES(?1,?2,?3)",
+                params![
+                    account.as_str(),
+                    choice.key(),
+                    serde_json::to_string(choice)?
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    /// Every model some account can use: each account's own catalog, plus
+    /// the provider-wide fallback for any provider with an account (or no
+    /// account at all) that still relies on it. One row per model key.
     pub fn models(&self) -> Result<Vec<ModelChoice>> {
+        Ok(self.model_catalog()?.union())
+    }
+    /// The catalog `account` routes with: its own observation, else the
+    /// provider-wide fallback.
+    pub fn account_models(&self, account: &Id) -> Result<Vec<ModelChoice>> {
+        let account = self.account(account)?;
+        Ok(self
+            .model_catalog()?
+            .for_account(&account.id, account.provider)
+            .to_vec())
+    }
+    pub fn model_catalog(&self) -> Result<ModelCatalog> {
+        let accounts = self
+            .accounts()?
+            .into_iter()
+            .map(|account| (account.id, account.provider))
+            .collect();
         let db = self.db()?;
         let mut query = db.prepare("SELECT payload FROM models ORDER BY provider,id LIMIT 4097")?;
         let rows = query.query_map([], |row| row.get::<_, String>(0))?;
-        let mut choices = Vec::new();
+        let mut fallback = Vec::new();
         for row in rows {
             let choice: ModelChoice = decode(&row?)?;
             choice.validate()?;
-            choices.push(choice);
+            fallback.push(choice);
         }
-        if choices.len() > 4096 {
+        if fallback.len() > MAX_ACCOUNT_MODELS {
             return Err(xcb_core::Error::Limit("models").into());
         }
-        Ok(choices)
+        let mut observed: BTreeMap<Id, Vec<ModelChoice>> = BTreeMap::new();
+        // A read-only handle on an older database may predate the table.
+        let available: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='account_models')",
+            [],
+            |row| row.get(0),
+        )?;
+        if available {
+            let mut query = db.prepare(
+                "SELECT account, payload FROM account_models ORDER BY account,id LIMIT ?1",
+            )?;
+            let rows = query.query_map([MAX_CATALOG_ROWS as i64 + 1], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut count = 0;
+            for row in rows {
+                let (account, payload) = row?;
+                count += 1;
+                if count > MAX_CATALOG_ROWS {
+                    return Err(xcb_core::Error::Limit("models").into());
+                }
+                let choice: ModelChoice = decode(&payload)?;
+                choice.validate()?;
+                observed.entry(Id::new(account)?).or_default().push(choice);
+            }
+        }
+        Ok(ModelCatalog {
+            accounts,
+            fallback,
+            observed,
+        })
     }
     pub fn record_usage(&self, observation: &UsageObservation) -> Result<()> {
         observation.counters.total()?;
@@ -3025,6 +3199,77 @@ mod tests {
                 .iter()
                 .any(|row| row.id == second.id)
         );
+    }
+
+    #[test]
+    fn account_catalogs_are_kept_apart_and_fall_back_to_the_provider_list() {
+        let dir = root();
+        let path = dir.path().canonicalize().unwrap().join("state");
+        let store = Store::open(&path).unwrap();
+        let first = store.add_account(Provider::Devin, "Pro", 1, None).unwrap();
+        let second = store.add_account(Provider::Devin, "Pro", 1, None).unwrap();
+        let choice = |id: &str| ModelChoice {
+            provider: Provider::Devin,
+            id: Id::new(id).unwrap(),
+            label: id.into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        // Rows written before this change stay usable by every account.
+        store
+            .set_models(Provider::Devin, &[choice("legacy")])
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        for account in [&first.id, &second.id] {
+            assert_eq!(
+                store.account_models(account).unwrap(),
+                vec![choice("legacy")]
+            );
+        }
+        store
+            .set_account_models(&first.id, &[choice("shared"), choice("first-only")])
+            .unwrap();
+        store
+            .set_account_models(&second.id, &[choice("shared"), choice("second-only")])
+            .unwrap();
+        // The first account's next refresh keeps the second account's list.
+        store
+            .set_account_models(&first.id, &[choice("shared"), choice("first-only")])
+            .unwrap();
+        assert_eq!(
+            store.account_models(&second.id).unwrap(),
+            vec![choice("second-only"), choice("shared")]
+        );
+        let catalog = store.model_catalog().unwrap();
+        assert!(!catalog.offers(&second.id, Provider::Devin, &choice("first-only")));
+        let mut both = vec![first.id.clone(), second.id.clone()];
+        both.sort();
+        assert_eq!(catalog.accounts_offering(&choice("shared")), both);
+        // Every account reported its own list, so the provider-wide list is
+        // no longer offered.
+        let keys: Vec<_> = store
+            .models()
+            .unwrap()
+            .into_iter()
+            .map(|model| model.id.to_string())
+            .collect();
+        assert_eq!(keys, ["first-only", "second-only", "shared"]);
+        // A mismatched provider is refused and changes nothing.
+        let mut codex = choice("codex-model");
+        codex.provider = Provider::Codex;
+        assert!(store.set_account_models(&first.id, &[codex]).is_err());
+        assert_eq!(store.account_models(&first.id).unwrap().len(), 2);
+        // Clearing an account's list returns it to the provider-wide list.
+        store.set_account_models(&second.id, &[]).unwrap();
+        assert_eq!(
+            store.account_models(&second.id).unwrap(),
+            vec![choice("legacy")]
+        );
+        let reader = Store::open_read_only(&path).unwrap();
+        assert_eq!(reader.models().unwrap().len(), 3);
     }
 
     #[test]

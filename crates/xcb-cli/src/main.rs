@@ -1778,7 +1778,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     let pin = ensure_pin(store.root(), account.provider).await?;
                     require_supported(store.root(), &pin)?;
                     let models = runner::probe(&store, &pin, Some(&account.id)).await?;
-                    store.set_models(account.provider, &models)?;
+                    store.set_account_models(&account.id, &models)?;
                     accounts(&store, &config, cli.json)?;
                 }
                 Some(AccountCommand::ImportAgentmixer { source }) => {
@@ -1920,7 +1920,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             require_setup_sign_in(&store, &account)?;
             let models = runner::probe(&store, &pin, Some(&account.id)).await?;
             require_setup_sign_in(&store, &account)?;
-            store.set_models(provider, &models)?;
+            store.set_account_models(&account.id, &models)?;
             println!("{ok} Loaded {} models", models.len());
             println!("{ok} {name} is set up.");
             ux::next("xcb");
@@ -1954,7 +1954,10 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     let pin = ensure_pin(store.root(), provider).await?;
                     require_supported(store.root(), &pin)?;
                     let models = runner::probe(&store, &pin, account.as_ref()).await?;
-                    store.set_models(provider, &models)?;
+                    match &account {
+                        Some(account) => store.set_account_models(account, &models)?,
+                        None => store.set_models(provider, &models)?,
+                    }
                 }
                 Some(ModelCommand::Route { task, provider }) => {
                     let workspace = cli.cwd.canonicalize()?;
@@ -2057,18 +2060,55 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 }
                 None => (),
             }
-            let mut choices = store.models()?;
+            let catalog = store.model_catalog()?;
+            let mut choices = catalog.union();
             sort_choices(&mut choices, &Config::load(store.root())?.0.favorites);
             if cli.json {
-                print_json(choices)?;
+                // Additive: each row keeps every model field and adds the ids
+                // of the accounts that can use it.
+                let rows = choices
+                    .iter()
+                    .map(|choice| {
+                        let mut value = serde_json::to_value(choice)?;
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert(
+                                "accounts".into(),
+                                json!(catalog.accounts_offering(choice)),
+                            );
+                        }
+                        Ok(value)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                print_json(rows)?;
             } else {
+                let accounts = store.accounts()?;
                 println!("  {} LABEL · MODE", cell("MODEL", 56));
                 // choose_model defaults each provider to its first row in this
                 // ordering, so mark those rows.
                 let mut defaulted = std::collections::BTreeSet::new();
                 for choice in choices {
+                    // Name the accounts only when some account of this
+                    // provider cannot use the model.
+                    let offering = catalog.accounts_offering(&choice);
+                    let of_provider = accounts
+                        .iter()
+                        .filter(|account| account.provider == choice.provider)
+                        .count();
+                    let only = if offering.len() < of_provider {
+                        format!(
+                            " · only {}",
+                            accounts
+                                .iter()
+                                .filter(|account| offering.contains(&account.id))
+                                .map(|account| xcb_core::display_text(&account.name(), 40))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "{} {} {} · {:?}",
+                        "{} {} {} · {:?}{only}",
                         if defaulted.insert(choice.provider) {
                             "*"
                         } else {

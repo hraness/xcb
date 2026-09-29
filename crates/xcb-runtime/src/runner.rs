@@ -2007,8 +2007,9 @@ pub(crate) async fn run_prepared<P: Protocol>(
         }
         // Retain fresh discovery even when a cached selection has disappeared.
         // The failed turn still cannot start or silently choose another model.
+        // The list is this account's own: another account's plan may differ.
         if protocol.refreshes_catalog() {
-            store.set_models(session.model.provider, &models)?;
+            store.set_account_models(&session.account, &models)?;
         }
         if !models.iter().any(|choice| {
             choice.id == session.model.id
