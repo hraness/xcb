@@ -12,6 +12,22 @@ version bump pull request by renaming `## Unreleased` to the version.
 
 ## Unreleased
 
+xcb keeps a separate model list for each account, so two accounts of the same
+provider on different plans no longer share one list.
+
+- Before, each refresh replaced the provider's single model list with what
+  one account reported. A model only one Devin or Claude plan offers could be
+  sent to another account, which then refused it and used up one of the
+  task's attempts, and each account's refresh erased the others' lists. Now
+  `xcb accounts refresh`, `xcb models refresh --account`, `xcb setup`, and
+  every task start update only that account's list, and automatic routing
+  sends a model only to an account that listed it.
+- Model lists saved before this version still work: an account uses them
+  until it reports its own list. `xcb models refresh` without `--account`
+  still updates that shared list.
+- `xcb models` names the accounts that can use a model when some account of
+  that provider cannot. `xcb models --json` adds an `accounts` field with
+  their ids to each row.
 - The command runner setup `--refresh` no longer fails with `public-cache-ack ValueError` after the runner VM restarts. Acknowledging a published dependency cache now remounts it read-only and rehashes it, as prepare and recover already do.
 
 ## 0.11.1 - 2026-09-28

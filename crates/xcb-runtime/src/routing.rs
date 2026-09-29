@@ -5,7 +5,7 @@ use crate::{
     offers::OfferState,
     process::Pin,
     reflex, runner,
-    store::Store,
+    store::{ModelCatalog, Store},
     summary, task_classifier,
 };
 use serde::Serialize;
@@ -463,7 +463,10 @@ async fn route_with_admitted(
     } = request;
     let now = now_ms();
     let offers = crate::offers::load(store.root()).unwrap_or_default();
-    let models = store.models()?;
+    // A model pairs only with accounts whose own catalog (or, before an
+    // account reports one, the provider-wide fallback) contains it.
+    let catalog = store.model_catalog()?;
+    let models = catalog.union();
     let view = summary::snapshot(store, None, config, now)?;
     // A connected account is admitted, enabled, credentialed and not waiting
     // for reconnection. Without one, no wait or quota reset can help: the
@@ -495,6 +498,7 @@ async fn route_with_admitted(
     let unavailable_reason = || {
         unavailable_route_reason(
             &models,
+            &catalog,
             &connected,
             now,
             required_model,
@@ -539,7 +543,7 @@ async fn route_with_admitted(
         |model| {
             required_model.is_none_or(|key| model.key() == key)
                 && accounts.iter().any(|account| {
-                    account.provider == model.provider
+                    catalog.offers(&account.id, account.provider, model)
                         && !excluded_routes.contains(&format!("{} · {}", model.key(), account.id))
                 })
         },
@@ -551,7 +555,9 @@ async fn route_with_admitted(
         };
         for account in &accounts {
             let route_key = format!("{} · {}", model.key(), account.id);
-            if account.provider != model.provider || excluded_routes.contains(&route_key) {
+            if !catalog.offers(&account.id, account.provider, model)
+                || excluded_routes.contains(&route_key)
+            {
                 continue;
             }
             let score = route_utility(
@@ -601,6 +607,7 @@ async fn route_with_admitted(
     let candidate = candidates.remove(0);
     let warning = quota_degradation_warning(
         &models,
+        &catalog,
         &connected,
         &offers,
         now,
@@ -716,6 +723,7 @@ fn retain_quality_tier(candidates: &mut Vec<Candidate>, frontier: bool) {
 /// merely from an excluded, busy, unknown or unobserved route.
 fn unavailable_route_reason(
     models: &[ModelChoice],
+    catalog: &ModelCatalog,
     connected: &[&xcb_core::ui::AccountRow],
     now: u64,
     required_model: Option<&str>,
@@ -727,7 +735,14 @@ fn unavailable_route_reason(
     } else if models.iter().any(|model| {
         selectable_model(model)
             && required_model.is_none_or(|key| model.key() == key)
-            && quota_blocks_model(model, connected, now, excluded_routes, excluded_accounts)
+            && quota_blocks_model(
+                model,
+                catalog,
+                connected,
+                now,
+                excluded_routes,
+                excluded_accounts,
+            )
     }) {
         NO_QUOTA_AVAILABLE_ROUTE
     } else {
@@ -737,13 +752,14 @@ fn unavailable_route_reason(
 
 fn quota_blocks_model(
     model: &ModelChoice,
+    catalog: &ModelCatalog,
     connected: &[&xcb_core::ui::AccountRow],
     now: u64,
     excluded_routes: &BTreeSet<String>,
     excluded_accounts: &BTreeSet<Id>,
 ) -> bool {
     connected.iter().any(|account| {
-        account.provider == model.provider
+        catalog.offers(&account.id, account.provider, model)
             && !excluded_accounts.contains(&account.id)
             && !excluded_routes.contains(&format!("{} · {}", model.key(), account.id))
             && (account
@@ -758,6 +774,7 @@ fn quota_blocks_model(
 #[allow(clippy::too_many_arguments)]
 fn quota_degradation_warning(
     models: &[ModelChoice],
+    catalog: &ModelCatalog,
     connected: &[&xcb_core::ui::AccountRow],
     offers: &OfferState,
     now: u64,
@@ -775,7 +792,14 @@ fn quota_degradation_warning(
         .filter(|model| {
             selectable_model(model)
                 && required_model.is_none_or(|key| model.key() == key)
-                && quota_blocks_model(model, connected, now, excluded_routes, excluded_accounts)
+                && quota_blocks_model(
+                    model,
+                    catalog,
+                    connected,
+                    now,
+                    excluded_routes,
+                    excluded_accounts,
+                )
         })
         .filter_map(|model| {
             let profile = base_profile(model, offers, now);
@@ -1852,5 +1876,76 @@ mod tests {
         ] {
             assert_eq!(explicit_provider_intent(task), None, "{task}");
         }
+    }
+
+    #[tokio::test]
+    async fn routes_a_model_only_to_accounts_whose_catalog_contains_it() {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let first = account(&store, Provider::Devin);
+        let second = account(&store, Provider::Devin);
+        let shared = model(Provider::Devin, "swe-2-variant", None, None);
+        let exclusive = model(Provider::Devin, "gpt-6-astra-ultra", None, None);
+        // An upgraded host: one provider-wide list, no account's own yet.
+        store
+            .set_models(Provider::Devin, std::slice::from_ref(&shared))
+            .unwrap();
+        store
+            .set_account_models(&first, &[shared.clone(), exclusive.clone()])
+            .unwrap();
+        let config = Config::default();
+        let prompt = "details ".repeat(400);
+        let admitted = [Provider::Devin].into();
+        let no_routes = BTreeSet::new();
+        let no_accounts = BTreeSet::new();
+        let route = |excluded_routes, excluded_accounts, required_model| {
+            let store = &store;
+            let config = &config;
+            let prompt = &prompt;
+            let admitted = &admitted;
+            async move {
+                route_with_admitted(
+                    store,
+                    config,
+                    RouteRequest {
+                        task: prompt,
+                        required_provider: Some(Provider::Devin),
+                        preferred_provider: None,
+                        required_model,
+                        excluded_routes,
+                        excluded_accounts,
+                        account: None,
+                    },
+                    admitted,
+                )
+                .await
+            }
+        };
+        // The stronger model belongs only to the first account's plan.
+        let best = route(&no_routes, &no_accounts, None).await.unwrap();
+        assert_eq!(
+            (best.account.clone(), best.model.key()),
+            (first.clone(), exclusive.key())
+        );
+        // With the first account unavailable, the second account (which has
+        // no list of its own yet) routes with the provider-wide list and is
+        // never paired with the first account's exclusive model.
+        let without_first = BTreeSet::from([first.clone()]);
+        let fallback = route(&no_routes, &without_first, None).await.unwrap();
+        assert_eq!(
+            (fallback.account.clone(), fallback.model.key()),
+            (second.clone(), shared.key())
+        );
+        let key = exclusive.key();
+        assert!(route(&no_routes, &without_first, Some(&key)).await.is_err());
+        // Once the second account reports its own list, that list decides.
+        store
+            .set_account_models(&second, std::slice::from_ref(&shared))
+            .unwrap();
+        let excluded = BTreeSet::from([format!("{} · {}", exclusive.key(), first)]);
+        let next = route(&excluded, &no_accounts, None).await.unwrap();
+        assert_eq!(next.model.key(), shared.key());
+        assert!(route(&excluded, &no_accounts, Some(&key)).await.is_err());
     }
 }
