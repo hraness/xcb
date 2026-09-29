@@ -122,7 +122,8 @@ impl CommandTools {
         if self.active.is_some() || self.preparing.is_some() || self.blocking.is_some() {
             return Err(Error::Conflict("a command is already active"));
         }
-        let request: CommandRequest = serde_json::from_value(arguments.clone())?;
+        let request = serde_json::from_value::<CommandRequest>(arguments.clone())?
+            .relative_to(workspace.root());
         request.validate()?;
         let backend_root = default_root()?;
         let run_id = run.id.clone();
