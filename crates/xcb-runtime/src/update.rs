@@ -789,7 +789,7 @@ pub fn install_scheduler(binary: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

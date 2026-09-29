@@ -298,6 +298,7 @@ mod tests {
         owner.check().unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn unsafe_or_replaced_lock_names_are_rejected() {
         let (_directory, root) = fixture();

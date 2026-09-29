@@ -635,5 +635,5 @@ pub async fn recover(store: &Store, run: &RunRecord, expected_digest: &str) -> R
     store.reconcile_command_custody(&run.id, expected_digest, custody)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

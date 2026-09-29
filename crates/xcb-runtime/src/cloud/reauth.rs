@@ -990,7 +990,7 @@ async fn refresh_pending(
     Ok(fresh)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "reauth_tests.rs"]
 mod tests;
 

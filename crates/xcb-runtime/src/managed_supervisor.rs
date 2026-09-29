@@ -404,7 +404,7 @@ fn check_progress(directory: &Path, pid: u32) -> Result<()> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};

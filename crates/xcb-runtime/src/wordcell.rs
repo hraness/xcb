@@ -410,7 +410,7 @@ fn save_receipt(path: &Path, receipt: &PromotionReceipt, old: &mut Option<Vec<u8
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

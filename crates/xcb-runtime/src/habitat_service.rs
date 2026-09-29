@@ -638,7 +638,7 @@ pub fn uninstall(root: &Path, home: &Path) -> Result<Status> {
     status(root, home)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

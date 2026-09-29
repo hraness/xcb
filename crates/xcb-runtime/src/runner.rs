@@ -2568,7 +2568,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
     Ok(outcome)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::Write;

@@ -553,6 +553,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn catalog_cache_is_keyed_by_the_exact_executable_digest() {
         use std::os::unix::fs::PermissionsExt;

@@ -280,7 +280,7 @@ pub fn read(store: &Store, account: &Id, request: &Id) -> Result<Option<Diagnost
     Ok((&value.request_id == request).then_some(value))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use xcb_core::session::State;

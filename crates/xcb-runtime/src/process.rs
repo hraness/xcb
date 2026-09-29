@@ -1548,7 +1548,7 @@ pub async fn capture(mut command: Command, max: usize, deadline: Duration) -> Re
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use rustix::io::{FdFlags, fcntl_getfd};
