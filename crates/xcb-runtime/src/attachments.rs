@@ -1,9 +1,8 @@
-use crate::{Error, Result, digest, private};
+use crate::{Error, Result, digest, os, private};
 use image::{GenericImageView, ImageFormat, ImageReader, Limits};
 use std::{
     fs::{File, OpenOptions},
     io::{Cursor, Read},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::Path,
 };
 use xcb_core::session::Attachment;
@@ -70,21 +69,13 @@ pub fn store(root: &Path, bytes: &[u8]) -> Result<Attachment> {
 }
 
 fn open_image_file(path: &Path) -> Result<File> {
-    Ok(OpenOptions::new()
-        .read(true)
-        .custom_flags(
-            (rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::CLOEXEC)
-                .bits() as i32,
-        )
-        .open(path)?)
+    Ok(os::no_follow(OpenOptions::new().read(true), true).open(path)?)
 }
 
 pub fn from_path(root: &Path, path: &Path) -> Result<Attachment> {
     let file = open_image_file(path)?;
-    let meta = file.metadata()?;
-    if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_BYTES as u64 {
+    let meta = os::fstat(&file)?;
+    if !meta.file || meta.links != 1 || meta.len > MAX_BYTES as u64 {
         return Err(xcb_core::Error::Invalid("image file").into());
     }
     let mut bytes = Vec::new();
@@ -131,14 +122,15 @@ pub fn read(root: &Path, attachment: &Attachment) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rustix::io::{FdFlags, fcntl_getfd};
 
+    #[cfg(unix)]
     #[test]
     fn attachment_descriptor_has_cloexec() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("image.png");
         std::fs::write(&path, b"\x89PNG\r\n\x1a\n").unwrap();
         let file = open_image_file(&path).unwrap();
+        use rustix::io::{FdFlags, fcntl_getfd};
         let flags = fcntl_getfd(&file).unwrap();
         assert!(flags.contains(FdFlags::CLOEXEC));
     }

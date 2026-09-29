@@ -1,9 +1,10 @@
 //! Account-owned Devin credentials. The provider receives only the opaque token
 //! through WINDSURF_API_KEY; no credential file belongs in its disposable HOME.
 use crate::{Error, Result, digest, private, store::Store};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::BTreeMap,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 use xcb_core::{Id, Provider, session::State};
@@ -170,6 +171,12 @@ fn credential_token(bytes: &[u8]) -> Result<&str> {
 /// The official CLI may create credentials.toml as 0644. Accept that explicit
 /// import source without modifying its mode; persistent xcb state remains 0600.
 /// Reject foreign/writable-by-others/link/nonregular sources and unstable reads.
+#[cfg(windows)]
+fn read_import_source(_source: &Path) -> Result<Zeroizing<Vec<u8>>> {
+    Err(Error::providers_unsupported())
+}
+
+#[cfg(unix)]
 fn read_import_source(source: &Path) -> Result<Zeroizing<Vec<u8>>> {
     let before = std::fs::symlink_metadata(source)?;
     if before.mode() & 0o022 != 0 {

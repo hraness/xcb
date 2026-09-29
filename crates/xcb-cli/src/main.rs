@@ -5,6 +5,7 @@ mod habitat;
 mod health;
 mod remote;
 mod route;
+mod stop;
 mod table;
 mod ux;
 mod workspaces;
@@ -1611,15 +1612,9 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             // Install both handlers before routing, which can start provider
             // work, and before any provider starts. SIGTERM must use the same
             // independent join/custody path as interactive Ctrl-C.
-            let mut interrupts =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-            let mut terminates =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            let mut stop = stop::Stop::install()?;
             let _interrupt = AbortOnDrop(tokio::spawn(async move {
-                tokio::select! {
-                    _ = interrupts.recv() => {},
-                    _ = terminates.recv() => {},
-                }
+                stop.recv().await;
                 let _ = cancel.send(true);
             }));
             let stopped_early =
@@ -1737,19 +1732,13 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                                 ux::Style::stderr().symbol(ux::Symbol::Next)
                             );
                             let (cancel, receiver) = tokio::sync::watch::channel(false);
-                            let mut interrupt = tokio::signal::unix::signal(
-                                tokio::signal::unix::SignalKind::interrupt(),
-                            )?;
-                            let mut terminate = tokio::signal::unix::signal(
-                                tokio::signal::unix::SignalKind::terminate(),
-                            )?;
+                            let mut stop = stop::Stop::install()?;
                             let login =
                                 auth::login_with_cancel(&store, &account.id, &pin, receiver);
                             tokio::pin!(login);
                             tokio::select! {
                                 result = &mut login => result?,
-                                _ = interrupt.recv() => { let _ = cancel.send(true); login.await?; },
-                                _ = terminate.recv() => { let _ = cancel.send(true); login.await?; },
+                                _ = stop.recv() => { let _ = cancel.send(true); login.await?; },
                             }
                         }
                         Provider::Codex => {

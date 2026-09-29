@@ -13,9 +13,8 @@ use crate::{
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    fs::{File, Metadata},
+    fs::File,
     io::{Read, Seek, SeekFrom},
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -353,28 +352,21 @@ struct OwnedSnapshot {
     path: PathBuf,
     parent: File,
     file: File,
-    identity: Metadata,
+    identity: xcb_core::FileIdentity,
     sha256: String,
 }
 const SNAPSHOT_LIMIT: u64 = 96 * 1024 * 1024;
 
-fn same_snapshot(left: &Metadata, right: &Metadata) -> bool {
-    left.dev() == right.dev()
-        && left.ino() == right.ino()
-        && left.uid() == right.uid()
-        && left.gid() == right.gid()
-        && left.mode() == right.mode()
-        && left.nlink() == right.nlink()
-        && left.len() == right.len()
-        && left.mtime() == right.mtime()
-        && left.mtime_nsec() == right.mtime_nsec()
-        && left.ctime() == right.ctime()
-        && left.ctime_nsec() == right.ctime_nsec()
+/// Device, inode, owner, group, mode, links, size, mtime and ctime: every
+/// field of [`xcb_core::FileIdentity`].
+fn same_snapshot(left: &xcb_core::FileIdentity, file: &File) -> Result<bool> {
+    Ok(*left == xcb_core::FileIdentity::of_file(file)?)
 }
 
 impl OwnedSnapshot {
     fn capture(path: &Path, sha256: &str) -> Result<Self> {
         let directory = private::check_directory(path.parent().ok_or(Error::PrivateState)?)?;
+        #[cfg(unix)]
         let parent = File::from(
             rustix::fs::open(
                 &directory,
@@ -386,8 +378,10 @@ impl OwnedSnapshot {
             )
             .map_err(std::io::Error::from)?,
         );
+        #[cfg(windows)]
+        let parent = xcb_platform::open_metadata(&directory)?;
         let file = private::open_file(path, SNAPSHOT_LIMIT)?;
-        let identity = file.metadata()?;
+        let identity = xcb_core::FileIdentity::of_file(&file)?;
         let mut owned = Self {
             path: path.to_owned(),
             parent,
@@ -402,9 +396,9 @@ impl OwnedSnapshot {
     fn check_parent(&self) -> Result<()> {
         let path = self.path.parent().ok_or(Error::PrivateState)?;
         private::check_directory(path)?;
-        let named = std::fs::symlink_metadata(path)?;
-        let retained = self.parent.metadata()?;
-        if named.dev() != retained.dev() || named.ino() != retained.ino() {
+        let named = crate::os::lstat(path)?;
+        let retained = crate::os::fstat(&self.parent)?;
+        if named.dev != retained.dev || named.ino != retained.ino {
             return Err(Error::Conflict("command snapshot parent changed"));
         }
         Ok(())
@@ -413,7 +407,7 @@ impl OwnedSnapshot {
     fn verify(&mut self) -> Result<()> {
         self.check_parent()?;
         private::check_file(&self.file, SNAPSHOT_LIMIT)?;
-        if !same_snapshot(&self.identity, &self.file.metadata()?) {
+        if !same_snapshot(&self.identity, &self.file)? {
             return Err(Error::Conflict("command snapshot identity changed"));
         }
         self.file.seek(SeekFrom::Start(0))?;
@@ -431,11 +425,11 @@ impl OwnedSnapshot {
             }
             hasher.update(&buffer[..count]);
         }
-        if total != self.identity.len() || hex::encode(hasher.finalize()) != self.sha256 {
+        if total != self.identity.size || hex::encode(hasher.finalize()) != self.sha256 {
             return Err(Error::Conflict("command snapshot digest changed"));
         }
         private::check_file(&self.file, SNAPSHOT_LIMIT)?;
-        if !same_snapshot(&self.identity, &self.file.metadata()?) {
+        if !same_snapshot(&self.identity, &self.file)? {
             return Err(Error::Conflict("command snapshot changed during cleanup"));
         }
         self.check_parent()?;
@@ -448,9 +442,16 @@ impl OwnedSnapshot {
         let name = self.path.file_name().ok_or(Error::PrivateState)?;
         // Remove through the retained parent, never through an unchecked
         // re-resolved ancestor. A failure does not change process join proof.
-        rustix::fs::unlinkat(&self.parent, name, rustix::fs::AtFlags::empty())
-            .map_err(std::io::Error::from)?;
-        self.parent.sync_all()?;
+        #[cfg(unix)]
+        {
+            rustix::fs::unlinkat(&self.parent, name, rustix::fs::AtFlags::empty())
+                .map_err(std::io::Error::from)?;
+            self.parent.sync_all()?;
+        }
+        // Windows has no handle-relative unlink; the parent's identity is
+        // re-proved just below. Command runs are refused there regardless.
+        #[cfg(windows)]
+        std::fs::remove_file(self.path.with_file_name(name))?;
         self.check_parent()?;
         Ok(())
     }
@@ -635,5 +636,5 @@ pub async fn recover(store: &Store, run: &RunRecord, expected_digest: &str) -> R
     store.reconcile_command_custody(&run.id, expected_digest, custody)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

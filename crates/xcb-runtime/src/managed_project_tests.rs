@@ -616,6 +616,7 @@ async fn queued_schedule_stops_at_project_pause_and_expiry_changes_view_stamp() 
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn project_policy_bounds_and_corruption_are_isolated() {
     let f = fixture().await;
@@ -1041,6 +1042,7 @@ async fn grant_for_workspace_a_never_admits_backlog_or_children_in_b_from_thread
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn two_conversations_over_one_workspace_share_grant_backlog_working_memory_and_binding() {
     let f = fixture().await;
@@ -1172,6 +1174,7 @@ async fn grant_on_parent_does_not_cover_explicit_subdirectory() {
 }
 
 /// A trusted fake Wordcell CLI that answers exact search and note creation.
+#[cfg(unix)]
 fn wordcell_fixture(f: &Fixture) -> (PathBuf, crate::wordcell::WordcellConfig) {
     use std::os::unix::fs::PermissionsExt;
     let tools = private::directory(&f.workspace.parent().unwrap().join("tools")).unwrap();
@@ -1187,6 +1190,7 @@ fn wordcell_fixture(f: &Fixture) -> (PathBuf, crate::wordcell::WordcellConfig) {
     (tools, config)
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn wordcell_bind_search_promote_are_workspace_keyed_and_promotion_digest_keeps_conversation_provenance()
  {

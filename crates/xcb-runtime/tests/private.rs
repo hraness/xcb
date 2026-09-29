@@ -1,3 +1,6 @@
+// These tests drive Unix permission bits, symlinks, or /bin/sh fixtures;
+// the Windows custody rules are covered by the platform tests.
+#![cfg(unix)]
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::{PermissionsExt, symlink};

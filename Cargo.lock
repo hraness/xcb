@@ -4287,6 +4287,15 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+ "xcb-platform",
+]
+
+[[package]]
+name = "xcb-platform"
+version = "0.11.2"
+dependencies = [
+ "tempfile",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4321,6 +4330,7 @@ dependencies = [
  "uuid",
  "webpki-roots",
  "xcb-core",
+ "xcb-platform",
  "zeroize",
 ]
 
@@ -4337,6 +4347,7 @@ dependencies = [
  "unicode-segmentation",
  "uuid",
  "xcb-core",
+ "xcb-platform",
 ]
 
 [[package]]

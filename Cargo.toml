@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/xcb-core", "crates/xcb-runtime", "crates/xcb-tui", "crates/xcb-cli"]
+members = ["crates/xcb-platform", "crates/xcb-core", "crates/xcb-runtime", "crates/xcb-tui", "crates/xcb-cli"]
 resolver = "3"
 
 [workspace.package]

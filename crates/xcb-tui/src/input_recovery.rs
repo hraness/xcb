@@ -1,12 +1,12 @@
 //! Private per-terminal input snapshots. This module never submits or acknowledges a turn.
 use crate::composer::{MAX_HISTORY, MAX_HISTORY_BYTES, MAX_INPUT};
-use rustix::fs::{FlockOperation, Mode, OFlags};
+#[cfg(unix)]
+use rustix::fs::{Mode, OFlags};
 use serde_json::{Value, json};
 use std::{
     collections::HashSet,
-    fs::{self, DirBuilder, File},
+    fs::{self, File},
     io::{self, Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -27,7 +27,7 @@ struct HeldLock(File);
 
 impl Drop for HeldLock {
     fn drop(&mut self) {
-        let _ = rustix::fs::flock(&self.0, FlockOperation::Unlock);
+        let _ = sys::unlock(&self.0);
     }
 }
 
@@ -89,7 +89,7 @@ impl RecoveryJournal {
     /// `trusted_dir` is a dedicated state subdirectory, never a project/provider path.
     /// Only its final component is created, with mode 0700; existing permissive directories fail.
     pub fn new(trusted_dir: &Path) -> io::Result<Self> {
-        match DirBuilder::new().mode(0o700).create(trusted_dir) {
+        match sys::create_private_directory(trusted_dir) {
             Ok(()) => (),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
             Err(error) => return Err(error),
@@ -101,9 +101,11 @@ impl RecoveryJournal {
         ensure_capacity(&directory)?;
         let id = uuid::Uuid::new_v4().to_string();
         let lock = directory.create(&format!("{id}.lock"))?;
-        rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive)?;
+        if !sys::try_lock(&lock)? {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         let lock = HeldLock(lock);
-        let lock_identity = FileIdentity::of(&lock.0.metadata()?);
+        let lock_identity = FileIdentity::of_file(&lock.0)?;
         Ok(Self {
             directory,
             id,
@@ -156,21 +158,13 @@ impl RecoveryJournal {
             staged.sync_all()?;
             self.directory.check()?;
             self.check_current()?;
-            rustix::fs::renameat(
-                &self.directory.file,
-                &temporary,
-                &self.directory.file,
-                format!("{}.json", self.id),
-            )?;
-            self.snapshot_identity = Some(FileIdentity::of(&staged.metadata()?));
-            self.directory.file.sync_all()
+            self.directory
+                .rename(&temporary, &format!("{}.json", self.id))?;
+            self.snapshot_identity = Some(FileIdentity::of_file(&staged)?);
+            self.directory.sync()
         })();
         // The unpredictable staging name belongs to this save only; never delete a sibling journal.
-        let _ = rustix::fs::unlinkat(
-            &self.directory.file,
-            &temporary,
-            rustix::fs::AtFlags::empty(),
-        );
+        let _ = self.directory.unlink(&temporary);
         self.last_save_complete = result.is_ok();
         result
     }
@@ -180,13 +174,9 @@ impl RecoveryJournal {
         self.directory.check()?;
         self.check_current()?;
         if self.snapshot_identity.is_some() {
-            rustix::fs::unlinkat(
-                &self.directory.file,
-                format!("{}.json", self.id),
-                rustix::fs::AtFlags::empty(),
-            )?;
+            self.directory.unlink(&format!("{}.json", self.id))?;
             self.snapshot_identity = None;
-            self.directory.file.sync_all()?;
+            self.directory.sync()?;
         }
         Ok(())
     }
@@ -195,9 +185,7 @@ impl RecoveryJournal {
             .directory
             .open_file(&format!("{}.json", self.id), MAX_JOURNAL_BYTES)
         {
-            Ok(file) if self.snapshot_identity == Some(FileIdentity::of(&file.metadata()?)) => {
-                Ok(())
-            }
+            Ok(file) if self.snapshot_identity == Some(FileIdentity::of_file(&file)?) => Ok(()),
             Err(error)
                 if error.kind() == io::ErrorKind::NotFound && self.snapshot_identity.is_none() =>
             {
@@ -224,17 +212,13 @@ impl Drop for RecoveryJournal {
                 .directory
                 .open_file(&format!("{}.lock", self.id), 0)
                 .is_ok_and(|file| {
-                    file.metadata()
-                        .is_ok_and(|meta| FileIdentity::of(&meta) == self.lock_identity)
+                    FileIdentity::of_file(&file)
+                        .is_ok_and(|identity| identity == self.lock_identity)
                 })
         {
-            let _ = rustix::fs::unlinkat(
-                &self.directory.file,
-                format!("{}.lock", self.id),
-                rustix::fs::AtFlags::empty(),
-            );
+            let _ = self.directory.unlink(&format!("{}.lock", self.id));
         }
-        let _ = rustix::fs::flock(&self.lock.0, FlockOperation::Unlock);
+        let _ = sys::unlock(&self.lock.0);
     }
 }
 
@@ -262,6 +246,7 @@ pub fn candidates(trusted_dir: &Path) -> io::Result<Vec<RecoveryEntry>> {
             continue;
         };
         let metadata = file.metadata()?;
+        let identity = FileIdentity::of_file(&file)?;
         let live = lock_is_live(&directory, id)?;
         entries.push(RecoveryEntry {
             id: id.to_owned(),
@@ -269,7 +254,7 @@ pub fn candidates(trusted_dir: &Path) -> io::Result<Vec<RecoveryEntry>> {
             live,
             kind,
             path: directory.path.join(name),
-            identity: FileIdentity::of(&metadata),
+            identity,
             directory_identity: directory.identity,
         });
     }
@@ -297,16 +282,14 @@ pub fn read(entry: &RecoveryEntry) -> io::Result<RecoverySnapshot> {
         return Err(invalid("This terminal reservation has no saved input"));
     }
     let file = directory.open_file(entry_name(entry)?, MAX_JOURNAL_BYTES)?;
-    if FileIdentity::of(&file.metadata()?) != entry.identity {
+    if FileIdentity::of_file(&file)? != entry.identity {
         return Err(invalid("Input snapshot changed; reopen recovery"));
     }
     let mut bytes = Vec::new();
     (&file)
         .take(MAX_JOURNAL_BYTES + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_JOURNAL_BYTES
-        || FileIdentity::of(&file.metadata()?) != entry.identity
-    {
+    if bytes.len() as u64 > MAX_JOURNAL_BYTES || FileIdentity::of_file(&file)? != entry.identity {
         return Err(invalid("Input snapshot changed; reopen recovery"));
     }
     directory.check()?;
@@ -379,7 +362,7 @@ pub fn remove(entry: &RecoveryEntry) -> io::Result<()> {
     let directory = entry_directory(entry)?;
     let _admission = directory.admission()?;
     let current = directory.open_file(entry_name(entry)?, u64::MAX)?;
-    if FileIdentity::of(&current.metadata()?) != entry.identity {
+    if FileIdentity::of_file(&current)? != entry.identity {
         return Err(invalid("Input snapshot changed; reopen recovery"));
     }
     let lock_name = format!("{}.lock", entry.id);
@@ -388,29 +371,30 @@ pub fn remove(entry: &RecoveryEntry) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => directory.create(&lock_name)?,
         Err(error) => return Err(error),
     };
-    rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive)
-        .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "This terminal is still active"))?;
+    if !sys::try_lock(&lock).unwrap_or(false) {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "This terminal is still active",
+        ));
+    }
     let lock = HeldLock(lock);
     directory.check()?;
-    rustix::fs::unlinkat(
-        &directory.file,
-        entry_name(entry)?,
-        rustix::fs::AtFlags::empty(),
-    )?;
+    // Windows cannot delete a file while any handle to it is open without
+    // delete sharing; the identity check above is done with this handle.
+    #[cfg(windows)]
+    drop(current);
+    directory.unlink(entry_name(entry)?)?;
     // Remove only the lock we opened, never a replacement.
     if directory
         .open_file(&lock_name, u64::MAX)
         .is_ok_and(|other| {
-            other.metadata().is_ok_and(|meta| {
-                lock.0
-                    .metadata()
-                    .is_ok_and(|ours| FileIdentity::of(&meta) == FileIdentity::of(&ours))
-            })
+            FileIdentity::of_file(&other)
+                .is_ok_and(|theirs| FileIdentity::of_file(&lock.0).is_ok_and(|ours| theirs == ours))
         })
     {
-        rustix::fs::unlinkat(&directory.file, &lock_name, rustix::fs::AtFlags::empty())?;
+        directory.unlink(&lock_name)?;
     }
-    directory.file.sync_all()
+    directory.sync()
 }
 
 fn entry_directory(entry: &RecoveryEntry) -> io::Result<Directory> {
@@ -434,16 +418,15 @@ fn lock_is_live(directory: &Directory, id: &str) -> io::Result<bool> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    match rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive) {
-        Ok(()) => {
+    match sys::try_lock(&lock)? {
+        true => {
             // A probe's close-only release could stay held by a spawned
             // child's inherited descriptor; unlock so the next probe reads
             // the true state.
-            let _ = rustix::fs::flock(&lock, FlockOperation::Unlock);
+            let _ = sys::unlock(&lock);
             Ok(false)
         }
-        Err(rustix::io::Errno::WOULDBLOCK) => Ok(true),
-        Err(error) => Err(error.into()),
+        false => Ok(true),
     }
 }
 fn entry_name(entry: &RecoveryEntry) -> io::Result<&str> {
@@ -606,6 +589,7 @@ fn invalid(message: &'static str) -> io::Error {
 
 struct Directory {
     path: PathBuf,
+    #[cfg(unix)]
     file: File,
     identity: (u64, u64),
 }
@@ -618,10 +602,25 @@ impl Directory {
             }
             Err(error) => return Err(error),
         };
-        rustix::fs::flock(&lock, FlockOperation::LockExclusive)?;
+        sys::lock(&lock)?;
         Ok(HeldLock(lock))
     }
+    fn sync(&self) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            self.file.sync_all()
+        }
+        #[cfg(windows)]
+        {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Directory {
     fn open(path: &Path) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt;
         let before = fs::symlink_metadata(path)?;
         if !before.is_dir()
             || before.mode() & 0o077 != 0
@@ -647,6 +646,7 @@ impl Directory {
         })
     }
     fn check(&self) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
         let meta = fs::symlink_metadata(&self.path)?;
         if !meta.is_dir()
             || (meta.dev(), meta.ino()) != self.identity
@@ -667,6 +667,7 @@ impl Directory {
         )?))
     }
     fn open_file(&self, name: &str, max: u64) -> io::Result<File> {
+        use std::os::unix::fs::MetadataExt;
         self.check()?;
         let file = File::from(rustix::fs::openat(
             &self.file,
@@ -687,9 +688,132 @@ impl Directory {
         }
         Ok(file)
     }
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        Ok(rustix::fs::renameat(&self.file, from, &self.file, to)?)
+    }
+    fn unlink(&self, name: &str) -> io::Result<()> {
+        Ok(rustix::fs::unlinkat(
+            &self.file,
+            name,
+            rustix::fs::AtFlags::empty(),
+        )?)
+    }
 }
 
-#[cfg(test)]
+/// Windows has no directory descriptors: every operation names the child
+/// under the checked directory path, and refuses a reparse point (symlink,
+/// junction) at the directory or the file itself.
+#[cfg(windows)]
+impl Directory {
+    fn open(path: &Path) -> io::Result<Self> {
+        let facts = xcb_platform::path_facts(path)?;
+        if !facts.is_private_directory() {
+            return Err(invalid(
+                "Recovery directory must be private and owned by this user",
+            ));
+        }
+        Ok(Self {
+            path: path.canonicalize()?,
+            identity: (facts.volume, facts.index),
+        })
+    }
+    fn check(&self) -> io::Result<()> {
+        let facts = xcb_platform::path_facts(&self.path)?;
+        if !facts.is_private_directory() || (facts.volume, facts.index) != self.identity {
+            return Err(invalid("Recovery directory changed"));
+        }
+        Ok(())
+    }
+    fn create(&self, name: &str) -> io::Result<File> {
+        self.check()?;
+        // Files inherit the directory's owner-only DACL.
+        xcb_platform::no_follow(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true),
+        )
+        .open(self.path.join(name))
+    }
+    fn open_file(&self, name: &str, max: u64) -> io::Result<File> {
+        self.check()?;
+        let file = xcb_platform::no_follow(fs::OpenOptions::new().read(true))
+            .open(self.path.join(name))?;
+        let facts = xcb_platform::file_facts(&file)?;
+        if !facts.is_private_file() || facts.len > max {
+            return Err(invalid(
+                "Recovery file must be a private regular file within its size limit",
+            ));
+        }
+        Ok(file)
+    }
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        self.check()?;
+        fs::rename(self.path.join(from), self.path.join(to))
+    }
+    fn unlink(&self, name: &str) -> io::Result<()> {
+        self.check()?;
+        fs::remove_file(self.path.join(name))
+    }
+}
+
+/// Advisory whole-file locks and the private directory: `flock` and
+/// `mkdir(0o700)` on Unix, `LockFileEx` (through `std`) and an owner-only
+/// DACL on Windows.
+mod sys {
+    use std::{fs::File, io, path::Path};
+
+    #[cfg(unix)]
+    pub(super) fn create_private_directory(path: &Path) -> io::Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(path)
+    }
+    #[cfg(windows)]
+    pub(super) fn create_private_directory(path: &Path) -> io::Result<()> {
+        xcb_platform::create_private_directory(path)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn lock(file: &File) -> io::Result<()> {
+        Ok(rustix::fs::flock(
+            file,
+            rustix::fs::FlockOperation::LockExclusive,
+        )?)
+    }
+    #[cfg(windows)]
+    pub(super) fn lock(file: &File) -> io::Result<()> {
+        file.lock()
+    }
+
+    /// `Ok(false)` when another holder has the lock.
+    #[cfg(unix)]
+    pub(super) fn try_lock(file: &File) -> io::Result<bool> {
+        match rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(true),
+            Err(rustix::io::Errno::WOULDBLOCK) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+    #[cfg(windows)]
+    pub(super) fn try_lock(file: &File) -> io::Result<bool> {
+        match file.try_lock() {
+            Ok(()) => Ok(true),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
+
+    #[cfg(unix)]
+    pub(super) fn unlock(file: &File) -> io::Result<()> {
+        Ok(rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock)?)
+    }
+    #[cfg(windows)]
+    pub(super) fn unlock(file: &File) -> io::Result<()> {
+        file.unlock()
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;

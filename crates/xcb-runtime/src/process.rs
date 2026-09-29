@@ -1,15 +1,17 @@
 use crate::{Error, Result, digest, private};
+#[cfg(unix)]
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::{
+    fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    process::CommandExt,
+};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::unix::{
-        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-        process::CommandExt,
-    },
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -49,6 +51,33 @@ pub fn environment(home: &Path) -> BTreeMap<String, String> {
     ])
 }
 
+/// Windows has no executable bit or setuid: an admitted executable is a
+/// regular file (never a reparse point) of plausible size. Provider
+/// executables are never launched there; this admits xcb's own image.
+#[cfg(windows)]
+fn executable_file(path: &Path) -> Result<File> {
+    let file = crate::os::no_follow(OpenOptions::new().read(true), true).open(path)?;
+    let meta = crate::os::fstat(&file)?;
+    if !meta.file {
+        return Err(Error::Unavailable("executable is not a regular file"));
+    }
+    if meta.len == 0 || meta.len > 512 * 1024 * 1024 {
+        return Err(Error::Unavailable("executable size is invalid"));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn repair_executable_mode(_path: &Path) -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(windows)]
+fn wrapper_file(_path: &Path) -> Result<File> {
+    Err(Error::providers_unsupported())
+}
+
+#[cfg(unix)]
 fn executable_file(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -88,6 +117,7 @@ fn executable_file(path: &Path) -> Result<File> {
     Ok(file)
 }
 
+#[cfg(unix)]
 fn repair_executable_mode(path: &Path) -> Result<bool> {
     let file = OpenOptions::new()
         .read(true)
@@ -115,6 +145,7 @@ fn repair_executable_mode(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
+#[cfg(unix)]
 fn wrapper_file(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
         .read(true)
@@ -184,7 +215,7 @@ fn verified_digests() -> &'static std::sync::Mutex<BTreeMap<PathBuf, (FileIdenti
 static EXECUTABLE_DIGESTS: std::sync::Mutex<BTreeMap<PathBuf, usize>> =
     std::sync::Mutex::new(BTreeMap::new());
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn digested_executables(path: &Path) -> usize {
     EXECUTABLE_DIGESTS
         .lock()
@@ -198,7 +229,7 @@ pub fn executable_digest(path: &Path) -> Result<String> {
     let file = executable_file(path)?;
     // fstat of the open descriptor: the identity below names the inode the
     // digest is computed from, never a re-resolved path.
-    let identity = FileIdentity::of(&file.metadata()?);
+    let identity = FileIdentity::of_file(&file)?;
     let key = path.canonicalize().unwrap_or_else(|_| path.to_owned());
     {
         let cache = verified_digests()
@@ -296,6 +327,16 @@ fn clone_into(source: &File, target: &File) -> bool {
 /// allows, falling back to the bounded stream copy. The caller still digests
 /// the result: a clone carries a new inode, so the pinned-byte proof must be
 /// repeated against the snapshot itself.
+#[cfg(windows)]
+fn snapshot_executable(source: &File, path: &Path) -> Result<()> {
+    let mut target = OpenOptions::new().write(true).create_new(true).open(path)?;
+    std::io::copy(&mut source.take(512 * 1024 * 1024 + 1), &mut target)?;
+    target.flush()?;
+    target.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn snapshot_executable(source: &File, path: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     if clone_file(source, path) {
@@ -386,6 +427,19 @@ pub fn wrapper_digest(path: &Path) -> Result<String> {
 }
 
 pub fn discover(provider: Provider, explicit: Option<&Path>) -> Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        let _ = (provider, explicit);
+        Err(Error::providers_unsupported())
+    }
+    #[cfg(unix)]
+    {
+        discover_executable(provider, explicit)
+    }
+}
+
+#[cfg(unix)]
+fn discover_executable(provider: Provider, explicit: Option<&Path>) -> Result<PathBuf> {
     let override_name = format!("XCB_{}", provider.as_str().to_uppercase());
     if let Some(path) = explicit
         .map(Path::to_owned)
@@ -632,6 +686,7 @@ fn custody_executable(
                 Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error),
             }
+            #[cfg(unix)]
             fs::set_permissions(&target, fs::Permissions::from_mode(0o700))?;
             if executable_digest(&target)? != sha256 {
                 let _ = fs::remove_file(&target);
@@ -944,11 +999,101 @@ struct Drained {
     complete: bool,
 }
 
+/// The unit a child's whole process tree is stopped and proven absent by: a
+/// process group the child leads on Unix, a kill-on-close Job Object the
+/// child joins before it runs on Windows.
+#[cfg(unix)]
+#[derive(Clone)]
+struct Group(Pid);
+#[cfg(windows)]
+#[derive(Clone)]
+struct Group(std::sync::Arc<xcb_platform::Job>, u32);
+
+impl Group {
+    /// Make `command` start its child as the leader of a new group (Unix) or
+    /// suspended, so it can join a job before it runs (Windows).
+    fn prepare(command: &mut Command) {
+        #[cfg(unix)]
+        command.as_std_mut().process_group(0);
+        #[cfg(windows)]
+        command.creation_flags(xcb_platform::SPAWN_SUSPENDED);
+    }
+
+    /// The group of a child spawned after [`Group::prepare`]. On Windows this
+    /// assigns the child to a new job and resumes it; a child that cannot
+    /// join is killed.
+    fn adopt(child: &mut Child) -> Option<Self> {
+        let pid = child.id().filter(|pid| *pid > 1)?;
+        #[cfg(unix)]
+        {
+            i32::try_from(pid).ok().and_then(Pid::from_raw).map(Self)
+        }
+        #[cfg(windows)]
+        {
+            let joined = child
+                .raw_handle()
+                .ok_or_else(|| std::io::Error::other("reaped"))
+                .and_then(|handle| {
+                    let job = xcb_platform::Job::new()?;
+                    job.adopt(handle, pid)?;
+                    Ok(job)
+                });
+            match joined {
+                Ok(job) => Some(Self(std::sync::Arc::new(job), pid)),
+                Err(_) => {
+                    let _ = child.start_kill();
+                    None
+                }
+            }
+        }
+    }
+
+    fn pid(&self) -> u32 {
+        #[cfg(unix)]
+        {
+            self.0.as_raw_nonzero().get() as u32
+        }
+        #[cfg(windows)]
+        {
+            self.1
+        }
+    }
+
+    /// `killpg(SIGKILL)` / `TerminateJobObject`.
+    fn kill(&self) -> bool {
+        #[cfg(unix)]
+        {
+            kill_process_group(self.0, Signal::KILL).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            self.0.kill().is_ok()
+        }
+    }
+
+    /// No member remains: `ESRCH` from a group probe, or a job with no
+    /// active process.
+    fn empty(&self) -> Option<bool> {
+        #[cfg(unix)]
+        {
+            match test_kill_process_group(self.0) {
+                Err(rustix::io::Errno::SRCH) => Some(true),
+                Ok(()) => Some(false),
+                Err(_) => None,
+            }
+        }
+        #[cfg(windows)]
+        {
+            self.0.active().ok().map(|active| active == 0)
+        }
+    }
+}
+
 pub struct StreamProcess {
     pub(crate) stdin: Option<ChildStdin>,
     pub(crate) stdout: BufReader<ChildStdout>,
     child: Child,
-    group: Option<Pid>,
+    group: Option<Group>,
     stderr: JoinHandle<Drained>,
     stderr_bytes: Option<u64>,
     exit_status: Option<std::process::ExitStatus>,
@@ -961,14 +1106,9 @@ impl StreamProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        command.as_std_mut().process_group(0);
+        Group::prepare(&mut command);
         let mut child = command.spawn().map_err(Error::LaunchNotStarted)?;
-        let pid = child
-            .id()
-            .filter(|pid| *pid > 1)
-            .and_then(|pid| i32::try_from(pid).ok())
-            .and_then(Pid::from_raw)
-            .ok_or(Error::Protocol("child process identity"))?;
+        let pid = Group::adopt(&mut child).ok_or(Error::Protocol("child process identity"))?;
         let stdin = child.stdin.take().ok_or(Error::Protocol("child stdin"))?;
         let stdout = BufReader::new(child.stdout.take().ok_or(Error::Protocol("child stdout"))?);
         let stderr = child.stderr.take().ok_or(Error::Protocol("child stderr"))?;
@@ -985,10 +1125,7 @@ impl StreamProcess {
         })
     }
     pub fn pid(&self) -> u32 {
-        self.group
-            .expect("owned process group")
-            .as_raw_nonzero()
-            .get() as u32
+        self.group.as_ref().expect("owned process group").pid()
     }
     pub async fn send(&mut self, value: &serde_json::Value) -> Result<()> {
         let stdin = self
@@ -1021,8 +1158,8 @@ impl StreamProcess {
         .await
     }
     fn signal(&self) {
-        if let Some(group) = self.group {
-            let _ = kill_process_group(group, Signal::KILL);
+        if let Some(group) = &self.group {
+            let _ = group.kill();
         }
     }
     /// Total stderr bytes the child wrote when that exceeded
@@ -1079,9 +1216,9 @@ impl StreamProcess {
         .await
         .unwrap_or(false);
         if !joined {
-            resignal_unjoined(group, self.child.id().is_some());
+            resignal_unjoined(&group, self.child.id().is_some());
         }
-        joined && group_absent(group).await
+        joined && group_absent(&group).await
     }
 }
 
@@ -1090,8 +1227,8 @@ impl StreamProcess {
 /// Sent only while the leader is unreaped: its pid still pins the group
 /// number, so the signal cannot reach a recycled group. The join stays
 /// unproven either way; the caller keeps the account held.
-fn resignal_unjoined(group: Pid, leader_unreaped: bool) -> bool {
-    leader_unreaped && kill_process_group(group, Signal::KILL).is_ok()
+fn resignal_unjoined(group: &Group, leader_unreaped: bool) -> bool {
+    leader_unreaped && group.kill()
 }
 impl Drop for StreamProcess {
     fn drop(&mut self) {
@@ -1100,10 +1237,10 @@ impl Drop for StreamProcess {
     }
 }
 
-async fn group_absent(group: Pid) -> bool {
+async fn group_absent(group: &Group) -> bool {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if test_kill_process_group(group) == Err(rustix::io::Errno::SRCH) {
+            if group.empty() == Some(true) {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1113,6 +1250,22 @@ async fn group_absent(group: Pid) -> bool {
     .unwrap_or(false)
 }
 
+/// Prove that the process group a recorded child led is gone. On Windows the
+/// job died with the xcb process that held it (kill-on-close), so the proof
+/// is that the recorded leader no longer exists.
+#[cfg(windows)]
+pub fn prove_process_group_absent(pid: u32) -> Result<()> {
+    if pid <= 1 {
+        return Err(Error::Unavailable("process group id is invalid"));
+    }
+    match xcb_platform::process_exists(pid) {
+        Some(false) => Ok(()),
+        Some(true) => Err(Error::Conflict("process group is still present")),
+        None => Err(Error::Unavailable("process group probe failed")),
+    }
+}
+
+#[cfg(unix)]
 pub fn prove_process_group_absent(pid: u32) -> Result<()> {
     let group = i32::try_from(pid)
         .ok()
@@ -1169,14 +1322,9 @@ pub async fn capture_with_input(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
+    Group::prepare(&mut command);
     let mut child = command.spawn()?;
-    let group = child
-        .id()
-        .filter(|pid| *pid > 1)
-        .and_then(|pid| i32::try_from(pid).ok())
-        .and_then(Pid::from_raw)
-        .ok_or(Error::Protocol("child process identity"))?;
+    let group = Group::adopt(&mut child).ok_or(Error::Protocol("child process identity"))?;
     let mut stdin = child.stdin.take().ok_or(Error::Protocol("child stdin"))?;
     let mut stdout = child.stdout.take().ok_or(Error::Protocol("child stdout"))?;
     let stderr = child.stderr.take().ok_or(Error::Protocol("child stderr"))?;
@@ -1201,17 +1349,17 @@ pub async fn capture_with_input(
     .await;
     let timed_out = result.is_err();
     if timed_out {
-        let _ = kill_process_group(group, Signal::KILL);
+        let _ = group.kill();
     }
     let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
         Ok(status) => status?,
         Err(_) => {
-            let _ = kill_process_group(group, Signal::KILL);
+            let _ = group.kill();
             let _ = child.wait().await;
             return Err(Error::Unavailable("child did not join"));
         }
     };
-    if !group_absent(group).await {
+    if !group_absent(&group).await {
         return Err(Error::Unavailable("process group did not join"));
     }
     if timed_out {
@@ -1232,11 +1380,11 @@ pub(crate) enum CaptureOutcome {
     Unproven,
 }
 
-struct CaptureGroup(Option<Pid>);
+struct CaptureGroup(Option<Group>);
 impl Drop for CaptureGroup {
     fn drop(&mut self) {
-        if let Some(group) = self.0 {
-            let _ = kill_process_group(group, Signal::KILL);
+        if let Some(group) = &self.0 {
+            let _ = group.kill();
         }
     }
 }
@@ -1265,18 +1413,16 @@ pub(crate) async fn capture_supervised(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
+    Group::prepare(&mut command);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => return CaptureOutcome::NeverStarted(Error::LaunchNotStarted(error)),
     };
-    let Some(pid) = child.id().filter(|pid| *pid > 1) else {
+    let Some(group) = Group::adopt(&mut child) else {
         return CaptureOutcome::Unproven;
     };
-    let Some(group) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
-        return CaptureOutcome::Unproven;
-    };
-    let mut custody = CaptureGroup(Some(group));
+    let pid = group.pid();
+    let mut custody = CaptureGroup(Some(group.clone()));
     let recorded = started(pid);
     let Some(mut stdout) = child.stdout.take() else {
         return CaptureOutcome::Unproven;
@@ -1316,7 +1462,7 @@ pub(crate) async fn capture_supervised(
     // immediately before exit cannot turn a successful login into SIGKILL.
     if result.is_err() {
         if child.id() == Some(pid) {
-            let _ = kill_process_group(group, Signal::KILL);
+            let _ = group.kill();
         }
         custody.0 = None;
     }
@@ -1337,7 +1483,7 @@ pub(crate) async fn capture_supervised(
     if !stdout.complete || !stderr.complete {
         return CaptureOutcome::Unproven;
     }
-    if !group_absent(group).await {
+    if !group_absent(&group).await {
         return CaptureOutcome::Unproven;
     }
     if !status.success() && result.is_ok() {
@@ -1352,14 +1498,9 @@ pub async fn capture(mut command: Command, max: usize, deadline: Duration) -> Re
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
+    Group::prepare(&mut command);
     let mut child = command.spawn()?;
-    let group = child
-        .id()
-        .filter(|pid| *pid > 1)
-        .and_then(|pid| i32::try_from(pid).ok())
-        .and_then(Pid::from_raw)
-        .ok_or(Error::Protocol("child process identity"))?;
+    let group = Group::adopt(&mut child).ok_or(Error::Protocol("child process identity"))?;
     let mut stdout = child.stdout.take().ok_or(Error::Protocol("stdout"))?;
     let stderr = child.stderr.take().ok_or(Error::Protocol("stderr"))?;
     let result = match tokio::time::timeout(deadline, async {
@@ -1388,17 +1529,17 @@ pub async fn capture(mut command: Command, max: usize, deadline: Duration) -> Re
     // read stops the group before the leader's status is known — the same
     // distinction capture_with_input and capture_supervised already make.
     if result.is_err() {
-        let _ = kill_process_group(group, Signal::KILL);
+        let _ = group.kill();
     }
     let status = match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
         Ok(status) => status?,
         Err(_) => {
-            let _ = kill_process_group(group, Signal::KILL);
+            let _ = group.kill();
             let _ = child.wait().await;
             return Err(Error::Unavailable("child did not join"));
         }
     };
-    if !group_absent(group).await {
+    if !group_absent(&group).await {
         return Err(Error::Unavailable("process group did not join"));
     }
     if !status.success() {
@@ -1407,7 +1548,7 @@ pub async fn capture(mut command: Command, max: usize, deadline: Duration) -> Re
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use rustix::io::{FdFlags, fcntl_getfd};
@@ -2405,14 +2546,14 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = leader.id();
-        let group = Pid::from_raw(pid as i32).unwrap();
-        assert!(!resignal_unjoined(group, false));
+        let group = Group(Pid::from_raw(pid as i32).unwrap());
+        assert!(!resignal_unjoined(&group, false));
         std::thread::sleep(Duration::from_millis(50));
         assert!(
             prove_process_group_absent(pid).is_err(),
             "nothing was sent to a group whose leader counts as reaped"
         );
-        assert!(resignal_unjoined(group, true));
+        assert!(resignal_unjoined(&group, true));
         leader.wait().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while prove_process_group_absent(pid).is_err() {

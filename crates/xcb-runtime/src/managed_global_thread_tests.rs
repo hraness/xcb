@@ -688,6 +688,7 @@ async fn move_task_refuses_proposal_schedule_worker_program_and_daemon_tasks() {
     ));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn launch_revalidation_fails_task_when_workspace_replaced_by_symlink() {
     let e = env();

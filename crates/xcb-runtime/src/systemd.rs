@@ -74,11 +74,8 @@ pub(crate) fn path(value: &Path) -> Result<String> {
 /// The file is opened without following a symlink, and a large file is
 /// never read past the marker.
 pub(crate) fn has_marker(path: &Path, marker: &str) -> Result<bool> {
-    use std::{io::Read, os::unix::fs::OpenOptionsExt};
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(path)?;
+    use std::io::Read;
+    let file = crate::os::no_follow(std::fs::OpenOptions::new().read(true), true).open(path)?;
     let expected = format!("{marker}\n");
     let mut head = Vec::new();
     file.take(expected.len() as u64).read_to_end(&mut head)?;

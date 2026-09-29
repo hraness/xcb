@@ -11,7 +11,6 @@
 
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -19,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
-use crate::{Error, Result, private};
+use crate::{Error, Result, os, private};
 
 use super::crypto::{AccountKey, DeviceIdentity};
 
@@ -335,7 +334,7 @@ impl SessionRefreshLock {
 fn check_refresh_lock(path: &Path, file: &std::fs::File) -> Result<()> {
     private::check_directory(path.parent().ok_or(Error::PrivateState)?)?;
     private::check_file(file, 0)?;
-    if file.metadata()?.mode() & 0o777 != 0o600 {
+    if !os::has_mode(file, 0o600)? {
         return Err(Error::PrivateState);
     }
     private::same_file(path, file)
@@ -386,19 +385,17 @@ pub(super) fn mutation_lock(state_root: &Path) -> Result<SessionRefreshLock> {
 
 fn open_custody_lock(state_root: &Path, name: &str) -> Result<(PathBuf, std::fs::File)> {
     let path = path(state_root, name)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(
-            (rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::CLOEXEC)
-                .bits() as i32,
-        )
-        .open(&path)?;
+    let file = os::no_follow(
+        os::owner_only(
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false),
+        ),
+        true,
+    )
+    .open(&path)?;
     check_refresh_lock(&path, &file)?;
     Ok((path, file))
 }

@@ -723,6 +723,7 @@ async fn schedule_in_thread_requires_workspace_and_waits_only_on_its_workspace()
 }
 
 /// A trusted fake Wordcell CLI that answers exact search.
+#[cfg(unix)]
 fn wordcell_fixture(base: &Path) -> crate::wordcell::WordcellConfig {
     use std::os::unix::fs::PermissionsExt;
     let tools = private::directory(&base.join("tools")).unwrap();
@@ -737,6 +738,7 @@ fn wordcell_fixture(base: &Path) -> crate::wordcell::WordcellConfig {
     crate::wordcell::WordcellConfig::admit(&executable, &vault).unwrap()
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn worker_in_a_cannot_get_update_complete_or_search_memory_of_b() {
     let f = fixture().await;

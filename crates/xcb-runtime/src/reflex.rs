@@ -26,7 +26,6 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{Duration, Instant},
@@ -170,15 +169,7 @@ pub fn admit(source: &Value) -> Result<(Manifest, String)> {
 }
 
 fn read_program(path: &Path) -> Result<Value> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(
-            (rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::CLOEXEC)
-                .bits() as i32,
-        )
-        .open(path)?;
+    let file = crate::os::no_follow(std::fs::OpenOptions::new().read(true), true).open(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() > MAX_PROGRAM_BYTES {
         return Err(Error::Unavailable("reflex program rejected"));
@@ -1523,6 +1514,7 @@ mod tests {
         assert!(admit(&oversized).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn custom_file_rejects_symlink_fifo_and_oversized_input() {
         let dir = temp();

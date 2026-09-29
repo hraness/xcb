@@ -185,14 +185,62 @@ pub fn relative_path(value: &str) -> bool {
     relative_parts(value).is_some()
 }
 
+/// `std::fs::canonicalize`, in the spelling the rest of xcb compares paths
+/// in. On Unix it is exactly that call. On Windows the result drops the
+/// `\\?\` verbatim prefix (`\\?\C:\x` becomes `C:\x`, `\\?\UNC\s\x`
+/// becomes `\\s\x`) whenever the plain spelling canonicalizes back to the
+/// same verbatim path, so `path.canonical()? == path` holds for a canonical
+/// `C:\...` path just as it does for `/...` on Unix.
+pub fn canonical(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let resolved = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        let text = resolved.to_string_lossy();
+        let plain = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            Some(format!(r"\\{rest}"))
+        } else {
+            text.strip_prefix(r"\\?\")
+                .filter(|rest| {
+                    let bytes = rest.as_bytes();
+                    bytes.len() >= 3
+                        && bytes[0].is_ascii_alphabetic()
+                        && bytes[1] == b':'
+                        && bytes[2] == b'\\'
+                })
+                .map(str::to_owned)
+        };
+        if let Some(plain) = plain.map(std::path::PathBuf::from)
+            && std::fs::canonicalize(&plain).is_ok_and(|again| again == resolved)
+        {
+            return Ok(plain);
+        }
+    }
+    Ok(resolved)
+}
+
+/// [`canonical`] as a method, so call sites read like `Path::canonicalize`.
+pub trait Canonical {
+    fn canonical(&self) -> std::io::Result<std::path::PathBuf>;
+}
+
+impl Canonical for std::path::Path {
+    fn canonical(&self) -> std::io::Result<std::path::PathBuf> {
+        canonical(self)
+    }
+}
+
 /// Absolute path made only of the root and ordinary components — no `.`,
 /// `..`, or platform prefix segments. Symlinks are not resolved here.
 pub fn absolute_clean(path: &std::path::Path) -> bool {
     use std::path::Component;
     path.is_absolute()
-        && path
-            .components()
-            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+        && path.components().all(|part| {
+            matches!(
+                part,
+                // A drive or UNC prefix only ever appears on Windows.
+                Component::Prefix(_) | Component::RootDir | Component::Normal(_)
+            )
+        })
 }
 
 /// Exact inode identity for custody and freshness proofs, read from live
@@ -215,6 +263,67 @@ pub struct FileIdentity {
 }
 
 impl FileIdentity {
+    /// The identity of an open file or directory (`fstat`).
+    pub fn of_file(file: &std::fs::File) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self::of(&file.metadata()?))
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self::of_facts(&xcb_platform::file_facts(file)?))
+        }
+    }
+
+    /// The identity of `path` itself, never a symlink's target (`lstat`).
+    pub fn of_path(path: &std::path::Path) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self::of(&std::fs::symlink_metadata(path)?))
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self::of_facts(&xcb_platform::path_facts(path)?))
+        }
+    }
+
+    /// Windows `Metadata` has no stable file index, so identity comes from
+    /// a handle: volume serial, file index, link count, owner, DACL, and the
+    /// last-write and change times. `mode` carries the kind and whether the
+    /// DACL is private (`0o600`/`0o700`) or not (`0o644`); `uid` is 0 when
+    /// this user owns the object.
+    #[cfg(windows)]
+    fn of_facts(facts: &xcb_platform::Facts) -> Self {
+        let kind = match facts.kind {
+            xcb_platform::Kind::File => 0o100_000,
+            xcb_platform::Kind::Directory => 0o040_000,
+            xcb_platform::Kind::ReparsePoint => 0o120_000,
+        };
+        let permissions = match (facts.private, facts.kind) {
+            (true, xcb_platform::Kind::Directory) => 0o700,
+            (true, _) => 0o600,
+            (false, _) => 0o644,
+        };
+        let time = |ticks: i64| {
+            (
+                ticks.div_euclid(10_000_000),
+                ticks.rem_euclid(10_000_000) * 100,
+            )
+        };
+        Self {
+            dev: facts.volume,
+            ino: facts.index,
+            mode: kind | permissions,
+            uid: u32::from(!facts.owned),
+            gid: 0,
+            links: facts.links,
+            size: facts.len,
+            mtime: time(facts.written),
+            ctime: time(facts.changed),
+        }
+    }
+
+    #[cfg(unix)]
     pub fn of(metadata: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
         Self {

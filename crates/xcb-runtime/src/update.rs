@@ -578,7 +578,12 @@ fn scheduler_files(home: &Path) -> Vec<PathBuf> {
 }
 
 fn launchd_domain() -> String {
-    format!("gui/{}", rustix::process::getuid().as_raw())
+    // launchd exists only on macOS; the scheduler never runs elsewhere.
+    #[cfg(unix)]
+    let uid = rustix::process::getuid().as_raw();
+    #[cfg(not(unix))]
+    let uid = 0;
+    format!("gui/{uid}")
 }
 
 /// Remove the daily update check under `home` when it is there, and report
@@ -789,7 +794,7 @@ pub fn install_scheduler(binary: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

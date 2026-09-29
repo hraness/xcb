@@ -4,6 +4,10 @@
 //! Every run uses a private temporary state root and HOME, and an empty
 //! PATH so no real provider (and no browser sign-in) can ever start.
 
+// These tests drive Unix permission bits, symlinks, or /bin/sh fixtures;
+// the Windows custody rules are covered by the platform tests.
+#![cfg(unix)]
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 

@@ -56,16 +56,10 @@ pub async fn dispatch(root: &Path, as_json: bool) -> Result<i32> {
     let (cancel, receiver) = watch::channel(false);
     // A caller deadline or signal cancels the turn; the response is emitted
     // only after the owned process future settles — never by dropping it.
-    let mut interrupt =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
-            Ok(value) => value,
-            Err(_) => return failed(RouteCode::Unavailable),
-        };
-    let mut terminate =
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(value) => value,
-            Err(_) => return failed(RouteCode::Unavailable),
-        };
+    let mut stop = match crate::stop::Stop::install() {
+        Ok(value) => value,
+        Err(_) => return failed(RouteCode::Unavailable),
+    };
     let observer: Observer = Arc::new(|event| {
         if let Progress::Notice(message) = event {
             eprintln!("xcb: {message}");
@@ -76,8 +70,7 @@ pub async fn dispatch(root: &Path, as_json: bool) -> Result<i32> {
     let mut timed_out = false;
     let outcome = tokio::select! {
         result = &mut task => result,
-        _ = interrupt.recv() => { let _ = cancel.send(true); task.await },
-        _ = terminate.recv() => { let _ = cancel.send(true); task.await },
+        _ = stop.recv() => { let _ = cancel.send(true); task.await },
         _ = deadline(timeout_ms) => { timed_out = true; let _ = cancel.send(true); task.await },
     };
     let outcome = match outcome {

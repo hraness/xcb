@@ -15,7 +15,6 @@ use crate::{Error, Result, digest, private, process};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Component, Path, PathBuf},
     time::{Duration, Instant, SystemTime},
 };
@@ -89,16 +88,20 @@ impl FileStamp {
         if !metadata.is_file() {
             return Err(Error::PrivateState);
         }
+        #[cfg(unix)]
+        let identity = xcb_core::FileIdentity::of(&metadata);
+        #[cfg(windows)]
+        let identity = xcb_core::FileIdentity::of_path(path)?;
         Ok(Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            bytes: metadata.len(),
-            mode: metadata.mode(),
-            uid: metadata.uid(),
-            gid: metadata.gid(),
-            links: metadata.nlink(),
-            modified: (metadata.mtime(), metadata.mtime_nsec()),
-            changed: (metadata.ctime(), metadata.ctime_nsec()),
+            device: identity.dev,
+            inode: identity.ino,
+            bytes: identity.size,
+            mode: identity.mode,
+            uid: identity.uid,
+            gid: identity.gid,
+            links: identity.links,
+            modified: identity.mtime,
+            changed: identity.ctime,
         })
     }
 }
@@ -189,7 +192,7 @@ impl SupervisorIdentity {
         Ok(PreparedIdentity { record, stamp })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn publish(root: &Path, record: Record) -> Result<Self> {
         Self::prepare_record(record)?.publish(root)
     }
@@ -239,16 +242,7 @@ impl SupervisorIdentity {
 /// carries meaning; the file stays empty.
 fn touch_heartbeat(directory: &Path) -> Result<()> {
     let path = directory.join(HEARTBEAT_NAME);
-    let file = match OpenOptions::new()
-        .write(true)
-        .custom_flags(
-            (rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::CLOEXEC)
-                .bits() as i32,
-        )
-        .open(&path)
-    {
+    let file = match crate::os::no_follow(OpenOptions::new().write(true), true).open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // A freshly created file carries the current time.
@@ -368,10 +362,13 @@ fn check_expected(root: &Path, expected_sha256: &str) -> Result<()> {
 /// means another process holds the lock: a supervisor that has not published
 /// its record yet, or a client briefly taking the same lock.
 fn owner_alive(pid: u32) -> Result<()> {
+    #[cfg(unix)]
     let alive = i32::try_from(pid)
         .ok()
         .and_then(rustix::process::Pid::from_raw)
         .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok());
+    #[cfg(windows)]
+    let alive = xcb_platform::process_exists(pid) == Some(true);
     if alive {
         Ok(())
     } else {
@@ -404,10 +401,10 @@ fn check_progress(directory: &Path, pid: u32) -> Result<()> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     fn fixture() -> (tempfile::TempDir, PathBuf, SupervisorIdentity) {
         let directory = tempfile::tempdir().unwrap();

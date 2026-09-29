@@ -8,7 +8,6 @@
 //! until that exact operation is reconciled or a verified renewal wins.
 
 use std::io::Read;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -82,14 +81,14 @@ impl FilePin {
         }
         private::check_file(&file, MAX_JOURNAL as u64)?;
         private::same_file(path, &file)?;
-        let meta = file.metadata()?;
+        let meta = xcb_core::FileIdentity::of_file(&file)?;
         Ok((
             Self {
                 digest: crate::digest(&bytes),
-                device: meta.dev(),
-                inode: meta.ino(),
-                changed_seconds: meta.ctime(),
-                changed_nanos: meta.ctime_nsec(),
+                device: meta.dev,
+                inode: meta.ino,
+                changed_seconds: meta.ctime.0,
+                changed_nanos: meta.ctime.1,
             },
             bytes,
         ))
@@ -991,7 +990,7 @@ async fn refresh_pending(
     Ok(fresh)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "reauth_tests.rs"]
 mod tests;
 

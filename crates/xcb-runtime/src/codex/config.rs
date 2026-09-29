@@ -327,7 +327,7 @@ pub(crate) fn static_catalog_bound(
 #[cfg(test)]
 static CATALOG_EXTRACTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn catalog_extractions() -> usize {
     CATALOG_EXTRACTIONS.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -553,6 +553,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn catalog_cache_is_keyed_by_the_exact_executable_digest() {
         use std::os::unix::fs::PermissionsExt;

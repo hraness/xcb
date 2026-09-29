@@ -6,11 +6,10 @@
 //! is replaced or removed, including when a supervisor exits.
 
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::{Error, Result, private};
+use crate::{Error, Result, os, private};
 
 const LEGACY_LOCK: &str = "supervisor.lock";
 const OWNER_LOCK: &str = "supervisor.owner.lock";
@@ -25,19 +24,17 @@ struct LockFile {
 impl LockFile {
     fn open(directory: &Path, name: &str) -> Result<Self> {
         let path = private::directory(directory)?.join(name);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(
-                (rustix::fs::OFlags::NOFOLLOW
-                    | rustix::fs::OFlags::NONBLOCK
-                    | rustix::fs::OFlags::CLOEXEC)
-                    .bits() as i32,
-            )
-            .open(&path)?;
+        let file = os::no_follow(
+            os::owner_only(
+                OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false),
+            ),
+            true,
+        )
+        .open(&path)?;
         let lock = Self { path, file };
         lock.check()?;
         Ok(lock)
@@ -72,7 +69,7 @@ impl LockFile {
 fn check(path: &Path, file: &File) -> Result<()> {
     private::check_directory(path.parent().ok_or(Error::PrivateState)?)?;
     private::check_file(file, 0)?;
-    if file.metadata()?.mode() & 0o777 != 0o600 {
+    if !os::has_mode(file, 0o600)? {
         return Err(Error::PrivateState);
     }
     private::same_file(path, file)
@@ -206,7 +203,7 @@ pub(crate) async fn transition(root: &Path, timeout: Duration) -> Result<Transit
     Ok(guard)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -301,6 +298,7 @@ mod tests {
         owner.check().unwrap();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn unsafe_or_replaced_lock_names_are_rejected() {
         let (_directory, root) = fixture();

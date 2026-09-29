@@ -7,16 +7,34 @@
 //! pinning, byte bounds, and the `Error` taxonomy callers match on.
 
 use crate::{Error, Result};
+#[cfg(unix)]
 use local_custody::{
     CustodyError, ObjectKind, OwnedPathOptions, assert_owned_fd, atomic_publish,
     atomic_publish_guarded, ensure_private_directory,
 };
+#[cfg(unix)]
 use std::cell::RefCell;
-use std::fs::{self, File, OpenOptions};
+use std::fs::File;
+#[cfg(unix)]
+use std::fs::{self, OpenOptions};
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::{Component, PathBuf};
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::{
+    check_directory, check_file, create, default_root, directory, open_file,
+    open_file_maybe_vanished,
+};
+#[cfg(windows)]
+pub(crate) use windows::{replace_guarded, same_file};
 
 /// Translate a custody-contract failure into xcb's error taxonomy. Violations
 /// of the owned/private contract (symlinks, wrong kind, foreign owner,
@@ -25,6 +43,7 @@ use std::path::{Component, Path, PathBuf};
 /// Genuine filesystem failures keep `Io`; a missing object keeps the
 /// `NotFound` kind that load-dedup callers match; the publish-name grammar is
 /// caller input and maps to `Invalid`; content drift is a `Conflict`.
+#[cfg(unix)]
 fn map_custody_error(error: CustodyError) -> Error {
     match error.code.as_str() {
         "not-found" => Error::Io(std::io::Error::new(
@@ -71,6 +90,7 @@ fn map_custody_error(error: CustodyError) -> Error {
 /// regular file with a single name, owner-only permissions, within `max`
 /// bytes. `assert_owned_fd` fstats the descriptor, so a hot sibling (WAL,
 /// SHM) is judged by the object actually opened, never a re-resolved path.
+#[cfg(unix)]
 fn owned_file(max: u64) -> OwnedPathOptions {
     OwnedPathOptions {
         kind: Some(ObjectKind::File),
@@ -85,6 +105,7 @@ fn owned_file(max: u64) -> OwnedPathOptions {
 /// parent must already be a checked private directory, and the leaf name —
 /// now also bound by the crate's `^[A-Za-z0-9][A-Za-z0-9._-]{0,126}$`
 /// publication grammar — is handed to the atomic publish call.
+#[cfg(unix)]
 fn publish_target(path: &Path) -> Result<(PathBuf, &str)> {
     let parent = check_directory(path.parent().ok_or(Error::PrivateState)?)?;
     let name = path
@@ -94,6 +115,7 @@ fn publish_target(path: &Path) -> Result<(PathBuf, &str)> {
     Ok((parent, name))
 }
 
+#[cfg(unix)]
 pub fn default_root() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("XCB_STATE") {
         return Ok(PathBuf::from(path));
@@ -102,6 +124,7 @@ pub fn default_root() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".local/share/xcb"))
 }
 
+#[cfg(unix)]
 pub fn directory(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute()
         || path
@@ -125,6 +148,7 @@ pub fn directory(path: &Path) -> Result<PathBuf> {
     check_directory(path)
 }
 
+#[cfg(unix)]
 pub fn check_directory(path: &Path) -> Result<PathBuf> {
     let meta = fs::symlink_metadata(path)?;
     if meta.file_type().is_symlink() {
@@ -139,11 +163,13 @@ pub fn check_directory(path: &Path) -> Result<PathBuf> {
     Ok(path.to_owned())
 }
 
+#[cfg(unix)]
 pub fn check_file(file: &File, max: u64) -> Result<()> {
     assert_owned_fd(file.as_raw_fd(), &owned_file(max)).map_err(map_custody_error)?;
     Ok(())
 }
 
+#[cfg(unix)]
 pub fn open_file(path: &Path, max: u64) -> Result<File> {
     // A racing private::replace can unlink the name between open and fstat:
     // the descriptor then names an inode with no surviving link. Re-resolve
@@ -174,6 +200,7 @@ pub fn open_file(path: &Path, max: u64) -> Result<File> {
 /// descriptor whose link count reached zero no longer has any name to check:
 /// it is treated exactly like an absent file. A surviving name still gets the
 /// full private-file check, including the single-name requirement.
+#[cfg(unix)]
 pub fn open_file_maybe_vanished(path: &Path, max: u64) -> Result<Option<File>> {
     let file = match OpenOptions::new()
         .read(true)
@@ -274,6 +301,7 @@ impl Drop for ExclusiveLock {
     }
 }
 
+#[cfg(unix)]
 pub(crate) fn same_file(path: &Path, file: &File) -> Result<()> {
     let opened = file.metadata()?;
     let named = fs::symlink_metadata(path)?;
@@ -283,6 +311,7 @@ pub(crate) fn same_file(path: &Path, file: &File) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 pub fn create(path: &Path, bytes: &[u8]) -> Result<()> {
     let (parent, name) = publish_target(path)?;
     // create_once commits with link(2): an existing name fails the commit
@@ -304,6 +333,7 @@ pub fn replace(path: &Path, bytes: &[u8], expected: &str) -> Result<()> {
 
 /// Add an operation's original-object/authority checks to the existing
 /// digest and inode guard, including the final check before publication.
+#[cfg(unix)]
 pub(crate) fn replace_guarded(
     path: &Path,
     bytes: &[u8],
@@ -356,8 +386,11 @@ pub(crate) fn replace_guarded(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::ExclusiveLock;
+    #[cfg(unix)]
     use std::fs::OpenOptions;
+    #[cfg(unix)]
     use std::process::{Command, Stdio};
 
     #[test]
@@ -397,6 +430,7 @@ mod tests {
     /// outright, so under a close-only release the child's copy would keep the
     /// lock held for its whole life. An explicit `unlock` on drop must free
     /// the description while the child still runs.
+    #[cfg(unix)]
     #[test]
     fn a_released_lock_is_not_held_by_a_shared_descriptor() {
         let directory = tempfile::tempdir().unwrap();

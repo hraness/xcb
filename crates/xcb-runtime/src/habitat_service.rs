@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -307,14 +306,10 @@ fn load(root: &Path, home: &Path) -> Result<Option<Service>> {
 
 fn lock(root: &Path, name: &str) -> Result<private::ExclusiveLock> {
     let dir = private::directory(&root.join("managed"))?;
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(dir.join(name))?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    let file =
+        crate::os::no_follow(crate::os::owner_only(&mut options), true).open(dir.join(name))?;
     private::check_file(&file, 4096)?;
     file.try_lock().map_err(|_| {
         Error::Conflict("habitat service or supervisor is active; pause schedules and project grants, let work settle, then retry")
@@ -323,10 +318,7 @@ fn lock(root: &Path, name: &str) -> Result<private::ExclusiveLock> {
 }
 
 fn read_manifest(path: &Path) -> Result<Vec<u8>> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(path)?;
+    let mut file = crate::os::no_follow(OpenOptions::new().read(true), true).open(path)?;
     private::check_file(&file, LIMIT as u64)?;
     let mut bytes = Vec::new();
     Read::by_ref(&mut file)
@@ -339,7 +331,12 @@ fn read_manifest(path: &Path) -> Result<Vec<u8>> {
 }
 
 fn domain() -> String {
-    format!("gui/{}", rustix::process::getuid().as_raw())
+    // launchd exists only on macOS; `supported` refuses the service elsewhere.
+    #[cfg(unix)]
+    let uid = rustix::process::getuid().as_raw();
+    #[cfg(not(unix))]
+    let uid = 0;
+    format!("gui/{uid}")
 }
 
 fn registered(service: &Service) -> Result<bool> {
@@ -449,12 +446,8 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
     for directory in manifest_folders(&service.home) {
         private_directory(&directory)?;
     }
-    let meta = fs::symlink_metadata(parent)?;
-    if !meta.is_dir()
-        || meta.uid() != rustix::process::getuid().as_raw()
-        || meta.mode() & 0o022 != 0
-        || parent.canonicalize()? != parent
-    {
+    let meta = crate::os::lstat(parent)?;
+    if !meta.dir || !meta.owned || !meta.unshared_write || parent.canonicalize()? != parent {
         return Err(Error::PrivateState);
     }
     let body = service.render()?;
@@ -522,16 +515,21 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
 pub(crate) fn private_directory(directory: &Path) -> Result<()> {
     match fs::symlink_metadata(directory) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            use std::os::unix::fs::DirBuilderExt;
-            fs::DirBuilder::new().mode(0o700).create(directory)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                fs::DirBuilder::new().mode(0o700).create(directory)?;
+            }
+            #[cfg(windows)]
+            crate::private::directory(directory).map(drop)?;
         }
         Err(e) => return Err(e.into()),
         Ok(_) => (),
     }
-    let metadata = fs::symlink_metadata(directory)?;
-    if !metadata.is_dir()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o022 != 0
+    let metadata = crate::os::lstat(directory)?;
+    if !metadata.dir
+        || !metadata.owned
+        || !metadata.unshared_write
         || directory.canonicalize()? != directory
     {
         return Err(Error::PrivateState);
@@ -638,7 +636,7 @@ pub fn uninstall(root: &Path, home: &Path) -> Result<Status> {
     status(root, home)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

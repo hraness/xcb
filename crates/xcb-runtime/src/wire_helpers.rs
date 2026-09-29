@@ -4,6 +4,7 @@
 //! text in diagnostics.
 use crate::{Error, Result};
 use serde_json::Value;
+#[cfg(unix)]
 use std::io::{BufRead, Write};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use xcb_core::usage::COUNTER_LIMIT;
@@ -172,6 +173,7 @@ pub(crate) async fn frame<R: AsyncBufReadExt + Unpin>(
 }
 
 /// Sync twin of `frame` for the blocking stdio relays.
+#[cfg(unix)]
 pub(crate) fn frame_sync<R: BufRead>(
     reader: &mut R,
     max: usize,
@@ -220,6 +222,7 @@ pub(crate) async fn write_frame<W: AsyncWrite + Unpin>(
 
 /// Sync twin of `write_frame` for the blocking stdio relays; the caller owns
 /// the bound, which host-authored frames never approach.
+#[cfg(unix)]
 pub(crate) fn write_frame_sync<W: Write>(
     writer: &mut W,
     value: &Value,

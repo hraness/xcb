@@ -20,9 +20,8 @@
 use crate::{Error, Result, application::ApplicationQualification, digest, private, process::Pin};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, File, Metadata},
+    fs::File,
     io::Read,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 use xcb_core::{Id, Provider};
@@ -410,8 +409,8 @@ struct OpenEvidence {
 impl OpenEvidence {
     fn verify(&self) -> Result<()> {
         private::check_file(&self.file, self.maximum as u64)?;
-        require(FileIdentity::of(&self.file.metadata()?) == self.identity)?;
-        require(FileIdentity::of(&fs::symlink_metadata(&self.path)?) == self.identity)
+        require(FileIdentity::of_file(&self.file)? == self.identity)?;
+        require(FileIdentity::of_path(&self.path)? == self.identity)
     }
 }
 #[derive(Default)]
@@ -422,13 +421,12 @@ struct Reader {
 impl Reader {
     fn directory(&mut self, path: &Path) -> Result<()> {
         let meta = read_directory(path)?;
-        self.directories
-            .push((path.to_owned(), meta.dev(), meta.ino()));
+        self.directories.push((path.to_owned(), meta.dev, meta.ino));
         Ok(())
     }
     fn read(&mut self, path: &Path, maximum: usize) -> Result<Vec<u8>> {
         let file = private::open_file(path, maximum as u64)?;
-        let identity = FileIdentity::of(&file.metadata()?);
+        let identity = FileIdentity::of_file(&file)?;
         let mut bytes = Vec::new();
         (&file).take(maximum as u64 + 1).read_to_end(&mut bytes)?;
         require(!bytes.is_empty() && bytes.len() <= maximum)?;
@@ -454,19 +452,19 @@ impl Reader {
         }
         for (path, dev, ino) in self.directories {
             let meta = read_directory(&path)?;
-            require(meta.dev() == dev && meta.ino() == ino)?;
+            require(meta.dev == dev && meta.ino == ino)?;
         }
         Ok(())
     }
 }
-fn read_directory(path: &Path) -> Result<Metadata> {
-    let meta = fs::symlink_metadata(path)?;
+fn read_directory(path: &Path) -> Result<crate::os::Stamp> {
+    let meta = crate::os::lstat(path)?;
     require(
         path.is_absolute()
             && path.canonicalize()? == path
-            && meta.is_dir()
-            && meta.uid() == rustix::process::getuid().as_raw()
-            && meta.mode() & 0o077 == 0,
+            && meta.dir
+            && meta.owned
+            && meta.private,
     )?;
     Ok(meta)
 }
@@ -691,11 +689,12 @@ fn generation(
     Ok(record)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use serde_json::{Value, json};
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::fs;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     #[test]
     fn quota_availability_generation_reader_validates_parents_without_creation() {

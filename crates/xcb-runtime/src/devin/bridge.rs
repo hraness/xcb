@@ -1,17 +1,23 @@
-use crate::{Error, Result, private};
+#[cfg(unix)]
+use crate::private;
+use crate::{Error, Result};
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::{
     io::{BufRead, BufReader as StdReader, Write},
     os::unix::fs::PermissionsExt,
+};
+use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    net::UnixListener,
+    io::AsyncBufReadExt,
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
 };
+#[cfg(unix)]
+use tokio::{io::BufReader, net::UnixListener};
 use xcb_core::MAX_JSON_BYTES;
 
 pub(crate) struct Request {
@@ -20,6 +26,7 @@ pub(crate) struct Request {
     pub reply: oneshot::Sender<Option<Value>>,
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) struct DevinBridge {
     path: PathBuf,
     token: String,
@@ -28,6 +35,7 @@ pub(crate) struct DevinBridge {
     task: Option<JoinHandle<()>>,
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) async fn frame<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>> {
     crate::wire_helpers::frame(
         reader,
@@ -40,6 +48,15 @@ pub(crate) async fn frame<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<
 }
 
 impl DevinBridge {
+    /// The broker bridge is a Unix socket into the provider's sandbox;
+    /// Windows never launches Devin.
+    #[cfg(windows)]
+    #[allow(dead_code)]
+    pub(crate) fn bind(_path: &Path) -> Result<Self> {
+        Err(Error::providers_unsupported())
+    }
+
+    #[cfg(unix)]
     #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub(crate) fn bind(path: &Path) -> Result<Self> {
         let parent = path.parent().ok_or(Error::PrivateState)?;
@@ -117,7 +134,7 @@ impl DevinBridge {
         })
     }
 
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", all(test, unix))), allow(dead_code))]
     pub(crate) fn configuration(&self, helper: &Path) -> Result<Value> {
         let helper = helper
             .to_str()
@@ -154,6 +171,7 @@ impl Drop for DevinBridge {
     }
 }
 
+#[cfg(unix)]
 fn copy_lines(mut from: impl BufRead, mut to: impl Write) -> Result<()> {
     for _ in 0..4096 {
         let Some(bytes) = crate::wire_helpers::frame_sync(
@@ -174,6 +192,13 @@ fn copy_lines(mut from: impl BufRead, mut to: impl Write) -> Result<()> {
 
 /// Hidden child-process entry point; this relay never executes a tool. Its
 /// process is covered by the provider process-group join before lease release.
+#[cfg(windows)]
+pub async fn broker_stdio(path: &Path, token: &str) -> Result<()> {
+    let _ = (path, token);
+    Err(Error::providers_unsupported())
+}
+
+#[cfg(unix)]
 pub async fn broker_stdio(path: &Path, token: &str) -> Result<()> {
     if !path.is_absolute() || !xcb_core::hex64_any(token) {
         return Err(Error::Protocol("invalid broker connection"));
@@ -205,7 +230,7 @@ pub async fn broker_stdio(path: &Path, token: &str) -> Result<()> {
     .map_err(|_| Error::Protocol("broker relay task failed"))?
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use tokio::{io::AsyncWriteExt, net::UnixStream};

@@ -1,17 +1,29 @@
 pub mod git_snapshot;
 pub mod snapshot;
 
-use crate::{Error, Result, coordination, digest};
+#[cfg(windows)]
+mod windows;
+
+use crate::coordination;
+#[cfg(unix)]
+use crate::{Error, Result, digest};
+#[cfg(unix)]
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, RenameFlags};
-use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::{Value, json};
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::{
     fs::File,
     io::{Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
 };
-use xcb_core::{MAX_TEXT_BYTES, policy::EffectState};
+use xcb_core::MAX_TEXT_BYTES;
+#[cfg(unix)]
+use xcb_core::policy::EffectState;
 
 #[derive(Debug, Serialize)]
 pub struct ReadResult {
@@ -38,20 +50,33 @@ pub const READ_LIMIT: usize = MAX_TEXT_BYTES / 2;
 pub const LIST_LIMIT: usize = 512;
 /// Directory entries are read up to this bound before sorting. A larger
 /// directory is reported truncated; its page is drawn from the entries read.
+#[cfg(unix)]
 const LIST_SCAN_LIMIT: usize = 65_536;
 /// `workspace_search` scans files up to the full text bound; larger or
 /// non-UTF-8 files are skipped rather than failing the search.
+#[cfg(unix)]
 const SEARCH_FILE_LIMIT: usize = MAX_TEXT_BYTES;
 
+/// The workspace tools walk descriptor-relative (`openat`) so a renamed or
+/// swapped directory can never redirect a tool outside the bound root. The
+/// Windows handle-relative walk is not built: provider runs, the only users
+/// of these tools, are refused there, so [`Workspace::open`] refuses too.
 pub struct Workspace {
+    #[cfg_attr(windows, allow(dead_code))]
     root: PathBuf,
+    #[cfg(unix)]
     directory: File,
+    #[cfg_attr(windows, allow(dead_code))]
     coordination: coordination::Coordination,
+    #[cfg(windows)]
+    unavailable: std::convert::Infallible,
 }
 
+#[cfg(unix)]
 fn io(error: rustix::io::Errno) -> Error {
     std::io::Error::from(error).into()
 }
+#[cfg(unix)]
 fn components(path: &str) -> Result<Vec<&std::ffi::OsStr>> {
     if !xcb_core::bounded_path(path) {
         return Err(xcb_core::Error::Invalid("workspace path").into());
@@ -64,6 +89,7 @@ fn components(path: &str) -> Result<Vec<&std::ffi::OsStr>> {
         })
         .collect()
 }
+#[cfg(unix)]
 fn regular(file: &File) -> Result<()> {
     let meta = file.metadata()?;
     if !meta.is_file() || meta.nlink() != 1 || meta.len() > MAX_TEXT_BYTES as u64 {
@@ -73,6 +99,7 @@ fn regular(file: &File) -> Result<()> {
 }
 /// A checked regular single-link file without a size bound; callers apply
 /// their own limit so an oversized read can carry guided tool errors.
+#[cfg(unix)]
 fn opened_file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
     let file = File::from(
         rustix::fs::openat(
@@ -89,11 +116,13 @@ fn opened_file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
     }
     Ok(file)
 }
+#[cfg(unix)]
 fn file_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
     let file = opened_file_at(parent, name)?;
     regular(&file)?;
     Ok(file)
 }
+#[cfg(unix)]
 fn revision_file_at(parent: &File, name: &std::ffi::OsStr, expected: &str) -> Result<File> {
     if !xcb_core::hex64(expected) {
         return Err(xcb_core::Error::Invalid("workspace revision").into());
@@ -115,6 +144,7 @@ fn revision_file_at(parent: &File, name: &std::ffi::OsStr, expected: &str) -> Re
     Ok(file)
 }
 
+#[cfg(unix)]
 fn read_bytes_at(parent: &File, name: &std::ffi::OsStr, limit: usize) -> Result<Vec<u8>> {
     let file = opened_file_at(parent, name)?;
     let mut bytes = Vec::new();
@@ -124,11 +154,13 @@ fn read_bytes_at(parent: &File, name: &std::ffi::OsStr, limit: usize) -> Result<
     }
     Ok(bytes)
 }
+#[cfg(unix)]
 fn utf8(bytes: Vec<u8>) -> Result<String> {
     String::from_utf8(bytes).map_err(|_| xcb_core::Error::Invalid("UTF-8 workspace file").into())
 }
 /// A legal but oversized file is a tool rejection with guidance, never a
 /// provider-turn failure.
+#[cfg(unix)]
 fn read_at(parent: &File, name: &std::ffi::OsStr) -> Result<ReadResult> {
     let bytes = match read_bytes_at(parent, name, READ_LIMIT) {
         Err(Error::Core(xcb_core::Error::Limit(_))) => {
@@ -145,16 +177,19 @@ fn read_at(parent: &File, name: &std::ffi::OsStr) -> Result<ReadResult> {
     })
 }
 /// Text without a revision for search: no digest pass per scanned file.
+#[cfg(unix)]
 fn read_text_at(parent: &File, name: &std::ffi::OsStr) -> Result<String> {
     utf8(read_bytes_at(parent, name, SEARCH_FILE_LIMIT)?)
 }
 /// The current revision of a file up to the full write bound, so an existing
 /// file above the read limit can still be replaced with its exact revision.
+#[cfg(unix)]
 fn revision_at(parent: &File, name: &std::ffi::OsStr) -> Result<String> {
     Ok(digest(read_bytes_at(parent, name, MAX_TEXT_BYTES)?))
 }
 /// One open carrying both proofs a write needs from an existing target: the
 /// content revision and the permission bits the replacement preserves.
+#[cfg(unix)]
 fn revision_mode_at(parent: &File, name: &std::ffi::OsStr) -> Result<(String, u32)> {
     let mut file = opened_file_at(parent, name)?;
     let mode = file.metadata()?.mode() & 0o777;
@@ -167,6 +202,7 @@ fn revision_mode_at(parent: &File, name: &std::ffi::OsStr) -> Result<(String, u3
     }
     Ok((digest(&bytes), mode))
 }
+#[cfg(unix)]
 fn open_directory_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
     Ok(File::from(
         rustix::fs::openat(
@@ -178,6 +214,7 @@ fn open_directory_at(parent: &File, name: &std::ffi::OsStr) -> Result<File> {
         .map_err(io)?,
     ))
 }
+#[cfg(unix)]
 fn list_at(directory: &File) -> Result<Listing> {
     let mut entries = Vec::new();
     let mut truncated = false;
@@ -211,6 +248,7 @@ fn list_at(directory: &File) -> Result<Listing> {
     Ok(Listing { entries, truncated })
 }
 
+#[cfg(unix)]
 impl Workspace {
     pub fn open(root: &Path) -> Result<Self> {
         Self::open_with_coordination(root, &coordination::default_root()?)

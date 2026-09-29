@@ -15,7 +15,6 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
@@ -102,7 +101,7 @@ mod resolve_tests;
 #[path = "managed_ui_tests.rs"]
 mod ui_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "managed_supervisor_tests.rs"]
 mod supervisor_tests;
 
@@ -692,14 +691,9 @@ fn managed_migration_guard_until(
     mut migrated: impl FnMut() -> Result<bool>,
 ) -> Result<Option<private::ExclusiveLock>> {
     let path = root.join("supervisor.lock");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(&path)?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    let file = crate::os::no_follow(crate::os::owner_only(&mut options), false).open(&path)?;
     private::check_file(&file, 4096)?;
     private::same_file(&path, &file)?;
     loop {
@@ -5966,7 +5960,7 @@ mod relay_lock_tests {
 pub async fn daemon(root: PathBuf) -> Result<i32> {
     // A detached supervisor's stderr goes nowhere: every startup failure is
     // written where the client that spawned it looks.
-    let started = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+    let started = crate::os::Terminate::install()
         .map_err(Error::from)
         .and_then(|interrupt| Ok(start_supervisor(&root)?.map(|startup| (interrupt, startup))));
     let (mut interrupt, startup) = match started {
@@ -6124,13 +6118,14 @@ fn ensure_daemon_within(root: &Path, executable: &Path, confirm: Duration) -> Re
     }
     let directory = private::directory(&root.join("managed"))?;
     let lock_path = directory.join("supervisor.lock");
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(lock_path)?;
+    let lock = crate::os::owner_only(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(lock_path)?;
     private::check_file(&lock, 4096)?;
     match lock.try_lock() {
         Ok(()) => drop(private::ExclusiveLock::held(lock)),
@@ -6146,8 +6141,8 @@ fn ensure_daemon_within(root: &Path, executable: &Path, confirm: Duration) -> Re
         .arg("managed-daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
+        .stderr(Stdio::null());
+    crate::os::detach(&mut command);
     let spawned_ms = now_ms();
     let mut child = command.spawn().map_err(Error::LaunchNotStarted)?;
     let confirmed = confirm_daemon(&directory, &mut child, spawned_ms, confirm);

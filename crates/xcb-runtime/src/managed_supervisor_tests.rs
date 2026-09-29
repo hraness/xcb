@@ -4,7 +4,7 @@
 //! cleans or waits.
 
 use super::*;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use xcb_core::models::{Mode, ModelChoice};
 
 struct Fixture {

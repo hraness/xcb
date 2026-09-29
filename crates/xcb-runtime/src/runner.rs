@@ -16,7 +16,6 @@ use base64::Engine;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -168,7 +167,7 @@ pub(crate) async fn close_bridge(bridge: Option<egress::EgressBridge>) -> bool {
     }
 }
 
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(all(test, unix), target_os = "linux"))]
 async fn discard_failed_preparation(
     artifacts: &mut LaunchArtifacts,
     bridge: egress::EgressBridge,
@@ -259,15 +258,11 @@ fn reclamation_receipt(path: &Path) -> PathBuf {
     path.with_extension("reclaimable.json")
 }
 
-fn launch_directory_metadata(path: &Path) -> Result<std::fs::Metadata> {
+fn launch_directory_metadata(path: &Path) -> Result<crate::os::Stamp> {
     // Inspection must not use ensure_private_directory: a path concurrently
     // removed by its owner must stay absent, including during a dry run.
-    let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_dir()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o077 != 0
-        || path.canonicalize()? != path
-    {
+    let metadata = crate::os::lstat(path)?;
+    if !metadata.dir || !metadata.owned || !metadata.private || path.canonicalize()? != path {
         return Err(Error::PrivateState);
     }
     Ok(metadata)
@@ -276,12 +271,12 @@ fn launch_directory_metadata(path: &Path) -> Result<std::fs::Metadata> {
 fn reclaimable_identity(path: &Path, owner: &std::fs::File) -> Result<ReclaimableLaunch> {
     let directory = launch_directory_metadata(path)?;
     private::same_file(&path.join(LAUNCH_OWNER_LOCK), owner)?;
-    let owner = owner.metadata()?;
+    let owner = crate::os::fstat(owner)?;
     Ok(ReclaimableLaunch {
         version: 1,
         path: path.to_path_buf(),
-        directory: (directory.dev(), directory.ino()),
-        owner: (owner.dev(), owner.ino()),
+        directory: (directory.dev, directory.ino),
+        owner: (owner.dev, owner.ino),
     })
 }
 
@@ -303,7 +298,7 @@ impl LaunchArtifacts {
 impl LaunchArtifacts {
     pub(crate) fn create(root: &Path) -> Result<Self> {
         let directory = private::directory(&root.join("runs").join(new_id("launch").as_str()))?;
-        let metadata = std::fs::symlink_metadata(&directory)?;
+        let metadata = crate::os::lstat(&directory)?;
         let owner = open_owner_lock(&directory.join(LAUNCH_OWNER_LOCK))?;
         // The directory name is a fresh identifier, so the lock cannot already
         // be held. A refusal here means something else is writing into our
@@ -314,7 +309,7 @@ impl LaunchArtifacts {
         let owner = private::ExclusiveLock::held(owner);
         Ok(Self {
             directory,
-            identity: (metadata.dev(), metadata.ino()),
+            identity: (metadata.dev, metadata.ino),
             retained: false,
             owner,
         })
@@ -334,20 +329,9 @@ impl LaunchArtifacts {
 /// Opens the owner lock without following a symlink and without blocking on a
 /// device. The same flags the store uses for its initialization lock.
 fn open_owner_lock(path: &Path) -> Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .custom_flags(
-            (rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::CLOEXEC)
-                .bits() as i32,
-        )
-        .open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    let file = crate::os::no_follow(crate::os::owner_only(&mut options), true).open(path)?;
     private::check_file(&file, 0)?;
     private::same_file(path, &file)?;
     Ok(file)
@@ -465,8 +449,8 @@ impl Drop for LaunchArtifacts {
         if self.retained || launch_directory_metadata(&self.directory).is_err() {
             return;
         }
-        if std::fs::symlink_metadata(&self.directory)
-            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == self.identity)
+        if crate::os::lstat(&self.directory)
+            .is_ok_and(|metadata| (metadata.dev, metadata.ino) == self.identity)
         {
             // Publish outside the provider's writable tree before removal, so
             // an interrupted or failed disposal remains safely reclaimable.
@@ -514,6 +498,7 @@ impl Answer {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn provider_args(model: &ModelChoice, tools: bool) -> Vec<String> {
     let mut args = vec![
         "--print".into(),
@@ -562,7 +547,7 @@ fn provider_args(model: &ModelChoice, tools: bool) -> Vec<String> {
 /// it anywhere. The planner owns the executable and forwarder-runtime binds;
 /// `read_only` carries only the dynamic-loader/library closure — repeating a
 /// path the plan already mounts used to be a fatal "bind target duplicated".
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 pub(crate) fn linux_spec(
     executable: PathBuf,
     runtime: PathBuf,
@@ -1204,6 +1189,12 @@ async fn probe_codex(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<V
 /// Interactive provider sign-in is a host action, separate from a model turn.
 /// Device codes are shown by the official CLI; credentials stay in the private
 /// launch profile until the process has independently joined.
+#[cfg(windows)]
+pub async fn login_codex(_store: &Store, _account: &Id, _pin: &Pin) -> Result<()> {
+    Err(Error::providers_unsupported())
+}
+
+#[cfg(unix)]
 pub async fn login_codex(store: &Store, account: &Id, pin: &Pin) -> Result<()> {
     use rustix::process::{Pid, Signal, kill_process_group};
     use std::{os::fd::AsFd, process::Stdio};
@@ -2568,7 +2559,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
     Ok(outcome)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::io::Write;
