@@ -51,7 +51,7 @@ Applications can embed the TypeScript SDK instead. There the application names t
 
 ## Limits
 
-With the tested accounts, Claude and Devin have completed coding tasks through xcb on macOS on Apple silicon. Claude ran a failing test, fixed the code, passed the test, and checked Git status; Devin, on Devin CLI 3000.11.3, fixed a broken function and reported the change. On Linux only Claude runs, in a bwrap sandbox once xcb's checks pass, and a coding session there has not been confirmed. Codex and Devin need macOS, and Codex runs only on specific builds that xcb has checked; its last confirmed signed-in coding session used an older build. The [providers page](/docs/providers) lists each supported build and its status.
+With the tested accounts, Claude, Codex, and Devin have each completed a coding task through xcb on macOS on Apple silicon: each wrote a small script, ran its own checks in the command VM, and recorded the result. Codex ran on Codex CLI 0.158.0 and Devin on Devin CLI 3000.11.3. Codex runs only on specific builds that xcb has checked. On Linux only Claude runs, in a bwrap sandbox once `xcb doctor --provider claude --qualify-sandbox` passes; on Ubuntu 24.04 that needs the AppArmor profile xcb prints. A signed-in coding session on a real Linux machine has not been confirmed yet. Codex and Devin need macOS. On Windows, xcb runs natively for everything except the providers, which run in the Linux build inside WSL2. The [providers page](/docs/providers) lists each supported build and its status.
 
 Tests and builds run only in an offline Linux VM that you set up on macOS on Apple silicon; without it, agents can read and change files but cannot run commands. Git in that VM is read-only, so agents working through xcb do not commit or push, and native macOS or Xcode builds cannot run there.
 
@@ -59,11 +59,19 @@ The managed harness that runs the tasks in your thread is experimental. It is be
 
 ## Install xcb and connect Claude
 
-Latest release: {{release.version}}. Release binaries are built for macOS on Apple silicon and Linux x86_64, and one line installs xcb:
+Latest release: {{release.version}}. Release binaries are built for macOS on Apple silicon, Linux on x86_64 and ARM64, and Windows on x86_64. On macOS or Linux, one line installs xcb:
 
 ```sh
 curl -fsSL https://xcb.sh/install.sh | sh
 ```
+
+On Windows, from PowerShell:
+
+```powershell
+irm https://xcb.sh/install.ps1 | iex
+```
+
+The Windows build isn't code-signed yet, so SmartScreen may ask before it runs the first time.
 
 With Claude Code installed, `xcb setup claude` adds a Claude account or reuses yours, checks your Claude Code build, opens the browser sign-in, and loads the account's models. Then plain `xcb` opens your thread:
 

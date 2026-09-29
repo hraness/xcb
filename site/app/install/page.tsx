@@ -10,7 +10,7 @@ import { socialImages } from "../social";
 import { agentPrompt, installCommand, pathCommand, windowsInstallCommand } from "./commands";
 
 const title = "Install xcb";
-const description = "Install xcb with one command on macOS with Apple silicon or Linux x86_64, connect a Claude, Codex, or Devin account, and give it a first task.";
+const description = "Install xcb with one command on macOS, Linux, or Windows, connect a Claude, Codex, or Devin account, and give it a first task.";
 
 export const metadata: Metadata = {
   title,
@@ -53,7 +53,7 @@ export default function Install() {
 
         <PageSection id="before" title="Before you start">
           <ul>
-            <li>A Mac with Apple silicon, or a Linux x86_64 machine with glibc 2.34 or newer (Ubuntu 22.04, Debian 12, RHEL 9, and later). Other systems can <a href="#source">build from source</a>.</li>
+            <li>A Mac with Apple silicon, or a Linux x86_64 or ARM64 machine with glibc 2.34 or newer (Ubuntu 22.04, Debian 12, RHEL 9, and later). Other systems can <a href="#source">build from source</a>.</li>
             <li>On Linux, complete the <a href="/docs/providers#claude-on-linux">sandbox checks for Claude</a> after installing xcb and before connecting an account. Codex and Devin run on macOS only.</li>
             <li>For Claude: a Claude subscription and Claude Code {supportedBuilds.claudeMinimum} or later. Check with <code>claude --version</code>.</li>
             <li>For Codex (macOS): Codex CLI {supportedBuilds.codex.join(" or ")}, which <code>npm install -g @openai/codex@{supportedBuilds.codex[0]}</code> installs.</li>
@@ -116,7 +116,7 @@ export default function Install() {
         </PageSection>
 
         <PageSection id="source" title="Build from source">
-          <p>On an Intel Mac, ARM Linux, or any other system, build with Git, Rust 1.97.1, and your platform’s build tools:</p>
+          <p>On an Intel Mac or any other system, build with Git, Rust 1.97.1, and your platform’s build tools:</p>
           <CodeBlock code={sourceBuild} />
         </PageSection>
       </main>

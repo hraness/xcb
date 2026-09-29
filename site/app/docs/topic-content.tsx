@@ -47,7 +47,7 @@ function GettingStarted() {
       <p>This tutorial installs xcb, connects one Claude account, and sends a task to a small practice project. At the end you’ll see which account and model xcb picked and the fix it made.</p>
       <h2 id="requirements">Before you start</h2>
       <ul>
-        <li>A Mac with Apple silicon or a Linux x86_64 machine. Other hosts can <a href="#build-from-source">build from source</a>.</li>
+        <li>A Mac with Apple silicon, a Linux x86_64 or ARM64 machine, or Windows x86_64 (providers run in WSL2). Other hosts can <a href="#build-from-source">build from source</a>.</li>
         <li>A Claude subscription and Claude Code {supportedBuilds.claudeMinimum} or later. Check with <code>claude --version</code>.</li>
         <li>On Linux, Claude runs only after you <a href="/docs/providers#claude-on-linux">run xcb’s sandbox checks</a> on that machine. Do that before step 2.</li>
       </ul>
