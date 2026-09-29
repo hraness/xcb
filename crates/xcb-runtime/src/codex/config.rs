@@ -546,6 +546,8 @@ mod tests {
         assert_eq!(schemas.len(), REVIEWED_BUILDS.len());
     }
 
+    // Unix catalog paths; Codex launch is refused on Windows.
+    #[cfg(unix)]
     #[test]
     fn background_features_are_disabled_as_literal_toml_keys() {
         let config = configuration(Path::new("/synthetic/catalog.json")).unwrap();
@@ -567,7 +569,7 @@ mod tests {
         bytes.push(0);
         std::fs::write(&executable, &bytes).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let executable = xcb_core::canonical(&executable).unwrap();
+        let executable = xcb_core::canonical(executable).unwrap();
         let sha256 = crate::process::executable_digest(&executable).unwrap();
         let (_, host_sha256) = crate::process::host_identity().unwrap();
         let pin = Pin {

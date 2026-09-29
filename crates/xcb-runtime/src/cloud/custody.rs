@@ -260,11 +260,11 @@ pub fn clear_session(state_root: &Path) -> Result<()> {
     let target = path(state_root, name::SESSION)?;
     if private::open_file_maybe_vanished(&target, MAX_FILE_BYTES as u64)?.is_some() {
         std::fs::remove_file(&target)?;
-        std::fs::File::open(cloud_dir(state_root)?)?.sync_all()?;
+        private::sync_directory(&cloud_dir(state_root)?)?;
     }
     if has_pending {
         std::fs::remove_file(&pending)?;
-        std::fs::File::open(cloud_dir(state_root)?)?.sync_all()?;
+        private::sync_directory(&cloud_dir(state_root)?)?;
     }
     Ok(())
 }

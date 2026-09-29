@@ -2706,7 +2706,7 @@ fn project_grant_numeric_first_token_is_tasks_not_scope() {
     let root = std::env::temp_dir().join(format!("xcb-grant-{}", std::process::id()));
     let digits = root.join("2026");
     std::fs::create_dir_all(&digits).unwrap();
-    let digits = xcb_core::canonical(&digits).unwrap();
+    let digits = xcb_core::canonical(digits).unwrap();
     app.view
         .workspaces
         .push(workspace_row(digits.to_str().unwrap(), "2026"));

@@ -680,7 +680,7 @@ impl CommandBackend {
             create_marker(&name)?;
         }
         create_marker(PENDING_READY)?;
-        std::fs::File::open(&pending)?.sync_all()?;
+        private::sync_directory(&pending)?;
         Ok(pending)
     }
     fn mark_pending(&self, command: &Id) -> Result<()> {
@@ -701,7 +701,7 @@ impl CommandBackend {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
         }
-        std::fs::File::open(&pending)?.sync_all()?;
+        private::sync_directory(&pending)?;
         Ok(())
     }
 
@@ -769,7 +769,7 @@ impl CommandBackend {
             }
         }
         if apply {
-            std::fs::File::open(&jobs)?.sync_all()?;
+            private::sync_directory(&jobs)?;
         }
         Ok(report)
     }

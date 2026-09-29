@@ -374,7 +374,7 @@ struct HostExecutable {
 }
 impl HostExecutable {
     fn capture(path: PathBuf) -> Result<Self> {
-        let path = xcb_core::canonical(&path)?;
+        let path = xcb_core::canonical(path)?;
         let sha256 = executable_digest(&path)?;
         Ok(Self { path, sha256 })
     }
@@ -448,7 +448,7 @@ fn discover_executable(provider: Provider, explicit: Option<&Path>) -> Result<Pa
         if !path.is_absolute() {
             return Err(Error::Unavailable("provider path must be absolute"));
         }
-        let path = xcb_core::canonical(&path)?;
+        let path = xcb_core::canonical(path)?;
         if executable_file(&path).is_err() && !repair_executable_mode(&path)? {
             return Err(Error::Unavailable(
                 "executable ownership, permissions, or size is invalid",
@@ -567,7 +567,7 @@ impl Pin {
     #[cfg(target_os = "macos")]
     pub(crate) fn host_snapshot(&self, directory: &Path) -> Result<PathBuf> {
         self.verify()?;
-        let source_path = xcb_core::canonical(&std::env::current_exe()?)?;
+        let source_path = xcb_core::canonical(std::env::current_exe()?)?;
         let path = directory.join("xcb-helper");
         snapshot_executable(&executable_file(&source_path)?, &path)?;
         if executable_digest(&path)? != self.host_sha256 {

@@ -1417,6 +1417,8 @@ async fn thread_excluded_from_max_conversations_count() {
     ));
 }
 
+// Unix-rooted workspace spellings.
+#[cfg(unix)]
 #[tokio::test]
 async fn only_c_global_may_have_no_workspace() {
     let conversation = |id: &str, workspace: Option<&str>| ManagedConversation {

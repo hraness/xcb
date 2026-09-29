@@ -578,7 +578,12 @@ jobs:
           # Keep the dependency builds warm while the workspace is still red.
           cache-on-failure: true
       - run: cargo check --workspace --all-targets --locked --keep-going
+      # The default temp folder is under the home folder (AppData), where
+      # xcb refuses workspaces; tests make their workspaces in temp.
       - run: cargo test --workspace --locked --no-fail-fast
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
 
   required:
     # The one check branch policy requires. A job may be skipped only because

@@ -309,6 +309,8 @@ async fn file_token_binds_its_repo() {
     assert_eq!(task.binding.unwrap().source, BindingSource::Mention);
 }
 
+// Unix system and library paths.
+#[cfg(unix)]
 #[tokio::test]
 async fn ssh_and_library_prompt_tokens_refused() {
     let e = env();

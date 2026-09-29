@@ -667,7 +667,12 @@ fn generation(
     };
     let mut random = [0u8; 32];
     // Read the OS CSPRNG without UUID format bits or a dependency/entropy fallback.
+    #[cfg(unix)]
     File::open("/dev/urandom")?.read_exact(&mut random)?;
+    // Windows has no /dev/urandom: ProcessPrng through getrandom.
+    #[cfg(windows)]
+    getrandom::fill(&mut random)
+        .map_err(|_| Error::Unavailable("the OS random number generator is unavailable"))?;
     let record = CredentialGeneration {
         version: 1,
         account: run.account.clone(),

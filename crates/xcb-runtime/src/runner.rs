@@ -699,7 +699,7 @@ pub(crate) async fn prepare(
     let env_file = egress::write_forwarder_env(&scratch, &child_env(&home, &config, &tmp, token))?;
     let socket_dir = private::directory(&directory.join("egress"))?;
     let socket = socket_dir.join("egress.sock");
-    let xcb = xcb_core::canonical(&std::env::current_exe()?)?;
+    let xcb = xcb_core::canonical(std::env::current_exe()?)?;
     // The planner mounts the executable and the forwarder runtime itself;
     // read_only carries only the shared-library closure the dynamic loader
     // needs — provider snapshot and runtime alike.
@@ -2576,7 +2576,7 @@ mod tests {
         };
 
         let root = tempfile::tempdir().unwrap();
-        let root = xcb_core::canonical(&root.path()).unwrap();
+        let root = xcb_core::canonical(root.path()).unwrap();
         let pin = Pin {
             provider: Provider::Claude,
             executable: root.join("synthetic-provider"),

@@ -3432,6 +3432,7 @@ mod tests {
         assert!(store.recover_run(&running.id, &payload_digest, 4).is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn prepared_recovery_retains_lease_without_independent_child_proof() {
         struct Child(std::process::Child);

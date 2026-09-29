@@ -81,7 +81,7 @@ pub async fn qualify(root: &Path) -> Result<QualificationRun> {
     let candidate =
         sandbox::bwrap_candidate().ok_or(Error::Unavailable("bwrap isn't installed"))?;
     let pin = sandbox::BwrapPin::admit(&candidate)?;
-    let xcb = xcb_core::canonical(&std::env::current_exe()?)?;
+    let xcb = xcb_core::canonical(std::env::current_exe()?)?;
     let closure = sandbox::shared_library_closure(&xcb)?;
     let namespaces = Namespaces::live();
     let work = tempfile::Builder::new()

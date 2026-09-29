@@ -193,7 +193,7 @@ async fn command(
         executable: xcb_core::canonical(&spec.executable)?,
         sha256: devin::BINARY_SHA256.into(),
         version: devin::VERSION.into(),
-        host_sha256: executable_digest(&xcb_core::canonical(&std::env::current_exe()?)?)?,
+        host_sha256: executable_digest(&xcb_core::canonical(std::env::current_exe()?)?)?,
         observed_at_ms: now_ms(),
     };
     pin.verify()?;

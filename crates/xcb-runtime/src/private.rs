@@ -124,6 +124,16 @@ pub fn default_root() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".local/share/xcb"))
 }
 
+/// Make a directory's entry changes durable. Windows cannot open a directory
+/// as a plain file, and NTFS journals its metadata, so there it does nothing.
+pub fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path)?.sync_all()?;
+    #[cfg(windows)]
+    let _ = path;
+    Ok(())
+}
+
 #[cfg(unix)]
 pub fn directory(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute()

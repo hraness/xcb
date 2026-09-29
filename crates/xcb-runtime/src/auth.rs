@@ -771,7 +771,7 @@ pub(crate) fn recover_codex_auth(
         // A prior recovery/normal persistence may have published and crashed
         // before SQLite commit. The exact refreshed bytes make this retry safe.
         private::open_file(&target, MAX_CODEX_AUTH_BYTES as u64)?.sync_all()?;
-        std::fs::File::open(&persistent)?.sync_all()?;
+        private::sync_directory(&persistent)?;
         return Ok(());
     }
     if current_revision != metadata.original_revision {

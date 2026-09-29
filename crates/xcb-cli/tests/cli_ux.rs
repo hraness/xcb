@@ -1107,7 +1107,7 @@ fn workspaces_list_add_hide_and_upgrade_preview_on_a_scratch_state() {
     assert_eq!(json(&["workspaces", "list"]), serde_json::json!([]));
     let work = sandbox.root.join("work");
     std::fs::create_dir_all(&work).unwrap();
-    let work = xcb_core::canonical(&work).unwrap();
+    let work = xcb_core::canonical(work).unwrap();
     let added = sandbox.run(
         &[
             "workspaces",
@@ -1149,7 +1149,7 @@ fn workspaces_list_add_hide_and_upgrade_preview_on_a_scratch_state() {
     for name in ["gone-path", "gone-name", "later-home"] {
         let dir = sandbox.root.join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = xcb_core::canonical(&dir).unwrap();
+        let dir = xcb_core::canonical(dir).unwrap();
         let added = sandbox.run(
             &["workspaces", "add", dir.to_str().unwrap(), "--name", name],
             &[],
