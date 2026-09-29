@@ -50,7 +50,7 @@ function describe(state: Awaited<ReturnType<typeof openCliProvider>>, provider: 
   if (state.detail !== undefined) return state.detail;
   if (state.status === "binary-missing") return `${provider} binary not found — install the provider CLI and run \`xcb-compat doctor\`.`;
   if (state.status === "version-mismatch") return `${provider} ${state.inspection?.version} found but this build requires the pinned version — run \`xcb-compat doctor\`.`;
-  if (state.status === "sandbox-unavailable") return "linux confinement unavailable — needs bubblewrap (`bwrap`) plus unprivileged user namespaces (Ubuntu 23.10+: `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`). Refusing to run unsandboxed.";
+  if (state.status === "sandbox-unavailable") return "linux confinement unavailable — needs bubblewrap (`bwrap`) plus unprivileged user namespaces (Ubuntu 23.10+: install the bwrap AppArmor profile at xcb.sh/docs/providers#claude-on-linux). Refusing to run unsandboxed.";
   return `provider not admitted — run \`xcb-compat doctor\`, then \`xcb-compat auth ${provider}\` if needed.`;
 }
 

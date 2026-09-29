@@ -122,8 +122,10 @@ variables. `qualification/linux-egress.ts` is the kernel-boundary evidence
 fixture for the bridge path, and `qualification/linux-loopback.ts` exercises
 the shipped forwarder end-to-end with stock `curl`; the `Qualification`
 workflow runs both on `ubuntu-24.04`. Note that Ubuntu's default AppArmor
-user-namespace restriction denies bwrap outright — the host must lift it
-(`kernel.apparmor_restrict_unprivileged_userns=0`) before any plan can run.
+user-namespace restriction denies bwrap outright; install xcb's exact-path
+profile for `/usr/bin/bwrap`
+(`crates/xcb-runtime/src/qualification/xcb-bwrap.apparmor`) before any plan
+can run.
 
 `createManagedCodexAccountFactory()` in TextButler's `managed-codex.ts` composes
 the controller, stdio transport and process helper. Its admission inputs come

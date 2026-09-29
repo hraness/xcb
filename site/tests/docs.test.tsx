@@ -142,8 +142,8 @@ describe("organized documentation", () => {
     expect(textOf(provider)).toContain("xcb accounts refresh <account-id>");
     expect(textOf(provider)).toContain("xcb accounts import-codex --source");
     expect(textOf(provider)).toContain("xcb accounts import-devin --source");
-    expect(provider).toContain("qualification/build-receipt.ts");
-    expect(provider).toContain("~/.local/share/xcb/qualification/linux.json");
+    expect(textOf(provider)).toContain("xcb doctor --provider claude --qualify-sandbox");
+    expect(textOf(provider)).toContain("profile xcb-bwrap /usr/bin/bwrap flags=(unconfined)");
     expect(provider).toContain('id="devin"');
   });
 
