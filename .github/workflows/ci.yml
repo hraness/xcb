@@ -578,6 +578,7 @@ jobs:
           # Keep the dependency builds warm while the workspace is still red.
           cache-on-failure: true
       - run: cargo check --workspace --all-targets --locked --keep-going
+      - run: cargo test --workspace --locked --no-fail-fast
 
   required:
     # The one check branch policy requires. A job may be skipped only because
