@@ -6,7 +6,7 @@ import Compare from "../app/compare/page";
 import { publishedRelease } from "../app/publication";
 import { providerStatus } from "../app/docs/provider-status";
 import Install from "../app/install/page";
-import { agentPrompt, installCommand } from "../app/install/commands";
+import { agentPrompt, installCommand, windowsInstallCommand } from "../app/install/commands";
 import RootLayout from "../app/layout";
 import { siteDefaultPalette } from "../palette";
 
@@ -172,4 +172,25 @@ test("the homepage declares one website and one application for xcb, published b
   expect(app?.["softwareVersion"]).toBe(publishedRelease?.version);
   expect(app).not.toHaveProperty("aggregateRating");
   expect(ofType("SoftwareSourceCode")[0]?.["targetProduct"]).toEqual({ "@id": "https://xcb.sh/#app" });
+});
+
+test("home and install pages offer one install tab per platform with the released commands", () => {
+  for (const Page of [Home, Install]) {
+    const html = renderToStaticMarkup(<Page />);
+    const text = textOf(html);
+    expect(text).toContain(installCommand);
+    expect(text).toContain(windowsInstallCommand);
+    const mac = text.indexOf("macOS");
+    const linux = text.indexOf("Linux", mac);
+    const windows = text.indexOf("Windows", linux);
+    expect(mac).toBeGreaterThanOrEqual(0);
+    expect(linux).toBeGreaterThan(mac);
+    expect(windows).toBeGreaterThan(linux);
+    expect(text).toContain("x86_64 and ARM64, glibc 2.34+");
+    expect(text).toContain("providers run in WSL2");
+    expect(text).toContain("Runs on");
+  }
+  const home = renderToStaticMarkup(<Home />);
+  expect(home).toContain('"operatingSystem":"macOS, Linux, Windows"');
+  expect(home).not.toContain("Linux x86_64. On Linux");
 });

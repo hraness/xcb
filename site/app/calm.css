@@ -111,5 +111,7 @@
 .xcb-code--terminal .hraness-marketing-proof-frame__content { overflow: visible; }
 .xcb-code--terminal .xcb-code-block { padding: 1.1rem 1.15rem; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 .xcb-code--terminal .xcb-code-copy { inset-block-start: .35rem; }
-.xcb-install-page ul, .xcb-picks ul, .xcb-compare-page #elsewhere ul { margin: 0 0 1rem; padding-inline-start: 1.25rem; display: grid; gap: 0.5rem; list-style: disc; }
+.xcb-install-page ul:not(.hraness-platform-badges__list), .xcb-picks ul, .xcb-compare-page #elsewhere ul { margin: 0 0 1rem; padding-inline-start: 1.25rem; display: grid; gap: 0.5rem; list-style: disc; }
 .xcb-install-page .xcb-page-section li, .xcb-picks li { line-height: 1.6; }
+/* Shared install tabs and "Runs on" row keep the page's paragraph rhythm. */
+.xcb-page-section .hraness-platform-badges, .xcb-page-section .hraness-platform-install { margin-block: 0 1rem; }
