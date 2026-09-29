@@ -1,0 +1,10 @@
+/* The site's type and accent inside the film: mockups read these variables. */
+.xcb-desk {
+  --primary: #1f6d80;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+  color-scheme: light;
+}
+
+.xcb-desk :where(.hkm-root) {
+  --hkm-font: "Film Sans", ui-sans-serif, system-ui, sans-serif;
+}
