@@ -439,3 +439,12 @@ body > div[data-hraness-marketing-preset] { flex: 1; }
 .xcb-home-showcase { width: 100%; }
 .xcb-launch-link { margin: 0; font-size: .95rem; }
 .xcb-launch-showcase { margin: 1.5rem 0; }
+
+/* Phone tap targets: the router showcase's tabs and mode buttons sit in the
+   hero header, and every header control on a phone is at least 44px tall. */
+@media (max-width: 600px) {
+  .hkm-showcase .hkm-tab,
+  .hkm-showcase .hkm-segmented button {
+    min-block-size: 44px;
+  }
+}
