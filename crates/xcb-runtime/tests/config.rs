@@ -83,3 +83,22 @@ fn old_configuration_gets_a_bounded_turn_deadline_independent_of_continuation() 
     config.turn_timeout_ms = 3_600_000;
     config.validate().unwrap();
 }
+
+#[test]
+fn usage_limit_cooldown_defaults_to_thirty_minutes_and_stays_bounded() {
+    let mut config: Config = serde_json::from_str(r#"{"version":1}"#).unwrap();
+    assert_eq!(
+        config.quota_limit_cooldown_ms,
+        xcb_runtime::config::DEFAULT_QUOTA_LIMIT_COOLDOWN_MS
+    );
+    assert_eq!(config.quota_limit_cooldown_ms, 1_800_000);
+    config.validate().unwrap();
+    for cooldown in [0, 59_999, 604_800_001, u64::MAX] {
+        config.quota_limit_cooldown_ms = cooldown;
+        assert!(config.validate().is_err());
+    }
+    for cooldown in [60_000, 604_800_000] {
+        config.quota_limit_cooldown_ms = cooldown;
+        config.validate().unwrap();
+    }
+}

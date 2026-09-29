@@ -129,8 +129,19 @@ pub struct Config {
     pub auto_failover: bool,
     /// Independent deadline for one provider turn, including initialization.
     pub turn_timeout_ms: u64,
+    /// How long an account stays at a known usage limit after a provider
+    /// refused a turn for its quota without reporting when the quota resets
+    /// (every Codex `usageLimitExceeded` and Devin resource-exhaustion error,
+    /// and a Claude rejection without a reset). A provider-reported reset
+    /// observed later replaces it. The default of 30 minutes trades one
+    /// wasted turn per half hour per account against sidelining the account:
+    /// Claude and Codex meter in five-hour and weekly windows that rarely
+    /// reopen sooner, while Devin reports no comparable window at all.
+    /// Range: one minute to seven days.
+    pub quota_limit_cooldown_ms: u64,
     pub extensions: Extensions,
 }
+pub const DEFAULT_QUOTA_LIMIT_COOLDOWN_MS: u64 = 1_800_000;
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -141,6 +152,7 @@ impl Default for Config {
             reduced_motion: false,
             auto_failover: true,
             turn_timeout_ms: 1_800_000,
+            quota_limit_cooldown_ms: DEFAULT_QUOTA_LIMIT_COOLDOWN_MS,
             extensions: Extensions::default(),
         }
     }
@@ -151,6 +163,7 @@ impl Config {
         let continuation = &self.extensions.auto_continue;
         if self.version != 1
             || !(1_000..=3_600_000).contains(&self.turn_timeout_ms)
+            || !(60_000..=604_800_000).contains(&self.quota_limit_cooldown_ms)
             || self.favorites.len() > 128
             || context.floor_tokens < 1024
             || context.floor_tokens >= context.trigger_tokens
