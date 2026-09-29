@@ -645,6 +645,7 @@ async fn thread(managed: &ManagedStore) -> Id {
     managed.global_thread().await.unwrap().id
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 async fn running(managed: &ManagedStore, task: &ManagedTask) -> ManagedTask {
     let mut next = task.clone();
     next.state = TaskState::Running;
@@ -654,6 +655,7 @@ async fn running(managed: &ManagedStore, task: &ManagedTask) -> ManagedTask {
     managed.transition(task, next, None).await.unwrap()
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 async fn settle(managed: &ManagedStore, task: &ManagedTask, state: TaskState) -> ManagedTask {
     let mut next = task.clone();
     next.state = state;

@@ -1424,6 +1424,7 @@ mod tests {
         })
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     struct Fixture {
         _directory: tempfile::TempDir,
         state: PathBuf,
@@ -1432,6 +1433,7 @@ mod tests {
         conversation: Id,
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     async fn fixture() -> Fixture {
         let directory = tempfile::tempdir().unwrap();
         let root = xcb_core::canonical(directory.path()).unwrap();
@@ -1449,6 +1451,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(windows, allow(dead_code))]
     async fn grant(fixture: &Fixture) {
         fixture
             .managed

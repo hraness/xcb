@@ -64,6 +64,7 @@ async fn prepared_with_goal(goal: String) -> Fixture {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 struct DiagnosticProtocol {
     model: ModelChoice,
     result_event: bool,
