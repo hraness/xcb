@@ -1163,6 +1163,8 @@ fn require_supported(root: &std::path::Path, pin: &Pin) -> Result<()> {
                 "run xcb doctor --provider claude --qualify-sandbox (xcb.sh/docs/providers#claude-on-linux)",
             ));
         }
+    } else if cfg!(windows) {
+        return Err(Error::providers_unsupported());
     } else if !cfg!(target_os = "macos") {
         return Err(Error::Guided {
             message: "xcb runs providers on macOS and Linux only".into(),
