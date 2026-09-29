@@ -122,6 +122,18 @@ class CacheGuestTests(unittest.TestCase):
   with patch.object(guest,'cache_image_identity',return_value={'dev':1,'ino':2,'size':1024**3}),patch.object(guest.subprocess,'run') as command:
    with self.assertRaises(ValueError):guest.ensure_cache_mount(pathlib.Path('/unused'),{'image':{'dev':1,'ino':3,'size':1024**3}})
    command.assert_not_called()
+ def test_ack_remounts_published_cache_after_guest_restart(self):
+  with tempfile.TemporaryDirectory() as root:
+   root=pathlib.Path(root);job=root/'preloads'/'cache_test';job.mkdir(parents=True)
+   (root/'admission.lock').write_bytes(b'')
+   key='a'*64;plan={'cacheKey':key}
+   (root/'cache'/key).mkdir(parents=True)
+   (root/'cache'/key/'record.json').write_bytes(guest.encode({'attemptId':'cache_test'}))
+   outcome={'joined':True,'plan':plan,'custody':{}}
+   with patch.object(guest,'ROOT',root),patch.object(guest,'cache_outcome',return_value=outcome),\
+        patch.object(guest,'cache_service_absent'),patch.object(guest,'verified_cache') as verified:
+    self.assertEqual(guest.cache_ack({'version':1,'cacheKey':key,'hostReceiptSha256':'b'*64}),{'acknowledged':True})
+   verified.assert_called_once_with(plan,remount=True)
  def test_phase_success_never_accepts_unjoined_or_timeout(self):
   good={'joined':True,'exitCode':0,'error':None,'timedOut':False,'cancelled':False,'truncated':False}
   self.assertTrue(guest.phase_success(good))
