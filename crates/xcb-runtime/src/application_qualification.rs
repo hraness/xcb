@@ -16,6 +16,11 @@
 //! Generate must call `load` again after reserving its account, not reuse a
 //! capabilities result. The producer must not expose a generic bypass of normal
 //! application admission, arbitrary JSON import, or an expiry-renewal endpoint.
+//!
+//! A published receipt has no time limit. Its binding names the exact
+//! executable, provider pin, platform, policy, configuration, sign-in
+//! generation and models, and a change to any of them invalidates it at once.
+//! Rerunning unchanged source gates on unchanged bytes proves nothing new.
 
 use crate::{Error, Result, application::ApplicationQualification, digest, private, process::Pin};
 use serde::{Deserialize, Serialize};
@@ -26,13 +31,14 @@ use std::{
 };
 use xcb_core::{Id, Provider};
 
+/// Longest span from the first prerequisite observation to publication.
 pub(crate) const MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_MODELS: usize = 64;
 const MAX_RECEIPT: usize = 64 * 1024;
 const MAX_BOUNDARY: usize = 64 * 1024;
 const MAX_GATE_OUTPUT: usize = 4 * 1024 * 1024;
 const MAX_LIVE: usize = 16 * 1024;
-const UNAVAILABLE: &str = "application qualification missing, expired, or invalid";
+const UNAVAILABLE: &str = "application qualification missing or invalid";
 
 /// All values come from current host state, never the application's request.
 /// Policy/config digests cover normalized effective application settings,
@@ -78,8 +84,9 @@ pub(crate) struct CredentialGeneration {
 pub(crate) struct Receipt {
     pub version: u32,
     pub binding: Binding,
-    /// Collection start and fixed expiration, both Unix milliseconds. Reading
-    /// a receipt never changes either, including when no account is available.
+    /// Collection start and the deadline every observation had to finish by,
+    /// both Unix milliseconds. The deadline bounds collection only: a published
+    /// receipt stays valid until its binding changes.
     pub observed_at_ms: u64,
     pub expires_at_ms: u64,
     pub boundary_sha256: String,
@@ -157,7 +164,6 @@ pub(crate) struct LiveEvidence {
 pub(crate) struct Admission {
     binding: Binding,
     receipt_sha256: String,
-    expires_at_ms: u64,
 }
 impl Admission {
     pub(crate) fn covers(&self, full_model_key: &str) -> bool {
@@ -168,7 +174,7 @@ impl Admission {
             runtime_version: self.binding.runtime_version.clone(),
             runtime_digest: self.binding.runtime_sha256.clone(),
             evidence_digest: self.receipt_sha256.clone(),
-            expires_at: self.expires_at_ms,
+            expires_at: None,
         }
     }
 }
@@ -204,7 +210,6 @@ fn load_verified(root: &Path, expected: &Expected<'_>, now_ms: u64) -> Result<Ad
     validate_binding(&receipt.binding, expected, &generation.generation)?;
     require(receipt.version == 1)?;
     require(receipt.observed_at_ms > 0 && receipt.observed_at_ms <= now_ms)?;
-    require(receipt.expires_at_ms > now_ms)?;
     require(
         receipt.expires_at_ms > receipt.observed_at_ms
             && receipt.expires_at_ms - receipt.observed_at_ms <= MAX_AGE_MS,
@@ -249,7 +254,6 @@ fn load_verified(root: &Path, expected: &Expected<'_>, now_ms: u64) -> Result<Ad
     Ok(Admission {
         binding: receipt.binding,
         receipt_sha256: digest(raw),
-        expires_at_ms: receipt.expires_at_ms,
     })
 }
 
@@ -938,7 +942,7 @@ mod tests {
         assert_eq!(public["runtimeDigest"], fixture.binding.runtime_sha256);
         assert_eq!(public["evidenceDigest"], digest(&bytes));
         assert_eq!(public["runtimeVersion"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(public["expiresAt"], NOW + 1000);
+        assert_eq!(public["expiresAt"], serde_json::Value::Null);
         assert_eq!(
             serde_json::to_value(fixture.read().unwrap().public()).unwrap(),
             public
@@ -987,10 +991,24 @@ mod tests {
     }
 
     #[test]
-    fn expiry_is_fixed_and_future_or_overlong_evidence_is_rejected() {
+    fn a_published_receipt_outlives_its_collection_deadline() {
+        let mut fixture = Fixture::new();
+        fixture.receipt.expires_at_ms = NOW - 5;
+        fixture.publish();
+        assert!(fixture.read().is_ok());
+        let mut fixture = Fixture::new();
+        fixture.receipt.expires_at_ms = NOW - 20;
+        fixture.publish();
+        assert!(
+            fixture.read().is_err(),
+            "live check finished after deadline"
+        );
+    }
+
+    #[test]
+    fn future_or_overlong_collection_is_rejected() {
         for (start, end) in [
             (NOW + 1, NOW + 1000),
-            (NOW - 100, NOW),
             (0, NOW + 1000),
             (NOW - 100, NOW - 100 + MAX_AGE_MS + 1),
         ] {

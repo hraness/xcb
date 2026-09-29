@@ -57,7 +57,7 @@ fn admission(
 ) -> Result<Admission> {
     let keys: Vec<_> = observed
         .iter()
-        .filter(|model| model.provider == pin.provider && fresh(model, now_ms()))
+        .filter(|model| model.provider == pin.provider && listed(model, now_ms()))
         .map(ModelChoice::key)
         .collect();
     qualification::load(
@@ -240,7 +240,9 @@ pub struct ApplicationQualification {
     pub runtime_version: String,
     pub runtime_digest: String,
     pub evidence_digest: String,
-    pub expires_at: u64,
+    /// Always `null`: qualification ends when its binding changes, not on a
+    /// clock. The field stays so existing readers see an explicit value.
+    pub expires_at: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -268,8 +270,14 @@ pub fn empty_capabilities() -> Capabilities {
     }
 }
 
+/// Qualifying requires a recent catalog observation of the model.
 fn fresh(model: &ModelChoice, now: u64) -> bool {
-    model.observed_at_ms <= now && now - model.observed_at_ms <= CATALOG_AGE_MS
+    listed(model, now) && now - model.observed_at_ms <= CATALOG_AGE_MS
+}
+/// A qualified model stays usable without catalog refreshes: its live check
+/// proved it, and a model the provider withdraws fails its own request.
+fn listed(model: &ModelChoice, now: u64) -> bool {
+    model.observed_at_ms <= now
 }
 
 /// Local metadata only: no provider launch, refresh, account connection, session
@@ -297,7 +305,7 @@ pub fn capabilities(store: &Store) -> Result<Capabilities> {
         result.supported |= qualified.is_some();
         let models: Vec<_> = models
             .iter()
-            .filter(|model| model.provider == account.provider && fresh(model, now))
+            .filter(|model| model.provider == account.provider && listed(model, now))
             .filter(|model| {
                 qualified
                     .as_ref()
@@ -454,7 +462,7 @@ pub async fn generate(
         .find(|model| {
             model.provider == account.provider
                 && model.key() == request.model
-                && fresh(model, now_ms())
+                && listed(model, now_ms())
         })
         .cloned()
         .ok_or_else(|| failure(FailureCode::Unavailable))?;

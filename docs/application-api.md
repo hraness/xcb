@@ -73,15 +73,17 @@ still have no available account.
 Account rows contain `id`, `label`, `provider`, `enabled`, `busy`, `connected`,
 `runtimeAdmitted`, `available`, `reason` and `models`. Models contain the exact
 public `key`, `label` and `observedAtMs`. Keys match `xcb models` and accounts
-match `xcb accounts`. Catalog observations expire after 24 hours. A reason is
+match `xcb accounts`. Qualifying needs a model seen in the last 24 hours; once
+qualified, a model stays listed without further catalog refreshes. A reason is
 `application_not_qualified`, `account_disabled`, `account_busy`, `not_connected`,
 `runtime_unavailable`, `models_unavailable`, or `null` when ready.
 
 A qualified account additionally carries `qualification` with `runtimeVersion`,
-`runtimeDigest`, `evidenceDigest` and `expiresAt` (Unix milliseconds).
-`runtimeDigest` identifies the exact xcb executable. The separately reviewed
-evidence binds its provider pin, isolation controls and live application tests.
-An application must reject missing, expired or mismatched evidence; neither
+`runtimeDigest`, `evidenceDigest` and `expiresAt`, which is always `null`:
+qualification has no time limit. `runtimeDigest` identifies the exact xcb
+executable. The separately reviewed evidence binds its provider pin, isolation
+controls and live application tests. An application must reject missing or
+mismatched evidence; neither
 account sign-in nor caller JSON can issue it.
 
 ## Generate one response
@@ -183,17 +185,15 @@ it holds the account exclusively. `generate` can't run this path. Each run cover
 one model and replaces that account's previous coverage; it doesn't add to other
 models' qualifications.
 
-Qualifications expire at a fixed deadline no later than 24 hours after evidence
-collection began. Reads never extend it. Exact executable/provider changes and
-explicit account credential replacement invalidate it immediately. Model
-observations also expire after 24 hours; `xcb accounts refresh <account>` obtains
-fresh provider metadata. Expired qualification requires new valid evidence and a
-new fixed challenge. For one previously qualified Claude account/model on macOS,
-the [explicit renewal helper](application-renewal.md) collects fresh evidence and
-runs that challenge against a pinned deployment and account generation. It does
-not extend the 24-hour lifetime or activate automatically. Unattended use requires
-explicit binding and LaunchAgent installation, plus a coordinated first live
-renewal whose actual result and final installed bytes have been verified.
+A qualification has no time limit. It ends when anything it covers changes: the
+xcb executable, the provider build, the platform, the application policy or
+configuration, or the account's sign-in after an explicit credential
+replacement. Collection itself must finish within 24 hours of its first
+observation, and the model must have been seen in the last 24 hours when
+qualifying; `xcb accounts refresh <account>` obtains fresh provider metadata.
+After a change, qualify again with new evidence and a new fixed challenge. The
+[renewal helper](application-renewal.md) remains available for requalifying a
+Claude account/model on macOS after such a change.
 
 Discovery emits models only when covered by that account's valid qualification.
 The complete response is limited to 128 accounts, 64 qualified models per

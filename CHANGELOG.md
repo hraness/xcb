@@ -12,6 +12,7 @@ version bump pull request by renaming `## Unreleased` to the version.
 
 ## Unreleased
 
+- An application's approval to use an account and model no longer runs out after 24 hours. It lasts until the xcb binary, provider build, platform, application settings or account sign-in changes, so a scheduled application no longer stops each day until the tests are rerun and the live check repeated. A model approved this way also stays usable without a daily catalog refresh. `qualification.expiresAt` in `generate --capabilities` is now always `null`.
 - The GitHub release step checks each uploaded file once instead of downloading every uploaded file again after each upload, which made a failed GitHub API call likely once releases carried eleven files.
 
 ## 0.12.0 - 2026-09-29
