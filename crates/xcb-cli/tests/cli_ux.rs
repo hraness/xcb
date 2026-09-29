@@ -17,8 +17,7 @@ struct Sandbox {
 
 impl Sandbox {
     fn new(name: &str) -> Self {
-        let root = std::env::temp_dir()
-            .canonicalize()
+        let root = xcb_core::canonical(std::env::temp_dir())
             .unwrap()
             .join(format!("xcb-cli-ux-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -1108,7 +1107,7 @@ fn workspaces_list_add_hide_and_upgrade_preview_on_a_scratch_state() {
     assert_eq!(json(&["workspaces", "list"]), serde_json::json!([]));
     let work = sandbox.root.join("work");
     std::fs::create_dir_all(&work).unwrap();
-    let work = work.canonicalize().unwrap();
+    let work = xcb_core::canonical(work).unwrap();
     let added = sandbox.run(
         &[
             "workspaces",
@@ -1150,7 +1149,7 @@ fn workspaces_list_add_hide_and_upgrade_preview_on_a_scratch_state() {
     for name in ["gone-path", "gone-name", "later-home"] {
         let dir = sandbox.root.join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        let dir = dir.canonicalize().unwrap();
+        let dir = xcb_core::canonical(dir).unwrap();
         let added = sandbox.run(
             &["workspaces", "add", dir.to_str().unwrap(), "--name", name],
             &[],

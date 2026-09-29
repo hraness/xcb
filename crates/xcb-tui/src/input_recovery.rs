@@ -640,7 +640,7 @@ impl Directory {
             return Err(invalid("Recovery directory changed"));
         }
         Ok(Self {
-            path: path.canonicalize()?,
+            path: xcb_core::canonical(path)?,
             file,
             identity: (opened.dev(), opened.ino()),
         })
@@ -713,7 +713,7 @@ impl Directory {
             ));
         }
         Ok(Self {
-            path: path.canonicalize()?,
+            path: xcb_core::canonical(&path)?,
             identity: (facts.volume, facts.index),
         })
     }

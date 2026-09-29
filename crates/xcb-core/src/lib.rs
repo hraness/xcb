@@ -185,13 +185,24 @@ pub fn relative_path(value: &str) -> bool {
     relative_parts(value).is_some()
 }
 
+/// This user's home directory as the environment names it: `HOME` on Unix,
+/// `USERPROFILE` on Windows. Unset means unknown; nothing falls back to the
+/// password database.
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    let home = std::env::var_os("HOME");
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE");
+    home.map(std::path::PathBuf::from)
+}
+
 /// `std::fs::canonicalize`, in the spelling the rest of xcb compares paths
 /// in. On Unix it is exactly that call. On Windows the result drops the
 /// `\\?\` verbatim prefix (`\\?\C:\x` becomes `C:\x`, `\\?\UNC\s\x`
 /// becomes `\\s\x`) whenever the plain spelling canonicalizes back to the
 /// same verbatim path, so `path.canonical()? == path` holds for a canonical
 /// `C:\...` path just as it does for `/...` on Unix.
-pub fn canonical(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+pub fn canonical(path: impl AsRef<std::path::Path>) -> std::io::Result<std::path::PathBuf> {
     let resolved = std::fs::canonicalize(path)?;
     #[cfg(windows)]
     {
@@ -216,17 +227,6 @@ pub fn canonical(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> 
         }
     }
     Ok(resolved)
-}
-
-/// [`canonical`] as a method, so call sites read like `Path::canonicalize`.
-pub trait Canonical {
-    fn canonical(&self) -> std::io::Result<std::path::PathBuf>;
-}
-
-impl Canonical for std::path::Path {
-    fn canonical(&self) -> std::io::Result<std::path::PathBuf> {
-        canonical(self)
-    }
 }
 
 /// Absolute path made only of the root and ordinary components — no `.`,

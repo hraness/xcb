@@ -100,6 +100,8 @@ pub fn runtime_admitted(pin: &Pin) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct Admission {
     pub(crate) catalog_sha256: String,
+    // Read by the launch path and its tests, which Windows builds refuse.
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) models: BTreeSet<String>,
 }
 #[derive(Debug)]
@@ -544,6 +546,8 @@ mod tests {
         assert_eq!(schemas.len(), REVIEWED_BUILDS.len());
     }
 
+    // Unix catalog paths; Codex launch is refused on Windows.
+    #[cfg(unix)]
     #[test]
     fn background_features_are_disabled_as_literal_toml_keys() {
         let config = configuration(Path::new("/synthetic/catalog.json")).unwrap();
@@ -558,14 +562,14 @@ mod tests {
     fn catalog_cache_is_keyed_by_the_exact_executable_digest() {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let executable = root.join("codex");
         let mut bytes = b"synthetic codex binary\n".to_vec();
         bytes.extend(serde_json::to_vec_pretty(&fixture_catalog_source()).unwrap());
         bytes.push(0);
         std::fs::write(&executable, &bytes).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let executable = executable.canonicalize().unwrap();
+        let executable = xcb_core::canonical(executable).unwrap();
         let sha256 = crate::process::executable_digest(&executable).unwrap();
         let (_, host_sha256) = crate::process::host_identity().unwrap();
         let pin = Pin {

@@ -181,7 +181,7 @@ fn response_parsing_validates_each_answer_shape() {
 #[test]
 fn vault_key_custody_roundtrips_without_echo() {
     let root = root();
-    let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+    let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
     assert!(!judge::has_judge_token(store.root()).unwrap());
     judge::store_judge_token(store.root(), b"ts_test_key-123.abc=\n").unwrap();
     assert!(judge::has_judge_token(store.root()).unwrap());

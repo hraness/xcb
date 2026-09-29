@@ -15,7 +15,7 @@ struct Env {
 /// A store at `base/state`; project directories are its siblings.
 fn env() -> Env {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let state = private::directory(&base.join("state")).unwrap();
     let managed = Arc::new(ManagedStore::open(&state).unwrap());
     let xcb = Arc::new(Store::open(&state).unwrap());
@@ -41,7 +41,7 @@ fn repo(base: &Path, name: &str) -> PathBuf {
         .unwrap();
     assert!(status.success());
     assert!(path.join(".git").is_dir());
-    path.canonicalize().unwrap()
+    xcb_core::canonical(&path).unwrap()
 }
 
 fn text(path: &Path) -> &str {
@@ -352,6 +352,7 @@ async fn relay_dispatch_and_tui_submit_share_one_thread() {
     assert_eq!(e.managed.tasks(16).unwrap().len(), 3);
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn raw(state: &Path) -> Connection {
     let db = Connection::open(state.join("managed").join("managed.sqlite")).unwrap();
     db.busy_timeout(Duration::from_secs(15)).unwrap();
@@ -360,6 +361,7 @@ fn raw(state: &Path) -> Connection {
 
 /// Rewrite a closed store into the 0.8.x (v6) shape with raw SQL: no
 /// generated column, no registry, and conversation-keyed project tables.
+#[cfg_attr(windows, allow(dead_code))]
 fn downgrade(state: &Path) {
     raw(state)
         .execute_batch(
@@ -377,6 +379,7 @@ fn downgrade(state: &Path) {
 }
 
 /// A v7 value in its 0.8.x shape: keyed on a conversation, not a directory.
+#[cfg_attr(windows, allow(dead_code))]
 fn legacy(value: impl Serialize, conversation: &Id) -> String {
     let mut value = serde_json::to_value(value).unwrap();
     let object = value.as_object_mut().unwrap();
@@ -385,6 +388,7 @@ fn legacy(value: impl Serialize, conversation: &Id) -> String {
     value.to_string()
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn insert_legacy(db: &Connection, table: &str, key: &Id, revision: u64, payload: &str) {
     db.execute(
         &format!("INSERT INTO {table}(conversation,revision,payload) VALUES(?1,?2,?3)"),
@@ -393,6 +397,7 @@ fn insert_legacy(db: &Connection, table: &str, key: &Id, revision: u64, payload:
     .unwrap();
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn policy(workspace: &Path, revision: u64) -> ProjectPolicy {
     ProjectPolicy {
         workspace: text(workspace).into(),
@@ -407,6 +412,7 @@ fn policy(workspace: &Path, revision: u64) -> ProjectPolicy {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn binding(workspace: &Path, vault: &str) -> MemoryBinding {
     MemoryBinding {
         workspace: text(workspace).into(),
@@ -424,6 +430,7 @@ fn binding(workspace: &Path, vault: &str) -> MemoryBinding {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn disposition(conflicts: &[MigrationConflict], kind: &str, conversation: &Id) -> String {
     conflicts
         .iter()
@@ -431,10 +438,13 @@ fn disposition(conflicts: &[MigrationConflict], kind: &str, conversation: &Id) -
         .map_or_else(|| "missing".into(), |row| row.disposition.clone())
 }
 
+// The v6 fixture stores Unix workspace paths.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn v6_fixture_upgrade_then_thread_use() {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let state = base.join("state");
     let work = repo(&base, "work");
     let other = repo(&base, "other");

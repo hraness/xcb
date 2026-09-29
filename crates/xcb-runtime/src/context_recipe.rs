@@ -753,7 +753,7 @@ mod tests {
     fn source_capture_refuses_traversal_secrets_symlinks_and_hardlinks() {
         use std::os::unix::fs::symlink;
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(temp.path()).unwrap();
         let source = root.join("project");
         std::fs::create_dir(&source).unwrap();
         std::fs::write(source.join("ok.txt"), "test data").unwrap();

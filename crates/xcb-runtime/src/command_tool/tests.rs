@@ -130,7 +130,7 @@ struct Fixture {
 }
 fn fixture() -> Fixture {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let work = private::directory(&base.join("workspace")).unwrap();
     let coordination = private::directory(&base.join("coordination")).unwrap();
     let original = work.join("data.bin");
@@ -342,10 +342,7 @@ fn unstarted_receipts_are_bounded_and_never_publish() {
 
 fn owned_input(fixture: &Fixture) -> (PathBuf, OwnedSnapshot) {
     let directory = private::directory(
-        &fixture
-            ._directory
-            .path()
-            .canonicalize()
+        &xcb_core::canonical(fixture._directory.path())
             .unwrap()
             .join("snapshots"),
     )
@@ -359,10 +356,7 @@ fn owned_input(fixture: &Fixture) -> (PathBuf, OwnedSnapshot) {
 
 fn registered_command(fixture: &mut Fixture, input: &OwnedSnapshot) -> (Store, RunRecord) {
     let store = Store::open(
-        &fixture
-            ._directory
-            .path()
-            .canonicalize()
+        &xcb_core::canonical(fixture._directory.path())
             .unwrap()
             .join("state"),
     )

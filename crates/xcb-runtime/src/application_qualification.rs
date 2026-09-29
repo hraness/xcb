@@ -461,7 +461,7 @@ fn read_directory(path: &Path) -> Result<crate::os::Stamp> {
     let meta = crate::os::lstat(path)?;
     require(
         path.is_absolute()
-            && path.canonicalize()? == path
+            && xcb_core::canonical(path)? == path
             && meta.dir
             && meta.owned
             && meta.private,
@@ -667,7 +667,12 @@ fn generation(
     };
     let mut random = [0u8; 32];
     // Read the OS CSPRNG without UUID format bits or a dependency/entropy fallback.
+    #[cfg(unix)]
     File::open("/dev/urandom")?.read_exact(&mut random)?;
+    // Windows has no /dev/urandom: ProcessPrng through getrandom.
+    #[cfg(windows)]
+    getrandom::fill(&mut random)
+        .map_err(|_| Error::Unavailable("the OS random number generator is unavailable"))?;
     let record = CredentialGeneration {
         version: 1,
         account: run.account.clone(),
@@ -699,7 +704,8 @@ mod tests {
     #[test]
     fn quota_availability_generation_reader_validates_parents_without_creation() {
         let temp = tempfile::tempdir().unwrap();
-        let root = private::directory(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let root =
+            private::directory(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
         let accounts = private::directory(&root.join("accounts")).unwrap();
         let account = Id::new("synthetic").unwrap();
         let directory = private::directory(&accounts.join(account.as_str())).unwrap();
@@ -746,8 +752,8 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let temp = tempfile::tempdir().unwrap();
-            let root =
-                private::directory(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+            let root = private::directory(&xcb_core::canonical(temp.path()).unwrap().join("state"))
+                .unwrap();
             let account = Id::new("a_synthetic").unwrap();
             let account_dir =
                 private::directory(&root.join("accounts").join(account.as_str())).unwrap();
@@ -1193,7 +1199,8 @@ mod tests {
     fn generation_creation_is_explicit_owned_and_rotation_revokes_old_identity() {
         let temp = tempfile::tempdir().unwrap();
         let store =
-            crate::store::Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+            crate::store::Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state"))
+                .unwrap();
         let account = store
             .add_account(Provider::Claude, "Synthetic", NOW, None)
             .unwrap();

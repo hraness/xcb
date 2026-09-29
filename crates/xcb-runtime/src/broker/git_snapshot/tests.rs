@@ -15,7 +15,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(temp.path()).unwrap();
         let work = base.join("work");
         fs::create_dir(&work).unwrap();
         let coordination = private::directory(&base.join("coordination")).unwrap();

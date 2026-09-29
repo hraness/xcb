@@ -96,7 +96,7 @@ fn open_dir(parent: &File, name: &str) -> Result<File> {
 }
 #[cfg(unix)]
 fn physical(path: &Path) -> Result<()> {
-    if !xcb_core::absolute_clean(path) || path.canonicalize()? != path {
+    if !xcb_core::absolute_clean(path) || xcb_core::canonical(path)? != path {
         return Err(Error::PrivateState);
     }
     Ok(())

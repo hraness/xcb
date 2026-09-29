@@ -1558,7 +1558,7 @@ mod tests {
     #[test]
     fn ui_submission_acknowledges_only_the_exact_durable_input() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let workspace = crate::private::directory(&base.join("work")).unwrap();
         let account = store
@@ -1620,7 +1620,7 @@ mod tests {
     #[tokio::test]
     async fn ui_async_submission_failure_restores_exact_id_and_context() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Arc::new(Store::open(&base.join("state")).unwrap());
         let session = new_id("missing_session");
         let submission = new_id("input");
@@ -1651,7 +1651,7 @@ mod tests {
     async fn ui_navigation_burst_rejects_stale_direct_submission_before_effects() {
         use xcb_core::ui::TranscriptContext;
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Arc::new(Store::open(&base.join("state")).unwrap());
         let workspace = crate::private::directory(&base.join("work")).unwrap();
         let account = store
@@ -1732,7 +1732,7 @@ mod tests {
     #[test]
     fn workspace_lease_excludes_concurrent_and_unsettled_writers_across_accounts() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let workspace = crate::private::directory(&base.join("work")).unwrap();
         let first = store
@@ -1852,7 +1852,7 @@ mod tests {
     #[test]
     fn quota_availability_preserves_affinity_and_never_reselects_blocked_onboarding_default() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let workspace = crate::private::directory(&base.join("work")).unwrap();
         let blocked = store
@@ -1963,7 +1963,7 @@ mod tests {
     #[test]
     fn queued_pane_waits_for_its_session_and_reports_start_failure_without_stopping_views() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let workspace = crate::private::directory(&base.join("workspace")).unwrap();
         let model = ModelChoice {
@@ -2012,7 +2012,7 @@ mod tests {
     #[test]
     fn publish_previews_the_pending_route_until_a_session_is_bound() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let workspace = crate::private::directory(&base.join("workspace")).unwrap();
         let account = store
@@ -2068,7 +2068,7 @@ mod tests {
     async fn disabled_resumed_accounts_restore_drafts_before_any_turn_for_every_provider() {
         for provider in Provider::ALL {
             let directory = tempfile::tempdir().unwrap();
-            let base = directory.path().canonicalize().unwrap();
+            let base = xcb_core::canonical(directory.path()).unwrap();
             let store = Arc::new(Store::open(&base.join("state")).unwrap());
             let workspace = crate::private::directory(&base.join("workspace")).unwrap();
             let account = store.add_account(provider, "Test", 1, None).unwrap();
@@ -2176,7 +2176,7 @@ mod tests {
     #[test]
     fn model_account_prefers_usable_current_then_default_and_preserves_busy_custody() {
         let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().canonicalize().unwrap().join("state");
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
         let store = Store::open(&state).unwrap();
         let current = store
             .add_account(Provider::Devin, "Subscription", 1, None)
@@ -2241,7 +2241,7 @@ mod tests {
     #[test]
     fn usable_account_prefers_the_most_remaining_quota() {
         let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().canonicalize().unwrap().join("state");
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
         let store = Store::open(&state).unwrap();
         let spent = store
             .add_account(Provider::Claude, "Subscription", 1, None)
@@ -2307,7 +2307,7 @@ mod tests {
     #[test]
     fn choose_model_defaults_to_the_high_effort_non_premium_route() {
         let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().canonicalize().unwrap().join("state");
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
         let store = Store::open(&state).unwrap();
         let fixed = |provider: Provider, model: &str, effort: Option<&str>| ModelChoice {
             provider,
@@ -2370,7 +2370,7 @@ mod tests {
     #[test]
     fn new_session_prefers_usable_matching_accounts_before_onboarding_fallback() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let workspace = crate::private::directory(&base.join("workspace")).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let unsigned = store
@@ -2460,7 +2460,7 @@ mod tests {
     #[tokio::test]
     async fn idle_terminal_observes_other_terminal_state_without_changing_sessions() {
         let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().canonicalize().unwrap().join("state");
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
         let store = Arc::new(Store::open(&state).unwrap());
         let other = Store::open(&state).unwrap();
         let account = store
@@ -2475,9 +2475,12 @@ mod tests {
             effort: None,
             observed_at_ms: 1,
         };
-        let workspace =
-            crate::private::directory(&directory.path().canonicalize().unwrap().join("workspace"))
-                .unwrap();
+        let workspace = crate::private::directory(
+            &xcb_core::canonical(directory.path())
+                .unwrap()
+                .join("workspace"),
+        )
+        .unwrap();
         let session = store
             .create_session(&account.id, model.clone(), &workspace, 2)
             .unwrap();
@@ -2784,11 +2787,14 @@ mod tests {
     #[tokio::test]
     async fn the_kernel_republishes_config_writes_without_a_client_refresh() {
         let directory = tempfile::tempdir().unwrap();
-        let state = directory.path().canonicalize().unwrap().join("state");
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
         let store = Arc::new(Store::open(&state).unwrap());
-        let workspace =
-            crate::private::directory(&directory.path().canonicalize().unwrap().join("workspace"))
-                .unwrap();
+        let workspace = crate::private::directory(
+            &xcb_core::canonical(directory.path())
+                .unwrap()
+                .join("workspace"),
+        )
+        .unwrap();
         let (commands, input) = sync_channel(8);
         let (output, updates) = sync_channel(64);
         let task = tokio::spawn(serve(store.clone(), workspace, None, input, output));

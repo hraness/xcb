@@ -19,7 +19,7 @@ async fn prepared() -> Fixture {
 
 async fn prepared_with_goal(goal: String) -> Fixture {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let state = base.join("state");
     let workspace = private::directory(&base.join("work")).unwrap();
     let managed = ManagedStore::open(&state).unwrap();
@@ -64,6 +64,7 @@ async fn prepared_with_goal(goal: String) -> Fixture {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 struct DiagnosticProtocol {
     model: ModelChoice,
     result_event: bool,
@@ -131,6 +132,9 @@ impl crate::protocol::Protocol for DiagnosticProtocol {
     }
 }
 
+// Runs a provider, which Windows refuses.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn runner_diagnostic_survives_restart_and_bounded_managed_message() {
     for (result_event, stale_catalog, empty_catalog) in [

@@ -387,7 +387,8 @@ mod tests {
     fn older_refresh_cannot_overwrite_a_newer_saved_observation() {
         let directory = tempfile::tempdir().unwrap();
         let root =
-            private::directory(&directory.path().canonicalize().unwrap().join("state")).unwrap();
+            private::directory(&xcb_core::canonical(directory.path()).unwrap().join("state"))
+                .unwrap();
         let old = parse_devin_pricing(SWE2_TERMS.as_bytes(), 100).unwrap();
         let new = parse_devin_pricing(b"Promotion withdrawn", 200).unwrap();
         save(&root, &new).unwrap();

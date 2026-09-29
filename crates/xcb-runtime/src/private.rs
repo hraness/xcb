@@ -124,6 +124,16 @@ pub fn default_root() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".local/share/xcb"))
 }
 
+/// Make a directory's entry changes durable. Windows cannot open a directory
+/// as a plain file, and NTFS journals its metadata, so there it does nothing.
+pub fn sync_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(path)?.sync_all()?;
+    #[cfg(windows)]
+    let _ = path;
+    Ok(())
+}
+
 #[cfg(unix)]
 pub fn directory(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute()
@@ -396,7 +406,8 @@ mod tests {
     #[test]
     fn a_publication_time_guard_rejection_preserves_the_target_and_removes_staging() {
         let temp = tempfile::TempDir::new().unwrap();
-        let root = super::directory(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let root =
+            super::directory(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
         let target = root.join("guarded.json");
         super::create(&target, b"original").unwrap();
         let checks = std::cell::Cell::new(0);

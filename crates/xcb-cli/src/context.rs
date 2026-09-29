@@ -58,7 +58,7 @@ pub async fn run(root: &Path, cwd: &Path, command: ContextCommand) -> Result<i32
         ContextCommand::Prepare { plan, output } => {
             let plan: ContextPlan = serde_json::from_slice(&read_input(&plan, MAX_PLAN_BYTES)?)?;
             plan.validate()?;
-            let workspace = Workspace::open(&cwd.canonicalize()?)?;
+            let workspace = Workspace::open(&xcb_core::canonical(cwd)?)?;
             let documents = workspace.context_documents(&plan.paths)?;
             let recipe = ContextRecipe::build(plan, documents)?;
             let output = if output.is_absolute() {

@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn coordination_checks_the_private_directory_once_and_reverifies_its_identity() {
         let temporary = tempfile::tempdir().unwrap();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(temporary.path()).unwrap();
         let workspace = base.join("work");
         fs::create_dir(&workspace).unwrap();
         let root = base.join("coordination");

@@ -771,7 +771,7 @@ pub(crate) fn recover_codex_auth(
         // A prior recovery/normal persistence may have published and crashed
         // before SQLite commit. The exact refreshed bytes make this retry safe.
         private::open_file(&target, MAX_CODEX_AUTH_BYTES as u64)?.sync_all()?;
-        std::fs::File::open(&persistent)?.sync_all()?;
+        private::sync_directory(&persistent)?;
         return Ok(());
     }
     if current_revision != metadata.original_revision {
@@ -1027,7 +1027,7 @@ mod auth_custody_tests {
     #[test]
     fn stopped_codex_login_can_discard_a_different_identity_only_with_unchanged_saved_auth() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Codex, "ChatGPT", 1, None)
@@ -1063,7 +1063,7 @@ mod auth_custody_tests {
     #[test]
     fn claude_unproven_login_capture_retains_account_and_artifacts() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";
@@ -1092,7 +1092,7 @@ mod auth_custody_tests {
     #[test]
     fn unstarted_auth_receipt_cleanup_rejects_started_and_foreign_owned_runs() {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Codex, "ChatGPT", 1, None)

@@ -286,7 +286,7 @@ pub(crate) fn registered(root: &Path, pid: u32) -> bool {
 /// acquisition. Unknown legacy owners are never signalled or adopted.
 pub(crate) fn check_running(root: &Path, executable: &Path) -> Result<()> {
     let (host_path, host_sha256) = process::host_identity()?;
-    if executable.canonicalize()? != host_path {
+    if xcb_core::canonical(executable)? != host_path {
         return Err(Error::Unavailable(
             "managed supervisor must use this xcb executable; restart xcb",
         ));
@@ -408,7 +408,7 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, PathBuf, SupervisorIdentity) {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let executable = root.join("xcb");
         fs::write(&executable, b"original executable").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn registration_uses_the_verified_process_startup_image() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let identity = SupervisorIdentity::register(&root).unwrap();
         let (path, sha256) = process::host_identity().unwrap();
         assert_eq!(identity.record.executable, path);

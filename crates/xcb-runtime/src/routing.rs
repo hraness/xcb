@@ -823,7 +823,7 @@ mod tests {
     async fn no_fallback_reports_observed_quota_only_within_requested_routes() {
         use crate::authentication_tests::{account, fail_authentication};
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let codex = account(&store, Provider::Codex);
         let frontier = model(Provider::Codex, "gpt-6-astra", None, Some("ultra"));
         let key = frontier.key();
@@ -971,7 +971,7 @@ mod tests {
     async fn route_reason_is_readable_and_a_public_promotion_never_changes_the_route() {
         use crate::authentication_tests::account;
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let devin = account(&store, Provider::Devin);
         store
             .set_models(
@@ -1065,7 +1065,7 @@ mod tests {
     async fn large_prompt_selects_best_known_quality_before_cost_favorites_and_shortlist() {
         use crate::authentication_tests::account;
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let devin = account(&store, Provider::Devin);
         let mut models: Vec<_> = (0..20)
             .map(|n| model(Provider::Devin, &format!("swe-2-variant-{n}"), None, None))
@@ -1125,7 +1125,7 @@ mod tests {
     async fn quota_warning_requires_quota_evidence_from_connected_admitted_routes() {
         use crate::authentication_tests::{account, fail_authentication};
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let codex = account(&store, Provider::Codex);
         account(&store, Provider::Devin);
         store
@@ -1155,7 +1155,8 @@ mod tests {
         };
         let admitted = [Provider::Codex, Provider::Devin].into();
         let work =
-            crate::private::directory(&root.path().canonicalize().unwrap().join("work")).unwrap();
+            crate::private::directory(&xcb_core::canonical(root.path()).unwrap().join("work"))
+                .unwrap();
         let session = store
             .create_session(
                 &codex,
@@ -1244,7 +1245,7 @@ mod tests {
     async fn authentication_health_selects_other_account_without_crossing_provider_constraint() {
         use crate::authentication_tests::{account, fail_authentication, model};
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let first = account(&store, Provider::Codex);
         let second = account(&store, Provider::Codex);
         account(&store, Provider::Claude);
@@ -1320,7 +1321,7 @@ mod tests {
     async fn no_connected_account_is_distinct_from_a_temporary_route_shortage() {
         use crate::authentication_tests::account;
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let config = Config::default();
         let routes = BTreeSet::new();
         let accounts = BTreeSet::new();
@@ -1597,7 +1598,7 @@ mod tests {
     async fn quota_spending_pressure_routes_before_reset_and_preserves_constraints() {
         use crate::authentication_tests::account;
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let soon = account(&store, Provider::Codex);
         let later = account(&store, Provider::Codex);
         let choice = model(Provider::Codex, "gpt-5.6-sol", None, None);
@@ -1689,7 +1690,7 @@ mod tests {
     async fn quota_spending_pressure_crosses_providers_without_lowering_frontier_quality() {
         use crate::authentication_tests::account;
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let claude = account(&store, Provider::Claude);
         let codex = account(&store, Provider::Codex);
         store
@@ -1882,7 +1883,7 @@ mod tests {
     async fn routes_a_model_only_to_accounts_whose_catalog_contains_it() {
         use crate::authentication_tests::account;
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let first = account(&store, Provider::Devin);
         let second = account(&store, Provider::Devin);
         let shared = model(Provider::Devin, "swe-2-variant", None, None);

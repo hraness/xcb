@@ -234,7 +234,7 @@ pub fn parse_models(result: &Value, observed_at_ms: u64) -> Result<Vec<ModelChoi
 }
 
 impl DevinProtocol {
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(any(windows, not(any(target_os = "macos", test))), allow(dead_code))]
     pub(crate) fn new(options: DevinOptions, bridge: Option<DevinBridge>) -> Result<Self> {
         options.model.validate()?;
         require(
@@ -1066,5 +1066,6 @@ impl Protocol for DevinProtocol {
     }
 }
 
-#[cfg(test)]
+// Drives provider or command-runner fixtures, which Windows builds refuse.
+#[cfg(all(test, unix))]
 mod tests;

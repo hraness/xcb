@@ -199,7 +199,8 @@ fn collect_files(
     let Ok(metadata) = fs::symlink_metadata(root) else {
         return;
     };
-    if !owned_readable(&metadata, false) || fs::canonicalize(root).ok().as_deref() != Some(root) {
+    if !owned_readable(&metadata, false) || xcb_core::canonical(root).ok().as_deref() != Some(root)
+    {
         report.skipped_files += 1;
         return;
     }
@@ -497,7 +498,7 @@ fn read_session(
     if subagent || messages.is_empty() || !Path::new(&workspace).is_absolute() {
         return Ok((None, read_bytes, subagent));
     }
-    let Ok(canonical) = fs::canonicalize(&workspace) else {
+    let Ok(canonical) = xcb_core::canonical(&workspace) else {
         return Ok((None, read_bytes, false));
     };
     let Some(workspace) = canonical.to_str().filter(|_| canonical.is_dir()) else {
@@ -771,7 +772,7 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let temporary = tempfile::tempdir().unwrap();
-            let base = temporary.path().canonicalize().unwrap();
+            let base = xcb_core::canonical(temporary.path()).unwrap();
             let workspace = base.join("work");
             let sources = Sources {
                 codex: base.join("codex/sessions"),
@@ -972,7 +973,7 @@ mod tests {
     async fn explicit_project_keeps_source_metadata_and_cannot_rebind_an_import() {
         let f = Fixture::new();
         let mut meta = f.codex_meta("home-started");
-        meta["payload"]["cwd"] = json!(std::env::var("HOME").unwrap());
+        meta["payload"]["cwd"] = json!(xcb_core::home_dir().unwrap());
         let source_path = f.write(
             Provider::Codex,
             "home",
@@ -988,7 +989,10 @@ mod tests {
             .import_session_into(source, Some(&f.workspace))
             .await
             .unwrap();
-        assert_eq!(imported.source_workspace, std::env::var("HOME").unwrap());
+        assert_eq!(
+            Path::new(&imported.source_workspace),
+            xcb_core::home_dir().unwrap()
+        );
         assert_eq!(imported.workspace, f.workspace.to_str().unwrap());
         let history = managed.messages(&imported.conversation, 10).unwrap();
         assert!(history[0].text.contains(&format!(

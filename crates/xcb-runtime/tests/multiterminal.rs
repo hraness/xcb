@@ -22,7 +22,7 @@ const REMOTE_CANCEL: &str = "This turn is running in another terminal; cancel it
 async fn twenty_terminals_share_account_custody_and_remote_resume_cannot_cancel_its_owner() {
     for provider in Provider::ALL {
         let temporary = tempfile::tempdir().unwrap();
-        let base = temporary.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(temporary.path()).unwrap();
         let workspace = base.join("workspace");
         fs::create_dir(&workspace).unwrap();
         let state = base.join("state");

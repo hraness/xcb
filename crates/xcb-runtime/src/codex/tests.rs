@@ -726,9 +726,12 @@ fn completed_status_alone_cannot_claim_a_successful_answer() {
 async fn preplanted_config_or_catalog_hardlinks_are_rejected_before_initialization() {
     for target in ["config", "catalog"] {
         let directory = tempfile::tempdir().unwrap();
-        let base =
-            crate::private::directory(&directory.path().canonicalize().unwrap().join("private"))
-                .unwrap();
+        let base = crate::private::directory(
+            &xcb_core::canonical(directory.path())
+                .unwrap()
+                .join("private"),
+        )
+        .unwrap();
         let cwd = crate::private::directory(&base.join("work")).unwrap();
         let profile = crate::private::directory(&base.join("profile")).unwrap();
         let catalog = base.join("catalog.json");

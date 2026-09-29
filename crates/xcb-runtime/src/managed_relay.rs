@@ -733,7 +733,7 @@ mod tests {
     /// so the state root itself must be canonical; workspaces live beside it.
     fn fixture() -> Fixture {
         let temp = TempDir::new().unwrap();
-        let base = temp.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(temp.path()).unwrap();
         let store = Arc::new(ManagedStore::open(&base.join("state")).unwrap());
         Fixture {
             _temp: temp,
@@ -746,7 +746,7 @@ mod tests {
         fn dir(&self, name: &str) -> PathBuf {
             let path = self.base.join(name);
             std::fs::create_dir_all(&path).unwrap();
-            path.canonicalize().unwrap()
+            xcb_core::canonical(&path).unwrap()
         }
 
         async fn dispatch(&self, workspace: &str, prompt: &str, operation: &str) -> Result<Value> {
@@ -927,8 +927,9 @@ mod tests {
     #[tokio::test]
     async fn home_workspace_refused() {
         let f = fixture();
-        let home = std::env::var("HOME").unwrap();
-        let refused = error_text(f.dispatch(&home, "anything", "home").await);
+        let home = xcb_core::home_dir().unwrap();
+        let home = home.to_str().unwrap();
+        let refused = error_text(f.dispatch(home, "anything", "home").await);
         assert!(refused.contains("workspace is not allowed"), "{refused}");
         assert!(f.store.tasks(16).unwrap().is_empty());
         assert!(f.store.all_workspaces().unwrap().is_empty());
@@ -937,7 +938,7 @@ mod tests {
     #[tokio::test]
     async fn hidden_home_workspace_refused() {
         let f = fixture();
-        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let home = xcb_core::home_dir().unwrap();
         let Ok(hidden) = tempfile::Builder::new()
             .prefix(".xcb-relay-")
             .tempdir_in(&home)

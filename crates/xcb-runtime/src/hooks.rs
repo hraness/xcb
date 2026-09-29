@@ -120,7 +120,7 @@ pub fn add(root: &Path, event: Event, executable: &Path, timeout_ms: u64) -> Res
     if !executable.is_absolute() {
         return Err(Error::Unavailable("hook executable path must be absolute"));
     }
-    let executable = executable.canonicalize()?;
+    let executable = xcb_core::canonical(executable)?;
     if executable.starts_with(root) {
         return Err(Error::Unavailable(
             "hook executable must be outside xcb state",

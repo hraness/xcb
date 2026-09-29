@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn from_path_still_loads_valid_image() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap().join("state");
+        let root = xcb_core::canonical(directory.path()).unwrap().join("state");
         let store = crate::store::Store::open(&root).unwrap();
         let image = image::RgbaImage::from_raw(2, 2, vec![255; 16]).unwrap();
         let path = directory.path().join("image.png");

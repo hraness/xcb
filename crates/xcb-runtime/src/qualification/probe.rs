@@ -81,13 +81,13 @@ pub async fn qualify(root: &Path) -> Result<QualificationRun> {
     let candidate =
         sandbox::bwrap_candidate().ok_or(Error::Unavailable("bwrap isn't installed"))?;
     let pin = sandbox::BwrapPin::admit(&candidate)?;
-    let xcb = std::env::current_exe()?.canonicalize()?;
+    let xcb = xcb_core::canonical(std::env::current_exe()?)?;
     let closure = sandbox::shared_library_closure(&xcb)?;
     let namespaces = Namespaces::live();
     let work = tempfile::Builder::new()
         .prefix("xcb-sandbox-test-")
         .tempdir()?;
-    let base = work.path().canonicalize()?;
+    let base = xcb_core::canonical(work.path())?;
     let context = Context {
         pin: &pin,
         xcb: &xcb,

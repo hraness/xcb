@@ -1136,7 +1136,7 @@ impl ManagedStore {
         &self,
         workspace: &Path,
     ) -> Result<Option<ManagedConversation>> {
-        let workspace = fs::canonicalize(workspace)?;
+        let workspace = xcb_core::canonical(workspace)?;
         let workspace = workspace.to_str().ok_or(Error::PrivateState)?.to_owned();
         let db = self.db()?;
         let row: Option<(String, i64)> = db
@@ -5941,7 +5941,7 @@ mod relay_lock_tests {
     #[test]
     fn modern_supervisor_keeps_existing_health_and_migration_probes_exclusive() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let locks = crate::cloud::relay_gate::supervisor_locks(&root)
             .unwrap()
             .unwrap();
@@ -7099,10 +7099,10 @@ mod tests {
     }
     /// The project directory: a sibling of the state root, never inside it.
     fn workspace(root: &TempDir) -> PathBuf {
-        private::directory(&root.path().canonicalize().unwrap().join("work")).unwrap()
+        private::directory(&xcb_core::canonical(root.path()).unwrap().join("work")).unwrap()
     }
     fn state_dir(root: &TempDir) -> PathBuf {
-        root.path().canonicalize().unwrap().join("state")
+        xcb_core::canonical(root.path()).unwrap().join("state")
     }
     fn message(name: &str) -> Id {
         Id::new(name).unwrap()
@@ -7197,9 +7197,13 @@ mod tests {
     async fn failover_requires_settlement_checkpoint_and_no_cancellation() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -7372,7 +7376,8 @@ mod tests {
     async fn coding_requests_beginning_with_cancel_are_preserved() {
         let root = root();
         let workspace = workspace(&root);
-        let state = private::directory(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let state =
+            private::directory(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -7423,7 +7428,8 @@ mod tests {
     async fn undispatched_failures_stop_at_the_automatic_budget() {
         let root = root();
         let workspace = workspace(&root);
-        let state = private::directory(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let state =
+            private::directory(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -7521,9 +7527,13 @@ mod tests {
         use xcb_core::models::{Mode, ModelChoice};
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let claude = xcb.add_account(Provider::Claude, "Test", 1, None).unwrap();
@@ -7593,7 +7603,7 @@ mod tests {
             .await
             .unwrap();
         let other_root = root();
-        let other_workspace = other_root.path().canonicalize().unwrap();
+        let other_workspace = xcb_core::canonical(other_root.path()).unwrap();
         let other_chat = conversation(&managed, &other_workspace).await;
         let other = managed
             .create_task(
@@ -7969,9 +7979,13 @@ mod tests {
         use xcb_core::models::{Mode, ModelChoice};
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let account = xcb
@@ -8025,9 +8039,13 @@ mod tests {
         use xcb_core::models::{Mode, ModelChoice};
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let account = xcb
@@ -8123,9 +8141,13 @@ mod tests {
         use xcb_core::models::{Mode, ModelChoice};
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let account = xcb.add_account(Provider::Claude, "Test", 1, None).unwrap();
@@ -8202,9 +8224,13 @@ mod tests {
         use xcb_core::models::{Mode, ModelChoice};
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let account = xcb.add_account(Provider::Devin, "Test", 1, None).unwrap();
@@ -8340,9 +8366,13 @@ mod tests {
     async fn detaching_the_ui_does_not_cancel_or_delete_accepted_work() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let xcb = Arc::new(Store::open(&state).unwrap());
         let managed = ManagedStore::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -8380,9 +8410,13 @@ mod tests {
     async fn managed_continuation_preserves_core_turn_limit_gates_without_a_judge() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -8809,9 +8843,13 @@ mod tests {
     async fn startup_reconcile_collects_a_per_task_error_and_recovers_the_rest() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -8881,9 +8919,13 @@ mod tests {
     async fn supervisor_tick_isolates_per_task_errors_and_marks_no_account() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = Arc::new(ManagedStore::open(&state).unwrap());
         let xcb = Arc::new(Store::open(&state).unwrap());
         let chat = conversation(&managed, &workspace).await;
@@ -8957,9 +8999,13 @@ mod tests {
     async fn exhausted_continuation_budget_asks_for_input_instead_of_failing() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -9102,9 +9148,13 @@ mod tests {
     async fn cancel_after_a_settled_completion_stays_completed() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -9182,9 +9232,13 @@ mod tests {
         use xcb_core::models::{Mode, ModelChoice};
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let xcb = Store::open(&state).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -9252,9 +9306,13 @@ mod tests {
     async fn serve_ui_resends_the_view_only_when_something_changed() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let xcb = Arc::new(Store::open(&state).unwrap());
         let managed = ManagedStore::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -9309,11 +9367,15 @@ mod tests {
         let state_root = root();
         let work_root = root();
         let other_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
         let managed = ManagedStore::open(&state).unwrap();
-        let work = work_root.path().canonicalize().unwrap();
-        let other = other_root.path().canonicalize().unwrap();
+        let work = xcb_core::canonical(work_root.path()).unwrap();
+        let other = xcb_core::canonical(other_root.path()).unwrap();
 
         let first = conversation(&managed, &work).await;
         let _foreign = conversation(&managed, &other).await;
@@ -9367,9 +9429,13 @@ mod tests {
     async fn continue_after_completion_reopens_the_task_and_labels_it() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -9433,9 +9499,13 @@ mod tests {
     async fn observed_settle_does_not_reopen_on_continue() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let mut config = Config::default();
@@ -9485,9 +9555,13 @@ mod tests {
     async fn auto_settle_acts_only_once_certified() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         assert_eq!(
@@ -9606,9 +9680,13 @@ mod tests {
     async fn a_turn_without_a_reply_or_changes_waits_for_the_user() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let chat = conversation(&managed, &workspace).await;
@@ -9686,9 +9764,13 @@ mod tests {
     async fn active_settle_reflex_continues_a_turn_that_stopped_short() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let mut config = Config::default();
@@ -9739,9 +9821,13 @@ mod tests {
     async fn active_confirm_answers_safe_requests_and_vetoes_risky_ones() {
         let state_root = root();
         let workspace_root = root();
-        let state =
-            private::directory(&state_root.path().canonicalize().unwrap().join("state")).unwrap();
-        let workspace = workspace_root.path().canonicalize().unwrap();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
         let managed = ManagedStore::open(&state).unwrap();
         let xcb = Store::open(&state).unwrap();
         let mut config = Config::default();

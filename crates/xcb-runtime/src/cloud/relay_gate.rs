@@ -210,7 +210,7 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         (directory, root)
     }
 

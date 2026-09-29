@@ -248,14 +248,14 @@ pub enum ProjectCommand {
 /// The directory `scope` names, resolved once by the shared scope order.
 /// Relative values start at `--cwd`, as in every other command.
 fn scope(store: &ManagedStore, cwd: &Path, value: &str) -> Result<String> {
-    store.resolve_scope(value, &cwd.canonicalize()?)
+    store.resolve_scope(value, &xcb_core::canonical(cwd)?)
 }
 
 /// `--workspace <dir>`: validated to its canonical path, never snapped.
 fn exact_workspace(store: &ManagedStore, cwd: &Path, dir: &Path) -> Result<PathBuf> {
-    Ok(PathBuf::from(
-        store.validate_workspace(&cwd.canonicalize()?.join(dir))?,
-    ))
+    Ok(PathBuf::from(store.validate_workspace(
+        &xcb_core::canonical(cwd)?.join(dir),
+    )?))
 }
 
 /// Where `backlog add|program`, `schedules add|program` and `daemons run`
@@ -525,8 +525,10 @@ pub async fn memory(root: &Path, cwd: &Path, command: MemoryCommand, json: bool)
             revision,
         } => {
             let workspace = scope(&store, cwd, &value)?;
-            let config =
-                xcb_runtime::wordcell::WordcellConfig::admit(&wordcell, &vault.canonicalize()?)?;
+            let config = xcb_runtime::wordcell::WordcellConfig::admit(
+                &wordcell,
+                &xcb_core::canonical(&vault)?,
+            )?;
             serde_json::to_value(store.bind_memory_in(Path::new(&workspace), revision, config)?)?
         }
         MemoryCommand::Status { scope: value } => {
@@ -1278,9 +1280,9 @@ mod tests {
     async fn scopes_resolve_directories_and_refuse_the_thread_and_ambiguous_names() {
         let path = std::env::temp_dir().join(new_id("habitat_scope").as_str());
         std::fs::create_dir_all(&path).unwrap();
-        let scratch = Scratch(path.canonicalize().unwrap());
+        let scratch = Scratch(xcb_core::canonical(&path).unwrap());
         let base = &scratch.0;
-        let (one, two) = (base.join("one/app"), base.join("two/app"));
+        let (one, two) = (base.join("one").join("app"), base.join("two").join("app"));
         std::fs::create_dir_all(&one).unwrap();
         std::fs::create_dir_all(&two).unwrap();
         let store = ManagedStore::open(&base.join("state")).unwrap();

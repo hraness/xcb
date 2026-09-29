@@ -35,7 +35,7 @@ struct Fixture {
 impl Fixture {
     fn new(due: bool) -> Self {
         let temp = tempfile::TempDir::new().unwrap();
-        let root = temp.path().canonicalize().unwrap().join("state");
+        let root = xcb_core::canonical(temp.path()).unwrap().join("state");
         let device = DeviceIdentity::generate().unwrap();
         custody::store_device(&root, &device, "daemon", "fixture", &device.device).unwrap();
         custody::store_account_key(&root, &AccountKey::generate(), 1).unwrap();

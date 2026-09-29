@@ -9,7 +9,7 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().canonicalize().unwrap();
+    let root = xcb_core::canonical(directory.path()).unwrap();
     let state = private::directory(&root.join("state")).unwrap();
     let workspace = private::directory(&root.join("workspace")).unwrap();
     let managed = ManagedStore::open(&state).unwrap();

@@ -41,7 +41,7 @@ fn private_directory(path: &Path) -> Result<()> {
     if !meta.is_dir()
         || meta.uid() != rustix::process::getuid().as_raw()
         || meta.mode() & 0o777 != 0o700
-        || path.canonicalize()? != path
+        || xcb_core::canonical(path)? != path
     {
         return Err(Error::PrivateState);
     }
@@ -754,7 +754,7 @@ mod tests {
     async fn bridge_serves_connect_and_relays_bytes() {
         let echo_port = echo_server().await;
         let root = private_root();
-        let socket_path = root.path().canonicalize().unwrap().join("e.sock");
+        let socket_path = xcb_core::canonical(root.path()).unwrap().join("e.sock");
         let mut opts = EgressBridgeOptions::new(socket_path.clone());
         opts.allowed_port = echo_port;
         // The production dialer refuses loopback destinations; the echo
@@ -786,7 +786,7 @@ mod tests {
     #[tokio::test]
     async fn bridge_refuses_wrong_port_and_unlisted_host() {
         let root = private_root();
-        let socket_path = root.path().canonicalize().unwrap().join("e.sock");
+        let socket_path = xcb_core::canonical(root.path()).unwrap().join("e.sock");
         let mut opts = EgressBridgeOptions::new(socket_path.clone());
         opts.allowlist = Some(BTreeSet::from(["allowed.example".to_owned()]));
         let bridge = EgressBridge::start(opts).await.unwrap();
@@ -829,7 +829,7 @@ mod tests {
         );
         // The production path answers 403 without dialing.
         let root = private_root();
-        let socket_path = root.path().canonicalize().unwrap().join("e.sock");
+        let socket_path = xcb_core::canonical(root.path()).unwrap().join("e.sock");
         let bridge = EgressBridge::start(EgressBridgeOptions::new(socket_path.clone()))
             .await
             .unwrap();
@@ -854,7 +854,7 @@ mod tests {
     async fn forwarder_connects_loopback_to_bridge() {
         let echo_port = echo_server().await;
         let root = private_root();
-        let socket_path = root.path().canonicalize().unwrap().join("e.sock");
+        let socket_path = xcb_core::canonical(root.path()).unwrap().join("e.sock");
         let mut opts = EgressBridgeOptions::new(socket_path.clone());
         opts.allowed_port = echo_port;
         opts.dialer = Some(Arc::new(move |_, port| {

@@ -254,10 +254,13 @@ impl Workspace {
         Self::open_with_coordination(root, &coordination::default_root()?)
     }
     pub fn open_with_coordination(root: &Path, coordination_root: &Path) -> Result<Self> {
-        if !root.is_absolute() || root.canonicalize()? != root || !coordination_root.is_absolute() {
+        if !root.is_absolute()
+            || xcb_core::canonical(root)? != root
+            || !coordination_root.is_absolute()
+        {
             return Err(Error::PrivateState);
         }
-        let root = root.canonicalize()?;
+        let root = xcb_core::canonical(root)?;
         let coordination = coordination::Coordination::new(&root, coordination_root)?;
         let fd = rustix::fs::open(
             &root,

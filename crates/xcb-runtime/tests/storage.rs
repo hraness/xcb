@@ -28,7 +28,7 @@ fn choice() -> ModelChoice {
 #[test]
 fn accounts_are_separate_and_labels_cannot_override_a_credential_path() {
     let dir = root();
-    let path = dir.path().canonicalize().unwrap().join("state");
+    let path = xcb_core::canonical(dir.path()).unwrap().join("state");
     let store = Store::open(&path).unwrap();
     let a = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let b = store
@@ -54,7 +54,7 @@ fn accounts_are_separate_and_labels_cannot_override_a_credential_path() {
 #[test]
 fn private_state_rejects_symlinks_and_public_permissions() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     drop(store);
     symlink(base.join("state"), base.join("link")).unwrap();
@@ -66,7 +66,7 @@ fn private_state_rejects_symlinks_and_public_permissions() {
 #[test]
 fn a_vanished_or_planted_sidecar_is_handled_during_startup_scan() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     drop(store);
     let state = base.join("state");
@@ -100,7 +100,7 @@ fn a_vanished_or_planted_sidecar_is_handled_during_startup_scan() {
 #[test]
 fn revision_checked_messages_persist_across_reopen() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let path = base.join("state");
     let store = Store::open(&path).unwrap();
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
@@ -132,7 +132,7 @@ fn revision_checked_messages_persist_across_reopen() {
 #[test]
 fn a_prepared_run_keeps_exclusive_account_custody_after_restart() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let path = base.join("state");
     let store = Store::open(&path).unwrap();
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
@@ -155,7 +155,7 @@ fn a_prepared_run_keeps_exclusive_account_custody_after_restart() {
 #[test]
 fn ui_session_rename_preserves_active_lease_and_transcript_revision() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let path = base.join("state");
     let store = Store::open(&path).unwrap();
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
@@ -209,7 +209,7 @@ fn ui_session_rename_preserves_active_lease_and_transcript_revision() {
 fn ui_session_history_cursor_is_scoped_and_keeps_existing_page_limits() {
     use xcb_core::ui::TranscriptContext;
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let mut session = store
@@ -266,7 +266,7 @@ fn ui_session_history_cursor_is_scoped_and_keeps_existing_page_limits() {
 #[test]
 fn pruning_never_erases_an_active_session() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let idle = store
@@ -321,7 +321,7 @@ fn storage_process_worker() {
 #[test]
 fn twenty_processes_initialize_and_write_one_fresh_store() {
     let directory = root();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let executable = std::env::current_exe().unwrap();
     let children: Vec<_> = (0..20)
         .map(|_| {

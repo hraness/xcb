@@ -8,7 +8,7 @@ struct Fixture {
 }
 async fn fixture() -> Fixture {
     let root = tempfile::tempdir().unwrap();
-    let physical_root = root.path().canonicalize().unwrap();
+    let physical_root = xcb_core::canonical(root.path()).unwrap();
     let state = private::directory(&physical_root.join("state")).unwrap();
     let workspace = private::directory(&physical_root.join("project")).unwrap();
     let managed = ManagedStore::open(&state).unwrap();
@@ -645,6 +645,7 @@ async fn thread(managed: &ManagedStore) -> Id {
     managed.global_thread().await.unwrap().id
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 async fn running(managed: &ManagedStore, task: &ManagedTask) -> ManagedTask {
     let mut next = task.clone();
     next.state = TaskState::Running;
@@ -654,6 +655,7 @@ async fn running(managed: &ManagedStore, task: &ManagedTask) -> ManagedTask {
     managed.transition(task, next, None).await.unwrap()
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 async fn settle(managed: &ManagedStore, task: &ManagedTask, state: TaskState) -> ManagedTask {
     let mut next = task.clone();
     next.state = state;
@@ -855,10 +857,13 @@ async fn worker_in_a_cannot_get_update_complete_or_search_memory_of_b() {
     );
 }
 
+// Daemons run provider agents, which Windows refuses.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn thread_children_carry_inherited_bindings_and_replay_exactly() {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let state = private::directory(&base.join("state")).unwrap();
     let a = private::directory(&base.join("project")).unwrap();
     let managed = Arc::new(ManagedStore::open(&state).unwrap());

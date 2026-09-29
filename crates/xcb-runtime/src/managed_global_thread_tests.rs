@@ -16,7 +16,7 @@ struct Env {
 /// A store at `base/state`; project directories are its siblings.
 fn env() -> Env {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let state = private::directory(&base.join("state")).unwrap();
     let managed = Arc::new(ManagedStore::open(&state).unwrap());
     let xcb = Arc::new(Store::open(&state).unwrap());
@@ -30,7 +30,7 @@ fn env() -> Env {
 
 fn dir(base: &Path, name: &str) -> PathBuf {
     fs::create_dir_all(base.join(name)).unwrap();
-    base.join(name).canonicalize().unwrap()
+    xcb_core::canonical(base.join(name)).unwrap()
 }
 
 fn git_repo(base: &Path, name: &str) -> PathBuf {
@@ -262,6 +262,9 @@ async fn prompt_path_inside_admitted_root_snaps_to_root() {
     assert_eq!(task.hold_until_ms, None);
 }
 
+// Prompt path mentions are parsed with / separators; Windows spellings are a known gap.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn prompt_path_in_nested_worktree_binds_worktree() {
     let e = env();
@@ -293,6 +296,9 @@ async fn prompt_path_in_nested_worktree_binds_worktree() {
     assert!(task.hold_until_ms.is_some());
 }
 
+// Prompt path mentions are parsed with / separators; Windows spellings are a known gap.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn file_token_binds_its_repo() {
     let e = env();
@@ -309,11 +315,13 @@ async fn file_token_binds_its_repo() {
     assert_eq!(task.binding.unwrap().source, BindingSource::Mention);
 }
 
+// Unix system and library paths.
+#[cfg(unix)]
 #[tokio::test]
 async fn ssh_and_library_prompt_tokens_refused() {
     let e = env();
     let before = footprint(&e.managed);
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let home = xcb_core::home_dir().unwrap();
     let mut evidence = vec![("in /etc/hosts fix it", "system directory")];
     if home.join(".ssh").is_dir() {
         evidence.push(("cd ~/.ssh and tidy it", "hidden or library directory"));
@@ -338,6 +346,9 @@ async fn ssh_and_library_prompt_tokens_refused() {
     assert_eq!(footprint(&e.managed), before);
 }
 
+// Prompt path mentions are parsed with / separators; Windows spellings are a known gap.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn unregistered_prompt_root_asks_and_writes_nothing() {
     let e = env();

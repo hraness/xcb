@@ -42,7 +42,7 @@ fn image() -> Attachment {
 #[tokio::test]
 async fn a_rejected_submission_returns_the_full_draft() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     // No accounts exist, so every submission is rejected before it can run.
     let store = Arc::new(Store::open(&base.join("state")).unwrap());
     let (updates, display) = sync_channel(256);
@@ -114,7 +114,7 @@ async fn a_rejected_submission_returns_the_full_draft() {
 #[tokio::test]
 async fn a_run_owned_by_a_sibling_terminal_is_remote_not_recovery() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let path = base.join("state");
     // Terminal one opens the state root and starts a run on the session.
     let owner = Store::open(&path).unwrap();
@@ -160,7 +160,7 @@ async fn a_run_owned_by_a_sibling_terminal_is_remote_not_recovery() {
 #[test]
 fn explicit_model_selects_its_provider_instead_of_an_unrelated_default_account() {
     let dir = root();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let claude = store
         .add_account(Provider::Claude, "Test", 1, None)

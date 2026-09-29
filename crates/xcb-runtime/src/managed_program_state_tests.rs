@@ -10,7 +10,7 @@ struct Fixture {
 }
 async fn fixture() -> Fixture {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let workspace = private::directory(&base.join("work")).unwrap();
     let state = base.join("state");
     let managed = Arc::new(ManagedStore::open(&state).unwrap());

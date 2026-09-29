@@ -90,7 +90,7 @@ impl CommandRequest {
                 .ok()
                 .map(Path::to_path_buf)
                 .or_else(|| {
-                    let canonical = std::fs::canonicalize(given).ok()?;
+                    let canonical = xcb_core::canonical(given).ok()?;
                     canonical.strip_prefix(root).ok().map(Path::to_path_buf)
                 });
             if let Some(inside) = inside.and_then(|path| path.to_str().map(str::to_owned)) {
@@ -680,7 +680,7 @@ impl CommandBackend {
             create_marker(&name)?;
         }
         create_marker(PENDING_READY)?;
-        std::fs::File::open(&pending)?.sync_all()?;
+        private::sync_directory(&pending)?;
         Ok(pending)
     }
     fn mark_pending(&self, command: &Id) -> Result<()> {
@@ -701,7 +701,7 @@ impl CommandBackend {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error.into()),
         }
-        std::fs::File::open(&pending)?.sync_all()?;
+        private::sync_directory(&pending)?;
         Ok(())
     }
 
@@ -769,7 +769,7 @@ impl CommandBackend {
             }
         }
         if apply {
-            std::fs::File::open(&jobs)?.sync_all()?;
+            private::sync_directory(&jobs)?;
         }
         Ok(report)
     }
@@ -1272,12 +1272,13 @@ impl CommandBackend {
     }
 }
 
-#[cfg(test)]
+// Drives provider or command-runner fixtures, which Windows builds refuse.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     fn fixture() -> (tempfile::TempDir, CommandBackend) {
         let temporary = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(temporary.path())
+        let root = xcb_core::canonical(temporary.path())
             .unwrap()
             .join("private");
         private::directory(&root).unwrap();
@@ -1336,7 +1337,7 @@ mod tests {
     #[test]
     fn absolute_cwd_inside_workspace_becomes_relative() {
         let root = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(root.path()).unwrap();
+        let root = xcb_core::canonical(root.path()).unwrap();
         std::fs::create_dir(root.join("src")).unwrap();
         let request = |cwd: &str| CommandRequest {
             argv: vec!["true".into()],
