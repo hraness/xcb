@@ -983,7 +983,9 @@ def cache_ack(ack):
             matched=True
             cache=ROOT/'cache'/ack['cacheKey']/'record.json'
             if cache.exists() and decode(read_regular(cache,4*1024*1024))['attemptId']==job.name:
-                verified_cache(result['plan'])
+                # A guest restart drops the readonly mount; acknowledgment is
+                # explicit, so remount and rehash like prepare and recover.
+                verified_cache(result['plan'],remount=True)
                 continue  # Published immutable dependency bytes remain available.
             evidence=job/'ack.json'
             if not evidence.exists():private_write(evidence,encode(ack))
