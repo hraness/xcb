@@ -2,7 +2,7 @@
 
 - `crates/` owns the native xcb (Excalibur) Rust kernel, local runtime, Ratatui
   frontend, and CLI. Panes are bounded userspace data; executable hooks require
-  separate trust. Keep local metering separate from opt-in aiCharts publishing.
+  separate trust. Keep local metering separate from opt-in aicharts publishing.
 - `src/` owns provider-neutral routing, account leases, model selection,
   scoped tool contracts, the `router.ts` subscription-router entry point
   (`createSubscriptionRouter`) that bundles the lease store and qualified task
@@ -36,7 +36,7 @@
 - `test/` contains synthetic boundary and concurrency tests.
 - `qualification/` holds the host qualification fixtures and native-tooling
   checks; its `contact-workspace.ts` is a vendored synthetic fixture, not a
-  Textbutler import. `linux-sandbox.ts` is the bwrap kernel-boundary probe,
+  TextButler import. `linux-sandbox.ts` is the bwrap kernel-boundary probe,
   `linux-egress.ts` is the CONNECT-bridge boundary probe, and
   `linux-loopback.ts` is the stock-binary forwarder probe; all are evidence,
   not activation. The `Check` workflow's `Linux kernel-boundary probes` job
@@ -135,15 +135,18 @@ Public copy is the site, README, `docs/`, `llms.txt`, `package.json` and GitHub
 descriptions, CLI help, and TUI text. Follow `STYLE.md` and `WRITING.md`.
 
 - The canonical one-line description, used as the README and `llms.txt` lead, is
-  “xcb routes coding tasks across the Claude, Codex, and Devin subscriptions
-  you already pay for.” The page descriptions, README lead, `llms.txt` lead,
-  `package.json` description, support value proposition, and CLI `about` use
-  this sentence or a shortening of it. The portfolio registry line lives in
-  hraness/jungle; propose changes there.
-- Write the product as `xcb` (lowercase, also at the start of a sentence) or
-  Excalibur. Never write XCB or Xcb in prose; `Xcb` is only the TypeScript
-  class name. Sibling names follow the registry: Textbutler, AI Charts,
-  PeopleBlade, Gobstopper, Ghostget, Soulscrape, Wordcell, ALGAL.
+  “Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
+  subscriptions you already pay for.” The page descriptions, README lead,
+  `llms.txt` lead, `package.json` description, support value proposition, and
+  CLI `about` use this sentence or a shortening of it. The portfolio registry
+  line lives in hraness/jungle; propose changes there.
+- The product name is “Excalibur (xcb)”. Use it for the first mention on each
+  page and in titles, site names, share cards, and package descriptions. Later
+  mentions may use `xcb` (lowercase, also at the start of a sentence), which is
+  also the command, binary, crate, and package name. Never write XCB or Xcb in
+  prose; `Xcb` is only the TypeScript class name. Sibling names follow the
+  registry: PeopleBlade, TextButler, GhostGet, ALGAL, Wordcell, Gobstopper,
+  aicharts (lowercase, one word).
 - State the release status once per page, from `site/published-release.json`
   through `site/app/release-state.tsx`. Put each other limit beside the feature
   it limits.

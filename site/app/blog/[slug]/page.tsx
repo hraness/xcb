@@ -21,7 +21,7 @@ export async function generateMetadata({ params }: { params: Promise<{ slug: str
   const metadata = createArticleMetadata(blogSite, blogArticleDiscovery(entry));
   return {
     ...metadata,
-    title: `${entry.title} · xcb`,
+    title: `${entry.title} · Excalibur (xcb)`,
     alternates: {
       ...metadata.alternates,
       types: { "application/atom+xml": [{ url: blogFeedPath, title: blogTitle }] },

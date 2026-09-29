@@ -33,13 +33,13 @@ export function findDocsTopic(slug: string): DocsTopic | undefined {
 }
 
 export function topicMetadata(topic: DocsTopic): Metadata {
-  const title = `${topic.title} · xcb docs`;
+  const title = `${topic.title} · Excalibur (xcb) docs`;
   const url = `/docs/${topic.slug}`;
   return {
     title,
     description: topic.description,
     alternates: { canonical: url },
-    openGraph: { title, description: topic.description, url, type: "article", siteName: "xcb", images: socialImages },
+    openGraph: { title, description: topic.description, url, type: "article", siteName: "Excalibur (xcb)", images: socialImages },
     twitter: { card: "summary_large_image", title, description: topic.description, images: socialImages },
   };
 }

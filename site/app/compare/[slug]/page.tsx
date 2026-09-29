@@ -18,7 +18,7 @@ export async function generateMetadata({ params }: Readonly<{ params: Promise<{ 
     title: entry.title,
     description: entry.description,
     alternates: { canonical: url },
-    openGraph: { title: entry.title, description: entry.description, siteName: "xcb", type: "article", url, images: socialImages },
+    openGraph: { title: entry.title, description: entry.description, siteName: "Excalibur (xcb)", type: "article", url, images: socialImages },
     twitter: { card: "summary_large_image", title: entry.title, description: entry.description, images: socialImages },
   };
 }

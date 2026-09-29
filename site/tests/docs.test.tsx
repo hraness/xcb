@@ -73,7 +73,7 @@ describe("organized documentation", () => {
       const metadata = await generateMetadata({ params: Promise.resolve({ slug: topic.slug }) });
       expect(metadata.alternates?.canonical).toBe(`/docs/${topic.slug}`);
       expect(metadata.openGraph?.url).toBe(`/docs/${topic.slug}`);
-      expect(metadata.title).toBe(`${topic.title} · xcb docs`);
+      expect(metadata.title).toBe(`${topic.title} · Excalibur (xcb) docs`);
       expect(metadata.description).toBe(topic.description);
       // Page descriptions are unique sentences of 110 to 160 characters.
       expect(topic.description.length).toBeGreaterThanOrEqual(110);

@@ -5,7 +5,7 @@ coding-agent subscription. xcb handles provider sign-in, the provider's
 sandbox, and the provider process, and holds the account while the call runs.
 The application sends a prompt of up to 1 MiB and receives untrusted text; its
 own code decides which files, network requests, or messages that text can lead
-to. [Textbutler](https://github.com/hraness/textbutler) is an example: it uses
+to. [TextButler](https://github.com/hraness/textbutler) is an example: it uses
 separate classification and reply prompts and keeps contact memory, recipient
 selection, review, and message delivery in its own code.
 
@@ -161,7 +161,7 @@ stopped. When the outcome is uncertain, xcb keeps the account held and blocks ne
 work on it; don't delete its records or blindly retry.
 
 Applications own their own durable request records, privacy controls, output
-validation and external effects. Textbutler's recipient-bound grants, final
+validation and external effects. TextButler's recipient-bound grants, final
 takeover checks and send journal remain necessary even when xcb has successfully
 generated a response. xcb never sends messages for the application.
 

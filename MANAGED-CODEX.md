@@ -71,7 +71,7 @@ refused and preserved for explicit recovery.
 A private journal records launch intent before spawning and retains process and
 stream cleanup evidence. Failed cleanup keeps the account lock and recovery state.
 An expired lease or stale lock does not authorize a replacement process. The
-helper is not registered with Textbutler's default host and does not enable replies.
+helper is not registered with TextButler's default host and does not enable replies.
 Filesystem cleanup can finish after the requested wait deadline. The transport
 retains and joins that work before releasing account custody.
 
@@ -125,7 +125,7 @@ workflow runs both on `ubuntu-24.04`. Note that Ubuntu's default AppArmor
 user-namespace restriction denies bwrap outright — the host must lift it
 (`kernel.apparmor_restrict_unprivileged_userns=0`) before any plan can run.
 
-`createManagedCodexAccountFactory()` in Textbutler's `managed-codex.ts` composes
+`createManagedCodexAccountFactory()` in TextButler's `managed-codex.ts` composes
 the controller, stdio transport and process helper. Its admission inputs come
 from trusted host code, never owner JSON or contact files, and preserve the
 explicitly selected v1 or v2 profile. It accepts device-code
@@ -171,9 +171,9 @@ streams, writes, requests and notifications are joined. Lease expiry alone
 does not authorize reuse. An account-control process must finish that handoff
 before a separately admitted task process can reuse the account.
 
-## Textbutler integration and current limits
+## TextButler integration and current limits
 
-Textbutler's `createProviderHost()` and `startDaemon()` accept an optional trusted
+TextButler's `createProviderHost()` and `startDaemon()` accept an optional trusted
 `managedCodex` factory. The factory is called only for an explicit owner account
 operation. When supplied, the local control protocol and Mac account panel expose
 sign-in, cancellation, sign-out and checks. The panel shows authentication state

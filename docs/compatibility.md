@@ -236,7 +236,7 @@ An application can define its own tools with `createCapabilityProfile()` and
 bind them to one host-selected workspace and run with `createCapabilityBroker()`.
 The host supplies every descriptor, input parser and handler. Model arguments
 cannot replace the bound workspace, credentials or handler implementation. This
-separate interface leaves Textbutler's existing contact broker and
+separate interface leaves TextButler's existing contact broker and
 `Xcb.run()` path unchanged.
 
 For example, this host stores bounded notes in memory:
@@ -803,9 +803,9 @@ semantics. These are source integration seams: no shared native artifact, native
 managed launcher or new production qualification is bundled or implicitly enabled.
 
 The application owns its daemon, contact enrollment, message classification policy,
-conversation history, memory format, prefix formatting and Ghostget/Linq access.
-Xcb owns the execution seam. The model cannot choose a workspace or contact
-in broker input. `WorkspaceFiles` and `PublicWeb` are trusted host ports. Textbutler supplies its confined file implementation and uses `createPublicWeb()` by default. Custom replacements must preserve file confinement and public-network policy across DNS and every redirect. URL syntax validation alone is insufficient. The supplied web client admits public unicast addresses, rejects mixed public/private DNS answers, pins the selected address while preserving TLS hostname verification, and validates each redirect anew. It fetches bounded UTF-8 text only; it does not carry account cookies or authorization headers.
+conversation history, memory format, prefix formatting and GhostGet/Linq access.
+xcb owns the execution seam. The model cannot choose a workspace or contact
+in broker input. `WorkspaceFiles` and `PublicWeb` are trusted host ports. TextButler supplies its confined file implementation and uses `createPublicWeb()` by default. Custom replacements must preserve file confinement and public-network policy across DNS and every redirect. URL syntax validation alone is insufficient. The supplied web client admits public unicast addresses, rejects mixed public/private DNS answers, pins the selected address while preserving TLS hostname verification, and validates each redirect anew. It fetches bounded UTF-8 text only; it does not carry account cookies or authorization headers.
 
 Messaging ports only stage proposed actions and return an intent ID. They must never
 submit a message during composition. The application must recheck current enrollment, exact recipient/message ownership,
@@ -833,7 +833,7 @@ the old process/controller stopped, followed by an exact generation-conditional
 release. `AbortSignal` alone does not prove process exit. A successful adapter result
 must assert `processStopped: true` only after obtaining that evidence.
 
-The current AI Charts CLI collects usage and does not execute agents, so its likely
+The current aicharts CLI collects usage and does not execute agents, so its likely
 future shared interface is sanitized usage/account metadata, not this execution
 port. Account sign-in and product-provider terms need separate qualification;
 [Anthropic's SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) directs
@@ -991,7 +991,7 @@ The adapter defaults to unqualified. `Xcb.runTask()` refuses it before
 account acquisition or process launch unless the trusted host supplies current
 qualification for the exact route, runtime and capability profile. Direct
 adapter calls also require qualification and a runtime-admitted request. Synthetic fixtures are not
-qualification evidence and do not enable the route in Textbutler or another app.
+qualification evidence and do not enable the route in TextButler or another app.
 
 The managed session checks ChatGPT account type, the public baseline configuration
 projection and native thread settings before sending the task. `config/read`

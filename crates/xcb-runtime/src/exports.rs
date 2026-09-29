@@ -90,7 +90,7 @@ fn records_from(
             .sum::<usize>()
             > MAX_RECORDS
     {
-        return Err(xcb_core::Error::Limit("aiCharts records").into());
+        return Err(xcb_core::Error::Limit("aicharts records").into());
     }
     let mut output = Vec::with_capacity(sessions.len());
     for (session, (provider_id, mut usage)) in sessions {
@@ -98,7 +98,7 @@ fn records_from(
         let start_ms = usage.first().map(|record| record.at_ms).unwrap_or(0);
         let end_ms = usage.last().map(|record| record.at_ms).unwrap_or(start_ms);
         if end_ms.saturating_sub(start_ms) > MAX_WINDOW_MS {
-            return Err(xcb_core::Error::Invalid("aiCharts observation window").into());
+            return Err(xcb_core::Error::Invalid("aicharts observation window").into());
         }
         output.push(SessionRecord {
             provider: provider(provider_id),
@@ -120,7 +120,7 @@ fn serialize(sessions: Vec<SessionRecord>) -> Result<Vec<u8>> {
         sessions,
     })?;
     if bytes.len() > MAX_BYTES {
-        return Err(xcb_core::Error::Limit("aiCharts export bytes").into());
+        return Err(xcb_core::Error::Limit("aicharts export bytes").into());
     }
     Ok(bytes)
 }
@@ -143,7 +143,7 @@ pub fn write(store: &Store) -> Result<PathBuf> {
             if private::read(&path, MAX_BYTES)? == bytes {
                 Ok(path)
             } else {
-                Err(Error::Conflict("aiCharts export digest collision"))
+                Err(Error::Conflict("aicharts export digest collision"))
             }
         }
         Err(error) => Err(error),

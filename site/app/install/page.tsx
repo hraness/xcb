@@ -16,7 +16,7 @@ export const metadata: Metadata = {
   title,
   description,
   alternates: { canonical: "/install" },
-  openGraph: { title, description, siteName: "xcb", type: "website", url: "/install", images: socialImages },
+  openGraph: { title, description, siteName: "Excalibur (xcb)", type: "website", url: "/install", images: socialImages },
   twitter: { card: "summary_large_image", title, description, images: socialImages },
 };
 

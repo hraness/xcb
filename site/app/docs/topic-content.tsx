@@ -142,7 +142,7 @@ function Security() {
       <ul>
         <li><strong>State:</strong> accounts, credentials, conversations, tasks, and settings live in <code>~/.local/share/xcb</code> (or <code>XCB_STATE</code>), readable only by you.</li>
         <li><strong>Credentials:</strong> xcb stores a sign-in only when you run <code>xcb setup</code>, <code>xcb accounts login</code>, or an explicit <code>import</code> command. It never reads your existing provider logins on its own, and import copies the one file you name, leaving it in place.</li>
-        <li><strong>Usage:</strong> token and usage measurement stays local. Uploading usage to AI Charts is unavailable.</li>
+        <li><strong>Usage:</strong> token and usage measurement stays local. Uploading usage to aicharts is unavailable.</li>
         <li><strong>Learning:</strong> the <a href="/docs/reflexes">reflexes</a> store numeric features and your labels, never prompt or response text.</li>
       </ul>
       <h2 id="providers">What goes to providers</h2>
@@ -646,7 +646,7 @@ function ApplicationApi() {
       <p>All six fields are required and other fields are rejected. The whole input is limited to 1 MiB, <code>timeoutMs</code> to 1,000 to 300,000 milliseconds, and <code>maxOutputBytes</code> to 1 to 262,144 bytes. The prompt can’t be empty or contain NUL.</p>
       <p>A success has <code>status: completed</code>, the generated <code>text</code>, and an outcome showing the provider exited with no effects. A failure exits nonzero with a fixed error object and no text. Treat the text as untrusted: validate it against your app’s own schema before acting on it.</p>
       <h2 id="host-responsibilities">Keep your app’s actions in your app</h2>
-      <p>xcb does the inference, not your app’s file access, network requests, or message delivery. Your app chooses recipients, authorizes actions, validates output, and keeps its own request records. <Ext href="https://github.com/hraness/textbutler">Textbutler</Ext> is an example app that keeps contact access and message approval in its own code.</p>
+      <p>xcb does the inference, not your app’s file access, network requests, or message delivery. Your app chooses recipients, authorizes actions, validates output, and keeps its own request records. <Ext href="https://github.com/hraness/textbutler">TextButler</Ext> is an example app that keeps contact access and message approval in its own code.</p>
       <p>Send SIGINT or SIGTERM to cancel, then wait for xcb to exit. The deadline passing doesn’t prove the provider stopped. When the result is uncertain, xcb keeps the account held; don’t retry blindly.</p>
       <h2 id="checks">Application checks and renewal</h2>
       <p>An app route becomes available after a host check of the sandbox and a separate fixed live test. The result expires no later than 24 hours after the check starts, and sooner if xcb, the provider, or the account’s credentials change. Reading capabilities never extends their lifetime.</p>

@@ -8,9 +8,9 @@ export function SiteHeader({ active }: Readonly<{ active?: "home" | "docs" | "co
       <MarketingSiteHeader
         ariaLabel="Primary"
         className="hraness-material-chrome"
-        brand="xcb"
+        brand="Excalibur (xcb)"
         brandMark="/marks/xcb.svg"
-        brandLabel="xcb home"
+        brandLabel="Excalibur (xcb) home"
         links={[
           { href: "/docs", label: "Docs", current: active === "docs" },
           { href: "/compare", label: "Compare", current: active === "compare" },

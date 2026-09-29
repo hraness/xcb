@@ -17,7 +17,7 @@ import type {
 
 export const blogPath = "/blog";
 export const blogFeedPath = "/blog/feed.xml";
-export const blogTitle = "xcb blog";
+export const blogTitle = "Excalibur (xcb) blog";
 export const blogDescription = "How xcb routes coding tasks across your Claude, Codex, and Devin subscriptions, and how it uses other Hraness tools to do it.";
 
 export const blogAuthor: ArticleAuthor = { kind: "organization", name: "Hraness" };

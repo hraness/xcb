@@ -15,11 +15,11 @@ const docsLines = docsTopics.map((topic) => `- [${topic.title}](https://xcb.sh/d
 // Only indexable posts are listed; quarantined posts stay out of machine-readable maps.
 const blogLines = indexableBlogPosts.map((entry) => `- [${entry.title}](https://xcb.sh${blogPostPath(entry)}): ${entry.dek}`).join("\n");
 
-const body = `# xcb
+const body = `# Excalibur (xcb)
 
-> xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.
+> Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.
 
-xcb, short for Excalibur, is a terminal and router for developers who pay for more than one coding agent. Each task runs on an account that is signed in, idle, and not at a known usage limit, on a model that fits the work, and xcb holds that account until the provider process exits. It is MIT licensed. ${releaseLine}
+xcb is a terminal and router for developers who pay for more than one coding agent. Each task runs on an account that is signed in, idle, and not at a known usage limit, on a model that fits the work, and xcb holds that account until the provider process exits. It is MIT licensed. ${releaseLine}
 
 ## Use it as a coding agent
 

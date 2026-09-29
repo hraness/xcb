@@ -1504,7 +1504,7 @@ impl ManagedStore {
             .task(id)?
             .ok_or(Error::Unavailable("managed task not found"))?;
         let manifest = Manifest::parse(&serde_json::from_str(POLICY)?)
-            .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?;
+            .map_err(|_| Error::Unavailable("ALGAL transition policy rejected"))?;
         let mut expected = task.clone();
         let mut verified = 0u64;
         loop {
@@ -2169,10 +2169,10 @@ impl ManagedStore {
     async fn algal_receipt<T: Serialize>(record: &T) -> Result<(String, String, String)> {
         let source: Value = serde_json::from_str(POLICY)?;
         let manifest = Manifest::parse(&source)
-            .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?;
+            .map_err(|_| Error::Unavailable("ALGAL transition policy rejected"))?;
         let policy_digest = manifest
             .digest()
-            .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?;
+            .map_err(|_| Error::Unavailable("ALGAL transition policy rejected"))?;
         let input = serde_json::to_value(record)?;
         let mut store = AlgalStore::default();
         let mut host = Host::default();
@@ -2185,17 +2185,17 @@ impl ManagedStore {
             None,
         )
         .await
-        .map_err(|_| Error::Unavailable("Algal transition failed"))?;
+        .map_err(|_| Error::Unavailable("ALGAL transition failed"))?;
         if receipt["outcome"] != "complete"
             || runtime::outputs(&manifest, &receipt)
-                .map_err(|_| Error::Unavailable("Algal transition output rejected"))?["record"]
+                .map_err(|_| Error::Unavailable("ALGAL transition output rejected"))?["record"]
                 != input
         {
-            return Err(Error::Unavailable("Algal transition output rejected"));
+            return Err(Error::Unavailable("ALGAL transition output rejected"));
         }
         let receipt_digest = receipt["digest"]
             .as_str()
-            .ok_or(Error::Unavailable("Algal transition receipt missing"))?
+            .ok_or(Error::Unavailable("ALGAL transition receipt missing"))?
             .to_owned();
         Ok((
             policy_digest,
@@ -2491,9 +2491,9 @@ impl ManagedStore {
         let title = xcb_core::display_text(&title, 160);
         let source: Value = serde_json::from_str(POLICY)?;
         let policy = Manifest::parse(&source)
-            .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?
+            .map_err(|_| Error::Unavailable("ALGAL transition policy rejected"))?
             .digest()
-            .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?;
+            .map_err(|_| Error::Unavailable("ALGAL transition policy rejected"))?;
         let program_generation = if options.program.is_some() {
             self.project_policy_in(&workspace)?
                 .filter(|p| p.enabled && p.expires_at_ms > now)

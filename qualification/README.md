@@ -70,7 +70,7 @@ without reviewing the deployment's remaining requirements and evidence.
 
 The fixture uses the vendored `contact-workspace.ts` synthetic contact
 workspace, a copy of the consumer's confined file boundary, because consumers
-supply the filesystem enforcement. Xcb itself continues
+supply the filesystem enforcement. xcb itself continues
 to depend only on its generic file broker port.
 
 The pinned native runtime retains `doctor` in its discovery catalog with only an

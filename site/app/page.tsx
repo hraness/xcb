@@ -20,7 +20,7 @@ const repository = "https://github.com/hraness/xcb";
 // Hero heading and summary come from the portfolio registry's xcb messaging record.
 const heading = "Use your Claude, Codex, and Devin plans from one agent.";
 const summary = "Bring your coding subscriptions into one conversation. xcb picks an account and model for each task, helps you use quota before it resets, and lets you continue recent Claude and Codex conversations.";
-const metaDescription = "xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
+const metaDescription = "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
 
 const questions = [
   { question: "Can I use the subscriptions I already have?", answer: "Yes. You sign in to your own Claude, Codex, and Devin accounts through each provider’s own tool, and xcb routes work among them. It has no model access of its own and does not lift provider usage limits; each provider’s pricing and terms still apply." },
@@ -47,13 +47,13 @@ const readiness = [
 export default function Home() {
   const publisher = { "@type": "Organization", "@id": "https://hraness.com/#organization", name: "Hraness", url: "https://hraness.com/" };
   const structuredData = [
-    { "@context": "https://schema.org", "@type": "WebSite", "@id": "https://xcb.sh/#website", url: "https://xcb.sh/", name: "xcb", alternateName: ["Excalibur"], inLanguage: "en-US", publisher },
+    { "@context": "https://schema.org", "@type": "WebSite", "@id": "https://xcb.sh/#website", url: "https://xcb.sh/", name: "Excalibur (xcb)", alternateName: ["xcb", "Excalibur"], inLanguage: "en-US", publisher },
     {
       "@context": "https://schema.org",
       "@type": "SoftwareApplication",
       "@id": "https://xcb.sh/#app",
-      name: "xcb",
-      alternateName: "Excalibur",
+      name: "Excalibur (xcb)",
+      alternateName: ["xcb", "Excalibur"],
       url: "https://xcb.sh/",
       description: metaDescription,
       applicationCategory: "DeveloperApplication",
@@ -65,7 +65,7 @@ export default function Home() {
       publisher,
       ...(publishedRelease === null ? {} : { softwareVersion: publishedRelease.version }),
     },
-    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: "xcb", description: metaDescription, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.sh/", targetProduct: { "@id": "https://xcb.sh/#app" } },
+    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: "Excalibur (xcb)", description: metaDescription, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.sh/", targetProduct: { "@id": "https://xcb.sh/#app" } },
     { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: questions.map(({ question, answer }) => ({ "@type": "Question", name: question, acceptedAnswer: { "@type": "Answer", text: answer } })) },
   ];
   return (
@@ -78,7 +78,7 @@ export default function Home() {
             align="start"
             backdrop={false}
             className="xcb-hero"
-            name="xcb"
+            name="Excalibur (xcb)"
             heading={heading}
             headingId="hero-title"
             summary={summary}

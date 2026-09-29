@@ -42,9 +42,9 @@ test("extracts the landing block between the shared Hraness markers", async () =
   expect(source.indexOf(LANDING_START)).toBeGreaterThanOrEqual(0);
   expect(source.indexOf(LANDING_END)).toBeGreaterThan(source.indexOf(LANDING_START));
   const landing = readmeLanding(source);
-  expect(landing.title).toBe("xcb");
+  expect(landing.title).toBe("Excalibur (xcb)");
   // The canonical one-line description leads the README.
-  expect(landing.lead.startsWith("xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.")).toBe(true);
+  expect(landing.lead.startsWith("Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for.")).toBe(true);
   // The README never types the current version; the site inserts the verified release.
   const { version } = JSON.parse(await readFile(join(repository, "package.json"), "utf8")) as { version: string };
   const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
@@ -63,7 +63,7 @@ test("extracts the landing block between the shared Hraness markers", async () =
 test("serves the README as markdown with repository-rooted relative links", async () => {
   const source = await readFile(join(repository, "README.md"), "utf8");
   const markdown = renderReadmeMarkdown(source);
-  expect(markdown).toContain("# xcb");
+  expect(markdown).toContain("# Excalibur (xcb)");
   expect(markdown).not.toContain("hraness:xcb-landing");
   expect(markdown).toContain("](https://github.com/hraness/xcb/blob/main/docs/compatibility.md)");
   expect(markdown).toContain("](https://github.com/hraness/xcb/blob/main/LICENSE)");

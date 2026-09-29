@@ -650,7 +650,7 @@ async fn execute_mode(
             && let Err(error) = exports::export_session(&store, &session_id)
         {
             observer(Progress::Notice(format!(
-                "aiCharts local idle export failed: {error}"
+                "aicharts local idle export failed: {error}"
             )));
         }
         fire_hooks(
@@ -1454,7 +1454,7 @@ pub async fn serve(
                             Intent::AttachRgba { width, height, bytes } => { let image = attachments::from_rgba(store.root(), width, height, bytes)?; queue(&outbox, Update::Attachment(image)); }
                             Intent::Extension { name, enabled } => {
                                 let (mut fresh, revision) = Config::load(store.root())?;
-                                match name.as_str() { "auto-continue" => fresh.extensions.auto_continue.enabled = enabled, "gobstopper" => fresh.extensions.gobstopper.enabled = enabled, "usage" => fresh.extensions.usage = enabled, "hooks" => fresh.extensions.hooks = enabled, "aicharts-export" => fresh.extensions.aicharts_export = enabled, "aicharts" | "aicharts-upload" => return Err(Error::Unavailable("automatic posting awaits a supported enrolled aiCharts ingress; local exports remain available")), _ => return Err(Error::Unavailable("unknown built-in extension")) }
+                                match name.as_str() { "auto-continue" => fresh.extensions.auto_continue.enabled = enabled, "gobstopper" => fresh.extensions.gobstopper.enabled = enabled, "usage" => fresh.extensions.usage = enabled, "hooks" => fresh.extensions.hooks = enabled, "aicharts-export" => fresh.extensions.aicharts_export = enabled, "aicharts" | "aicharts-upload" => return Err(Error::Unavailable("automatic posting awaits a supported enrolled aicharts ingress; local exports remain available")), _ => return Err(Error::Unavailable("unknown built-in extension")) }
                                 fresh.save(store.root(), revision.as_deref())?; config = fresh;
                             }
                             Intent::Quit => (),

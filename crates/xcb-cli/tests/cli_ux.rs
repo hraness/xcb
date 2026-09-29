@@ -407,7 +407,8 @@ fn bare_xcb_without_a_terminal_prints_where_to_start() {
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let stdout = text(&output.stdout);
     assert!(
-        stdout.starts_with("xcb routes coding tasks across the Claude, Codex, and Devin"),
+        stdout
+            .starts_with("Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin"),
         "{stdout}"
     );
     assert!(

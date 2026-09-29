@@ -7,7 +7,7 @@ import { socialImages } from "../social";
 import { blogArticleDiscovery, blogPublisher, blogSite } from "./discovery";
 import { blogDescription, blogFeedPath, blogPath, blogPostPath, blogTitle, indexableBlogPosts } from "./posts";
 
-const title = "Blog · xcb";
+const title = "Blog · Excalibur (xcb)";
 
 export const metadata: Metadata = {
   title,
@@ -16,7 +16,7 @@ export const metadata: Metadata = {
     canonical: blogPath,
     types: { "application/atom+xml": [{ url: blogFeedPath, title: blogTitle }] },
   },
-  openGraph: { title, description: blogDescription, siteName: "xcb", type: "website", url: blogPath, images: socialImages },
+  openGraph: { title, description: blogDescription, siteName: "Excalibur (xcb)", type: "website", url: blogPath, images: socialImages },
   twitter: { card: "summary_large_image", title, description: blogDescription, images: socialImages },
 };
 
