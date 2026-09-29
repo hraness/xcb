@@ -7,7 +7,7 @@ import { publishedRelease } from "../publication";
 import { releaseStatusLabel } from "../release-state";
 import { SiteHeader } from "../site-header";
 import { socialImages } from "../social";
-import { agentPrompt, installCommand, pathCommand } from "./commands";
+import { agentPrompt, installCommand, pathCommand, windowsInstallCommand } from "./commands";
 
 const title = "Install xcb";
 const description = "Install xcb with one command on macOS with Apple silicon or Linux x86_64, connect a Claude, Codex, or Devin account, and give it a first task.";
@@ -37,6 +37,7 @@ rm ~/.local/bin/xcb`;
 
 export default function Install() {
   const released = publishedRelease !== null;
+  const windowsReleased = publishedRelease?.native.some(({ platform }) => platform === "windows-x86_64") ?? false;
   return (
     <div data-hraness-marketing-preset="minimal" className="xcb-install-page">
       <SiteHeader active="install" />
@@ -70,6 +71,19 @@ export default function Install() {
             </PageSection>
           )
           : null}
+
+        <PageSection id="windows" title="On Windows">
+          <p>Claude Code, Codex, and Devin run only in the Linux build of xcb. On Windows, install <a href="https://learn.microsoft.com/windows/wsl/install">WSL2</a> with Ubuntu and run the Linux steps on this page inside it.</p>
+          {windowsReleased
+            ? (
+              <>
+                <p>A native Windows x86_64 build runs everything else: the thread, doctor, accounts, remote control, and routing, which refuses provider work with the WSL2 steps. Install it from PowerShell:</p>
+                <CodeBlock code={windowsInstallCommand} />
+                <p>It puts <code>xcb.exe</code> in <code>%LOCALAPPDATA%\Programs\xcb\bin</code>. The binary is not code-signed yet, so Windows may show a SmartScreen prompt the first time it runs.</p>
+              </>
+            )
+            : <p>A native Windows x86_64 build, which runs everything except the providers, ships with the next release.</p>}
+        </PageSection>
 
         <PageSection id="connect" title={released ? "2. Connect an account" : "Connect an account"}>
           <CodeBlock code="xcb setup claude" />

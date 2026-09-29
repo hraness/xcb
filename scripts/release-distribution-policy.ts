@@ -8,7 +8,7 @@ const SEMVER = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/u;
 // (2026-09-29); both name the same trusted-publisher configuration.
 const OIDC_CONFIG_ID = /^(?:oidc:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const SCOPED_PACKAGE = /^@[a-z0-9][a-z0-9._-]{0,127}\/[a-z0-9][a-z0-9._-]{0,127}$/u;
-const NATIVE_ARCHIVE = /^xcb-((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))-([a-z0-9]{1,32})-([a-z0-9_]{1,32})\.tar\.gz$/u;
+const NATIVE_ARCHIVE = /^xcb-((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))-([a-z0-9]{1,32})-([a-z0-9_]{1,32})\.(tar\.gz|zip)$/u;
 const NATIVE_CHECKSUM_SUFFIX = ".sha256";
 const MAXIMUM_NATIVE_ASSET_PAIRS = 16;
 
@@ -156,6 +156,7 @@ export function assertReleaseBody(body: unknown, expectedNotes: string, expected
 }
 
 /** Pair one complete set of `xcb-<version>-<os>-<arch>.tar.gz` archive names
+ * (`.zip` for, and only for, `windows`)
  * with their adjacent `.sha256` checksum names for the exact release version.
  * Every name must belong to a complete pair; anything else fails closed. */
 export function nativeAssetFilePairs(
@@ -168,7 +169,7 @@ export function nativeAssetFilePairs(
     const isChecksum = name.endsWith(NATIVE_CHECKSUM_SUFFIX);
     const base = isChecksum ? name.slice(0, -NATIVE_CHECKSUM_SUFFIX.length) : name;
     const match = NATIVE_ARCHIVE.exec(base);
-    if (match === null || match[1] !== version) {
+    if (match === null || match[1] !== version || (match[2] === "windows") !== (match[4] === "zip")) {
       throw new Error(`Native release asset ${name} is not one exact xcb-${version}-<os>-<arch>.tar.gz name.`);
     }
     const pair = pairs.get(base) ?? {};

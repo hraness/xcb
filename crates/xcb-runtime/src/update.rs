@@ -130,8 +130,47 @@ fn version_tuple(version: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(tuple)
 }
 
+/// The release archive's extension: a zip on Windows, a gzipped tar elsewhere.
+const ARCHIVE: &str = if cfg!(windows) { "zip" } else { "tar.gz" };
+
+/// The installer `xcb upgrade` delegates to, as the reinstall guidance names it.
+macro_rules! reinstall {
+    ($message:literal) => {
+        if cfg!(windows) {
+            concat!($message, "; reinstall with scripts/install.ps1")
+        } else {
+            concat!($message, "; reinstall with scripts/install-native.sh")
+        }
+    };
+    ($message:literal, $rest:literal) => {
+        if cfg!(windows) {
+            concat!($message, "; reinstall with scripts/install.ps1", $rest)
+        } else {
+            concat!(
+                $message,
+                "; reinstall with scripts/install-native.sh",
+                $rest
+            )
+        }
+    };
+}
+
+/// Where an installer puts the binary and itself under its prefix.
+fn install_layout(prefix: &Path) -> (PathBuf, PathBuf) {
+    let share = prefix.join("share").join("xcb");
+    if cfg!(windows) {
+        (
+            prefix.join("bin").join("xcb.exe"),
+            share.join("install.ps1"),
+        )
+    } else {
+        (prefix.join("bin/xcb"), share.join("install-native.sh"))
+    }
+}
+
 /// The release platform this build installs, such as `linux-aarch64`: the
-/// `<os>-<arch>` part of `xcb-<version>-<os>-<arch>.tar.gz`.
+/// `<os>-<arch>` part of `xcb-<version>-<os>-<arch>.tar.gz` (`.zip` on
+/// Windows).
 pub fn platform() -> String {
     let os = match std::env::consts::OS {
         "macos" => "darwin",
@@ -141,7 +180,7 @@ pub fn platform() -> String {
 }
 
 fn platform_asset(version: &str) -> String {
-    format!("xcb-{version}-{}.tar.gz", platform())
+    format!("xcb-{version}-{}.{ARCHIVE}", platform())
 }
 
 /// The version of a published, stable release entry, whatever it carries.
@@ -360,15 +399,13 @@ fn find_manifest(root: &Path) -> Result<Option<(PathBuf, InstallManifest)>> {
     if let Ok(binary) = std::env::current_exe()
         && let Some(prefix) = binary.parent().and_then(Path::parent)
     {
-        paths.push(prefix.join("share/xcb/install.json"));
+        paths.push(prefix.join("share").join("xcb").join("install.json"));
     }
     for path in paths {
         match private::read(&path, 16 * 1024) {
             Ok(bytes) => {
                 let manifest = serde_json::from_slice(&bytes).map_err(|_| {
-                    Error::Unavailable(
-                        "global install metadata is invalid; reinstall with scripts/install-native.sh",
-                    )
+                    Error::Unavailable(reinstall!("global install metadata is invalid"))
                 })?;
                 return Ok(Some((path, manifest)));
             }
@@ -380,9 +417,12 @@ fn find_manifest(root: &Path) -> Result<Option<(PathBuf, InstallManifest)>> {
 }
 
 fn manifest(root: &Path) -> Result<InstallManifest> {
-    find_manifest(root)?.map(|(_, manifest)| manifest).ok_or(Error::Unavailable(
-        "global install metadata is missing; reinstall with scripts/install-native.sh to enable xcb upgrade",
-    ))
+    find_manifest(root)?
+        .map(|(_, manifest)| manifest)
+        .ok_or(Error::Unavailable(reinstall!(
+            "global install metadata is missing",
+            " to enable xcb upgrade"
+        )))
 }
 
 /// The install `install-native.sh` recorded, if any. Paths must be the
@@ -393,9 +433,10 @@ pub fn install_record(root: &Path) -> Result<Option<InstallRecord>> {
         return Ok(None);
     };
     let prefix = recorded.prefix;
+    let (expected_binary, expected_helper) = install_layout(&prefix);
     let binary = recorded
         .binary_path
-        .unwrap_or_else(|| prefix.join("bin/xcb"));
+        .unwrap_or_else(|| expected_binary.clone());
     let plain = |path: &Path| {
         path.is_absolute()
             && !path.components().any(|component| {
@@ -405,10 +446,7 @@ pub fn install_record(root: &Path) -> Result<Option<InstallRecord>> {
                 )
             })
     };
-    if !plain(&prefix)
-        || binary != prefix.join("bin/xcb")
-        || recorded.helper_path != prefix.join("share/xcb/install-native.sh")
-    {
+    if !plain(&prefix) || binary != expected_binary || recorded.helper_path != expected_helper {
         return Err(Error::Unavailable(
             "the install record names paths outside its install prefix; remove xcb by hand",
         ));
@@ -478,11 +516,8 @@ pub fn upgrade(
         });
     }
     let install = manifest(root)?;
-    let metadata = std::fs::symlink_metadata(&install.helper_path).map_err(|_| {
-        Error::Unavailable(
-            "the recorded xcb installer is missing; reinstall with scripts/install-native.sh",
-        )
-    })?;
+    let metadata = std::fs::symlink_metadata(&install.helper_path)
+        .map_err(|_| Error::Unavailable(reinstall!("the recorded xcb installer is missing")))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(Error::PrivateState);
     }
@@ -490,12 +525,34 @@ pub fn upgrade(
     {
         use std::os::unix::fs::PermissionsExt;
         if metadata.permissions().mode() & 0o111 == 0 {
-            return Err(Error::Unavailable(
-                "the recorded xcb installer is not executable; reinstall with scripts/install-native.sh",
-            ));
+            return Err(Error::Unavailable(reinstall!(
+                "the recorded xcb installer is not executable"
+            )));
         }
     }
+    #[cfg(unix)]
     let mut command = Command::new(&install.helper_path);
+    // The installer renames the running xcb.exe aside, which Windows allows,
+    // and moves the new binary into its place.
+    #[cfg(windows)]
+    let mut command = {
+        if install.helper_path.extension() != Some(std::ffi::OsStr::new("ps1")) {
+            return Err(Error::Unavailable(reinstall!(
+                "the recorded xcb installer is not install.ps1"
+            )));
+        }
+        let mut command = Command::new("powershell.exe");
+        command
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&install.helper_path);
+        command
+    };
     command
         .env("XCB_VERSION", &release.version)
         .env("XCB_INSTALL_PREFIX", &install.prefix)

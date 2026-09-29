@@ -38,6 +38,24 @@ curl -fsSL https://xcb.sh/install.sh | sh
 exact version, `XCB_INSTALL_PREFIX` replaces `~/.local`, and `XCB_ADD_PATH=yes`
 adds the `bin` folder to your shell profile.
 
+### Windows
+
+Claude Code, Codex, and Devin run only in the Linux build of xcb: on Windows,
+install it inside [WSL2](https://learn.microsoft.com/windows/wsl/install) with
+the command above. Releases from the next version on also carry a native
+Windows x86_64 build that runs everything except the providers (the thread,
+`xcb doctor`, accounts, remote control, and `xcb route`, which refuses provider
+work with those WSL2 steps). Install it from PowerShell:
+
+```powershell
+irm https://xcb.sh/install.ps1 | iex
+```
+
+It checks the zip's SHA-256 checksum and installs
+`%LOCALAPPDATA%\Programs\xcb\bin\xcb.exe`; state lives in
+`%LOCALAPPDATA%\xcb`. The binary is not code-signed yet, so SmartScreen may
+ask before its first run.
+
 ### Build from source
 
 On other hosts, build with Git, Rust 1.97.1, and the platform's build tools:

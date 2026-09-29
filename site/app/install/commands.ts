@@ -1,6 +1,9 @@
 /** The one-line installer that xcb.sh serves at /install.sh. */
 export const installCommand = "curl -fsSL https://xcb.sh/install.sh | sh";
 
+/** The PowerShell line that xcb.sh serves at /install.ps1, for native Windows. */
+export const windowsInstallCommand = "irm https://xcb.sh/install.ps1 | iex";
+
 /** The shell line that puts the installer's default prefix on PATH. */
 export const pathCommand = 'export PATH="$HOME/.local/bin:$PATH"';
 

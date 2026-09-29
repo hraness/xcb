@@ -278,7 +278,13 @@ jobs:
             platform: linux-aarch64
           - os: macos-15
             platform: darwin-aarch64
+          # Not Authenticode-signed; the zip is attested like the tarballs.
+          - os: windows-2025
+            platform: windows-x86_64
     steps:
+      # Keep LF line endings so embedded fixtures hash the same as on Unix.
+      - if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
@@ -290,10 +296,19 @@ jobs:
           toolchain: 1.97.1
       # No dependency cache: a release build is a cold, reproducible build.
       - name: Build and package the native binary
+        if: runner.os != 'Windows'
         env:
           XCB_VERSION: ${{ needs.identity.outputs.verified_tag }}
         run: ./scripts/build-native.sh
+      # The Windows script re-admits its zip exactly like scripts/install.ps1.
+      - name: Build and package the native Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          XCB_VERSION: ${{ needs.identity.outputs.verified_tag }}
+        run: ./scripts/build-native-windows.ps1
       - name: Re-admit the packaged archive exactly like the installer
+        if: runner.os != 'Windows'
         env:
           XCB_VERSION: ${{ needs.identity.outputs.verified_tag }}
         run: ./scripts/check-native-archive.sh "$XCB_VERSION" artifacts/*.tar.gz
@@ -303,7 +318,7 @@ jobs:
       - name: Attest native release tarball provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: artifacts/*.tar.gz
+          subject-path: ${{ runner.os == 'Windows' && 'artifacts/*.zip' || 'artifacts/*.tar.gz' }}
       - name: Preserve the exact native release assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -362,7 +377,7 @@ jobs:
             exit 1
           fi
           ids=()
-          for platform in linux-x86_64 linux-aarch64 darwin-aarch64; do
+          for platform in linux-x86_64 linux-aarch64 darwin-aarch64 windows-x86_64; do
             id="$(jq -r --arg platform "$platform" '[.artifacts[] | select(.expired == false and (.name | test("^xcb-native-" + $platform + "-[1-9][0-9]*$")))] | max_by(.id) | .id // empty' <<<"$listing")"
             if [[ ! "$id" =~ ^[1-9][0-9]*$ ]]; then
               echo "::error::No native $platform asset artifact exists in this run"
@@ -371,8 +386,8 @@ jobs:
             echo "xcb-native-$platform: artifact $id"
             ids+=("$id")
           done
-          if [[ "${#ids[@]}" -ne 3 ]]; then
-            echo "::error::Expected 3 native asset artifacts, found ${#ids[@]}"
+          if [[ "${#ids[@]}" -ne 4 ]]; then
+            echo "::error::Expected 4 native asset artifacts, found ${#ids[@]}"
             exit 1
           fi
           (IFS=,; echo "ids=${ids[*]}") >> "$GITHUB_OUTPUT"
@@ -385,7 +400,7 @@ jobs:
       - name: Re-verify the downloaded native asset checksums
         run: |
           set -euo pipefail
-          for archive in native-artifacts/*.tar.gz; do
+          for archive in native-artifacts/*.tar.gz native-artifacts/*.zip; do
             recorded=$(tr -d '[:space:]' < "$archive.sha256")
             actual=$(sha256sum "$archive" | sed 's/ .*//')
             if [[ ${#recorded} -ne 64 || "$recorded" != "$actual" ]]; then
@@ -471,7 +486,7 @@ jobs:
             exit 1
           fi
           ids=()
-          for platform in linux-x86_64 linux-aarch64 darwin-aarch64; do
+          for platform in linux-x86_64 linux-aarch64 darwin-aarch64 windows-x86_64; do
             id="$(jq -r --arg platform "$platform" '[.artifacts[] | select(.expired == false and (.name | test("^xcb-native-" + $platform + "-[1-9][0-9]*$")))] | max_by(.id) | .id // empty' <<<"$listing")"
             if [[ ! "$id" =~ ^[1-9][0-9]*$ ]]; then
               echo "::error::No native $platform asset artifact exists in this run"
@@ -480,8 +495,8 @@ jobs:
             echo "xcb-native-$platform: artifact $id"
             ids+=("$id")
           done
-          if [[ "${#ids[@]}" -ne 3 ]]; then
-            echo "::error::Expected 3 native asset artifacts, found ${#ids[@]}"
+          if [[ "${#ids[@]}" -ne 4 ]]; then
+            echo "::error::Expected 4 native asset artifacts, found ${#ids[@]}"
             exit 1
           fi
           (IFS=,; echo "ids=${ids[*]}") >> "$GITHUB_OUTPUT"
