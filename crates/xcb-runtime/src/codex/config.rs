@@ -100,6 +100,8 @@ pub fn runtime_admitted(pin: &Pin) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct Admission {
     pub(crate) catalog_sha256: String,
+    // Read by the launch path and its tests, which Windows builds refuse.
+    #[cfg_attr(windows, allow(dead_code))]
     pub(crate) models: BTreeSet<String>,
 }
 #[derive(Debug)]

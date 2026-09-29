@@ -403,7 +403,7 @@ impl CodexProtocol {
         parse_quotas(&value, pool, now_ms())
     }
     // Other platforms retain the pure codec for tests, but cannot launch it.
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(any(windows, not(any(target_os = "macos", test))), allow(dead_code))]
     pub(crate) fn new(options: CodexOptions) -> Result<Self> {
         options.model.validate()?;
         require(
