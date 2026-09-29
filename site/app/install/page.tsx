@@ -7,19 +7,19 @@ import { PageHeader, PageSection } from "../page-header";
 import { publishedRelease } from "../publication";
 import { releaseStatusLabel } from "../release-state";
 import { SiteHeader } from "../site-header";
-import { socialImages } from "../social";
 import { agentPrompt, pathCommand } from "./commands";
+import { installDescription, installTitle } from "./copy";
 import { installPlatforms, runsOnPlatforms } from "./platforms";
 
-const title = "Install xcb";
-const description = "Install xcb with one command on macOS, Linux, or Windows, connect a Claude, Codex, or Devin account, and give it a first task.";
+const title = installTitle;
+const description = installDescription;
 
 export const metadata: Metadata = {
   title,
   description,
   alternates: { canonical: "/install" },
-  openGraph: { title, description, siteName: "Excalibur (xcb)", type: "website", url: "/install", images: socialImages },
-  twitter: { card: "summary_large_image", title, description, images: socialImages },
+  openGraph: { title, description, siteName: "Excalibur (xcb)", type: "website", url: "/install" },
+  twitter: { card: "summary_large_image", title, description },
 };
 
 const sourceBuild = `git clone https://github.com/hraness/xcb.git

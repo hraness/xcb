@@ -95,25 +95,56 @@ describe("xcb site source contract", () => {
   });
 
   test("renders the share card from the shared template and the one site declaration", async () => {
-    const [route, { socialImageAlt, socialImages, socialSite }, mark] = await Promise.all([
+    const [route, { socialSite }, { socialCardAlt }, mark] = await Promise.all([
       import("../app/opengraph-image"),
       import("../app/social"),
+      import("../app/social-cards"),
       read("public/marks/xcb.svg"),
     ]);
-    const source = await read("app/opengraph-image.tsx");
-    expect(source).toContain("createSiteSocialImageResponse(socialSite)");
-    expect(source).not.toMatch(/<svg|<div|new ImageResponse|createSocialImageResponse/u);
     expect(route.size).toEqual({ width: 1200, height: 630 });
     expect(route.contentType).toBe("image/png");
-    expect(route.alt).toBe(socialImageAlt);
+    expect(route.alt).toBe(socialCardAlt("/"));
     expect(socialSite.name).toBe("Excalibur (xcb)");
     expect(socialSite.domain).toBe("xcb.sh");
     expect(socialSite.icon?.kind).toBe("mark");
     expect(socialSite.icon?.src).toBe(`data:image/svg+xml;base64,${Buffer.from(mark).toString("base64")}`);
     expect(socialSite.theme).toEqual({ accent: "#2e7de9", background: "#e1e2e7", foreground: "#3760bf", muted: "#6172b0" });
-    expect(socialImages).toEqual([{ url: "/opengraph-image", width: 1200, height: 630, alt: socialImageAlt }]);
     const response = route.default();
     expect(response.headers.get("content-type")).toBe("image/png");
+  });
+
+  test("gives every page its own share card, drawn only by the shared template", async () => {
+    const pages = [...new Bun.Glob("app/**/page.tsx").scanSync({ cwd: site })].map((path) => path.replace(/page\.tsx$/u, ""));
+    // /download redirects to the release; it keeps the home card.
+    for (const dir of pages.filter((dir) => dir !== "app/download/")) {
+      const source = await read(`${dir}opengraph-image.tsx`);
+      expect(source).toContain("socialImageFor(");
+      expect(source).not.toMatch(/<svg|<div|new ImageResponse|createSocialImageResponse/u);
+    }
+    for (const path of ["app/social.ts", "app/social-cards.ts", "app/social-image.tsx"]) {
+      expect(await read(path)).not.toMatch(/<svg|<div|new ImageResponse/u);
+    }
+    for (const dir of pages) expect(await read(`${dir}page.tsx`)).not.toContain("socialImages");
+  });
+
+  test("fits every share card's copy as written, with no cut, shrink, or strip", async () => {
+    const [{ socialImageFit, socialImageSiteDetails }, { socialSite }, { socialCards }, { docsTopics }, { comparisons }, { blogPosts }] = await Promise.all([
+      import("@hraness/web-discovery/social-image/card"),
+      import("../app/social"),
+      import("../app/social-cards"),
+      import("../app/docs/topics"),
+      import("../app/compare/comparisons"),
+      import("../app/blog/posts"),
+    ]);
+    expect(socialCards.size).toBe(6 + docsTopics.length + comparisons.length + blogPosts.length);
+    for (const [path, page] of socialCards) {
+      const fit = socialImageFit(socialImageSiteDetails(socialSite, page));
+      expect({ path, issues: fit.issues }).toEqual({ path, issues: [] });
+      if (path !== "/") {
+        expect(fit.layout).toBe("page");
+        expect(page.description).not.toBe(socialSite.description);
+      }
+    }
   });
 
   test("keeps the sitemap and robots on the canonical origin", async () => {

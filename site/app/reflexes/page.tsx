@@ -2,18 +2,18 @@ import type { Metadata } from "next";
 import { MarketingPage, MarketingSection, ProductHero } from "@hraness/design-kit/react/server";
 import { AskAiAboutThis } from "@hraness/ui";
 import { SiteHeader } from "../site-header";
-import { socialImages } from "../social";
+import { reflexesDescription, reflexesHeadline } from "./copy";
 
-const title = "Stop typing “continue” to your coding agent · Excalibur (xcb)";
-const description = "xcb learns from your replies when a coding agent stopped short or is waiting for a go-ahead, and which model tier you want. It answers for you only after your own replies certify it.";
+const title = `${reflexesHeadline} · Excalibur (xcb)`;
+const description = reflexesDescription;
 const reference = "https://github.com/hraness/xcb/blob/main/docs/reflexes.md";
 
 export const metadata: Metadata = {
   title,
   description,
   alternates: { canonical: "/reflexes" },
-  openGraph: { title, description, siteName: "Excalibur (xcb)", type: "website", url: "/reflexes", images: socialImages },
-  twitter: { card: "summary_large_image", title, description, images: socialImages },
+  openGraph: { title, description, siteName: "Excalibur (xcb)", type: "website", url: "/reflexes" },
+  twitter: { card: "summary_large_image", title, description },
 };
 
 export default function Reflexes() {

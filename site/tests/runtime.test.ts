@@ -143,10 +143,15 @@ describe("built xcb site", () => {
         const body = await response.text();
         expect(body.match(/<h1\b/gu)).toHaveLength(1);
         expect(body).toContain('href="https://xcb.sh' + (path === "/" ? "" : path) + '"');
-        // Every page that declares a large social card must also carry its image.
-        // Vercel previews serve the file-based card from the preview origin.
-        expect(body).toMatch(/<meta property="og:image" content="https:\/\/[^"/]+\/opengraph-image/u);
-        expect(body).toMatch(/<meta name="twitter:image" content="https:\/\/[^"/]+\/opengraph-image/u);
+        // Every page carries its own share card, not the home card. Vercel
+        // previews serve the file-based card from the preview origin.
+        const card = `${path === "/" ? "" : path}/opengraph-image`.replaceAll("/", "\\/");
+        expect(body).toMatch(new RegExp(`<meta property="og:image" content="https:\\/\\/[^"/]+${card}`, "u"));
+        expect(body).toMatch(new RegExp(`<meta name="twitter:image" content="https:\\/\\/[^"/]+${card}`, "u"));
+        const image = /<meta property="og:image" content="https:\/\/[^"/]+([^"]+)"/u.exec(body)?.[1] ?? "";
+        const imageResponse = await fetch(`${server.origin}${image.replaceAll("&amp;", "&")}`);
+        expect(imageResponse.status).toBe(200);
+        expect(imageResponse.headers.get("content-type")).toBe("image/png");
         documents.set(path, body);
       }
       for (const [path, body] of documents) {

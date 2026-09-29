@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
-import { socialImages } from "../social";
+/** The docs overview's headline and meta description, shared with its share card. */
+export const docsHeadline = "Set up xcb and route your first task";
+export const docsDescription = "Guides to installing xcb, connecting Claude, Codex, or Devin accounts, and sending it work from its terminal, another agent, or your own app.";
 
 /** Sidebar and overview groups, in order: both readers, then each reader. */
 export const docsGroups = [
@@ -39,7 +41,7 @@ export function topicMetadata(topic: DocsTopic): Metadata {
     title,
     description: topic.description,
     alternates: { canonical: url },
-    openGraph: { title, description: topic.description, url, type: "article", siteName: "Excalibur (xcb)", images: socialImages },
-    twitter: { card: "summary_large_image", title, description: topic.description, images: socialImages },
+    openGraph: { title, description: topic.description, url, type: "article", siteName: "Excalibur (xcb)" },
+    twitter: { card: "summary_large_image", title, description: topic.description },
   };
 }
