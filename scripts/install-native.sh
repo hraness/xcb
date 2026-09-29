@@ -198,7 +198,25 @@ fi
 # guarantees atomic visibility, not persistence through sudden power loss.
 mv -f "$stage/candidate" "$destination"
 [ "$candidate_digest" = "$(sha256 "$destination")" ] || fail "installed binary changed"
-if [ -n "$previous_digest" ]; then echo "Previous binary preserved at $backup"; fi
+if [ -n "$previous_digest" ]; then
+  echo "Previous binary preserved at $backup"
+  # Keep this backup plus the two most recent other digest backups, so
+  # repeated upgrades do not keep every previous binary forever. Only exact
+  # `xcb.previous.<sha256>` regular files are candidates for removal.
+  kept=1
+  for old in $(cd "$bin_dir" && ls -t 2>/dev/null); do
+    case "$old" in xcb.previous.*) ;; *) continue ;; esac
+    [ "${#old}" -eq 77 ] || continue
+    case "${old#xcb.previous.}" in *[!0-9a-f]*) continue ;; esac
+    [ "$bin_dir/$old" != "$backup" ] || continue
+    regular_file "$bin_dir/$old" || continue
+    if [ "$kept" -lt 3 ]; then
+      kept=$((kept + 1))
+    else
+      rm -f "$bin_dir/$old"
+    fi
+  done
+fi
 
 # Keep the exact installer beside the user-global binary so `xcb upgrade` can
 # delegate release updates to the same checksum and atomic-swap contract. This

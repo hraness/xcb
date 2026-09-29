@@ -5,6 +5,14 @@
 set -eu
 
 : "${CARGO:=cargo}"
+# Release assets always use the `release` profile. CI's per-change native
+# build sets XCB_CARGO_PROFILE=ci (no LTO) to prove the same binary builds and
+# runs without paying the release link on every pull request.
+: "${XCB_CARGO_PROFILE:=release}"
+case "$XCB_CARGO_PROFILE" in
+  release|ci) ;;
+  *) echo "error: XCB_CARGO_PROFILE must be release or ci" >&2; exit 1 ;;
+esac
 root="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [ -n "${XCB_VERSION:-}" ]; then
@@ -26,9 +34,9 @@ case "$arch" in
 esac
 
 cd "$root"
-"$CARGO" build --release --locked -p xcb-cli
+"$CARGO" build --profile "$XCB_CARGO_PROFILE" --locked -p xcb-cli
 
-binary="$root/target/release/xcb"
+binary="$root/target/$XCB_CARGO_PROFILE/xcb"
 if [ ! -f "$binary" ]; then
   echo "error: expected $binary after build" >&2
   exit 1

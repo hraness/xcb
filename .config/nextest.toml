@@ -1,0 +1,11 @@
+# cargo-nextest settings. CI runs `cargo nextest run --workspace --locked
+# --profile ci`; locally `cargo nextest run --workspace` uses the default.
+
+[profile.ci]
+# Report every failing test in one run instead of stopping at the first.
+fail-fast = false
+# A flaky test must fail CI, not pass on a retry.
+retries = 0
+# Flag slow tests after 60 s; never kill one that is still making progress.
+slow-timeout = { period = "60s" }
+failure-output = "immediate-final"

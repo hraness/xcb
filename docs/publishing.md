@@ -38,7 +38,9 @@ An immutable annotated `v<version>` tag at a commit in current `main` history
    (`actions/attest-build-provenance`; this is the only job holding
    `attestations: write` and `id-token: write`) and preserves
    `xcb-<version>-<os>-<arch>.tar.gz` plus its adjacent `.sha256` checksum as
-   run-bound workflow artifacts.
+   run-bound workflow artifacts. Later jobs resolve each platform's newest
+   native artifact in this run to its numeric artifact ID, so re-running a
+   failed later job reuses the assets its run already built and attested.
 5. **Publish immutable GitHub Release.** The only job holding
    `contents: write`. Re-verifies every downloaded native archive against its
    adjacent checksum, then creates the immutable Latest GitHub Release
