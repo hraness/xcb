@@ -1,0 +1,422 @@
+{
+  "schema": "xcb.codex-native-boundary.v1",
+  "observedDate": "2026-09-29",
+  "platform": "macos-arm64",
+  "version": "0.159.0",
+  "binarySha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+  "sandboxFunctionSha256": "3d1f1500b33e1f192f2304dedd53d5e31cbea5e46e54bd5d04778490fc770a75",
+  "providerProbeSha256": "7e98dc9ce8918eb64297b311ebec3159e9d7fec53a5095983c638d83240a27af",
+  "providerReceiptSha256": "0d969d1a569a1199e3bf9f356779f2a7f2331747d17631ed72964389d5128bb1",
+  "kernelProbeSha256": "68b0f415a4a913477a3677b39f264d11d42ed40758588590d5a61eafc44abae1",
+  "kernelReceiptSha256": "0ab29fb3eccd514d23ef4aaef2a67cf703c64e0fedc8c2b227a768a7a429fa72",
+  "providerChecks": [
+    {
+      "label": "scratch read",
+      "method": "fs/readFile",
+      "expectedAllowed": true,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "scratch write",
+      "method": "fs/writeFile",
+      "expectedAllowed": true,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "profile refresh write",
+      "method": "fs/writeFile",
+      "expectedAllowed": true,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "consumer read denied",
+      "method": "fs/readFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "consumer write denied",
+      "method": "fs/writeFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "peer account read denied",
+      "method": "fs/readFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "peer account write denied",
+      "method": "fs/writeFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "ambient config read denied",
+      "method": "fs/readFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "ambient config write denied",
+      "method": "fs/writeFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "consumer symlink read denied",
+      "method": "fs/readFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "consumer symlink write denied",
+      "method": "fs/writeFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "config read",
+      "method": "fs/readFile",
+      "expectedAllowed": true,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "config write denied",
+      "method": "fs/writeFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "catalog read",
+      "method": "fs/readFile",
+      "expectedAllowed": true,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "catalog write denied",
+      "method": "fs/writeFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "config symlink read",
+      "method": "fs/readFile",
+      "expectedAllowed": true,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "config symlink write denied",
+      "method": "fs/writeFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "catalog symlink read",
+      "method": "fs/readFile",
+      "expectedAllowed": true,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "catalog symlink write denied",
+      "method": "fs/writeFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "public CA read",
+      "method": "fs/readFile",
+      "expectedAllowed": true,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "public CA write denied",
+      "method": "fs/writeFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "public CA symlink read",
+      "method": "fs/readFile",
+      "expectedAllowed": true,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "public CA symlink write denied",
+      "method": "fs/writeFile",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "config copy-over denied",
+      "method": "fs/copy",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "config unlink denied",
+      "method": "fs/remove",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "catalog copy-over denied",
+      "method": "fs/copy",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "catalog unlink denied",
+      "method": "fs/remove",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "public CA copy-over denied",
+      "method": "fs/copy",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "public CA unlink denied",
+      "method": "fs/remove",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "helper execution denied",
+      "method": "process/spawn",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "self execution denied",
+      "method": "process/spawn",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    },
+    {
+      "label": "profile recursive removal denied",
+      "method": "fs/remove",
+      "expectedAllowed": false,
+      "allowed": false,
+      "matched": true
+    }
+  ],
+  "kernelChecks": [
+    {
+      "label": "scratch hard-link creation (observational)",
+      "expectedAllowed": null,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "config hard-link creation denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "catalog hard-link creation denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "config symlink creation (observational)",
+      "expectedAllowed": null,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "config symlink write denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "config chmod denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "config rename denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "config overwrite rename denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "profile rename denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "public CA read",
+      "expectedAllowed": true,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "public CA symlink read",
+      "expectedAllowed": true,
+      "allowed": true,
+      "matched": true
+    },
+    {
+      "label": "public CA write denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "public CA symlink write denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "public CA hard-link creation denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "public CA chmod denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "public CA symlink chmod denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "public CA rename denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "public CA overwrite rename denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    },
+    {
+      "label": "public CA unlink denied",
+      "expectedAllowed": false,
+      "allowed": false,
+      "errno": 1,
+      "matched": true
+    }
+  ],
+  "rootExitCode": 0,
+  "stdioJoined": true,
+  "processGroupAbsent": true,
+  "protectedFilesUnchanged": true,
+  "protectedMetadataUnchanged": true,
+  "binaryUnchanged": true,
+  "sourceFunctionUnchanged": true,
+  "kernelProcess": {
+    "rootExitCode": 0,
+    "stdioJoined": true,
+    "processGroupAbsent": true,
+    "sourceFunctionUnchanged": true
+  },
+  "publicCaSha256": "9dae8d76e55cb08991f2b672d58999ea15560d910759c16b544f843bdffbb994",
+  "caEnvironment": "SSL_CERT_FILE",
+  "accountFeaturesDisabled": [
+    "apps",
+    "auth_elicitation",
+    "browser_use",
+    "code_mode",
+    "computer_use",
+    "daemon_auto_start",
+    "guardian_reuse_parent_compaction",
+    "guardianv2.thread_context",
+    "hooks",
+    "image_generation",
+    "in_app_browser",
+    "memories",
+    "multi_agent",
+    "multi_agent_v2",
+    "plugins",
+    "plugin_sharing",
+    "realtime_conversation",
+    "remote_plugin",
+    "remote_control",
+    "shell_snapshot",
+    "shell_tool",
+    "skill_mcp_dependency_install",
+    "skill_search",
+    "system_proxy_fallback",
+    "unified_exec",
+    "workspace_dependencies",
+    "worktrees"
+  ],
+  "authentication": "none; fresh synthetic account home; no existing credentials read",
+  "modelTurns": 0,
+  "provenScope": "production filesystem and process boundary with host single-link admission; explicit account feature controls read back from exact native executable",
+  "notProven": [
+    "authenticated provider TLS transport",
+    "live model inference",
+    "credential refresh with real provider",
+    "shell/build/test/Git execution"
+  ]
+}

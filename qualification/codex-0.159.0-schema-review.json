@@ -1,0 +1,84 @@
+{
+  "schema": "xcb.codex-release-schema-review.v1",
+  "observedDate": "2026-09-29",
+  "previous": {
+    "version": "0.158.0",
+    "binarySha256": "788a818fbb9596869c7a487554507cb8bdca17584b8671112b23f9e225ba35c8",
+    "schemaSha256": "b245d4b027cf8d1624c0c6733e6918c042bc278886251e7f2d90a3f29abfac2d"
+  },
+  "current": {
+    "version": "0.159.0",
+    "binarySha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+    "schemaSha256": "ca6bdd8786588a11b8b0713d697a211a703f688e20776d2d1cb5054dc749f139"
+  },
+  "schemaCommand": [
+    "app-server",
+    "generate-json-schema",
+    "--experimental",
+    "--out",
+    "DIR"
+  ],
+  "digestAlgorithm": "sha256(sorted relative schema path + NUL + raw generated JSON bytes + NUL)",
+  "addedFiles": [],
+  "removedFiles": [],
+  "changedFiles": [
+    "ClientRequest.json",
+    "ServerNotification.json",
+    "codex_app_server_protocol.schemas.json",
+    "codex_app_server_protocol.v2.schemas.json",
+    "v2/ErrorNotification.json",
+    "v2/ListMcpServerStatusParams.json",
+    "v2/ReviewStartResponse.json",
+    "v2/ThreadForkResponse.json",
+    "v2/ThreadItemsListParams.json",
+    "v2/ThreadListResponse.json",
+    "v2/ThreadMetadataUpdateResponse.json",
+    "v2/ThreadQueueStartResponse.json",
+    "v2/ThreadReadResponse.json",
+    "v2/ThreadResumeResponse.json",
+    "v2/ThreadRevertResponse.json",
+    "v2/ThreadSearchResponse.json",
+    "v2/ThreadStartResponse.json",
+    "v2/ThreadStartedNotification.json",
+    "v2/ThreadTimelineListResponse.json",
+    "v2/ThreadTurnsListResponse.json",
+    "v2/ThreadUnarchiveResponse.json",
+    "v2/TurnCompletedNotification.json",
+    "v2/TurnStartResponse.json",
+    "v2/TurnStartedNotification.json"
+  ],
+  "unchangedCoreFileSha256": {
+    "v2/ThreadStartParams.json": "80a40a7fac15b4bf70efb7f893fb353acc0a0d30c68f54aee4f01923deca85de",
+    "v2/TurnStartParams.json": "07771223642e1b61bd9aac0069fc0f98143a1c047724ca02c7ceb13653442738",
+    "v2/ConfigReadResponse.json": "4ec77e1a3eed746037149799c3b6bb8fe7b4b593e5930fc9f410e6282de9df50",
+    "v1/InitializeParams.json": "b55124e7c0f36a1789396daa5578217a92be67f053903696236686e59f6f212e"
+  },
+  "reviewedChanges": [
+    "CodexErrorInfo adds the string variant tooManyDenials, between misalignmentPolicyViolation and internalServerError. It appears in every thread, turn and error payload that embeds a turn error, which accounts for all changed thread and turn response, notification and aggregate files. The binary's strings tie it to the auto-review (Guardian) denial path: the turn ends after the provider's own review layer denied its actions too often. xcb classifies it with cyberPolicy, misalignmentPolicyViolation and sandboxError as a provider policy outcome (Failure::Policy, category 'provider policy rejected the operation') on turn/completed, on the error notification, and in the sanitized RPC diagnostic. It is never the account's usage limit, so it neither marks the account exhausted nor triggers quota failover. Guardian, hooks and shell features stay disabled, so the tag is not expected on xcb's fixed configuration.",
+    "Turn.error changes its description from 'Only populated when the Turn's status is failed.' to 'Error associated with a failed or interrupted turn.' The shape is unchanged. The adapter already settles an interrupted turn as cancelled without reading the error, and a new test pins that an interrupted turn carrying an error still settles as cancelled with no quota event and no error text surfaced.",
+    "ThreadItemsListParams.cursor changes from a nullable string to the new ThreadItemsListCursor union (an opaque string, or the new ThreadItemsListAnchor item anchor within a turn). The adapter never calls thread/items/list; the thread it starts is ephemeral and item history is read from notifications only.",
+    "ListMcpServerStatusParams adds optional serverName to limit discovery to one server. The adapter never calls mcpServerStatus/list; mcp_servers stays an empty table in the launch configuration.",
+    "Thread start, turn start, initialize and config/read request or response shapes used by the adapter are byte-identical to 0.158.0 (unchangedCoreFileSha256); the recorded echo trace differs from 0.158.0 only in timestamps, and the configuration readback differs only in the layer version hash."
+  ],
+  "featureReview": {
+    "command": "codex features list (empty disposable CODEX_HOME)",
+    "added": [
+      "instant_interrupt: under development, default false; not enabled"
+    ],
+    "changedDefaults": []
+  },
+  "newFeatureControls": [],
+  "compatibility": "Each reviewed version and executable digest selects its own exact schema; unknown catalog candidates must match the current release schema. The launch configuration is unchanged from 0.158.0, so the retained 0.158.0, 0.157.1 and 0.156.1 evidence stands. 0.159.0 passed the full scripted inventory (12 cases) and native boundary (32 provider and 19 kernel checks) with this source.",
+  "documentation": "https://learn.chatgpt.com/docs/app-server#message-schema",
+  "runtimeEvidence": [
+    "codex-0.159.0-inventory.json",
+    "codex-0.159.0-boundary.json",
+    "codex-0.158.0-inventory.json",
+    "codex-0.158.0-boundary.json",
+    "codex-0.157.1-inventory.json",
+    "codex-0.157.1-boundary.json",
+    "codex-0.156.1-compatibility-inventory.json",
+    "codex-0.156.1-compatibility-boundary.json"
+  ],
+  "realProviderInference": false
+}
