@@ -38,6 +38,7 @@ jobs:
       site: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.site }}
       qualification: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.qualification }}
       native_arm: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.native_arm }}
+      rust: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.rust }}
     steps:
       - name: Code changes (everything except the site, docs, and markdown)
         id: code
@@ -79,6 +80,12 @@ jobs:
               - 'qualification/inbox-acceptance.py'
               - '.github/workflows/ci.yml'
               - '.github/workflows/release.yml'
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/ci.yml'
 
   check:
     # Native Rust checks. Linux runs the generic gates (fmt, clippy, Python
@@ -394,6 +401,27 @@ jobs:
       - name: Require probe evidence
         if: steps.probes.outputs.status != '0'
         run: exit 1
+
+  windows:
+    # Native Windows x86_64 ratchet. Not part of Required until the whole
+    # workspace compiles and its tests pass on Windows. Runs only when Rust
+    # sources, the lockfile, the toolchain pin, or this workflow change.
+    name: Check (windows-2025)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      # Keep LF line endings so embedded fixtures hash the same as on Unix.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo check --workspace --all-targets --locked
 
   required:
     # The one check branch policy requires. A job may be skipped only because
