@@ -245,14 +245,19 @@ fn trusted(sid: &[u8], principals: &Principals) -> bool {
 
 /// # Safety
 /// `dacl` must point at a valid ACL.
-unsafe fn dacl_private(dacl: *const ACL, principals: &Principals) -> bool {
-    let count = unsafe { (*dacl).AceCount };
+unsafe fn dacl_private(dacl: std::ptr::NonNull<ACL>, principals: &Principals) -> bool {
+    let count = unsafe { dacl.as_ref() }.AceCount;
     for index in 0..u32::from(count) {
-        let mut ace: *mut core::ffi::c_void = null_mut();
-        if unsafe { GetAce(dacl, index, &mut ace) } == 0 || ace.is_null() {
+        // GetAce writes the entry pointer on success; nothing reads it
+        // before that write is proven, and a null result is refused.
+        let mut slot = std::mem::MaybeUninit::<*mut core::ffi::c_void>::uninit();
+        if unsafe { GetAce(dacl.as_ptr(), index, slot.as_mut_ptr()) } == 0 {
             return false;
         }
-        let header = unsafe { *(ace as *const ACE_HEADER) };
+        let Some(ace) = std::ptr::NonNull::new(unsafe { slot.assume_init() }) else {
+            return false;
+        };
+        let header = *unsafe { ace.cast::<ACE_HEADER>().as_ref() };
         if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 {
             // Applies only to children created later, not this object.
             continue;
@@ -263,11 +268,12 @@ unsafe fn dacl_private(dacl: *const ACL, principals: &Principals) -> bool {
             | ACCESS_DENIED_CALLBACK
             | ACCESS_DENIED_CALLBACK_OBJECT => continue,
             ACCESS_ALLOWED => {
-                let allowed = ace as *const ACCESS_ALLOWED_ACE;
-                if unsafe { (*allowed).Mask } == 0 {
+                let allowed = ace.cast::<ACCESS_ALLOWED_ACE>();
+                if unsafe { allowed.as_ref() }.Mask == 0 {
                     continue;
                 }
-                let sid = unsafe { sid_bytes(std::ptr::addr_of!((*allowed).SidStart) as PSID) };
+                let sid =
+                    unsafe { sid_bytes(std::ptr::addr_of!((*allowed.as_ptr()).SidStart) as PSID) };
                 if !trusted(&sid, principals) {
                     return false;
                 }
@@ -306,7 +312,8 @@ fn security(handle: HANDLE) -> io::Result<(bool, bool)> {
         owner == principals.user || owner == principals.owner
     };
     // A NULL DACL grants everyone full access.
-    let private = !dacl.is_null() && unsafe { dacl_private(dacl, principals) };
+    let private =
+        std::ptr::NonNull::new(dacl).is_some_and(|dacl| unsafe { dacl_private(dacl, principals) });
     drop(descriptor);
     Ok((owned, private))
 }
