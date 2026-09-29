@@ -610,11 +610,14 @@ jobs:
               if ($reported -cne "xcb $version") { throw "installed xcb reports '$reported'" }
             }
             Get-Content (Join-Path $env:XCB_INSTALL_PREFIX 'share\xcb\install.json')
+            # Doctor reports missing providers with a non-zero exit; it must
+            # run to completion, not pass.
             & $installed doctor
             Write-Host "xcb doctor exited $LASTEXITCODE"
           } finally {
             Stop-Process -Id $server.Id -Force
           }
+          exit 0
 
   required:
     # The one check branch policy requires. A job may be skipped only because
