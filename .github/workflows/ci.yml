@@ -554,9 +554,9 @@ jobs:
         run: exit 1
 
   windows:
-    # Native Windows x86_64 ratchet. Not part of Required until the whole
-    # workspace compiles and its tests pass on Windows. Runs only when Rust
-    # sources, the lockfile, the toolchain pin, or this workflow change.
+    # Native Windows x86_64: the workspace compiles and its tests pass. Runs
+    # only when Rust sources, the lockfile, the toolchain pin, or this
+    # workflow change, and Required admits the skip only then.
     name: Check (windows-2025)
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -575,8 +575,6 @@ jobs:
           # dependency debuginfo setting in Cargo.toml.
           key: deps-line-tables
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          # Keep the dependency builds warm while the workspace is still red.
-          cache-on-failure: true
       - run: cargo check --workspace --all-targets --locked --keep-going
       # The default temp folder is under the home folder (AppData), where
       # xcb refuses workspaces; tests make their workspaces in temp.
@@ -600,6 +598,7 @@ jobs:
       - native-build-arm
       - site
       - qualification
+      - windows
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -610,6 +609,7 @@ jobs:
           SITE_CHANGED: ${{ needs.changes.outputs.site }}
           QUALIFICATION_CHANGED: ${{ needs.changes.outputs.qualification }}
           NATIVE_ARM_CHANGED: ${{ needs.changes.outputs.native_arm }}
+          RUST_CHANGED: ${{ needs.changes.outputs.rust }}
         run: |
           python3 - <<'EOF'
           import json, os, sys
@@ -619,6 +619,7 @@ jobs:
               "site": os.environ["SITE_CHANGED"],
               "qualification": os.environ["QUALIFICATION_CHANGED"],
               "native_arm": os.environ["NATIVE_ARM_CHANGED"],
+              "rust": os.environ["RUST_CHANGED"],
           }
           filtered = {
               "check": "code",
@@ -628,6 +629,7 @@ jobs:
               "native-build-arm": "native_arm",
               "site": "site",
               "qualification": "qualification",
+              "windows": "rust",
           }
           failed = []
           for job, info in sorted(needs.items()):

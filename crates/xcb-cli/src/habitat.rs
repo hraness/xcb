@@ -1282,7 +1282,7 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         let scratch = Scratch(xcb_core::canonical(&path).unwrap());
         let base = &scratch.0;
-        let (one, two) = (base.join("one/app"), base.join("two/app"));
+        let (one, two) = (base.join("one").join("app"), base.join("two").join("app"));
         std::fs::create_dir_all(&one).unwrap();
         std::fs::create_dir_all(&two).unwrap();
         let store = ManagedStore::open(&base.join("state")).unwrap();

@@ -2698,6 +2698,9 @@ mod tests {
         // snapshot exactly as an interrupted interactive sign-in would.
     }
 
+    // Codex sign-in recovery; provider sign-in is refused on Windows.
+
+    #[cfg(unix)]
     #[test]
     fn stopped_login_with_another_identity_releases_lease_without_replacing_auth() {
         let dir = root();

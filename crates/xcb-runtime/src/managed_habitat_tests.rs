@@ -855,6 +855,9 @@ async fn worker_in_a_cannot_get_update_complete_or_search_memory_of_b() {
     );
 }
 
+// Daemons run provider agents, which Windows refuses.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn thread_children_carry_inherited_bindings_and_replay_exactly() {
     let root = tempfile::tempdir().unwrap();

@@ -304,6 +304,9 @@ async fn overview_idle_direct_database_does_not_invalidate_on_time_boundaries() 
     );
 }
 
+// Uses /bin/sleep as the owner process.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn overview_owner_exit_invalidates_once_without_a_database_write() {
     use xcb_core::models::{Mode, ModelChoice};
@@ -422,6 +425,9 @@ async fn overview_corrupt_task_identity_never_exposes_another_conversation_respo
     assert_eq!(f.managed.unreadable_tasks(), 1);
 }
 
+// Uses Unix-rooted task workspaces.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn overview_global_attention_failures_and_running_survive_current_workspace_volume() {
     let f = fixture().await;

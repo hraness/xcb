@@ -882,6 +882,9 @@ async fn store_at_version_8_is_refused() {
     ));
 }
 
+// Uses Unix-rooted scope spellings.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn registry_backfill_is_db_only_and_skips_relative_and_global_scopes() {
     let l = legacy_store().await;

@@ -684,6 +684,10 @@ impl ManagedStore {
         name: &str,
         daemon: &AdmittedDaemon,
     ) -> Result<DaemonStatus> {
+        // A daemon runs a provider agent, which Windows refuses.
+        if cfg!(windows) {
+            return Err(Error::providers_unsupported());
+        }
         let name = daemon_name(name)?;
         daemon.verify()?;
         let workspace = self.entry_workspace(conversation, workspace)?;
@@ -1544,6 +1548,9 @@ mod tests {
         assert!(daemon.verify().is_err());
     }
 
+    // Daemons run provider agents, which Windows refuses.
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn enqueue_creates_durable_process_mailboxes_and_status() {
         let fixture = fixture().await;
@@ -1576,6 +1583,9 @@ mod tests {
         assert!(reopened.daemon_status_for("missing").unwrap().is_none());
     }
 
+    // Daemons run provider agents, which Windows refuses.
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn agent_call_suspends_records_intent_and_links_one_child() {
         let fixture = fixture().await;
@@ -1643,6 +1653,9 @@ mod tests {
         assert_eq!(link.request_digest, digest);
     }
 
+    // Daemons run provider agents, which Windows refuses.
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn daemon_run_in_thread_requires_workspace_and_uses_its_grant() {
         let fixture = fixture().await;
@@ -1718,6 +1731,9 @@ mod tests {
         );
     }
 
+    // Daemons run provider agents, which Windows refuses.
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn without_project_authority_no_child_is_published() {
         let fixture = fixture().await;
@@ -1743,6 +1759,9 @@ mod tests {
         assert!(status.pending_call.is_some());
     }
 
+    // Daemons run provider agents, which Windows refuses.
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn send_posts_bounded_inbox_messages_and_stop_blocks_them() {
         let fixture = fixture().await;

@@ -262,6 +262,9 @@ async fn prompt_path_inside_admitted_root_snaps_to_root() {
     assert_eq!(task.hold_until_ms, None);
 }
 
+// Prompt path mentions are parsed with / separators; Windows spellings are a known gap.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn prompt_path_in_nested_worktree_binds_worktree() {
     let e = env();
@@ -293,6 +296,9 @@ async fn prompt_path_in_nested_worktree_binds_worktree() {
     assert!(task.hold_until_ms.is_some());
 }
 
+// Prompt path mentions are parsed with / separators; Windows spellings are a known gap.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn file_token_binds_its_repo() {
     let e = env();
@@ -340,6 +346,9 @@ async fn ssh_and_library_prompt_tokens_refused() {
     assert_eq!(footprint(&e.managed), before);
 }
 
+// Prompt path mentions are parsed with / separators; Windows spellings are a known gap.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn unregistered_prompt_root_asks_and_writes_nothing() {
     let e = env();

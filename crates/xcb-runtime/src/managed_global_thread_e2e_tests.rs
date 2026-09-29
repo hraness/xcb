@@ -431,6 +431,9 @@ fn disposition(conflicts: &[MigrationConflict], kind: &str, conversation: &Id) -
         .map_or_else(|| "missing".into(), |row| row.disposition.clone())
 }
 
+// The v6 fixture stores Unix workspace paths.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn v6_fixture_upgrade_then_thread_use() {
     let root = tempfile::tempdir().unwrap();

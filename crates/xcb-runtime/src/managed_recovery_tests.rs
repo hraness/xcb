@@ -131,6 +131,9 @@ impl crate::protocol::Protocol for DiagnosticProtocol {
     }
 }
 
+// Runs a provider, which Windows refuses.
+
+#[cfg(unix)]
 #[tokio::test]
 async fn runner_diagnostic_survives_restart_and_bounded_managed_message() {
     for (result_event, stale_catalog, empty_catalog) in [
