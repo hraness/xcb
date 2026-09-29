@@ -203,7 +203,7 @@ pub(crate) async fn transition(root: &Path, timeout: Duration) -> Result<Transit
     Ok(guard)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};

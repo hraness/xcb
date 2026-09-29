@@ -498,6 +498,7 @@ impl Answer {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn provider_args(model: &ModelChoice, tools: bool) -> Vec<String> {
     let mut args = vec![
         "--print".into(),

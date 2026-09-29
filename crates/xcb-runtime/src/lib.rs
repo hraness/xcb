@@ -15,6 +15,8 @@ pub mod command_tool;
 pub mod config;
 pub mod context;
 pub mod context_recipe;
+// Only the workspace tools, which Windows builds refuse, take this lock.
+#[cfg_attr(windows, allow(dead_code))]
 mod coordination;
 pub mod devin;
 #[cfg(unix)]

@@ -185,6 +185,50 @@ pub fn relative_path(value: &str) -> bool {
     relative_parts(value).is_some()
 }
 
+/// `std::fs::canonicalize`, in the spelling the rest of xcb compares paths
+/// in. On Unix it is exactly that call. On Windows the result drops the
+/// `\\?\` verbatim prefix (`\\?\C:\x` becomes `C:\x`, `\\?\UNC\s\x`
+/// becomes `\\s\x`) whenever the plain spelling canonicalizes back to the
+/// same verbatim path, so `path.canonical()? == path` holds for a canonical
+/// `C:\...` path just as it does for `/...` on Unix.
+pub fn canonical(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let resolved = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        let text = resolved.to_string_lossy();
+        let plain = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            Some(format!(r"\\{rest}"))
+        } else {
+            text.strip_prefix(r"\\?\")
+                .filter(|rest| {
+                    let bytes = rest.as_bytes();
+                    bytes.len() >= 3
+                        && bytes[0].is_ascii_alphabetic()
+                        && bytes[1] == b':'
+                        && bytes[2] == b'\\'
+                })
+                .map(str::to_owned)
+        };
+        if let Some(plain) = plain.map(std::path::PathBuf::from)
+            && std::fs::canonicalize(&plain).is_ok_and(|again| again == resolved)
+        {
+            return Ok(plain);
+        }
+    }
+    Ok(resolved)
+}
+
+/// [`canonical`] as a method, so call sites read like `Path::canonicalize`.
+pub trait Canonical {
+    fn canonical(&self) -> std::io::Result<std::path::PathBuf>;
+}
+
+impl Canonical for std::path::Path {
+    fn canonical(&self) -> std::io::Result<std::path::PathBuf> {
+        canonical(self)
+    }
+}
+
 /// Absolute path made only of the root and ordinary components — no `.`,
 /// `..`, or platform prefix segments. Symlinks are not resolved here.
 pub fn absolute_clean(path: &std::path::Path) -> bool {

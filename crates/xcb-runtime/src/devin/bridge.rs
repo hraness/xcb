@@ -34,6 +34,7 @@ pub(crate) struct DevinBridge {
     task: Option<JoinHandle<()>>,
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) async fn frame<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<Option<Vec<u8>>> {
     crate::wire_helpers::frame(
         reader,

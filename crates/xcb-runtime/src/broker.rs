@@ -4,22 +4,26 @@ pub mod snapshot;
 #[cfg(windows)]
 mod windows;
 
-use crate::{Error, Result, coordination, digest};
+use crate::coordination;
+#[cfg(unix)]
+use crate::{Error, Result, digest};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, RenameFlags};
 #[cfg(unix)]
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 #[cfg(unix)]
 use std::{
     fs::File,
     io::{Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::Component,
+    path::{Component, Path},
 };
-use xcb_core::{MAX_TEXT_BYTES, policy::EffectState};
+use xcb_core::MAX_TEXT_BYTES;
+#[cfg(unix)]
+use xcb_core::policy::EffectState;
 
 #[derive(Debug, Serialize)]
 pub struct ReadResult {
@@ -46,9 +50,11 @@ pub const READ_LIMIT: usize = MAX_TEXT_BYTES / 2;
 pub const LIST_LIMIT: usize = 512;
 /// Directory entries are read up to this bound before sorting. A larger
 /// directory is reported truncated; its page is drawn from the entries read.
+#[cfg(unix)]
 const LIST_SCAN_LIMIT: usize = 65_536;
 /// `workspace_search` scans files up to the full text bound; larger or
 /// non-UTF-8 files are skipped rather than failing the search.
+#[cfg(unix)]
 const SEARCH_FILE_LIMIT: usize = MAX_TEXT_BYTES;
 
 /// The workspace tools walk descriptor-relative (`openat`) so a renamed or
