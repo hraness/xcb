@@ -714,7 +714,8 @@ enum ServiceCommand {
     /// Stop starting at login; refuses while work is running and never
     /// stops it.
     Uninstall,
-    /// Print the LaunchAgent file without installing it.
+    /// Print the LaunchAgent (macOS) or systemd user unit (Linux) without
+    /// installing it.
     Plan,
 }
 
@@ -1052,6 +1053,16 @@ impl PublicAccount<'_> {
     }
 }
 
+/// systemd stops a user's services when their last session ends unless
+/// lingering is on, so a supervisor on a host reached over SSH would stop
+/// at logout.
+fn linger_notice() -> String {
+    let user = std::env::var("USER").unwrap_or_else(|_| "$USER".into());
+    format!(
+        "xcb: systemd stops the supervisor when you log out. To keep it running on a server or other headless host, run: loginctl enable-linger {user}"
+    )
+}
+
 /// `xcb service` status: what starts at login, whether the supervisor runs,
 /// where it logs, and a Files & Folders denial found in that log.
 fn service_text(status: &xcb_runtime::habitat_service::Status, style: ux::Style) -> String {
@@ -1059,8 +1070,13 @@ fn service_text(status: &xcb_runtime::habitat_service::Status, style: ux::Style)
     let login = match (status.installed, status.registered) {
         (true, true) => format!("{} Starts at login", style.symbol(ux::Symbol::Ok)),
         (true, false) => format!(
-            "{} Installed, but macOS hasn't loaded it",
-            style.symbol(ux::Symbol::Warn)
+            "{} Installed, but {} hasn't loaded it",
+            style.symbol(ux::Symbol::Warn),
+            if cfg!(target_os = "linux") {
+                "systemd"
+            } else {
+                "macOS"
+            }
         ),
         (false, _) => format!("{} Doesn't start at login", style.symbol(ux::Symbol::Off)),
     };
@@ -1314,7 +1330,7 @@ fn set_update_policy(
         false
     } else if update::scheduler_supported() {
         let home = home.ok_or(Error::PrivateState)?;
-        if !update::scheduler_path(&home).exists() {
+        if cfg!(target_os = "macos") && !update::scheduler_path(&home).exists() {
             ux::login_item_notice(
                 "It checks once a day for a verified xcb release, until you run xcb update disable.",
             );
@@ -2650,7 +2666,12 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                             "It resumes your conversations' background work after you log in, until you run xcb service uninstall.",
                         );
                     }
-                    xcb_runtime::habitat_service::install(store.root(), &executable, &home)?
+                    let status =
+                        xcb_runtime::habitat_service::install(store.root(), &executable, &home)?;
+                    if xcb_runtime::habitat_service::stops_at_logout() == Some(true) {
+                        eprintln!("{}", linger_notice());
+                    }
+                    status
                 }
                 Some(ServiceCommand::Uninstall) => {
                     xcb_runtime::habitat_service::uninstall(store.root(), &home)?
@@ -4440,10 +4461,17 @@ mod tests {
             },
             style,
         );
+        let manager = if cfg!(target_os = "linux") {
+            "systemd"
+        } else {
+            "macOS"
+        };
         assert_eq!(
             legacy,
-            "⚠ Installed, but macOS hasn't loaded it · ● supervisor running\n\
-             Log: off (this service was installed before xcb kept a log)\n"
+            format!(
+                "⚠ Installed, but {manager} hasn't loaded it · ● supervisor running\n\
+                 Log: off (this service was installed before xcb kept a log)\n"
+            )
         );
         let absent = super::service_text(
             &Status {

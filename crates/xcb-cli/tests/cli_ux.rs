@@ -843,8 +843,9 @@ fn update_policy_changes_without_installing_anything_to_turn_off() {
         assert_eq!(value["policy"], "disable", "{args:?}");
         assert!(!agents.exists(), "{args:?} created {}", agents.display());
     }
-    // Linux has no built-in daily check: enable records the policy and
-    // names the timer to add instead of failing.
+    // Without a systemd user manager (the sandbox PATH has no systemctl),
+    // enable records the policy and names the timer to add instead of
+    // failing.
     if cfg!(target_os = "linux") {
         let output = sandbox.run(&["update", "enable"], &[("HRANESS_AUDIENCE", "human")]);
         assert_eq!(output.status.code(), Some(0), "{output:?}");

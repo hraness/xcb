@@ -25,6 +25,7 @@ version bump pull request by renaming `## Unreleased` to the version.
   from the run and does not publish again.
 - The one-line installer and the installer it downloads now accept the same hosts: macOS on Apple silicon and Linux on x86_64 or ARM64. When the requested version has no build for your host, `curl -fsSL https://xcb.sh/install.sh | sh` says so before downloading anything, and a release install on an Intel Mac or another unsupported host stops with the same message instead of a failed download.
 - `xcb upgrade` and `xcb update check` say when a release has no build for this host (for example `xcb 0.11.2 has no release build for linux-aarch64`) and point to the source install, instead of reporting a failed lookup or that no release exists.
+- `xcb service install`, `status` and `uninstall` work on Linux: the supervisor runs from a systemd user unit in `~/.config/systemd/user`, logs to `~/.local/state/xcb`, and install says when `loginctl enable-linger` is needed to keep it running after logout. `xcb update enable` adds a daily systemd user timer. xcb never replaces or removes a unit it did not write.
 
 ## 0.11.2 - 2026-09-29
 
