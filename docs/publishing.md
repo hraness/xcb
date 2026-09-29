@@ -173,12 +173,16 @@ not carry, and it serves no binaries.
 ## Native binary release
 
 The `native_artifact` job inside `.github/workflows/release.yml` builds `xcb`
-for Linux x86_64 on `ubuntu-22.04` and macOS ARM64 on `macos-15` from the
-verified tag commit through `scripts/build-native.sh`. The Linux binary links
-against the runner's glibc, so the build image sets the oldest glibc the
-release supports: `scripts/check-glibc-floor.py` fails the release when the
+for Linux x86_64 on `ubuntu-22.04`, Linux ARM64 on `ubuntu-22.04-arm`, and
+macOS ARM64 on `macos-15` from the verified tag commit through
+`scripts/build-native.sh`. Each binary is built natively on its own
+architecture; nothing is cross-compiled. The Linux binaries link against the
+runner's glibc, so the build image sets the oldest glibc the release
+supports: `scripts/check-glibc-floor.py` fails the release when the
 binary needs a symbol version newer than glibc 2.34 (RHEL 9; Ubuntu 22.04 and
-Debian 12 ship newer), and CI runs the same check on every change. Each archive is admitted twice with the installer's
+Debian 12 ship newer). CI runs the same check on every change for x86_64,
+and for ARM64 on every push to `main` and on pull requests that change the
+build, toolchain, or lockfile. Each archive is admitted twice with the installer's
 own rules — once in `build-native.sh`, once as a separate workflow step through
 `scripts/check-native-archive.sh` — which require exactly one regular `xcb`
 member (no AppleDouble companions or extended attributes), a matching
@@ -220,7 +224,7 @@ After public release verification passes, set:
   compatibility package asset, or `null` when the release carries none.
 - `native`: a list with at most one entry per built platform, each
   `{ "platform", "url", "sha256Url" }`. Admitted platforms are
-  `darwin-aarch64` and `linux-x86_64`; `url` must be the exact
+  `darwin-aarch64`, `linux-x86_64`, and `linux-aarch64`; `url` must be the exact
   `.../v<version>/xcb-<version>-<platform>.tar.gz` asset and `sha256Url` that
   URL plus `.sha256`. Omit a platform whose asset does not exist; the site
   then says it must be built from source.

@@ -8,6 +8,7 @@ const verificationRunPattern = /^https:\/\/github\.com\/hraness\/xcb\/actions\/r
 export const nativePlatforms = [
   { platform: "darwin-aarch64", label: "macOS ARM64 (Apple silicon)" },
   { platform: "linux-x86_64", label: "Linux x86_64" },
+  { platform: "linux-aarch64", label: "Linux ARM64" },
 ] as const;
 
 export type NativePlatform = (typeof nativePlatforms)[number]["platform"];

@@ -272,6 +272,10 @@ jobs:
           # docs/publishing.md). GitHub retires this image on 2027-04-17.
           - os: ubuntu-22.04
             platform: linux-x86_64
+          # Built natively on the arm64 image with the same glibc (2.35), so
+          # the same floor check applies. No cross toolchain is involved.
+          - os: ubuntu-22.04-arm
+            platform: linux-aarch64
           - os: macos-15
             platform: darwin-aarch64
     steps:
@@ -344,6 +348,11 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: xcb-native-linux-x86_64-${{ github.run_attempt }}
+          path: native-artifacts
+      - name: Download the exact Linux ARM64 native assets by run-bound name
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: xcb-native-linux-aarch64-${{ github.run_attempt }}
           path: native-artifacts
       - name: Download the exact macOS native assets by run-bound name
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -425,6 +434,11 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: xcb-native-linux-x86_64-${{ github.run_attempt }}
+          path: native-artifacts
+      - name: Download the exact Linux ARM64 native assets by run-bound name
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: xcb-native-linux-aarch64-${{ github.run_attempt }}
           path: native-artifacts
       - name: Download the exact macOS native assets by run-bound name
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

@@ -37,6 +37,7 @@ jobs:
       code: ${{ github.event_name != 'pull_request' && 'true' || steps.code.outputs.code }}
       site: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.site }}
       qualification: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.qualification }}
+      native_arm: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.native_arm }}
     steps:
       - name: Code changes (everything except the site, docs, and markdown)
         id: code
@@ -60,6 +61,7 @@ jobs:
               - 'site/**'
               - 'src/**'
               - 'README.md'
+              - 'scripts/install.sh'
               - '.github/workflows/ci.yml'
             qualification:
               - 'qualification/**'
@@ -68,6 +70,15 @@ jobs:
               - 'src/egress-client.ts'
               - 'sandbox/**'
               - '.github/workflows/ci.yml'
+            native_arm:
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'scripts/build-native.sh'
+              - 'scripts/check-native-archive.sh'
+              - 'scripts/check-glibc-floor.py'
+              - 'qualification/inbox-acceptance.py'
+              - '.github/workflows/ci.yml'
+              - '.github/workflows/release.yml'
 
   check:
     # Native Rust checks. Linux runs the generic gates (fmt, clippy, Python
@@ -224,6 +235,40 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  native-build-arm:
+    # The linux-aarch64 release build on the release runner. Pull requests
+    # run it only when the build, toolchain, or dependency inputs change;
+    # every push to main runs it, so ordinary Rust changes are still built
+    # for ARM64 before a release tag.
+    name: Native build (ubuntu-22.04-arm)
+    needs: changes
+    if: needs.changes.outputs.native_arm == 'true'
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
+        with:
+          toolchain: 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: glibc-2.35-aarch64
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # build-native.sh re-admits the archive with the installer's rules.
+      - run: ./scripts/build-native.sh
+      - name: Enforce the Linux glibc floor
+        run: python3 -I scripts/check-glibc-floor.py artifacts/*.tar.gz
+      - name: Isolated inbox operator acceptance
+        run: python3 -I qualification/inbox-acceptance.py target/release/xcb --evidence-dir "$RUNNER_TEMP"
+      - name: Preserve inbox acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: inbox-acceptance-ubuntu-22.04-arm
+          path: ${{ runner.temp }}/xcb-inbox-acceptance-*/
+          if-no-files-found: ignore
+          retention-days: 14
+
   site:
     name: Site
     needs: changes
@@ -362,6 +407,7 @@ jobs:
       - compat
       - compat-macos
       - native-build
+      - native-build-arm
       - site
       - qualification
     runs-on: ubuntu-24.04
@@ -373,6 +419,7 @@ jobs:
           CODE_CHANGED: ${{ needs.changes.outputs.code }}
           SITE_CHANGED: ${{ needs.changes.outputs.site }}
           QUALIFICATION_CHANGED: ${{ needs.changes.outputs.qualification }}
+          NATIVE_ARM_CHANGED: ${{ needs.changes.outputs.native_arm }}
         run: |
           python3 - <<'EOF'
           import json, os, sys
@@ -381,12 +428,14 @@ jobs:
               "code": os.environ["CODE_CHANGED"],
               "site": os.environ["SITE_CHANGED"],
               "qualification": os.environ["QUALIFICATION_CHANGED"],
+              "native_arm": os.environ["NATIVE_ARM_CHANGED"],
           }
           filtered = {
               "check": "code",
               "compat": "code",
               "compat-macos": "code",
               "native-build": "code",
+              "native-build-arm": "native_arm",
               "site": "site",
               "qualification": "qualification",
           }
