@@ -2546,6 +2546,38 @@ pub(crate) async fn run_prepared<P: Protocol>(
             auth::persist_codex_auth(&store, &run, credentials, joined)?;
         }
         if effects != EffectState::Uncertain {
+            // The provider refused this account's quota but reported no reset
+            // (Codex's `usageLimitExceeded` and Devin's resource-exhaustion
+            // error carry none; Claude's rejection may omit one), so the
+            // meters recorded above leave no block: without a cooldown the
+            // account would look ready and be routed to again. Recorded under
+            // this run's hold, and only from a settled provider outcome; a
+            // model-scoped limit stays with the run's outcome because
+            // admission is per account.
+            if outcome.facts.terminal == Terminal::Failed
+                && outcome.facts.failure == Some(Failure::AccountQuota)
+            {
+                let now = now_ms();
+                let recorded =
+                    store
+                        .quota_blocked_until(&session.account, now)
+                        .and_then(|blocked| match blocked {
+                            Some(_) => Ok(()),
+                            None => store.record_quota_limit(
+                                &run,
+                                now,
+                                now.saturating_add(input.config.quota_limit_cooldown_ms),
+                            ),
+                        });
+                // The cooldown is routing bookkeeping, not custody: a failed
+                // write is reported and the settled outcome still lands.
+                if let Err(error) = recorded {
+                    observer(Progress::Notice(format!(
+                        "usage limit cooldown was not recorded: {}",
+                        Diagnostic::from_error(&error).as_str()
+                    )));
+                }
+            }
             store.settle_outcome_submitted(
                 &run,
                 &input.message.id,
@@ -3430,6 +3462,136 @@ mod tests {
             }
         }
     }
+
+    /// A provider that refuses the turn for the account's quota without
+    /// reporting a reset leaves no meter to block on. The settled outcome
+    /// records a cooldown under the run's hold, so the account reads as
+    /// limited to the summary and cannot be routed to again until it ends.
+    #[tokio::test]
+    async fn settled_usage_limit_without_reset_records_a_cooldown_that_blocks_the_account() {
+        for provider in [Provider::Claude, Provider::Codex, Provider::Devin] {
+            let root = tempfile::tempdir().unwrap();
+            let base = xcb_core::canonical(root.path()).unwrap();
+            let workspace = base.join("work");
+            std::fs::create_dir(&workspace).unwrap();
+            let store = Arc::new(Store::open(&base.join("state")).unwrap());
+            let account = store
+                .add_account(provider, "Fixture", now_ms(), None)
+                .unwrap();
+            // Claude binds quota to a credential generation, which a launch
+            // establishes before the turn; a fixture turn has no launch.
+            let probe = store.prepare_probe(&account.id, None, now_ms()).unwrap();
+            crate::application_qualification::ensure_generation(&store, &probe).unwrap();
+            store.settle(&probe, State::Idle, now_ms()).unwrap();
+            let model = ModelChoice {
+                provider,
+                id: Id::new("fixture-model").unwrap(),
+                label: "Fixture".into(),
+                mode: Mode::Fixed,
+                resolved: None,
+                effort: None,
+                observed_at_ms: now_ms(),
+            };
+            let session = store
+                .create_session(&account.id, model.clone(), &workspace, now_ms())
+                .unwrap();
+            let message = Message {
+                id: new_id("message"),
+                role: Role::User,
+                text: "Create a file".into(),
+                at_ms: now_ms(),
+                attachments: vec![],
+                provenance: None,
+            };
+            let session = store
+                .append_message(&session.id, session.revision, &message)
+                .unwrap();
+            let launch = Launch {
+                command: Command::new("/bin/cat"),
+                cwd: base.clone(),
+                bridge: None,
+                artifacts: LaunchArtifacts::create(store.root()).unwrap(),
+                prepared_run: None,
+                codex_credentials: None,
+            };
+            let config = Config {
+                quota_limit_cooldown_ms: 600_000,
+                ..Config::default()
+            };
+            let (_cancel, cancellation) = watch::channel(false);
+            let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen = notices.clone();
+            let started = now_ms();
+            let outcome = run_prepared(
+                store.clone(),
+                RunInput {
+                    session: session.clone(),
+                    message,
+                    config,
+                    pane_generation: false,
+                },
+                cancellation,
+                Arc::new(move |event| {
+                    if let Progress::Notice(text) = event {
+                        seen.lock().unwrap().push(text);
+                    }
+                }),
+                launch,
+                FixtureProtocol {
+                    model,
+                    before_ready: false,
+                    mailbox_failure: false,
+                    passive_after_quota: true,
+                    initialize_failure: None,
+                    receive_failure: None,
+                    step: 0,
+                    block_initialize: None,
+                },
+                Workspace::open_with_coordination(&workspace, &base.join("coordination")).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(outcome.facts.failure, Some(Failure::AccountQuota));
+            assert_eq!(outcome.state, State::Limited);
+            assert!(outcome.facts.joined);
+            assert!(store.unsettled_runs().unwrap().is_empty());
+            assert!(
+                !notices
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|text| text.contains("cooldown")),
+                "{provider:?}: the cooldown must be recorded, not reported as failed"
+            );
+            let now = now_ms();
+            let until = store
+                .quota_blocked_until(&account.id, now)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{provider:?}: settled usage limit must block"));
+            assert!(
+                until >= started + 600_000 && until <= now + 600_000,
+                "{provider:?}: cooldown {until} is not the configured span from settlement"
+            );
+            // Not a meter: the account shows no percentage or reset, only the
+            // retry estimate, and the next turn cannot start on it.
+            let pool = store.account(&account.id).unwrap().quota_pool;
+            assert!(store.quotas(&pool).unwrap().is_empty());
+            assert_eq!(store.quota_limits(&pool).unwrap().len(), 1);
+            let view = crate::summary::snapshot(&store, None, &Config::default(), now).unwrap();
+            assert_eq!(view.accounts[0].quota_blocked_until_ms, Some(until));
+            assert_eq!(view.accounts[0].remaining_percent, None);
+            let current = store.session(&session.id).unwrap().unwrap();
+            assert_eq!(current.state, State::Limited);
+            assert!(
+                store
+                    .prepare_run(&session.id, current.revision, now)
+                    .is_err()
+            );
+            assert_eq!(store.quota_blocked_until(&account.id, until).unwrap(), None);
+            let run = store.prepare_probe(&account.id, None, until).unwrap();
+            store.settle(&run, State::Idle, until).unwrap();
+        }
+    }
     #[tokio::test]
     async fn prompt_submission_receipt_distinguishes_unstarted_unknown_and_submitted() {
         struct SubmissionProtocol {
@@ -4018,6 +4180,7 @@ mod tests {
         assert!(outcome.facts.joined);
         assert!(store.authentication_required(&account).unwrap());
         assert!(store.unsettled_runs().unwrap().is_empty());
+        assert_eq!(store.quota_blocked_until(&account, now_ms()).unwrap(), None);
 
         let (outcome, store, account) = run(
             Provider::Codex,
@@ -4032,6 +4195,14 @@ mod tests {
         assert_eq!(outcome.facts.failure, Some(Failure::AccountQuota));
         assert_eq!(outcome.state, State::Limited);
         assert!(!store.authentication_required(&account).unwrap());
+        // Codex's usage-limit error carries no reset: the settled failure
+        // records the configured cooldown instead of leaving the account ready.
+        assert!(
+            store
+                .quota_blocked_until(&account, now_ms())
+                .unwrap()
+                .is_some()
+        );
 
         let (outcome, store, account) = run(
             Provider::Devin,
@@ -4046,6 +4217,7 @@ mod tests {
         assert_eq!(outcome.facts.failure, Some(Failure::Transport));
         assert_eq!(outcome.state, State::Failed);
         assert!(!store.authentication_required(&account).unwrap());
+        assert_eq!(store.quota_blocked_until(&account, now_ms()).unwrap(), None);
 
         let (outcome, store, account) = run(
             Provider::Devin,
@@ -4060,6 +4232,26 @@ mod tests {
         assert_eq!(outcome.facts.failure, Some(Failure::Unknown));
         assert_eq!(outcome.state, State::Failed);
         assert!(!store.authentication_required(&account).unwrap());
+        assert_eq!(store.quota_blocked_until(&account, now_ms()).unwrap(), None);
+
+        let (outcome, store, account) = run(
+            Provider::Devin,
+            None,
+            Some(Error::DevinRpc {
+                method: "session/prompt",
+                code: -32011,
+                category: crate::category::DEVIN_RESOURCE_LIMIT,
+            }),
+        )
+        .await;
+        assert_eq!(outcome.facts.failure, Some(Failure::AccountQuota));
+        assert_eq!(outcome.state, State::Limited);
+        assert!(
+            store
+                .quota_blocked_until(&account, now_ms())
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// Streaming providers emit one frame per delta, so frame volume is

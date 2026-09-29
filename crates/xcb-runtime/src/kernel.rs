@@ -3,6 +3,7 @@ use crate::{
     config::Config,
     digest, exports, hooks, judge, new_id, now_ms, panes, private,
     process::Pin,
+    routing,
     runner::{self, Observer, Outcome, Progress, RunInput},
     store::Store,
     summary,
@@ -25,9 +26,12 @@ use xcb_core::{
     Id, Provider,
     models::{ModelChoice, Preference},
     panes::Pane,
-    policy::{RouteCandidate, Terminal, next_route, should_continue},
+    policy::{
+        EffectState, Failure, RouteCandidate, Terminal, TurnFacts, failover_permitted, next_route,
+        should_continue,
+    },
     session::{Message, MessageProvenance, Role, Session, State, Subagent},
-    ui::{Intent, RoutePreview, Update},
+    ui::{AccountRow, Intent, RoutePreview, Update, View},
 };
 
 /// Shown in a direct session when the provider completed a turn without a
@@ -683,6 +687,9 @@ async fn execute_inner(
     let mut consecutive = 0u32;
     let mut previous_output = None;
     let mut tried = BTreeSet::new();
+    // Accounts that reported an account-wide usage limit during this task.
+    // A later failover never returns to them, even on another model.
+    let mut limited_accounts: BTreeSet<Id> = BTreeSet::new();
     let original_task = text.clone();
     let mut text = text;
     let mut attachments = attachments;
@@ -806,13 +813,20 @@ async fn execute_inner(
         } else {
             deterministic_continue
         };
-        if *cancel.borrow()
-            || now_ms().saturating_sub(started)
-                >= current_config.extensions.auto_continue.max_elapsed_ms
-        {
+        if *cancel.borrow() {
             return Ok(outcome);
         }
-        if continue_turn {
+        // The judge may have taken time: the elapsed budget is checked again
+        // here, for continuation only. Failover is bounded by the routes
+        // tried and by cancellation, so a long turn that then hits a usage
+        // limit still moves to another account.
+        let step = supervision_step(
+            &current_config,
+            &outcome,
+            continue_turn,
+            now_ms().saturating_sub(started),
+        );
+        if step == Supervision::Continue {
             consecutive += 1;
             previous_output = Some(output_digest);
             observer(Progress::Notice(format!(
@@ -824,21 +838,23 @@ async fn execute_inner(
             role = Role::System;
             continue;
         }
-        if current_config.auto_failover
-            && outcome.facts.terminal == Terminal::Failed
-            && matches!(
-                outcome.facts.failure,
-                Some(
-                    xcb_core::policy::Failure::AccountQuota | xcb_core::policy::Failure::ModelQuota
-                )
-            )
-        {
-            let view = summary::snapshot(&store, Some(&session_id), &current_config, now_ms())?;
+        if let Supervision::Failover(failure) = step {
+            if failure == Failure::AccountQuota {
+                limited_accounts.insert(current.account.clone());
+            }
+            let now = now_ms();
+            let view = summary::snapshot(&store, Some(&session_id), &current_config, now)?;
+            let checkpointed = checkpointed(&outcome);
+            let limit = usage_limit_label(&view, &current.account, &current.model, failure);
+            if let Some(reason) = failover_blocked_reason(&outcome.facts, &tried, checkpointed) {
+                observer(Progress::Notice(format!("{limit} · {reason}")));
+                return Ok(outcome);
+            }
             let source = RouteCandidate {
                 account: current.account.clone(),
                 model: current.model.clone(),
                 admitted: true,
-                quota_fresh: true,
+                quota_clear: false,
                 available: false,
             };
             let admitted_providers: BTreeSet<_> = Provider::ALL
@@ -848,34 +864,62 @@ async fn execute_inner(
                         .is_ok_and(|pin| runner::provider_admitted(store.root(), &pin))
                 })
                 .collect();
-            let mut candidates = Vec::new();
-            for model in &view.models {
-                for account in &view.accounts {
-                    if account.provider != model.provider
-                        || account.busy
-                        || !account.enabled
-                        || account.authentication_required
-                        || account.quota_blocked_until_ms.is_some()
-                        || candidates.len() >= 256
-                    {
-                        continue;
-                    }
-                    candidates.push(RouteCandidate {
-                        account: account.id.clone(),
-                        model: model.clone(),
-                        admitted: admitted_providers.contains(&model.provider)
-                            && auth::has_credentials(&store, &account.id)?,
-                        quota_fresh: account.remaining_percent.is_some(),
-                        available: account
-                            .remaining_percent
-                            .is_some_and(|remaining| remaining > 0.0),
-                    });
-                }
-            }
-            let checkpointed = !outcome.text.is_empty()
-                || outcome.facts.effects == xcb_core::policy::EffectState::None;
+            let credentialed: BTreeSet<Id> = view
+                .accounts
+                .iter()
+                .filter(|account| auth::has_credentials(&store, &account.id).unwrap_or(false))
+                .map(|account| account.id.clone())
+                .collect();
+            // An opening "Use <provider>" directive pins the provider for the
+            // whole task; failover never widens past it.
+            let required_provider = routing::explicit_provider_intent(&original_task);
+            // The router applies the same eligibility as automatic routing
+            // (a Devin account without a meter, or one whose last reading
+            // aged out, is a target) and orders the routes; `next_route`
+            // stays the safety gate over facts read from the account view.
+            let ranked = tokio::select! {
+                biased;
+                _ = cancellation_requested(&mut cancel) => return Ok(outcome),
+                ranked = routing::failover_routes(
+                    &store,
+                    &current_config,
+                    routing::FailoverRequest {
+                        task: &original_task,
+                        account: &current.account,
+                        model: &current.model,
+                        failure,
+                        tried: &tried,
+                        limited_accounts: &limited_accounts,
+                        required_provider,
+                        required_model: None,
+                    },
+                ) => ranked?,
+            };
+            let mut candidates: Vec<_> = ranked
+                .into_iter()
+                .filter_map(|route| {
+                    let row = view.accounts.iter().find(|row| row.id == route.account)?;
+                    let admitted = admitted_providers.contains(&route.model.provider)
+                        && credentialed.contains(&row.id);
+                    Some(failover_candidate(row, route.model, admitted))
+                })
+                .collect();
             let eligible = eligible_failover_routes(&source, &candidates, &tried, &outcome);
             if eligible.is_empty() {
+                observer(Progress::Notice(failover_unavailable_notice(
+                    &FailoverNoticeInput {
+                        view: &view,
+                        account: &current.account,
+                        model: &current.model,
+                        failure,
+                        tried: &tried,
+                        limited_accounts: &limited_accounts,
+                        admitted: &admitted_providers,
+                        credentialed: &credentialed,
+                        required_provider,
+                        now,
+                    },
+                )));
                 return Ok(outcome);
             }
             // Ask the judge to rank the routes `next_route` could pick; on any
@@ -947,10 +991,7 @@ async fn execute_inner(
                     ))),
                 }
             }
-            if *cancel.borrow()
-                || now_ms().saturating_sub(started)
-                    >= current_config.extensions.auto_continue.max_elapsed_ms
-            {
+            if *cancel.borrow() {
                 return Ok(outcome);
             }
             if let Some(target) =
@@ -996,14 +1037,223 @@ async fn cancellation_requested(cancel: &mut watch::Receiver<bool>) {
     let _ = cancel.wait_for(|cancelled| *cancelled).await;
 }
 
+/// What supervision does after a settled turn, decided from the turn alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Supervision {
+    Continue,
+    Failover(Failure),
+    Stop,
+}
+
+/// Continuation keeps its own elapsed budget. Failover has none: it is
+/// bounded by the sixteen routes `next_route` allows and by cancellation, so
+/// a turn that ran past the continuation budget and then hit a usage limit
+/// still moves to another account.
+fn supervision_step(
+    config: &Config,
+    outcome: &Outcome,
+    continue_turn: bool,
+    elapsed_ms: u64,
+) -> Supervision {
+    if continue_turn && elapsed_ms < config.extensions.auto_continue.max_elapsed_ms {
+        return Supervision::Continue;
+    }
+    match outcome.facts.failure {
+        Some(failure @ (Failure::AccountQuota | Failure::ModelQuota))
+            if config.auto_failover && outcome.facts.terminal == Terminal::Failed =>
+        {
+            Supervision::Failover(failure)
+        }
+        _ => Supervision::Stop,
+    }
+}
+
+/// A turn left something to continue from: answer text, or no effects at all.
+fn checkpointed(outcome: &Outcome) -> bool {
+    !outcome.text.is_empty() || outcome.facts.effects == EffectState::None
+}
+
+/// The facts the failover gate reads about one route, taken from the account
+/// view the terminal shows. The router already applied the same rules; the
+/// gate re-reads them so a candidate can never be admitted by construction.
+fn failover_candidate(account: &AccountRow, model: ModelChoice, admitted: bool) -> RouteCandidate {
+    RouteCandidate {
+        account: account.id.clone(),
+        model,
+        admitted: admitted && !account.authentication_required,
+        quota_clear: account.quota_blocked_until_ms.is_none()
+            && account
+                .remaining_percent
+                .is_none_or(|remaining| remaining > 0.0),
+        available: account.enabled && !account.busy,
+    }
+}
+
+/// Why a usage-limited turn cannot move at all, before any route is ranked.
+fn failover_blocked_reason(
+    facts: &TurnFacts,
+    tried: &BTreeSet<String>,
+    checkpointed: bool,
+) -> Option<&'static str> {
+    if failover_permitted(facts, tried, checkpointed) {
+        return None;
+    }
+    Some(
+        if !facts.joined || facts.effects == EffectState::Uncertain {
+            "xcb could not confirm how the run ended, so it keeps this account and does not switch"
+        } else if facts.pending_attention {
+            "the provider is waiting for an answer, so xcb does not switch"
+        } else if !checkpointed {
+            "the turn changed files without a reply, so xcb does not continue it on another account"
+        } else if tried.len() >= 16 {
+            "16 routes already ran this task, so xcb stops here"
+        } else {
+            "the turn did not settle with a usage limit"
+        },
+    )
+}
+
+fn usage_limit_label(view: &View, account: &Id, model: &ModelChoice, failure: Failure) -> String {
+    let name = view
+        .accounts
+        .iter()
+        .find(|row| &row.id == account)
+        .map_or_else(|| account.to_string(), |row| row.name.clone());
+    match failure {
+        Failure::ModelQuota => format!(
+            "Usage limit for {} on {} · {name}",
+            model.label, model.provider
+        ),
+        _ => format!("Usage limit on {} · {name}", model.provider),
+    }
+}
+
+/// Everything the no-target notice is written from.
+pub struct FailoverNoticeInput<'a> {
+    pub view: &'a View,
+    pub account: &'a Id,
+    pub model: &'a ModelChoice,
+    pub failure: Failure,
+    /// Routes this task already ran, as `<account>/<model key>`.
+    pub tried: &'a BTreeSet<String>,
+    pub limited_accounts: &'a BTreeSet<Id>,
+    /// Providers whose pinned build xcb can run.
+    pub admitted: &'a BTreeSet<Provider>,
+    /// Accounts with usable credentials.
+    pub credentialed: &'a BTreeSet<Id>,
+    pub required_provider: Option<Provider>,
+    pub now: u64,
+}
+
+fn wait_label(until: u64, now: u64) -> String {
+    let minutes = until.saturating_sub(now).div_ceil(60_000).max(1);
+    if minutes >= 60 * 24 {
+        format!("{}d", minutes / (60 * 24))
+    } else if minutes >= 60 {
+        format!("{}h {}m", minutes / 60, minutes % 60)
+    } else {
+        format!("{minutes}m")
+    }
+}
+
+/// The notice shown when a usage limit stopped a turn and no other account
+/// can take the task now: which account hit the limit, why each other
+/// account was passed over, and the earliest known reset.
+pub fn failover_unavailable_notice(input: &FailoverNoticeInput<'_>) -> String {
+    let FailoverNoticeInput {
+        view,
+        account,
+        model,
+        failure,
+        tried,
+        limited_accounts,
+        admitted,
+        credentialed,
+        required_provider,
+        now,
+    } = input;
+    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut order: Vec<&'static str> = Vec::new();
+    let mut others = 0usize;
+    for row in view.accounts.iter().filter(|row| &row.id != *account) {
+        others += 1;
+        let models: Vec<_> = view
+            .models
+            .iter()
+            .filter(|choice| choice.provider == row.provider)
+            .collect();
+        let all_tried = !models.is_empty()
+            && models
+                .iter()
+                .all(|choice| tried.contains(&format!("{}/{}", row.id, choice.key())));
+        let reason = if !row.enabled {
+            "disabled"
+        } else if row.authentication_required || !credentialed.contains(&row.id) {
+            "signed out"
+        } else if !admitted.contains(&row.provider) {
+            "on a provider build xcb has not checked"
+        } else if required_provider.is_some_and(|provider| provider != row.provider) {
+            "outside the pinned provider"
+        } else if row.busy {
+            "busy with another task"
+        } else if row.quota_blocked_until_ms.is_some()
+            || row
+                .remaining_percent
+                .is_some_and(|remaining| remaining <= 0.0)
+            || limited_accounts.contains(&row.id)
+        {
+            "at a usage limit"
+        } else if all_tried {
+            "already tried on this task"
+        } else if models.is_empty() {
+            "without a recently seen model"
+        } else {
+            "not able to take the task now"
+        };
+        if !counts.contains_key(reason) {
+            order.push(reason);
+        }
+        *counts.entry(reason).or_default() += 1;
+    }
+    let mut notice = usage_limit_label(view, account, model, *failure);
+    if others == 0 {
+        notice.push_str(" · no other account is signed in");
+    } else {
+        notice.push_str(" · no other account is able to take the task now");
+        for reason in order {
+            notice.push_str(&format!(" · {} {reason}", counts[reason]));
+        }
+    }
+    let reset = view
+        .accounts
+        .iter()
+        .filter_map(|row| row.quota_blocked_until_ms)
+        .filter(|until| until > now)
+        .min()
+        .or_else(|| {
+            view.accounts
+                .iter()
+                .find(|row| &row.id == *account)
+                .and_then(|row| row.resets_at_ms)
+                .filter(|until| until > now)
+        });
+    match reset {
+        Some(until) => notice.push_str(&format!(
+            " · earliest known reset in ~{}",
+            wait_label(until, *now)
+        )),
+        None => notice.push_str(" · no reset time is known"),
+    }
+    notice
+}
+
 fn eligible_failover_routes(
     source: &RouteCandidate,
     candidates: &[RouteCandidate],
     tried: &BTreeSet<String>,
     outcome: &Outcome,
 ) -> Vec<usize> {
-    let checkpointed =
-        !outcome.text.is_empty() || outcome.facts.effects == xcb_core::policy::EffectState::None;
+    let checkpointed = self::checkpointed(outcome);
     candidates
         .iter()
         .enumerate()
@@ -1804,7 +2054,7 @@ mod tests {
                 account,
                 model,
                 admitted: true,
-                quota_fresh: true,
+                quota_clear: true,
                 available: true,
             }
         };
@@ -1847,6 +2097,278 @@ mod tests {
         outcome.facts.pending_attention = false;
         outcome.facts.terminal = Terminal::Completed;
         assert!(eligible_failover_routes(&source, &candidates, &tried, &outcome).is_empty());
+    }
+
+    fn account_row(index: usize, provider: Provider) -> AccountRow {
+        AccountRow {
+            id: Id::new(format!("a{index}")).unwrap(),
+            provider,
+            name: format!("{provider}/a{index}"),
+            email: None,
+            subscription: "Max".into(),
+            remaining_percent: None,
+            resets_at_ms: None,
+            quota_blocked_until_ms: None,
+            runway: xcb_core::usage::Estimate::unknown("quota_or_burn_unmeasured"),
+            busy: false,
+            enabled: true,
+            authentication_required: false,
+        }
+    }
+
+    fn quota_outcome(failure: Failure) -> Outcome {
+        Outcome {
+            tool_calls: Some(0),
+            diagnostic: None,
+            text: "Saved the migration; remaining tests need to run".into(),
+            state: State::Failed,
+            facts: TurnFacts {
+                terminal: Terminal::Failed,
+                joined: true,
+                effects: EffectState::Settled,
+                pending_attention: false,
+                failure: Some(failure),
+            },
+        }
+    }
+
+    /// The gate reads the same facts as automatic routing: an account without
+    /// a meter (Devin) or with an aged-out reading has no known limit and is
+    /// a target; a recorded block, a zero reading, a held account, a
+    /// signed-out account or an unchecked provider build is not.
+    #[test]
+    fn failover_candidate_treats_unmeasured_accounts_as_clear() {
+        let model = route_candidate(0).1;
+        let devin = account_row(1, Provider::Devin);
+        let candidate = failover_candidate(&devin, model.clone(), true);
+        assert!(candidate.admitted && candidate.quota_clear && candidate.available);
+        let stale = AccountRow {
+            remaining_percent: None,
+            resets_at_ms: None,
+            ..account_row(2, Provider::Claude)
+        };
+        assert!(failover_candidate(&stale, model.clone(), true).quota_clear);
+        let measured = AccountRow {
+            remaining_percent: Some(12.5),
+            ..account_row(3, Provider::Claude)
+        };
+        assert!(failover_candidate(&measured, model.clone(), true).quota_clear);
+        let blocked = AccountRow {
+            quota_blocked_until_ms: Some(u64::MAX),
+            ..account_row(4, Provider::Claude)
+        };
+        assert!(!failover_candidate(&blocked, model.clone(), true).quota_clear);
+        let exhausted = AccountRow {
+            remaining_percent: Some(0.0),
+            ..account_row(5, Provider::Claude)
+        };
+        assert!(!failover_candidate(&exhausted, model.clone(), true).quota_clear);
+        let busy = AccountRow {
+            busy: true,
+            ..account_row(6, Provider::Claude)
+        };
+        assert!(!failover_candidate(&busy, model.clone(), true).available);
+        let disabled = AccountRow {
+            enabled: false,
+            ..account_row(7, Provider::Claude)
+        };
+        assert!(!failover_candidate(&disabled, model.clone(), true).available);
+        let signed_out = AccountRow {
+            authentication_required: true,
+            ..account_row(8, Provider::Claude)
+        };
+        assert!(!failover_candidate(&signed_out, model.clone(), true).admitted);
+        assert!(!failover_candidate(&devin, model, false).admitted);
+    }
+
+    /// Continuation keeps its elapsed budget; failover does not share it. A
+    /// settled usage limit after a long turn still moves, while an uncertain,
+    /// unjoined or attention-pending turn never reaches the router.
+    #[test]
+    fn failover_ignores_the_continuation_budget_but_not_the_safety_gates() {
+        let mut config = Config::default();
+        config.extensions.auto_continue.max_elapsed_ms = 60_000;
+        let limited = quota_outcome(Failure::AccountQuota);
+        assert_eq!(
+            supervision_step(&config, &limited, false, 3_600_000),
+            Supervision::Failover(Failure::AccountQuota)
+        );
+        assert_eq!(
+            supervision_step(&config, &quota_outcome(Failure::ModelQuota), false, 59_999),
+            Supervision::Failover(Failure::ModelQuota)
+        );
+        let mut token_limit = quota_outcome(Failure::AccountQuota);
+        token_limit.facts.terminal = Terminal::TokenLimit;
+        token_limit.facts.failure = None;
+        assert_eq!(
+            supervision_step(&config, &token_limit, true, 59_999),
+            Supervision::Continue
+        );
+        assert_eq!(
+            supervision_step(&config, &token_limit, true, 60_000),
+            Supervision::Stop,
+            "the continuation budget still bounds continuation"
+        );
+        let mut transport = quota_outcome(Failure::Transport);
+        transport.facts.failure = Some(Failure::Transport);
+        assert_eq!(
+            supervision_step(&config, &transport, false, 1),
+            Supervision::Stop
+        );
+        config.auto_failover = false;
+        assert_eq!(
+            supervision_step(&config, &limited, false, 1),
+            Supervision::Stop
+        );
+        // The gates before ranking: every refusal names its reason.
+        let tried = BTreeSet::new();
+        assert!(failover_blocked_reason(&limited.facts, &tried, true).is_none());
+        let uncertain = TurnFacts {
+            effects: EffectState::Uncertain,
+            ..limited.facts.clone()
+        };
+        assert!(
+            failover_blocked_reason(&uncertain, &tried, true)
+                .unwrap()
+                .contains("could not confirm")
+        );
+        let unjoined = TurnFacts {
+            joined: false,
+            ..limited.facts.clone()
+        };
+        assert!(
+            failover_blocked_reason(&unjoined, &tried, true)
+                .unwrap()
+                .contains("could not confirm")
+        );
+        let attention = TurnFacts {
+            pending_attention: true,
+            ..limited.facts.clone()
+        };
+        assert!(
+            failover_blocked_reason(&attention, &tried, true)
+                .unwrap()
+                .contains("waiting for an answer")
+        );
+        assert!(
+            failover_blocked_reason(&limited.facts, &tried, false)
+                .unwrap()
+                .contains("without a reply")
+        );
+        let sixteen: BTreeSet<_> = (0..16).map(|n| format!("a{n}/claude/m")).collect();
+        assert!(
+            failover_blocked_reason(&limited.facts, &sixteen, true)
+                .unwrap()
+                .contains("16 routes")
+        );
+    }
+
+    /// With no eligible route the terminal still learns which account hit the
+    /// limit, why each other account was passed over, and the earliest reset.
+    #[test]
+    fn no_target_notice_names_the_limit_the_reasons_and_the_earliest_reset() {
+        let now = 1_000_000_000;
+        let model = route_candidate(0).1;
+        let mut view = View {
+            models: vec![model.clone(), route_candidate(1).1],
+            accounts: vec![
+                AccountRow {
+                    remaining_percent: Some(0.0),
+                    resets_at_ms: Some(now + 3 * 3_600_000),
+                    quota_blocked_until_ms: Some(now + 3 * 3_600_000),
+                    ..account_row(0, Provider::Claude)
+                },
+                AccountRow {
+                    quota_blocked_until_ms: Some(now + 2 * 3_600_000 + 5 * 60_000),
+                    ..account_row(1, Provider::Claude)
+                },
+                AccountRow {
+                    authentication_required: true,
+                    ..account_row(2, Provider::Codex)
+                },
+                account_row(3, Provider::Devin),
+                AccountRow {
+                    busy: true,
+                    ..account_row(4, Provider::Claude)
+                },
+                account_row(5, Provider::Claude),
+            ],
+            ..View::default()
+        };
+        let tried: BTreeSet<_> = view
+            .models
+            .iter()
+            .map(|choice| format!("a5/{}", choice.key()))
+            .collect();
+        let limited_accounts = BTreeSet::from([Id::new("a0").unwrap()]);
+        let admitted = BTreeSet::from([Provider::Claude, Provider::Codex]);
+        let credentialed: BTreeSet<_> = view
+            .accounts
+            .iter()
+            .filter(|row| !row.authentication_required)
+            .map(|row| row.id.clone())
+            .collect();
+        let notice = failover_unavailable_notice(&FailoverNoticeInput {
+            view: &view,
+            account: &Id::new("a0").unwrap(),
+            model: &model,
+            failure: Failure::AccountQuota,
+            tried: &tried,
+            limited_accounts: &limited_accounts,
+            admitted: &admitted,
+            credentialed: &credentialed,
+            required_provider: None,
+            now,
+        });
+        assert_eq!(
+            notice,
+            "Usage limit on claude · claude/a0 · no other account is able to take the task now · 1 at a usage limit · 1 signed out · 1 on a provider build xcb has not checked · 1 busy with another task · 1 already tried on this task · earliest known reset in ~2h 5m"
+        );
+        for internal in ["lease", "custody", "eligible", "admitted", "credential"] {
+            assert!(!notice.contains(internal), "{notice}");
+        }
+        // A model-specific limit names the model; a pinned provider explains
+        // the accounts outside it; a reset falls back to the account's own
+        // window; a single account says so.
+        let pinned = failover_unavailable_notice(&FailoverNoticeInput {
+            view: &view,
+            account: &Id::new("a0").unwrap(),
+            model: &model,
+            failure: Failure::ModelQuota,
+            tried: &BTreeSet::new(),
+            limited_accounts: &BTreeSet::new(),
+            admitted: &Provider::ALL.into_iter().collect(),
+            credentialed: &credentialed,
+            required_provider: Some(Provider::Devin),
+            now,
+        });
+        assert!(pinned.starts_with("Usage limit for Model 0 on claude · claude/a0 · "));
+        assert!(
+            pinned.contains(" · 3 outside the pinned provider"),
+            "{pinned}"
+        );
+        assert!(
+            pinned.contains(" · 1 without a recently seen model"),
+            "{pinned}"
+        );
+        view.accounts.truncate(1);
+        view.accounts[0].quota_blocked_until_ms = None;
+        let alone = failover_unavailable_notice(&FailoverNoticeInput {
+            view: &view,
+            account: &Id::new("a0").unwrap(),
+            model: &model,
+            failure: Failure::AccountQuota,
+            tried: &BTreeSet::new(),
+            limited_accounts: &BTreeSet::new(),
+            admitted: &admitted,
+            credentialed: &credentialed,
+            required_provider: None,
+            now,
+        });
+        assert_eq!(
+            alone,
+            "Usage limit on claude · claude/a0 · no other account is signed in · earliest known reset in ~3h 0m"
+        );
     }
 
     #[test]

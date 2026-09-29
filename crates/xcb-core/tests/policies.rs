@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 use xcb_core::models::{Mode, ModelChoice, default_preferences, sort_choices};
 use xcb_core::panes::{Pane, PaneSlot};
 use xcb_core::policy::{
-    EffectState, Failure, RouteCandidate, Terminal, TurnFacts, next_route, no_reply,
+    EffectState, Failure, RouteCandidate, Terminal, TurnFacts, failover_permitted, next_route,
+    no_reply,
 };
 use xcb_core::usage::{Estimate, QuotaPoint, runway};
 use xcb_core::{Id, Provider};
@@ -20,7 +21,7 @@ fn route(account: &str, model: &str) -> RouteCandidate {
             observed_at_ms: 1,
         },
         admitted: true,
-        quota_fresh: true,
+        quota_clear: true,
         available: true,
     }
 }
@@ -111,7 +112,7 @@ fn switching_is_not_a_recovery_for_policy_auth_or_transport_failures() {
 }
 
 #[test]
-fn unadmitted_stale_or_already_tried_targets_are_excluded() {
+fn unadmitted_limited_busy_or_already_tried_targets_are_excluded() {
     let current = route("personal", "swe-2-high");
     let target = route("work", "gpt-6-astra-max");
     for invalid in [
@@ -120,7 +121,7 @@ fn unadmitted_stale_or_already_tried_targets_are_excluded() {
             ..target.clone()
         },
         RouteCandidate {
-            quota_fresh: false,
+            quota_clear: false,
             ..target.clone()
         },
         RouteCandidate {
@@ -150,6 +151,98 @@ fn unadmitted_stale_or_already_tried_targets_are_excluded() {
         )
         .is_none()
     );
+}
+
+/// An account without a usage meter, or whose last reading has aged out, is
+/// still a failover target: `quota_clear` is a statement about known limits,
+/// not about measurement freshness. The caller sets it from the same facts
+/// automatic routing uses, so the gate and the router agree on eligibility.
+#[test]
+fn an_unmeasured_account_is_a_failover_target_and_a_known_limit_is_not() {
+    let current = route("personal", "swe-2-high");
+    let unmeasured = route("devin-work", "swe-2-high");
+    let limited = RouteCandidate {
+        quota_clear: false,
+        ..route("codex-work", "gpt-6-astra-max")
+    };
+    let ordered = [limited, unmeasured];
+    let chosen = next_route(
+        &current,
+        &ordered,
+        &BTreeSet::new(),
+        &facts(Failure::AccountQuota),
+        true,
+    )
+    .unwrap();
+    assert_eq!(chosen.account.as_str(), "devin-work");
+}
+
+/// The shared gate answers exactly when `next_route` could answer for some
+/// candidate, so a caller can skip ranking and explain the refusal instead.
+#[test]
+fn failover_gate_matches_next_route_preconditions() {
+    let current = route("personal", "swe-2-high");
+    let target = route("work", "gpt-6-astra-max");
+    let none = BTreeSet::new();
+    let sixteen: BTreeSet<_> = (0..16).map(|n| format!("account-{n}/model")).collect();
+    let uncertain = TurnFacts {
+        effects: EffectState::Uncertain,
+        ..facts(Failure::AccountQuota)
+    };
+    let unjoined = TurnFacts {
+        joined: false,
+        ..facts(Failure::AccountQuota)
+    };
+    let attention = TurnFacts {
+        pending_attention: true,
+        ..facts(Failure::ModelQuota)
+    };
+    for (label, facts, tried, checkpointed) in [
+        (
+            "settled account limit",
+            facts(Failure::AccountQuota),
+            &none,
+            true,
+        ),
+        (
+            "settled model limit",
+            facts(Failure::ModelQuota),
+            &none,
+            true,
+        ),
+        ("uncertain effects", uncertain, &none, true),
+        ("processes not exited", unjoined, &none, true),
+        ("waiting for an answer", attention, &none, true),
+        ("no checkpoint", facts(Failure::AccountQuota), &none, false),
+        (
+            "sixteen routes tried",
+            facts(Failure::AccountQuota),
+            &sixteen,
+            true,
+        ),
+        ("transport failure", facts(Failure::Transport), &none, true),
+        (
+            "token limit",
+            facts_with_terminal(Terminal::TokenLimit, Some(Failure::AccountQuota)),
+            &none,
+            true,
+        ),
+    ] {
+        let permitted = failover_permitted(&facts, tried, checkpointed);
+        let chosen = next_route(
+            &current,
+            std::slice::from_ref(&target),
+            tried,
+            &facts,
+            checkpointed,
+        );
+        assert_eq!(permitted, chosen.is_some(), "{label}");
+        assert_eq!(
+            permitted,
+            label.starts_with("settled"),
+            "{label} permitted={permitted}"
+        );
+    }
 }
 
 #[test]

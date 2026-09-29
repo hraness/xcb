@@ -160,9 +160,18 @@ fn generation_pool(root: &Path, account: &Account) -> Result<Option<Id>> {
         .transpose()
 }
 
-fn quotas_from(db: &Connection, pool: &Id) -> Result<Vec<QuotaPoint>> {
-    let mut query =
-        db.prepare("SELECT payload FROM quotas WHERE pool=?1 ORDER BY observed_at LIMIT 2049")?;
+/// Provider-reported meters: the windows usage projections read.
+const QUOTAS: &str = "quotas";
+/// Cooldowns for usage limits without a reported reset, one synthetic
+/// [`xcb_core::usage::limit_window`] per provider. Kept apart from the meters
+/// so no percentage, reset, or runway projection reads a cooldown as
+/// telemetry; only admission consults both.
+const QUOTA_LIMITS: &str = "quota_limits";
+
+fn quota_points_from(db: &Connection, table: &str, pool: &Id) -> Result<Vec<QuotaPoint>> {
+    let mut query = db.prepare(&format!(
+        "SELECT payload FROM {table} WHERE pool=?1 ORDER BY observed_at LIMIT 2049"
+    ))?;
     let rows = query.query_map([pool.as_str()], |row| row.get::<_, String>(0))?;
     let mut points = Vec::new();
     for row in rows {
@@ -177,6 +186,24 @@ fn quotas_from(db: &Connection, pool: &Id) -> Result<Vec<QuotaPoint>> {
         return Err(xcb_core::Error::Limit("quota windows").into());
     }
     Ok(points)
+}
+
+fn quotas_from(db: &Connection, pool: &Id) -> Result<Vec<QuotaPoint>> {
+    quota_points_from(db, QUOTAS, pool)
+}
+
+/// Additive table: a database written by an older xcb has none, and then
+/// carries no cooldowns.
+fn quota_limits_from(db: &Connection, pool: &Id) -> Result<Vec<QuotaPoint>> {
+    let available: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='quota_limits')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !available {
+        return Ok(Vec::new());
+    }
+    quota_points_from(db, QUOTA_LIMITS, pool)
 }
 
 fn current_quota_points_from(
@@ -198,7 +225,8 @@ fn current_quota_points_from(
     if pool != account.quota_pool {
         return Ok(None);
     }
-    let points = quotas_from(db, &pool)?;
+    let mut points = quotas_from(db, &pool)?;
+    points.extend(quota_limits_from(db, &pool)?);
     if account.provider == Provider::Claude
         && generation_pool(root, account)?.as_ref() != Some(&pool)
     {
@@ -234,8 +262,8 @@ pub(crate) struct PendingQuota {
     pub resets_at_ms: u64,
 }
 
-fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
-    if !store_quota(tx, point)? {
+fn insert_quota(tx: &Transaction<'_>, table: &str, point: &QuotaPoint) -> Result<()> {
+    if !store_quota(tx, table, point)? {
         return Err(Error::Conflict("conflicting quota observation"));
     }
     Ok(())
@@ -243,13 +271,14 @@ fn insert_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<()> {
 
 /// Store one quota point unless a different payload already holds the same
 /// (pool, window, instant); returns false for that conflict and writes
-/// nothing. Stored history is never rewritten.
-fn store_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<bool> {
+/// nothing. Stored history is never rewritten. `table` is one of the two
+/// constants above, never caller input.
+fn store_quota(tx: &Transaction<'_>, table: &str, point: &QuotaPoint) -> Result<bool> {
     point.validate()?;
     let json = serde_json::to_string(point)?;
     let prior: Option<String> = tx
         .query_row(
-            "SELECT payload FROM quotas WHERE pool=?1 AND window=?2 AND observed_at=?3",
+            &format!("SELECT payload FROM {table} WHERE pool=?1 AND window=?2 AND observed_at=?3"),
             params![
                 point.pool.as_str(),
                 point.window.as_str(),
@@ -262,7 +291,7 @@ fn store_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<bool> {
         return Ok(false);
     }
     tx.execute(
-        "INSERT OR IGNORE INTO quotas VALUES(?1,?2,?3,?4)",
+        &format!("INSERT OR IGNORE INTO {table} VALUES(?1,?2,?3,?4)"),
         params![
             point.pool.as_str(),
             point.window.as_str(),
@@ -270,7 +299,7 @@ fn store_quota(tx: &Transaction<'_>, point: &QuotaPoint) -> Result<bool> {
             json
         ],
     )?;
-    tx.execute("DELETE FROM quotas WHERE pool=?1 AND window=?2 AND observed_at NOT IN (SELECT observed_at FROM quotas WHERE pool=?1 AND window=?2 ORDER BY observed_at DESC LIMIT 128)", params![point.pool.as_str(), point.window.as_str()])?;
+    tx.execute(&format!("DELETE FROM {table} WHERE pool=?1 AND window=?2 AND observed_at NOT IN (SELECT observed_at FROM {table} WHERE pool=?1 AND window=?2 ORDER BY observed_at DESC LIMIT 128)"), params![point.pool.as_str(), point.window.as_str()])?;
     Ok(true)
 }
 
@@ -748,6 +777,17 @@ impl Store {
             id TEXT NOT NULL,
             payload TEXT NOT NULL,
             PRIMARY KEY(account, id));",
+        )?;
+        // Additive: cooldowns for usage limits the provider refused without
+        // a reset time (see `QUOTA_LIMITS`). Older readers ignore it and
+        // simply do not see the cooldown.
+        connection.execute_batch(
+            "CREATE TABLE IF NOT EXISTS quota_limits(
+            pool TEXT NOT NULL,
+            window TEXT NOT NULL,
+            observed_at INTEGER NOT NULL,
+            payload TEXT NOT NULL,
+            PRIMARY KEY(pool, window, observed_at));",
         )?;
         Ok(Self {
             root,
@@ -2207,7 +2247,7 @@ impl Store {
     pub fn record_quota(&self, point: &QuotaPoint) -> Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        insert_quota(&tx, point)?;
+        insert_quota(&tx, QUOTAS, point)?;
         tx.commit()?;
         Ok(())
     }
@@ -2217,7 +2257,51 @@ impl Store {
     /// pools and their observations are preserved, not relabeled or copied.
     pub(crate) fn record_account_quota(&self, run: &RunRecord, point: &QuotaPoint) -> Result<()> {
         point.validate()?;
-        if point.observed_at_ms < run.created_at_ms {
+        self.record_bound_quota(run, QUOTAS, point.observed_at_ms, |_| Ok(point.clone()))
+    }
+
+    /// Record a usage-limit cooldown for the account the run holds: the
+    /// provider refused a turn for this account's quota and reported no
+    /// reset, so the account stays at a known limit until `until_ms` unless
+    /// a provider-reported window observed later supersedes it (see
+    /// `xcb_core::usage::quota_blocked_until`). The same hold, pool, and
+    /// credential-generation rules apply as to a provider-reported meter.
+    /// Model-scoped limits are not recorded here: admission is per account,
+    /// and a model-specific window never implies account scope.
+    pub(crate) fn record_quota_limit(
+        &self,
+        run: &RunRecord,
+        observed_at_ms: u64,
+        until_ms: u64,
+    ) -> Result<()> {
+        if until_ms <= observed_at_ms {
+            return Err(xcb_core::Error::Invalid("quota cooldown").into());
+        }
+        self.record_bound_quota(run, QUOTA_LIMITS, observed_at_ms, |account| {
+            Ok(QuotaPoint {
+                pool: account.quota_pool.clone(),
+                window: Id::new(xcb_core::usage::limit_window(account.provider))?,
+                used_percent: 100.0,
+                resets_at_ms: until_ms,
+                observed_at_ms,
+            })
+        })
+    }
+
+    /// The cooldowns recorded for a pool, oldest first.
+    pub fn quota_limits(&self, pool: &Id) -> Result<Vec<QuotaPoint>> {
+        let db = self.db()?;
+        quota_limits_from(&db, pool)
+    }
+
+    fn record_bound_quota(
+        &self,
+        run: &RunRecord,
+        table: &str,
+        observed_at_ms: u64,
+        point_for: impl FnOnce(&Account) -> Result<QuotaPoint>,
+    ) -> Result<()> {
+        if observed_at_ms < run.created_at_ms {
             return Err(Error::Conflict(
                 "quota observation predates its account lease",
             ));
@@ -2239,9 +2323,9 @@ impl Store {
         if let Some(pool) = &pool {
             account.quota_pool = pool.clone();
         }
-        let mut point = point.clone();
+        let mut point = point_for(&account)?;
         point.pool = account.quota_pool.clone();
-        insert_quota(&tx, &point)?;
+        insert_quota(&tx, table, &point)?;
         if generation_pool(&self.root, &account)? != pool {
             return Err(Error::Conflict("account credential generation changed"));
         }
@@ -2336,7 +2420,9 @@ impl Store {
                 // account cannot be shown, so it is never attributed to it.
                 // The first payload stored at an instant stays; a different
                 // one at the same instant is dropped.
-                if observation.observed_at_ms < run.created_at_ms || !store_quota(&tx, &point)? {
+                if observation.observed_at_ms < run.created_at_ms
+                    || !store_quota(&tx, QUOTAS, &point)?
+                {
                     dropped += 1;
                 }
             }
@@ -3161,6 +3247,137 @@ mod tests {
             }
             store.settle(&run, State::Idle, 5).unwrap();
         }
+    }
+
+    #[test]
+    fn usage_limit_cooldown_blocks_until_it_ends_and_needs_the_held_account() {
+        let dir = root();
+        let base = xcb_core::canonical(dir.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        for provider in Provider::ALL {
+            let account = store.add_account(provider, "Test", 1, None).unwrap();
+            let run = store.prepare_probe(&account.id, None, 2).unwrap();
+            crate::application_qualification::ensure_generation(&store, &run).unwrap();
+            // A cooldown needs the exact owned live hold, a positive span,
+            // and an instant inside the hold, like a provider-reported meter.
+            assert!(store.record_quota_limit(&run, 1, 1_801).is_err());
+            assert!(store.record_quota_limit(&run, 3, 3).is_err());
+            let foreign = Store::open(store.root()).unwrap();
+            assert!(foreign.record_quota_limit(&run, 3, 1_803).is_err());
+            let mut forged = run.clone();
+            forged.revision += 1;
+            assert!(store.record_quota_limit(&forged, 3, 1_803).is_err());
+            assert_eq!(store.quota_blocked_until(&account.id, 4).unwrap(), None);
+            store.record_quota_limit(&run, 3, 1_803).unwrap();
+            let pool = store.account(&account.id).unwrap().quota_pool;
+            assert_eq!(pool != account.quota_pool, provider == Provider::Claude);
+            // The cooldown is admission state, never a meter: percentage,
+            // reset, and runway projections do not see it.
+            assert!(store.quotas(&pool).unwrap().is_empty());
+            let limits = store.quota_limits(&pool).unwrap();
+            assert_eq!(limits.len(), 1);
+            assert_eq!(
+                limits[0].window.as_str(),
+                xcb_core::usage::limit_window(provider)
+            );
+            assert_eq!(store.remaining_percent(&pool, 4).unwrap(), None);
+            assert_eq!(store.quota_blocked_until(&account.id, 2).unwrap(), None);
+            assert_eq!(
+                store.quota_blocked_until(&account.id, 3).unwrap(),
+                Some(1_803)
+            );
+            assert_eq!(
+                store.quota_blocked_until(&account.id, 1_802).unwrap(),
+                Some(1_803)
+            );
+            assert_eq!(store.quota_blocked_until(&account.id, 1_803).unwrap(), None);
+            assert_eq!(store.quota_spending_pressure(&account.id, 4).unwrap(), None);
+            store.settle(&run, State::Idle, 5).unwrap();
+            assert!(store.record_quota_limit(&run, 6, 1_806).is_err());
+            let view = crate::summary::snapshot(&store, None, &crate::config::Config::default(), 4)
+                .unwrap();
+            let row = view
+                .accounts
+                .iter()
+                .find(|row| row.id == account.id)
+                .unwrap();
+            assert_eq!(row.quota_blocked_until_ms, Some(1_803));
+            assert_eq!(row.remaining_percent, None);
+            assert_eq!(row.resets_at_ms, None);
+        }
+    }
+
+    #[test]
+    fn usage_limit_cooldown_yields_to_later_reported_windows_and_credential_rotation() {
+        let dir = root();
+        let base = xcb_core::canonical(dir.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Codex, "Test", 1, None).unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        store.record_quota_limit(&run, 3, 1_803).unwrap();
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 4).unwrap(),
+            Some(1_803)
+        );
+        // A provider-reported reset observed later wins even when shorter.
+        store
+            .record_account_quota(
+                &run,
+                &quota_point(&account.quota_pool, "codex.primary", 100.0, 5, 500),
+            )
+            .unwrap();
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 6).unwrap(),
+            Some(500)
+        );
+        assert_eq!(store.quota_blocked_until(&account.id, 500).unwrap(), None);
+        // A newer cooldown after that report applies again until a meter
+        // observed later shows capacity.
+        store.record_quota_limit(&run, 600, 2_400).unwrap();
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 601).unwrap(),
+            Some(2_400)
+        );
+        store
+            .record_account_quota(
+                &run,
+                &quota_point(&account.quota_pool, "codex.primary", 20.0, 700, 5_000),
+            )
+            .unwrap();
+        assert_eq!(store.quota_blocked_until(&account.id, 701).unwrap(), None);
+        // An exhausted window with a later reset still combines with a
+        // cooldown recorded after it: the later reset wins.
+        store
+            .record_account_quota(
+                &run,
+                &quota_point(&account.quota_pool, "codex.secondary", 100.0, 800, 9_000),
+            )
+            .unwrap();
+        store.record_quota_limit(&run, 900, 2_700).unwrap();
+        assert_eq!(
+            store.quota_blocked_until(&account.id, 901).unwrap(),
+            Some(9_000)
+        );
+        store.settle(&run, State::Idle, 1_000).unwrap();
+
+        // Claude cooldowns follow the credential generation like meters do.
+        let claude = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let run = store.prepare_probe(&claude.id, None, 2).unwrap();
+        crate::application_qualification::ensure_generation(&store, &run).unwrap();
+        store.record_quota_limit(&run, 3, 1_803).unwrap();
+        let bound = store.account(&claude.id).unwrap().quota_pool;
+        assert_eq!(
+            store.quota_blocked_until(&claude.id, 4).unwrap(),
+            Some(1_803)
+        );
+        store.settle(&run, State::Idle, 4).unwrap();
+        let run = store.prepare_probe(&claude.id, None, 5).unwrap();
+        crate::application_qualification::rotate_generation(&store, &run).unwrap();
+        assert_eq!(store.quota_blocked_until(&claude.id, 6).unwrap(), None);
+        assert_eq!(store.quota_limits(&bound).unwrap().len(), 1);
+        store.settle(&run, State::Idle, 7).unwrap();
     }
 
     #[test]

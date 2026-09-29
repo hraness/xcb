@@ -31,6 +31,26 @@ exhausted, the later reset applies. A newer observation of the same window can
 supersede the old one. Reaching a reset permits another attempt; it does not
 prove that the provider will accept it.
 
+A provider can also refuse a turn for the account's usage limit without saying
+when the limit resets. Every Codex `usageLimitExceeded` and Devin
+resource-exhaustion error arrives this way (the Codex error carries no reset
+or rate-limit snapshot), and a Claude rejection may omit its reset time. Once
+the provider process has exited and xcb has recorded that the turn ended at
+the account's usage limit, xcb records a cooldown for the account while it
+still holds it: the account stays at a known usage limit for
+`quota_limit_cooldown_ms` from `config.json` (default 30 minutes; 1 minute to
+7 days). A limit the provider reports for one model only is recorded with the
+turn but not as an account cooldown, because a model-specific window never
+implies account scope. A reset the provider reports after the cooldown was
+recorded replaces it, whether sooner or later, and a later meter that shows
+capacity clears it; a cooldown recorded after an exhausted window with a later
+reset keeps that later reset. The cooldown is not a meter: it changes no
+percentage, reset, or runway shown for the account. xcb does not start a
+metadata check after the failed turn to learn the real reset, because the
+account is released when the turn settles and a new hold would race other
+terminals; the next turn or `xcb accounts refresh` records the provider's
+meters, which then take over.
+
 Automatic account selection skips these blocked accounts. An explicit blocked
 account choice reports why it cannot start. Saved sessions keep their account
 binding. The runtime checks again while acquiring account
@@ -58,7 +78,8 @@ position follows Cognition’s published
 
 `xcb accounts` and `/accounts` show the known retry estimate.
 `xcb --json accounts` adds `quotaBlockedUntilMs`, the exact Unix timestamp in
-milliseconds, separately from `remainingPercent` and `resetsAtMs`. A null block
+milliseconds, separately from `remainingPercent` and `resetsAtMs`; a cooldown
+appears there as its end time. A null block
 means no enforceable observation in this narrow scope; it does not certify
 that an account is available. Disabled accounts and unsettled runs still have
 their own checks.
@@ -76,9 +97,9 @@ only on requests, so the next routed turn records the meters instead:
 xcb accounts refresh ACCOUNT
 ```
 
-This first slice does not infer account-wide limits from Claude model-specific
-windows, arbitrary Codex quota buckets, or Devin resource-exhaustion errors.
-It does not persist unknown-reset denials or authentication health. Existing
+xcb does not infer account-wide meters from Claude model-specific windows or
+arbitrary Codex quota buckets. A refused turn without a reset records only the
+bounded cooldown above, never a percentage or a provider reset. Existing
 percentage summaries remain telemetry, not proof of model-specific availability.
 
 Official temporary pricing offers are a separate observation class. xcb checks
@@ -99,6 +120,11 @@ bounded deterministic policy; semantic continuation may proceed only after the
 same safety gates and a positive judge result. A settled account/model quota
 failure can choose another admitted Pareto route, excluding routes already
 tried by that task. Unsettled or uncertain effects are never failed over.
+Direct sessions and the terminal keep their transcript across such a switch
+and treat an account without a usage meter, or with a stale reading, as able
+to take the task; [failover.md](failover.md) describes that path, its route
+order (same model, then same provider, then the least recently used account),
+and the notice xcb shows when no account can take the task.
 
 The separation of account health from active work and selection was informed by
 [Underclass's routing and health design](https://github.com/ghuntley/underclass/tree/a0ed73d732e5230657595ab6803c182aea93d792).

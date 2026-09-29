@@ -10,7 +10,7 @@ with xcb.
 Three commands run one task at a time:
 
 - `xcb run` is for people: flags on the command line, a saved direct session,
-  and your configured continuation and failover.
+  and your configured continuation and [failover](failover.md).
 - `xcb --json route` is for programs: one JSON request on stdin, account and
   model chosen per request, exactly one provider turn, no continuation.
 - `xcb --json generate` is for applications: one model response with no tools,
