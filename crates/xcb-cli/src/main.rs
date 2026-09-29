@@ -4461,10 +4461,17 @@ mod tests {
             },
             style,
         );
+        let manager = if cfg!(target_os = "linux") {
+            "systemd"
+        } else {
+            "macOS"
+        };
         assert_eq!(
             legacy,
-            "⚠ Installed, but macOS hasn't loaded it · ● supervisor running\n\
-             Log: off (this service was installed before xcb kept a log)\n"
+            format!(
+                "⚠ Installed, but {manager} hasn't loaded it · ● supervisor running\n\
+                 Log: off (this service was installed before xcb kept a log)\n"
+            )
         );
         let absent = super::service_text(
             &Status {
