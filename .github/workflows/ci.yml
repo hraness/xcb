@@ -421,7 +421,9 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo check --workspace --all-targets --locked
+          # Keep the dependency builds warm while the workspace is still red.
+          cache-on-failure: true
+      - run: cargo check --workspace --all-targets --locked --keep-going
 
   required:
     # The one check branch policy requires. A job may be skipped only because
