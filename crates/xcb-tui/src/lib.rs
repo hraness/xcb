@@ -3317,6 +3317,7 @@ mod habitat_surface_tests {
     use std::sync::mpsc::sync_channel;
     use xcb_core::ui::BacklogRow;
 
+    #[cfg(unix)]
     #[test]
     fn pending_input_is_journaled_before_dispatch_and_failed_journaling_blocks_send() {
         use std::os::unix::fs::PermissionsExt;

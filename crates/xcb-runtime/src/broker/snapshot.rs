@@ -1,24 +1,32 @@
 //! Bounded command snapshots and revision-checked publication. Guest paths
 //! never select a host root; every operation is rooted in Workspace descriptors.
-use super::{Workspace, components, git_snapshot, io};
-use crate::{Error, Result, coordination, digest, private};
+use super::git_snapshot;
+#[cfg(unix)]
+use super::{Workspace, components, io};
+use crate::{Result, digest, private};
+#[cfg(unix)]
+use crate::{Error, coordination};
+#[cfg(unix)]
 use base64::{Engine, engine::general_purpose::STANDARD};
+#[cfg(unix)]
 use rustix::fs::{Dir, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
+#[cfg(unix)]
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     fs::File,
     io::{Read, Write},
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::Path,
-    sync::Arc,
 };
+#[cfg(unix)]
 use xcb_core::{FileIdentity, policy::EffectState};
 
 pub const SNAPSHOT_FILE_LIMIT: usize = 2 * 1024 * 1024;
 pub const SNAPSHOT_BYTE_LIMIT: usize = 64 * 1024 * 1024;
 pub const SNAPSHOT_ENTRY_LIMIT: usize = 8192;
 pub const CHANGE_BYTE_LIMIT: usize = 16 * 1024 * 1024;
+#[cfg(unix)]
 const DEPTH_LIMIT: usize = 64;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -43,6 +51,7 @@ pub struct CommandSnapshot {
     pub document: SnapshotDocument,
     pub excluded: Vec<String>,
     pub git_unavailable: Option<&'static str>,
+    #[cfg_attr(windows, allow(dead_code))]
     originals: BTreeMap<String, (String, bool)>,
     encoded: VerifiedSnapshot,
 }
@@ -71,11 +80,13 @@ impl VerifiedSnapshot {
 }
 /// The snapshot encoding bound shared with the command backend.
 pub const SNAPSHOT_ENCODING_LIMIT: usize = 96 * 1024 * 1024;
+#[cfg(unix)]
 struct RawFile {
     path: String,
     data: Vec<u8>,
     executable: bool,
 }
+#[cfg(unix)]
 #[derive(Default)]
 struct Collected {
     files: Vec<RawFile>,
@@ -136,6 +147,7 @@ pub fn command_excluded(path: &str) -> bool {
             || name.starts_with(".xcb-")
     })
 }
+#[cfg(unix)]
 fn read_binary(parent: &File, name: &std::ffi::OsStr) -> Result<(Vec<u8>, u32)> {
     let mut file = File::from(
         rustix::fs::openat(
@@ -175,6 +187,7 @@ fn read_binary(parent: &File, name: &std::ffi::OsStr) -> Result<(Vec<u8>, u32)> 
 }
 /// Raw bytes are collected here under the coordination lock; base64 and
 /// JSON encoding happen after it is released.
+#[cfg(unix)]
 fn walk(
     directory: &File,
     prefix: &str,
@@ -294,6 +307,7 @@ fn walk(
     }
     Ok(())
 }
+#[cfg(unix)]
 impl Workspace {
     /// Capture only operator-selected text files for an offline context recipe.
     /// This does not add a provider tool or expand the workspace tool inventory.
@@ -644,6 +658,7 @@ impl Workspace {
         }
     }
 }
+#[cfg(unix)]
 fn command_current_at(
     snapshot: &CommandSnapshot,
     path: &str,
@@ -679,5 +694,5 @@ impl CommandSnapshot {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

@@ -4,7 +4,6 @@ use serde_json::json;
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
-    os::unix::fs::OpenOptionsExt,
     sync::mpsc,
     thread,
     time::Duration,
@@ -167,11 +166,11 @@ fn main() -> io::Result<()> {
     if args.next().is_some() {
         return Err(io::Error::other("unexpected fixture argument"));
     }
-    let mut events = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut events = options.open(path)?;
     let mut view = fixture();
     writeln!(
         events,

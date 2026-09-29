@@ -1,11 +1,13 @@
 //! External editing owns only its private scratch directory; callers own terminal restoration.
 use crate::composer::MAX_INPUT;
+#[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::{
     env, fmt,
-    fs::{self, DirBuilder, File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::PathBuf,
     process::Command,
 };
@@ -63,11 +65,12 @@ pub fn edit_with_command(command: &str, text: &str) -> Result<String, EditorErro
     let args = parse_command(command)?;
     let scratch = Scratch::new()?;
     let path = scratch.directory.join("prompt.txt");
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    // On Windows the file inherits the scratch directory's owner-only DACL.
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path)?;
     file.write_all(text.as_bytes())?;
     file.sync_all()?;
     drop(file);
@@ -79,34 +82,20 @@ pub fn edit_with_command(command: &str, text: &str) -> Result<String, EditorErro
     if !status.success() {
         return Err(EditorError::Failed);
     }
-    let directory_metadata = fs::symlink_metadata(&scratch.directory)?;
-    if !directory_metadata.is_dir()
-        || (directory_metadata.dev(), directory_metadata.ino()) != scratch.identity
-    {
+    if !scratch.unchanged() {
         return Err(EditorError::InvalidOutput);
     }
-    let fd = rustix::fs::openat(
-        &scratch.handle,
-        "prompt.txt",
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| EditorError::InvalidOutput)?;
-    let file = File::from(fd);
-    let opened = file.metadata()?;
-    if !valid_output(&opened) {
-        return Err(EditorError::InvalidOutput);
-    }
+    let file = scratch.open_output()?;
+    let opened = xcb_core::FileIdentity::of_file(&file)?;
     let mut bytes = Vec::new();
     (&file).take(MAX_INPUT as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_INPUT
-        || xcb_core::FileIdentity::of(&file.metadata()?) != xcb_core::FileIdentity::of(&opened)
-    {
+    if bytes.len() > MAX_INPUT || xcb_core::FileIdentity::of_file(&file)? != opened {
         return Err(EditorError::InvalidOutput);
     }
     String::from_utf8(bytes).map_err(|_| EditorError::InvalidOutput)
 }
 
+#[cfg(unix)]
 fn valid_output(metadata: &fs::Metadata) -> bool {
     metadata.is_file()
         && metadata.uid() == rustix::process::geteuid().as_raw()
@@ -118,12 +107,32 @@ fn valid_output(metadata: &fs::Metadata) -> bool {
 struct Scratch {
     directory: PathBuf,
     identity: (u64, u64),
+    #[cfg(unix)]
     handle: File,
 }
+#[cfg(unix)]
 impl Scratch {
+    fn unchanged(&self) -> bool {
+        fs::symlink_metadata(&self.directory)
+            .is_ok_and(|meta| meta.is_dir() && (meta.dev(), meta.ino()) == self.identity)
+    }
+    fn open_output(&self) -> Result<File, EditorError> {
+        let fd = rustix::fs::openat(
+            &self.handle,
+            "prompt.txt",
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| EditorError::InvalidOutput)?;
+        let file = File::from(fd);
+        if !valid_output(&file.metadata()?) {
+            return Err(EditorError::InvalidOutput);
+        }
+        Ok(file)
+    }
     fn new() -> io::Result<Self> {
         let directory = env::temp_dir().join(format!("xcb-editor-{}", uuid::Uuid::new_v4()));
-        DirBuilder::new().mode(0o700).create(&directory)?;
+        fs::DirBuilder::new().mode(0o700).create(&directory)?;
         let metadata = fs::symlink_metadata(&directory)?;
         let handle = File::from(rustix::fs::open(
             &directory,
@@ -137,11 +146,38 @@ impl Scratch {
         })
     }
 }
+/// Windows: an owner-only scratch directory; the output must be an owned,
+/// private regular file with one name, never a reparse point.
+#[cfg(windows)]
+impl Scratch {
+    fn unchanged(&self) -> bool {
+        xcb_platform::path_facts(&self.directory).is_ok_and(|facts| {
+            facts.is_private_directory() && (facts.volume, facts.index) == self.identity
+        })
+    }
+    fn open_output(&self) -> Result<File, EditorError> {
+        let file = xcb_platform::no_follow(OpenOptions::new().read(true))
+            .open(self.directory.join("prompt.txt"))
+            .map_err(|_| EditorError::InvalidOutput)?;
+        let facts = xcb_platform::file_facts(&file)?;
+        if !facts.is_private_file() || facts.len > MAX_INPUT as u64 {
+            return Err(EditorError::InvalidOutput);
+        }
+        Ok(file)
+    }
+    fn new() -> io::Result<Self> {
+        let directory = env::temp_dir().join(format!("xcb-editor-{}", uuid::Uuid::new_v4()));
+        xcb_platform::create_private_directory(&directory)?;
+        let facts = xcb_platform::path_facts(&directory)?;
+        Ok(Self {
+            directory,
+            identity: (facts.volume, facts.index),
+        })
+    }
+}
 impl Drop for Scratch {
     fn drop(&mut self) {
-        if fs::symlink_metadata(&self.directory)
-            .is_ok_and(|meta| meta.is_dir() && (meta.dev(), meta.ino()) == self.identity)
-        {
+        if self.unchanged() {
             // Never recursively delete editor-created backups or follow a replacement directory.
             let _ = fs::remove_file(self.directory.join("prompt.txt"));
             let _ = fs::remove_dir(&self.directory);
@@ -213,6 +249,7 @@ mod tests {
         );
         assert!(parse_command("editor 'bad").is_err());
     }
+    #[cfg(unix)]
     #[test]
     fn round_trip_and_failure_keep_original_owned_by_caller() {
         let original = "draft λ\n";
@@ -226,6 +263,7 @@ mod tests {
         ));
         assert_eq!(original, "draft λ\n");
     }
+    #[cfg(unix)]
     #[test]
     fn editor_replacements_are_bounded_regular_utf8_files() {
         assert!(
