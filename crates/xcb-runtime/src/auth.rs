@@ -630,10 +630,9 @@ struct CodexAuthRecovery {
 }
 
 fn directory_identity(path: &Path) -> Result<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
     private::check_directory(path)?;
-    let metadata = std::fs::symlink_metadata(path)?;
-    Ok((metadata.dev(), metadata.ino()))
+    let metadata = crate::os::lstat(path)?;
+    Ok((metadata.dev, metadata.ino))
 }
 
 fn recovery_path(root: &Path, run: &Id) -> std::path::PathBuf {
@@ -814,7 +813,6 @@ pub fn snapshot_codex_auth(
     run: &crate::store::RunRecord,
     profile: &Path,
 ) -> Result<CodexAuthSnapshot> {
-    use std::os::unix::fs::MetadataExt;
     current_codex_run(store, run)?;
     let runs = store.root().join("runs");
     if !profile.starts_with(&runs) || profile == runs {
@@ -833,13 +831,13 @@ pub fn snapshot_codex_auth(
     )?);
     let identity = codex_identity(&bytes)?;
     let revision = crate::digest(&bytes);
-    let metadata = std::fs::symlink_metadata(&profile)?;
+    let metadata = crate::os::lstat(&profile)?;
     let snapshot = CodexAuthSnapshot {
         account: run.account.clone(),
         run: run.id.clone(),
         state_root: store.root().to_owned(),
         profile,
-        directory_identity: (metadata.dev(), metadata.ino()),
+        directory_identity: (metadata.dev, metadata.ino),
         original_revision: Some(revision),
         account_identity: Some(identity.digest),
     };
@@ -873,7 +871,6 @@ pub fn persist_codex_auth(
     snapshot: &CodexAuthSnapshot,
     joined: bool,
 ) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
     if !joined
         || snapshot.run != run.id
         || snapshot.account != run.account
@@ -885,8 +882,8 @@ pub fn persist_codex_auth(
     }
     current_codex_run(store, run)?;
     private::check_directory(&snapshot.profile)?;
-    let metadata = std::fs::symlink_metadata(&snapshot.profile)?;
-    if (metadata.dev(), metadata.ino()) != snapshot.directory_identity {
+    let metadata = crate::os::lstat(&snapshot.profile)?;
+    if (metadata.dev, metadata.ino) != snapshot.directory_identity {
         return Err(Error::Conflict("credential snapshot directory changed"));
     }
     let bytes = Zeroizing::new(private::read(
@@ -928,7 +925,9 @@ pub fn prepare_codex_login(
     pin: &Pin,
     profile: &Path,
 ) -> Result<CodexLoginPlan> {
-    use std::os::unix::{fs::MetadataExt, process::CommandExt};
+    if cfg!(windows) {
+        return Err(Error::providers_unsupported());
+    }
     current_codex_run(store, run)?;
     if pin.provider != Provider::Codex {
         return Err(Error::Conflict("login provider mismatch"));
@@ -978,14 +977,18 @@ pub fn prepare_codex_login(
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true);
-    command.as_std_mut().process_group(0);
-    let metadata = std::fs::symlink_metadata(&profile)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    let metadata = crate::os::lstat(&profile)?;
     let credentials = CodexAuthSnapshot {
         account: run.account.clone(),
         run: run.id.clone(),
         state_root: store.root().to_owned(),
         profile,
-        directory_identity: (metadata.dev(), metadata.ino()),
+        directory_identity: (metadata.dev, metadata.ino),
         original_revision,
         account_identity,
     };

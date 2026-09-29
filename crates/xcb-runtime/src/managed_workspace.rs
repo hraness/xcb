@@ -643,15 +643,13 @@ pub(super) fn backup_before_upgrade(db: &Connection, root: &Path, version: u32) 
     }
     let target = root.join(format!("{BACKUP_PREFIX}{}.sqlite", now_ms()));
     let result: Result<()> = (|| {
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&target)?;
+        crate::os::owner_only(OpenOptions::new().write(true).create_new(true)).open(&target)?;
         db.execute(
             "VACUUM INTO ?1",
             [target.to_str().ok_or(Error::PrivateState)?],
         )?;
+        // On Windows the copy inherits the managed directory's owner-only DACL.
+        #[cfg(unix)]
         fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
         Ok(())
     })();
@@ -670,8 +668,15 @@ pub(super) fn backup_before_upgrade(db: &Connection, root: &Path, version: u32) 
 
 /// A `VACUUM INTO` copy of `bytes` needs twice that free on `dir`'s volume.
 fn room_for_copy(dir: &Path, bytes: u64) -> std::result::Result<(), &'static str> {
-    let stat = rustix::fs::statvfs(dir).map_err(|_| "free space could not be measured")?;
-    if stat.f_bavail.saturating_mul(stat.f_frsize) < bytes.saturating_mul(2) {
+    #[cfg(unix)]
+    let available = {
+        let stat = rustix::fs::statvfs(dir).map_err(|_| "free space could not be measured")?;
+        stat.f_bavail.saturating_mul(stat.f_frsize)
+    };
+    #[cfg(windows)]
+    let available =
+        xcb_platform::available_space(dir).map_err(|_| "free space could not be measured")?;
+    if available < bytes.saturating_mul(2) {
         return Err("free space is below twice the database size");
     }
     Ok(())
@@ -1468,10 +1473,7 @@ impl ManagedStore {
                     "managed state was written by a newer xcb",
                 ));
             }
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
+            crate::os::owner_only(OpenOptions::new().write(true).create_new(true))
                 .open(&target)?;
             connection.execute(
                 "VACUUM INTO ?1",

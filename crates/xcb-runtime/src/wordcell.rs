@@ -11,9 +11,8 @@ use crate::{Error, Result, digest, private, process};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    fs::{self, OpenOptions},
+    fs::OpenOptions,
     io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -101,10 +100,7 @@ impl ExecutablePin {
 fn interpreter(executable: &Path) -> Result<Option<ExecutablePin>> {
     let mut prefix = String::new();
     let mut bytes = Vec::new();
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(executable)?;
+    let file = crate::os::no_follow(OpenOptions::new().read(true), true).open(executable)?;
     if !file.metadata()?.is_file() {
         return Err(unavailable());
     }
@@ -140,15 +136,12 @@ fn interpreter(executable: &Path) -> Result<Option<ExecutablePin>> {
     ExecutablePin::admit(&path).map(Some)
 }
 
-fn vault_metadata(vault: &Path) -> Result<fs::Metadata> {
+fn vault_metadata(vault: &Path) -> Result<crate::os::Stamp> {
     if !vault.is_absolute() || vault.canonicalize()? != vault {
         return Err(unavailable());
     }
-    let metadata = fs::symlink_metadata(vault)?;
-    if !metadata.is_dir()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o022 != 0
-    {
+    let metadata = crate::os::lstat(vault)?;
+    if !metadata.dir || !metadata.owned || !metadata.unshared_write {
         return Err(unavailable());
     }
     Ok(metadata)
@@ -167,15 +160,15 @@ impl WordcellConfig {
             executable,
             interpreter,
             vault,
-            vault_device: metadata.dev(),
-            vault_inode: metadata.ino(),
+            vault_device: metadata.dev,
+            vault_inode: metadata.ino,
         })
     }
 
     pub fn verify(&self) -> Result<()> {
         self.executable.verify()?;
         let metadata = vault_metadata(&self.vault)?;
-        if metadata.dev() != self.vault_device || metadata.ino() != self.vault_inode {
+        if metadata.dev != self.vault_device || metadata.ino != self.vault_inode {
             return Err(unavailable());
         }
         if let Some(interpreter) = &self.interpreter {
@@ -413,7 +406,7 @@ fn save_receipt(path: &Path, receipt: &PromotionReceipt, old: &mut Option<Vec<u8
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
+    use std::{fs, os::unix::fs::PermissionsExt};
 
     fn fixture(script: &str) -> (tempfile::TempDir, WordcellConfig) {
         let root = tempfile::tempdir().unwrap();

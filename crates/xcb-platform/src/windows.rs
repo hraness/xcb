@@ -565,3 +565,27 @@ mod tests {
         assert_eq!(process_exists(pid), Some(false));
     }
 }
+
+/// Bytes available to this user on the volume holding `directory`
+/// (`statvfs` `f_bavail * f_frsize`).
+pub fn available_space(directory: &Path) -> io::Result<u64> {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = directory
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut available = 0u64;
+    if unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(available)
+}

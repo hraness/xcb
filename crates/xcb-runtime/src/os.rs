@@ -153,3 +153,70 @@ pub(crate) fn has_mode(file: &File, mode: u32) -> io::Result<bool> {
         Ok(mode & 0o077 == 0 && xcb_platform::file_facts(file)?.private)
     }
 }
+
+/// The supervisor's stop request: `SIGTERM` on Unix; on Windows, where a
+/// detached supervisor has no console, Ctrl-Break, console close, or system
+/// shutdown delivered to its process group.
+pub(crate) struct Terminate {
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(windows)]
+    brk: tokio::signal::windows::CtrlBreak,
+    #[cfg(windows)]
+    close: tokio::signal::windows::CtrlClose,
+    #[cfg(windows)]
+    shutdown: tokio::signal::windows::CtrlShutdown,
+}
+
+impl Terminate {
+    pub(crate) fn install() -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Ok(Self {
+                terminate: signal(SignalKind::terminate())?,
+            })
+        }
+        #[cfg(windows)]
+        {
+            use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+            Ok(Self {
+                brk: ctrl_break()?,
+                close: ctrl_close()?,
+                shutdown: ctrl_shutdown()?,
+            })
+        }
+    }
+
+    pub(crate) async fn recv(&mut self) -> Option<()> {
+        #[cfg(unix)]
+        {
+            self.terminate.recv().await
+        }
+        #[cfg(windows)]
+        {
+            tokio::select! {
+                value = self.brk.recv() => value,
+                value = self.close.recv() => value,
+                value = self.shutdown.recv() => value,
+            }
+        }
+    }
+}
+
+/// Start `command` outside the caller's terminal session: its own process
+/// group on Unix (`setpgid(0, 0)`), a detached new process group on Windows.
+pub(crate) fn detach(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+    }
+}

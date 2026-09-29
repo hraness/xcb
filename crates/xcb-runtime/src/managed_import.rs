@@ -6,10 +6,10 @@ use std::{
     collections::VecDeque,
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
-    os::unix::fs::MetadataExt,
-    path::Component,
     time::UNIX_EPOCH,
 };
+#[cfg(unix)]
+use std::{os::unix::fs::MetadataExt, path::Component};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 const MAX_ENTRIES: usize = 32_768;
@@ -102,6 +102,9 @@ pub fn discover(
     if !(1..=8760).contains(&hours) || provider == Some(Provider::Devin) {
         return Err(xcb_core::Error::Invalid("session discovery options").into());
     }
+    if cfg!(windows) {
+        return Err(Error::providers_unsupported());
+    }
     let since_ms = now.saturating_sub(u64::from(hours) * 3_600_000);
     let mut report = Discovery {
         version: 1,
@@ -167,6 +170,14 @@ pub fn discover(
     Ok(report)
 }
 
+/// Provider transcripts are read only where providers run: Windows builds
+/// refuse discovery and import before any source is opened.
+#[cfg(windows)]
+fn owned_readable(_metadata: &fs::Metadata, _file: bool) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn owned_readable(metadata: &fs::Metadata, file: bool) -> bool {
     metadata.uid() == rustix::process::getuid().as_raw()
         && metadata.mode() & 0o022 == 0
@@ -250,6 +261,12 @@ fn collect_files(
 
 /// Open every path component relative to the previous directory descriptor.
 /// NOFOLLOW on just the leaf would still follow a replaced parent directory.
+#[cfg(windows)]
+fn open_source(_path: &Path) -> Result<File> {
+    Err(Error::providers_unsupported())
+}
+
+#[cfg(unix)]
 fn open_source(path: &Path) -> Result<File> {
     use rustix::fs::{Mode, OFlags, open, openat};
     if !path.is_absolute() {

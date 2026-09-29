@@ -1,9 +1,13 @@
-use crate::{Error, Result, private};
+#[cfg(unix)]
+use crate::private;
+use crate::{Error, Result};
 use serde_json::{Value, json};
 #[cfg(unix)]
-use std::{io::BufReader as StdReader, os::unix::fs::PermissionsExt};
 use std::{
-    io::{BufRead, Write},
+    io::{BufRead, BufReader as StdReader, Write},
+    os::unix::fs::PermissionsExt,
+};
+use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -165,6 +169,7 @@ impl Drop for DevinBridge {
     }
 }
 
+#[cfg(unix)]
 fn copy_lines(mut from: impl BufRead, mut to: impl Write) -> Result<()> {
     for _ in 0..4096 {
         let Some(bytes) = crate::wire_helpers::frame_sync(
@@ -187,7 +192,7 @@ fn copy_lines(mut from: impl BufRead, mut to: impl Write) -> Result<()> {
 /// process is covered by the provider process-group join before lease release.
 #[cfg(windows)]
 pub async fn broker_stdio(path: &Path, token: &str) -> Result<()> {
-    let _ = (path, token, copy_lines::<&[u8], Vec<u8>>);
+    let _ = (path, token);
     Err(Error::providers_unsupported())
 }
 
