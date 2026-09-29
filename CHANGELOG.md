@@ -14,6 +14,7 @@ version bump pull request by renaming `## Unreleased` to the version.
 
 - The GitHub release step checks each uploaded file once instead of downloading every uploaded file again after each upload, which made a failed GitHub API call likely once releases carried eleven files.
 - An account whose provider refuses a turn for its usage limit without saying when the limit resets (every Codex `usageLimitExceeded` and Devin resource-exhaustion error, and a Claude rejection without a reset time) now stays at a known usage limit for `quota_limit_cooldown_ms` (default 30 minutes, 1 minute to 7 days in `config.json`) instead of reading as ready and being routed to again. Automatic routing, `xcb --json route`, other terminals, and `xcb accounts` (`quotaBlockedUntilMs`) all see the limit; a reset the provider reports later replaces it, even when sooner. Limits on one model only are still not recorded against the whole account.
+- Failover after a usage limit in `xcb run` and the terminal now picks routes with the same rules as automatic routing, so accounts without a usage meter (Devin) or with a reading older than five minutes are targets; it prefers the same model on another account, then the same provider, then other providers, and rotates equal accounts least-recently-used first. It is no longer cut off by the auto-continue time budget, and when no account can take the task it says which accounts are at a limit, signed out, or busy, and the earliest known reset. See `docs/failover.md`.
 
 ## 0.12.0 - 2026-09-29
 

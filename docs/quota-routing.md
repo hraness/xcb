@@ -120,6 +120,11 @@ bounded deterministic policy; semantic continuation may proceed only after the
 same safety gates and a positive judge result. A settled account/model quota
 failure can choose another admitted Pareto route, excluding routes already
 tried by that task. Unsettled or uncertain effects are never failed over.
+Direct sessions and the terminal keep their transcript across such a switch
+and treat an account without a usage meter, or with a stale reading, as able
+to take the task; [failover.md](failover.md) describes that path, its route
+order (same model, then same provider, then the least recently used account),
+and the notice xcb shows when no account can take the task.
 
 The separation of account health from active work and selection was informed by
 [Underclass's routing and health design](https://github.com/ghuntley/underclass/tree/a0ed73d732e5230657595ab6803c182aea93d792).
