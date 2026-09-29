@@ -424,3 +424,12 @@ body > div[data-hraness-marketing-preset] { flex: 1; }
   min-inline-size: max(2.75rem, var(--interactive-target-compact, 2.75rem));
   min-block-size: max(2.75rem, var(--interactive-target-compact, 2.75rem));
 }
+
+@media (forced-colors: active) {
+  .hraness-platform-install__tab[aria-selected="true"] {
+    forced-color-adjust: none;
+    background-color: Highlight;
+    border-color: Highlight;
+    color: HighlightText;
+  }
+}
