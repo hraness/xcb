@@ -10,7 +10,11 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.12.0 - 2026-09-29
+
+xcb now ships for Windows x86_64 and Linux ARM64. On Windows, providers run
+through the Linux build in WSL2; on Linux, a release install can set up
+Claude's sandbox by itself and run as a systemd user service.
 
 - xcb now compiles for Windows x86_64 (`x86_64-pc-windows-msvc`), and CI builds and tests it on Windows Server 2025 on every Rust change as a required check. State lives in `%LOCALAPPDATA%\xcb`, private files and folders get an owner-only access list instead of Unix permission bits, and junctions and symlinks are refused where Unix refuses symlinks. Running or signing in to Claude Code, Codex, or Devin, daemons, and the workspace tools are refused on Windows with a message that points to the Linux build in WSL2.
 - Releases now include a Windows x86_64 build, `xcb-<version>-windows-x86_64.zip`, with a checksum and build provenance like the other archives. It is not code-signed, so SmartScreen may ask before its first run. `irm https://xcb.sh/install.ps1 | iex` installs it to `%LOCALAPPDATA%\Programs\xcb\bin`, and `xcb upgrade` runs the same installer, which moves a running `xcb.exe` aside instead of overwriting it. Providers still need the Linux build in WSL2.
