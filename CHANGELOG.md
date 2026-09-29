@@ -10,7 +10,12 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.13.1 - 2026-09-29
+
+xcb now runs Codex CLI 0.159.0, so Codex accounts take tasks again on
+machines that upgraded Codex, and subscription rotation at usage limits
+covers all three providers.
+
 
 xcb now runs Codex CLI 0.159.0.
 
