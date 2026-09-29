@@ -9,7 +9,7 @@ terminal, or hand it one task at a time from another agent or your own code.
 <!-- hraness:xcb-landing:end -->
 
 **Status:** [Latest release](https://github.com/hraness/xcb/releases/latest)
-for macOS ARM64 and Linux x86_64; other hosts build from source. MIT licensed.
+for macOS ARM64, Linux x86_64 and ARM64, and Windows x86_64; other hosts build from source. MIT licensed.
 
 [Site](https://xcb.sh) · [Docs](https://xcb.sh/docs) ·
 [Getting started](https://xcb.sh/docs/getting-started) ·
@@ -26,7 +26,7 @@ active in the last 24 hours.
 
 ### Install a verified release
 
-On macOS with Apple silicon or Linux x86_64 (glibc 2.34 or newer), one command
+On macOS with Apple silicon or Linux x86_64 or ARM64 (glibc 2.34 or newer), one command
 downloads the latest release for your platform, checks its SHA-256 checksum,
 and installs `~/.local/bin/xcb`:
 
@@ -42,7 +42,7 @@ adds the `bin` folder to your shell profile.
 
 Claude Code, Codex, and Devin run only in the Linux build of xcb: on Windows,
 install it inside [WSL2](https://learn.microsoft.com/windows/wsl/install) with
-the command above. Releases from the next version on also carry a native
+the command above. Releases also carry a native
 Windows x86_64 build that runs everything except the providers (the thread,
 `xcb doctor`, accounts, remote control, and `xcb route`, which refuses provider
 work with those WSL2 steps). Install it from PowerShell:
@@ -151,7 +151,7 @@ example.
 | Provider | Supported builds | Status |
 | --- | --- | --- |
 | Claude | Claude Code 2.1.268 or later within version 2 | Coding workflow passed on macOS ARM64 with the tested account. On Linux, Claude runs after you run xcb's sandbox checks on that machine. |
-| Codex | Codex CLI 0.158.0, 0.157.1, or 0.156.1 on macOS ARM64 | Passes xcb's sandbox and tool checks. A signed-in coding session was last confirmed on an older build. |
+| Codex | Codex CLI 0.158.0, 0.157.1, or 0.156.1 on macOS ARM64 | Coding workflow passed on macOS ARM64 with the tested account and Codex CLI 0.158.0. |
 | Devin | Devin CLI 3000.11.3, 3000.11.1, or 3000.10.31 on macOS ARM64 | Coding workflow passed on macOS ARM64 with the tested account and Devin CLI 3000.11.3. |
 
 xcb checks each provider executable's version, and for Codex and Devin its

@@ -13,6 +13,6 @@ export const supportedBuilds = {
 /** One sentence per provider. Change a status here, and in README.md. */
 export const providerStatus = {
   claude: "Claude's coding workflow passed on macOS ARM64 with the tested account.",
-  codex: "Codex CLI 0.158.0, 0.157.1, and 0.156.1 pass xcb's sandbox and tool checks on macOS ARM64. A signed-in coding session was last confirmed on an older build.",
+  codex: "Codex CLI 0.158.0, 0.157.1, and 0.156.1 pass xcb's sandbox and tool checks on macOS ARM64. A signed-in coding workflow passed on macOS ARM64 with Codex CLI 0.158.0.",
   devin: "Devin's coding workflow passed on macOS ARM64 with the tested account and Devin CLI 3000.11.3.",
 } as const;
