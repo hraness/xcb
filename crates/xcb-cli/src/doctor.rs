@@ -744,6 +744,7 @@ fn receipt_code(receipt: &xcb_runtime::sandbox::ReceiptStatus) -> &'static str {
 }
 
 /// What each sandbox probe proves, for people.
+#[cfg(unix)]
 fn probe_sentence(name: &str) -> &'static str {
     match name {
         "linux-sandbox" => "files outside the task folder stay hidden and the network is off",
