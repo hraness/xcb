@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use xcb_core::{
     Id, Provider,
     models::{Mode, ModelChoice},
+    policy::Failure,
+    ui::AccountRow,
     usage::QuotaSpendingPressure,
 };
 
@@ -79,6 +81,33 @@ pub struct RouteRequest<'a> {
     pub account: Option<&'a Id>,
 }
 
+/// One route a usage-limited turn could move to, in the router's order.
+#[derive(Debug, Clone)]
+pub struct FailoverRoute {
+    pub account: Id,
+    pub model: ModelChoice,
+}
+
+/// What [`failover_routes`] needs to rank replacements for a route that
+/// settled with a usage limit.
+pub struct FailoverRequest<'a> {
+    pub task: &'a str,
+    /// The account and model the limited turn ran on.
+    pub account: &'a Id,
+    pub model: &'a ModelChoice,
+    /// [`Failure::AccountQuota`] excludes every model on `account`;
+    /// [`Failure::ModelQuota`] excludes only `model` there.
+    pub failure: Failure,
+    /// Routes this task already ran, as `<account>/<model key>`.
+    pub tried: &'a BTreeSet<String>,
+    /// Accounts that reported an account-wide limit earlier in this task.
+    pub limited_accounts: &'a BTreeSet<Id>,
+    /// A hard provider constraint, such as an opening "Use Claude" directive.
+    pub required_provider: Option<Provider>,
+    /// An exact model key the task is pinned to.
+    pub required_model: Option<&'a str>,
+}
+
 #[derive(Clone)]
 struct Candidate {
     account: Id,
@@ -86,6 +115,24 @@ struct Candidate {
     profile: ModelProfile,
     utility: i32,
     quota_pressure: Option<QuotaSpendingPressure>,
+    /// When a session last ran on this account (0 when none is recorded), so
+    /// equal-score routes rotate across accounts instead of always picking
+    /// the same one.
+    last_used_ms: u64,
+}
+
+/// Everything the router knows after ranking: the ordered shortlist and the
+/// evidence a reason or a warning is written from.
+struct Ranking {
+    candidates: Vec<Candidate>,
+    classification: task_classifier::Classification,
+    reflex: Option<reflex::Decision>,
+    class: TaskClass,
+    models: Vec<ModelChoice>,
+    catalog: ModelCatalog,
+    connected: Vec<AccountRow>,
+    offers: OfferState,
+    now: u64,
 }
 
 fn effort(model: &ModelChoice) -> String {
@@ -431,19 +478,114 @@ fn eligible_profiles(
         .collect()
 }
 
-pub async fn smart_route(
-    store: &Store,
-    config: &Config,
-    request: RouteRequest<'_>,
-) -> Result<RouteDecision> {
-    let admitted: BTreeSet<_> = Provider::ALL
+fn admitted_providers(store: &Store) -> BTreeSet<Provider> {
+    Provider::ALL
         .into_iter()
         .filter(|provider| {
             Pin::load(store.root(), *provider)
                 .is_ok_and(|pin| runner::provider_admitted(store.root(), &pin))
         })
-        .collect();
+        .collect()
+}
+
+pub async fn smart_route(
+    store: &Store,
+    config: &Config,
+    request: RouteRequest<'_>,
+) -> Result<RouteDecision> {
+    let admitted = admitted_providers(store);
     route_with_admitted(store, config, request, &admitted).await
+}
+
+/// The routes that could replace a usage-limited one, best first: the same
+/// filters and ranking as [`smart_route`] (supported build, signed in, idle,
+/// no known usage limit, quality tier, favorites, usage pace, then
+/// least-recently-used account), with the failed route, every route the
+/// task already tried, and any account that reported an account-wide limit
+/// left out. Over that order, routes are grouped to keep the subscription
+/// rotation close to the work: the same model on another account first
+/// (quality preserved), then the same provider's other models, then other
+/// providers. A pinned provider or model is a hard constraint and never
+/// widens. An empty list means nothing can take the task now; the caller
+/// explains why from the account view.
+pub async fn failover_routes(
+    store: &Store,
+    config: &Config,
+    request: FailoverRequest<'_>,
+) -> Result<Vec<FailoverRoute>> {
+    let admitted = admitted_providers(store);
+    failover_routes_with_admitted(store, config, request, &admitted).await
+}
+
+async fn failover_routes_with_admitted(
+    store: &Store,
+    config: &Config,
+    request: FailoverRequest<'_>,
+    admitted: &BTreeSet<Provider>,
+) -> Result<Vec<FailoverRoute>> {
+    let FailoverRequest {
+        task,
+        account,
+        model,
+        failure,
+        tried,
+        limited_accounts,
+        required_provider,
+        required_model,
+    } = request;
+    if required_provider.is_some_and(|provider| provider != model.provider) {
+        return Ok(vec![]);
+    }
+    // The kernel records tried routes as `<account>/<model key>`; the router
+    // excludes `<model key> · <account>`. Account ids never contain `/`.
+    let mut excluded_routes: BTreeSet<String> = tried
+        .iter()
+        .filter_map(|key| key.split_once('/'))
+        .map(|(account, model)| format!("{model} · {account}"))
+        .collect();
+    excluded_routes.insert(format!("{} · {}", model.key(), account));
+    let mut excluded_accounts = limited_accounts.clone();
+    if failure == Failure::AccountQuota {
+        excluded_accounts.insert(account.clone());
+    }
+    let ranking = match rank_with_admitted(
+        store,
+        config,
+        RouteRequest {
+            task,
+            required_provider,
+            preferred_provider: None,
+            required_model,
+            excluded_routes: &excluded_routes,
+            excluded_accounts: &excluded_accounts,
+            account: None,
+        },
+        admitted,
+    )
+    .await
+    {
+        Ok(ranking) => ranking,
+        Err(Error::Unavailable(_)) => return Ok(vec![]),
+        Err(error) => return Err(error),
+    };
+    let mut routes: Vec<_> = ranking
+        .candidates
+        .into_iter()
+        .map(|candidate| FailoverRoute {
+            account: candidate.account,
+            model: candidate.model,
+        })
+        .collect();
+    // Stable: within each group the router's order (utility, Pareto layer,
+    // least recently used account) is kept.
+    let current_key = model.key();
+    routes.sort_by_key(|route| {
+        (
+            route.model.provider != model.provider,
+            route.model.key() != current_key,
+        )
+    });
+    Ok(routes)
 }
 
 async fn route_with_admitted(
@@ -452,6 +594,88 @@ async fn route_with_admitted(
     request: RouteRequest<'_>,
     admitted: &BTreeSet<Provider>,
 ) -> Result<RouteDecision> {
+    let required_model = request.required_model;
+    let excluded_routes = request.excluded_routes;
+    let excluded_accounts = request.excluded_accounts;
+    let Ranking {
+        mut candidates,
+        classification,
+        reflex,
+        class,
+        models,
+        catalog,
+        connected,
+        offers,
+        now,
+    } = rank_with_admitted(store, config, request, admitted).await?;
+    let candidate = candidates.remove(0);
+    let warning = quota_degradation_warning(
+        &models,
+        &catalog,
+        &connected,
+        &offers,
+        now,
+        &candidate,
+        classification.frontier,
+        required_model,
+        excluded_routes,
+        excluded_accounts,
+    );
+    // A person reads this. Raw classifier scores and reflex generations stay
+    // in the `reflex` decision, which callers record as an observation.
+    let quota_reason = match &candidate.quota_pressure {
+        Some(pressure) => format!(
+            " · subscription budget {:.1}% in {} · resets in {}m · pace {:.2} points/h",
+            pressure.remaining_percent,
+            pressure.window,
+            pressure.resets_at_ms.saturating_sub(now).div_ceil(60_000),
+            pressure.percent_per_hour,
+        ),
+        None => " · quota timing unmeasured".into(),
+    };
+    let reason = format!(
+        "{}{} · {} tier · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}{}",
+        warning.unwrap_or_default(),
+        classification.reason(),
+        if classification.frontier {
+            "frontier"
+        } else {
+            "standard"
+        },
+        match class {
+            TaskClass::Routine => "routine",
+            TaskClass::Balanced => "balanced",
+            TaskClass::Complex => "complex",
+        },
+        candidate.profile.pareto_layer,
+        candidate.profile.quality,
+        candidate.profile.relative_cost,
+        candidate.profile.relative_latency,
+        quota_reason,
+        candidate
+            .profile
+            .free_offer
+            .as_ref()
+            .map(|_| " · public promotion, not confirmed for this account")
+            .unwrap_or(""),
+    );
+    Ok(RouteDecision {
+        account: candidate.account,
+        model: candidate.model,
+        profile: candidate.profile,
+        reason,
+        reflex,
+    })
+}
+
+/// Ranks every eligible route for the request. The result is never empty:
+/// an empty shortlist is the `Unavailable` error whose reason names why.
+async fn rank_with_admitted(
+    store: &Store,
+    config: &Config,
+    request: RouteRequest<'_>,
+    admitted: &BTreeSet<Provider>,
+) -> Result<Ranking> {
     let RouteRequest {
         task,
         required_provider,
@@ -471,7 +695,7 @@ async fn route_with_admitted(
     // A connected account is admitted, enabled, credentialed and not waiting
     // for reconnection. Without one, no wait or quota reset can help: the
     // user must add or reconnect an account, and the supervisor says so.
-    let connected: Vec<_> = view
+    let connected: Vec<AccountRow> = view
         .accounts
         .iter()
         .filter(|account| {
@@ -482,10 +706,17 @@ async fn route_with_admitted(
                 && account_hint.is_none_or(|hint| hint == &account.id)
                 && auth::has_credentials(store, &account.id).unwrap_or(false)
         })
+        .cloned()
         .collect();
+    // The sessions view is ordered by recent activity, so the newest session
+    // per account is the account's last use; an absent account ranks first.
+    let mut last_used: BTreeMap<Id, u64> = BTreeMap::new();
+    for session in &view.sessions {
+        let entry = last_used.entry(session.account.clone()).or_default();
+        *entry = (*entry).max(session.last_active_at_ms);
+    }
     let accounts: Vec<_> = connected
         .iter()
-        .copied()
         .filter(|account| {
             !account.busy
                 && account.quota_blocked_until_ms.is_none()
@@ -573,17 +804,24 @@ async fn route_with_admitted(
                 profile: profile.clone(),
                 utility: score,
                 quota_pressure: quota_pressure.get(&account.id).cloned().flatten(),
+                last_used_ms: last_used.get(&account.id).copied().unwrap_or(0),
             });
         }
     }
     // An expensive/favored route or an external judgment cannot displace the
     // strongest known eligible quality tier when the task demands frontier.
     retain_quality_tier(&mut candidates, classification.frontier);
+    // Score, then Pareto layer, decide; among routes they leave tied the
+    // account that ran a session longest ago goes first, so subscriptions
+    // rotate instead of the lowest id always winning. Quality tiers,
+    // favorites, pins and usage pace are all inside the score and are never
+    // overridden by recency.
     candidates.sort_by(|left, right| {
         right
             .utility
             .cmp(&left.utility)
             .then_with(|| left.profile.pareto_layer.cmp(&right.profile.pareto_layer))
+            .then_with(|| left.last_used_ms.cmp(&right.last_used_ms))
             .then_with(|| left.model.key().cmp(&right.model.key()))
             .then_with(|| left.account.cmp(&right.account))
     });
@@ -604,63 +842,16 @@ async fn route_with_admitted(
     if candidates.is_empty() {
         return Err(Error::Unavailable(unavailable_reason()));
     }
-    let candidate = candidates.remove(0);
-    let warning = quota_degradation_warning(
-        &models,
-        &catalog,
-        &connected,
-        &offers,
-        now,
-        &candidate,
-        classification.frontier,
-        required_model,
-        excluded_routes,
-        excluded_accounts,
-    );
-    // A person reads this. Raw classifier scores and reflex generations stay
-    // in the `reflex` decision, which callers record as an observation.
-    let quota_reason = match &candidate.quota_pressure {
-        Some(pressure) => format!(
-            " · subscription budget {:.1}% in {} · resets in {}m · pace {:.2} points/h",
-            pressure.remaining_percent,
-            pressure.window,
-            pressure.resets_at_ms.saturating_sub(now).div_ceil(60_000),
-            pressure.percent_per_hour,
-        ),
-        None => " · quota timing unmeasured".into(),
-    };
-    let reason = format!(
-        "{}{} · {} tier · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}{}",
-        warning.unwrap_or_default(),
-        classification.reason(),
-        if classification.frontier {
-            "frontier"
-        } else {
-            "standard"
-        },
-        match class {
-            TaskClass::Routine => "routine",
-            TaskClass::Balanced => "balanced",
-            TaskClass::Complex => "complex",
-        },
-        candidate.profile.pareto_layer,
-        candidate.profile.quality,
-        candidate.profile.relative_cost,
-        candidate.profile.relative_latency,
-        quota_reason,
-        candidate
-            .profile
-            .free_offer
-            .as_ref()
-            .map(|_| " · public promotion, not confirmed for this account")
-            .unwrap_or(""),
-    );
-    Ok(RouteDecision {
-        account: candidate.account,
-        model: candidate.model,
-        profile: candidate.profile,
-        reason,
+    Ok(Ranking {
+        candidates,
+        classification,
         reflex,
+        class,
+        models,
+        catalog,
+        connected,
+        offers,
+        now,
     })
 }
 
@@ -724,7 +915,7 @@ fn retain_quality_tier(candidates: &mut Vec<Candidate>, frontier: bool) {
 fn unavailable_route_reason(
     models: &[ModelChoice],
     catalog: &ModelCatalog,
-    connected: &[&xcb_core::ui::AccountRow],
+    connected: &[AccountRow],
     now: u64,
     required_model: Option<&str>,
     excluded_routes: &BTreeSet<String>,
@@ -753,7 +944,7 @@ fn unavailable_route_reason(
 fn quota_blocks_model(
     model: &ModelChoice,
     catalog: &ModelCatalog,
-    connected: &[&xcb_core::ui::AccountRow],
+    connected: &[AccountRow],
     now: u64,
     excluded_routes: &BTreeSet<String>,
     excluded_accounts: &BTreeSet<Id>,
@@ -775,7 +966,7 @@ fn quota_blocks_model(
 fn quota_degradation_warning(
     models: &[ModelChoice],
     catalog: &ModelCatalog,
-    connected: &[&xcb_core::ui::AccountRow],
+    connected: &[AccountRow],
     offers: &OfferState,
     now: u64,
     selected: &Candidate,
@@ -1223,6 +1414,264 @@ mod tests {
         assert!(!unauthenticated.reason.contains("Warning"));
     }
 
+    /// Three equal accounts of one provider take turns: each pick is the one
+    /// whose last session is oldest, so the fourth pick wraps to the first.
+    #[tokio::test]
+    async fn equal_routes_rotate_to_the_least_recently_used_account() {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let work = crate::private::directory(&base.join("work")).unwrap();
+        let accounts: BTreeSet<_> = (0..3).map(|_| account(&store, Provider::Claude)).collect();
+        let sonnet = model(Provider::Claude, "claude-sonnet-5", None, None);
+        store
+            .set_models(Provider::Claude, std::slice::from_ref(&sonnet))
+            .unwrap();
+        let mut config = Config::default();
+        config.extensions.judge.enabled = false;
+        let none = BTreeSet::new();
+        let no_accounts = BTreeSet::new();
+        let request = || RouteRequest {
+            task: "fix a test",
+            required_provider: None,
+            preferred_provider: None,
+            required_model: None,
+            excluded_routes: &none,
+            excluded_accounts: &no_accounts,
+            account: None,
+        };
+        let admitted = [Provider::Claude].into();
+        let base_ms = now_ms();
+        let mut picks = Vec::new();
+        for turn in 0..4u64 {
+            let decision = route_with_admitted(&store, &config, request(), &admitted)
+                .await
+                .unwrap();
+            assert_eq!(decision.model.key(), sonnet.key());
+            // Starting a session on the chosen account records its use.
+            store
+                .create_session(
+                    &decision.account,
+                    sonnet.clone(),
+                    &work,
+                    base_ms + turn * 1_000,
+                )
+                .unwrap();
+            picks.push(decision.account);
+        }
+        let first_three: BTreeSet<_> = picks[..3].iter().cloned().collect();
+        assert_eq!(first_three, accounts, "{picks:?}");
+        assert_eq!(picks[3], picks[0], "the rotation wraps: {picks:?}");
+    }
+
+    /// Failover keeps the subscription rotation close to the work: the same
+    /// model on another account, then the same provider's other models, then
+    /// other providers. The failed route, tried routes and an account-wide
+    /// limit are left out; a model-specific limit keeps the failed account's
+    /// other models.
+    #[tokio::test]
+    async fn failover_prefers_same_model_then_same_provider_then_other_providers() {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
+        let first = account(&store, Provider::Claude);
+        let second = account(&store, Provider::Claude);
+        let codex = account(&store, Provider::Codex);
+        let opus = model(Provider::Claude, "claude-opus-5", None, None);
+        let sonnet = model(Provider::Claude, "claude-sonnet-5", None, None);
+        let sol = model(Provider::Codex, "gpt-5.6-sol", None, None);
+        store
+            .set_models(Provider::Claude, &[opus.clone(), sonnet.clone()])
+            .unwrap();
+        store
+            .set_models(Provider::Codex, std::slice::from_ref(&sol))
+            .unwrap();
+        let mut config = Config::default();
+        config.extensions.judge.enabled = false;
+        let none = BTreeSet::new();
+        let no_accounts = BTreeSet::new();
+        let admitted = [Provider::Claude, Provider::Codex].into();
+        let request = |failure, tried, required_provider| FailoverRequest {
+            task: "fix a test",
+            account: &first,
+            model: &opus,
+            failure,
+            tried,
+            limited_accounts: &no_accounts,
+            required_provider,
+            required_model: None,
+        };
+        let keys = |routes: &[FailoverRoute]| -> Vec<String> {
+            routes
+                .iter()
+                .map(|route| format!("{}/{}", route.account, route.model.key()))
+                .collect()
+        };
+        let account_limit = failover_routes_with_admitted(
+            &store,
+            &config,
+            request(Failure::AccountQuota, &none, None),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            keys(&account_limit),
+            [
+                format!("{second}/{}", opus.key()),
+                format!("{second}/{}", sonnet.key()),
+                format!("{codex}/{}", sol.key()),
+            ]
+        );
+        let model_limit = failover_routes_with_admitted(
+            &store,
+            &config,
+            request(Failure::ModelQuota, &none, None),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        let listed = keys(&model_limit);
+        assert_eq!(listed[0], format!("{second}/{}", opus.key()));
+        assert_eq!(listed.len(), 4, "{listed:?}");
+        assert!(listed[1..3].contains(&format!("{first}/{}", sonnet.key())));
+        assert!(listed[1..3].contains(&format!("{second}/{}", sonnet.key())));
+        assert_eq!(listed[3], format!("{codex}/{}", sol.key()));
+        assert!(!listed.contains(&format!("{first}/{}", opus.key())));
+        // A route this task already ran is never offered again.
+        let tried = BTreeSet::from([format!("{second}/{}", opus.key())]);
+        let after_tried = failover_routes_with_admitted(
+            &store,
+            &config,
+            request(Failure::AccountQuota, &tried, None),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            keys(&after_tried),
+            [
+                format!("{second}/{}", sonnet.key()),
+                format!("{codex}/{}", sol.key()),
+            ]
+        );
+        // A pinned provider is a hard constraint: it never widens.
+        let pinned = failover_routes_with_admitted(
+            &store,
+            &config,
+            request(Failure::AccountQuota, &none, Some(Provider::Claude)),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert!(
+            pinned
+                .iter()
+                .all(|route| route.model.provider == Provider::Claude),
+            "{:?}",
+            keys(&pinned)
+        );
+        let tried_all: BTreeSet<_> = [&opus, &sonnet]
+            .into_iter()
+            .map(|choice| format!("{second}/{}", choice.key()))
+            .collect();
+        let exhausted = failover_routes_with_admitted(
+            &store,
+            &config,
+            request(Failure::AccountQuota, &tried_all, Some(Provider::Claude)),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert!(exhausted.is_empty(), "{:?}", keys(&exhausted));
+        let mismatched = failover_routes_with_admitted(
+            &store,
+            &config,
+            request(Failure::AccountQuota, &none, Some(Provider::Codex)),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert!(mismatched.is_empty(), "{:?}", keys(&mismatched));
+    }
+
+    /// An account without a usage meter (Devin) or whose last reading aged
+    /// out is a failover target; a fresh reading at 100% is not, and an
+    /// account that reported an account-wide limit earlier in the task stays
+    /// out even on another model.
+    #[tokio::test]
+    async fn failover_targets_unmeasured_accounts_and_skips_known_limits() {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
+        let limited = account(&store, Provider::Claude);
+        let stale = account(&store, Provider::Claude);
+        let exhausted = account(&store, Provider::Claude);
+        let devin = account(&store, Provider::Devin);
+        let sonnet = model(Provider::Claude, "claude-sonnet-5", None, None);
+        let swe = model(Provider::Devin, "swe-2-high", None, None);
+        store
+            .set_models(Provider::Claude, std::slice::from_ref(&sonnet))
+            .unwrap();
+        store
+            .set_models(Provider::Devin, std::slice::from_ref(&swe))
+            .unwrap();
+        let now = now_ms();
+        let quota = |account: &Id, used_percent, observed_at_ms| xcb_core::usage::QuotaPoint {
+            pool: store.account(account).unwrap().quota_pool,
+            window: Id::new("seven_day").unwrap(),
+            used_percent,
+            observed_at_ms,
+            resets_at_ms: now + 3_600_000,
+        };
+        // Half used, read ten minutes ago: no percentage is fresh enough to
+        // count, and nothing says the account is limited.
+        store
+            .record_quota(&quota(&stale, 50.0, now - 600_000))
+            .unwrap();
+        store
+            .record_quota(&quota(&exhausted, 100.0, now - 1))
+            .unwrap();
+        let mut config = Config::default();
+        config.extensions.judge.enabled = false;
+        let none = BTreeSet::new();
+        let no_accounts = BTreeSet::new();
+        let admitted = [Provider::Claude, Provider::Devin].into();
+        let request = |limited_accounts| FailoverRequest {
+            task: "fix a test",
+            account: &limited,
+            model: &sonnet,
+            failure: Failure::AccountQuota,
+            tried: &none,
+            limited_accounts,
+            required_provider: None,
+            required_model: None,
+        };
+        let routes =
+            failover_routes_with_admitted(&store, &config, request(&no_accounts), &admitted)
+                .await
+                .unwrap();
+        let listed: Vec<_> = routes
+            .iter()
+            .map(|route| format!("{}/{}", route.account, route.model.key()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                format!("{stale}/{}", sonnet.key()),
+                format!("{devin}/{}", swe.key()),
+            ]
+        );
+        let seen_limited = BTreeSet::from([stale.clone()]);
+        let routes =
+            failover_routes_with_admitted(&store, &config, request(&seen_limited), &admitted)
+                .await
+                .unwrap();
+        assert_eq!(routes.len(), 1, "{routes:?}");
+        assert_eq!(routes[0].account, devin);
+    }
+
     #[test]
     fn unknown_model_labels_cannot_displace_the_known_quality_tier() {
         let build = |id, utility| {
@@ -1233,6 +1682,7 @@ mod tests {
                 account: Id::new("account").unwrap(),
                 utility,
                 quota_pressure: None,
+                last_used_ms: 0,
             }
         };
         let mut candidates = vec![build("future-model", 10000), build("claude-haiku", -100)];
