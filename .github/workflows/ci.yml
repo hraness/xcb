@@ -10,9 +10,12 @@ on:
 permissions:
   contents: read
 
+# Pull requests cancel their own superseded runs. Pushes to main group by
+# commit, so a later merge never cancels an earlier main run (each main commit
+# is validated against its own parent).
 concurrency:
-  group: check-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: check-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_INCREMENTAL: "0"
@@ -25,8 +28,10 @@ env:
 
 jobs:
   changes:
-    # Pull requests skip the jobs whose inputs did not change. Pushes to main
-    # and manual dispatches run everything so the main caches stay warm.
+    # Pull requests and pushes to main skip the jobs whose inputs did not
+    # change (a push is compared with the commit it replaced on main). Manual
+    # dispatches run everything. The Rust caches key on Cargo.lock, the
+    # toolchain, and the profile, so a docs-only main push has nothing to warm.
     name: Detect changed paths
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -34,17 +39,29 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      code: ${{ github.event_name != 'pull_request' && 'true' || steps.code.outputs.code }}
-      site: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.site }}
-      qualification: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.qualification }}
+      code: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.code.outputs.code }}
+      site: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.surfaces.outputs.site }}
+      qualification: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.surfaces.outputs.qualification }}
+      # Every push to main still builds ARM64 and Windows, so ordinary Rust
+      # changes are compiled for those targets before a release tag.
       native_arm: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.native_arm }}
       rust: ${{ github.event_name != 'pull_request' && 'true' || steps.surfaces.outputs.rust }}
     steps:
+      # Pull requests read the changed files from the API; a push diffs the
+      # pushed commit against github.event.before with git, so it needs the
+      # repository (trees only; the filter fetches the base if it is missing).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'push'
+        with:
+          fetch-depth: 2
+          filter: blob:none
+          persist-credentials: false
       - name: Code changes (everything except the site, docs, and markdown)
         id: code
-        if: github.event_name == 'pull_request'
+        if: github.event_name != 'workflow_dispatch'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
           predicate-quantifier: every
           filters: |
             code:
@@ -54,15 +71,24 @@ jobs:
               - '!**/*.md'
       - name: Site and qualification changes
         id: surfaces
-        if: github.event_name == 'pull_request'
+        if: github.event_name != 'workflow_dispatch'
         uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         with:
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
+          # The site checks (and the Vercel build, site/vercel.json) also read
+          # these repository files; keep both lists in step.
           filters: |
             site:
               - 'site/**'
               - 'src/**'
               - 'README.md'
+              - 'package.json'
+              - 'qualified-builds.json'
               - 'scripts/install.sh'
+              - 'docs/sdk.md'
+              - 'crates/xcb-runtime/src/claude.rs'
+              - 'crates/xcb-runtime/src/codex/config.rs'
+              - 'crates/xcb-runtime/src/devin/config.rs'
               - '.github/workflows/ci.yml'
             qualification:
               - 'qualification/**'
@@ -113,13 +139,18 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: cargo-nextest@0.9.146
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: ${{ env.BUN_VERSION }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Pull requests only restore caches; main saves them (after install).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: bun-cache
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -128,6 +159,11 @@ jobs:
         if: runner.os == 'Linux'
       # Native broker tests drive actual Bun and Node lock owners on PATH.
       - run: bun install --frozen-lockfile --ignore-scripts
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ steps.bun-cache.outputs.cache-primary-key }}
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         if: runner.os == 'Linux'
         with:
@@ -146,9 +182,12 @@ jobs:
       - name: Linux sandbox admission fixture
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap
-      - run: cargo test --workspace --locked
+      # nextest runs the test binaries in parallel (cargo test ran them one
+      # after another). The workspace has no doctests, which nextest skips.
+      - run: cargo nextest run --workspace --locked --profile ci
       # The runner has no login session; lingering starts its systemd user
-      # manager. Reuses the xcb binary the tests above built.
+      # manager. Reuses the xcb binary the nextest build above produced
+      # (integration tests build the bin into target/debug).
       - name: systemd user service round trip
         if: runner.os == 'Linux'
         run: |
@@ -173,12 +212,19 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Pull requests only restore caches; main saves them (after install).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: bun-cache
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-${{ runner.os }}-
       - run: bun install --frozen-lockfile --ignore-scripts
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ steps.bun-cache.outputs.cache-primary-key }}
       - run: bun run check
 
   compat-macos:
@@ -197,17 +243,27 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Pull requests only restore caches; main saves them (after install).
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: bun-cache
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
           restore-keys: bun-${{ runner.os }}-
       - run: bun install --frozen-lockfile --ignore-scripts
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ steps.bun-cache.outputs.cache-primary-key }}
       - run: bun run test
 
   native-build:
     # The same runners as the release build, so every change proves the
-    # release binaries build and the Linux one stays within the glibc floor.
+    # native binary builds, runs, and the Linux one stays within the glibc
+    # floor. It builds the `ci` profile (release without LTO) on pull requests
+    # and main alike, so main saves the cache pull requests restore; the LTO
+    # `release` build runs cold on every tag in release.yml.
     name: Native build (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -219,10 +275,12 @@ jobs:
         include:
           # rust-cache keys by OS family, not image: without its own key the
           # 22.04 leg would restore objects compiled against glibc 2.39.
+          # The -ci suffix keeps the ci-profile objects apart from the older
+          # release-profile caches.
           - os: ubuntu-22.04
-            cache-key: glibc-2.35
+            cache-key: glibc-2.35-ci
           - os: macos-15
-            cache-key: ""
+            cache-key: ci
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable 2026-09-03
@@ -233,11 +291,13 @@ jobs:
           key: ${{ matrix.cache-key }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: ./scripts/build-native.sh
+        env:
+          XCB_CARGO_PROFILE: ci
       - name: Enforce the Linux glibc floor
         if: runner.os == 'Linux'
         run: python3 -I scripts/check-glibc-floor.py artifacts/*.tar.gz
       - name: Isolated inbox operator acceptance
-        run: python3 -I qualification/inbox-acceptance.py target/release/xcb --evidence-dir "$RUNNER_TEMP"
+        run: python3 -I qualification/inbox-acceptance.py target/ci/xcb --evidence-dir "$RUNNER_TEMP"
       - name: Preserve inbox acceptance evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -246,7 +306,7 @@ jobs:
           path: ${{ runner.temp }}/xcb-inbox-acceptance-*/
           if-no-files-found: ignore
           retention-days: 14
-      - run: cp target/release/xcb "xcb-${{ matrix.os }}"
+      - run: cp target/ci/xcb "xcb-${{ matrix.os }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: xcb-${{ matrix.os }}
@@ -302,28 +362,55 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # Pull requests only restore caches; main saves them.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: bun-cache
         with:
           path: ~/.bun/install/cache
           key: bun-site-${{ runner.os }}-${{ hashFiles('site/bun.lock') }}
           restore-keys: bun-site-${{ runner.os }}-
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: next-cache
         with:
           path: site/.next/cache
           key: nextjs-${{ runner.os }}-${{ hashFiles('site/bun.lock') }}-${{ hashFiles('site/**/*.ts', 'site/**/*.tsx', 'site/**/*.css') }}
           restore-keys: nextjs-${{ runner.os }}-${{ hashFiles('site/bun.lock') }}-
       - run: bun install --frozen-lockfile --ignore-scripts
         working-directory: site
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ steps.bun-cache.outputs.cache-primary-key }}
       - run: bun run check
         working-directory: site
-      - name: Cache Chromium
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.next-cache.outputs.cache-hit != 'true'
+        with:
+          path: site/.next/cache
+          key: ${{ steps.next-cache.outputs.cache-primary-key }}
+      - name: Restore Chromium headless shell
+        id: chromium-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
-          key: site-chromium-${{ runner.os }}-1.58.2
-      - name: Install Chromium
+          key: site-chromium-headless-shell-${{ runner.os }}-1.58.2
+      # verify-site-browser.mjs launches headless, which only needs the
+      # headless shell. The runner image already carries its system libraries;
+      # install them only if the shell cannot start.
+      - name: Install Chromium headless shell
         working-directory: site
-        run: node node_modules/playwright-core/cli.js install --with-deps chromium
+        run: |
+          node node_modules/playwright-core/cli.js install --only-shell chromium
+          if ! node -e "require('playwright-core').chromium.launch().then((browser) => browser.close())"; then
+            echo "::warning::Chromium headless shell could not start; installing its system dependencies"
+            node node_modules/playwright-core/cli.js install-deps chromium
+          fi
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.ref == 'refs/heads/main' && steps.chromium-cache.outputs.cache-hit != 'true'
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.chromium-cache.outputs.cache-primary-key }}
       - name: Check public pages in a browser
         working-directory: site
         env:

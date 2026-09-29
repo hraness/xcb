@@ -319,6 +319,7 @@ jobs:
       - exact_artifact
       - native_artifact
     permissions:
+      actions: read
       contents: write
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -344,20 +345,42 @@ jobs:
           artifact-ids: ${{ needs.verify.outputs.github_writer_artifact_id }}
           merge-multiple: true
           path: github-release-writer
-      - name: Download the exact Linux native assets by run-bound name
+      # Re-running failed jobs gives them a new run_attempt while the native
+      # assets keep the attempt that built them, so resolve each platform's
+      # newest upload in this run to its numeric artifact ID instead of
+      # rebuilding the name from github.run_attempt.
+      - name: Resolve the exact native assets to numeric artifact IDs
+        id: native_ids
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100")"
+          if [[ "$(jq -r '.total_count' <<<"$listing")" -gt 100 ]]; then
+            echo "::error::This run has more artifacts than one listing page"
+            exit 1
+          fi
+          ids=()
+          for platform in linux-x86_64 linux-aarch64 darwin-aarch64; do
+            id="$(jq -r --arg platform "$platform" '[.artifacts[] | select(.expired == false and (.name | test("^xcb-native-" + $platform + "-[1-9][0-9]*$")))] | max_by(.id) | .id // empty' <<<"$listing")"
+            if [[ ! "$id" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::No native $platform asset artifact exists in this run"
+              exit 1
+            fi
+            echo "xcb-native-$platform: artifact $id"
+            ids+=("$id")
+          done
+          if [[ "${#ids[@]}" -ne 3 ]]; then
+            echo "::error::Expected 3 native asset artifacts, found ${#ids[@]}"
+            exit 1
+          fi
+          (IFS=,; echo "ids=${ids[*]}") >> "$GITHUB_OUTPUT"
+      - name: Download the exact native assets by numeric artifact ID
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: xcb-native-linux-x86_64-${{ github.run_attempt }}
-          path: native-artifacts
-      - name: Download the exact Linux ARM64 native assets by run-bound name
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: xcb-native-linux-aarch64-${{ github.run_attempt }}
-          path: native-artifacts
-      - name: Download the exact macOS native assets by run-bound name
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: xcb-native-darwin-aarch64-${{ github.run_attempt }}
+          artifact-ids: ${{ steps.native_ids.outputs.ids }}
+          merge-multiple: true
           path: native-artifacts
       - name: Re-verify the downloaded native asset checksums
         run: |
@@ -395,6 +418,7 @@ jobs:
       - verify
       - publish_github
     permissions:
+      actions: read
       contents: read
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -430,20 +454,42 @@ jobs:
           artifact-ids: ${{ needs.verify.outputs.release_artifact_id }}
           merge-multiple: true
           path: artifacts
-      - name: Download the exact Linux native assets by run-bound name
+      # Re-running failed jobs gives them a new run_attempt while the native
+      # assets keep the attempt that built them, so resolve each platform's
+      # newest upload in this run to its numeric artifact ID instead of
+      # rebuilding the name from github.run_attempt.
+      - name: Resolve the exact native assets to numeric artifact IDs
+        id: native_ids
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          listing="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100")"
+          if [[ "$(jq -r '.total_count' <<<"$listing")" -gt 100 ]]; then
+            echo "::error::This run has more artifacts than one listing page"
+            exit 1
+          fi
+          ids=()
+          for platform in linux-x86_64 linux-aarch64 darwin-aarch64; do
+            id="$(jq -r --arg platform "$platform" '[.artifacts[] | select(.expired == false and (.name | test("^xcb-native-" + $platform + "-[1-9][0-9]*$")))] | max_by(.id) | .id // empty' <<<"$listing")"
+            if [[ ! "$id" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::No native $platform asset artifact exists in this run"
+              exit 1
+            fi
+            echo "xcb-native-$platform: artifact $id"
+            ids+=("$id")
+          done
+          if [[ "${#ids[@]}" -ne 3 ]]; then
+            echo "::error::Expected 3 native asset artifacts, found ${#ids[@]}"
+            exit 1
+          fi
+          (IFS=,; echo "ids=${ids[*]}") >> "$GITHUB_OUTPUT"
+      - name: Download the exact native assets by numeric artifact ID
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: xcb-native-linux-x86_64-${{ github.run_attempt }}
-          path: native-artifacts
-      - name: Download the exact Linux ARM64 native assets by run-bound name
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: xcb-native-linux-aarch64-${{ github.run_attempt }}
-          path: native-artifacts
-      - name: Download the exact macOS native assets by run-bound name
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: xcb-native-darwin-aarch64-${{ github.run_attempt }}
+          artifact-ids: ${{ steps.native_ids.outputs.ids }}
+          merge-multiple: true
           path: native-artifacts
       - name: Prove immutable Latest GitHub Release exact-byte parity
         run: bun run ./scripts/check-github-release.ts artifacts/*.tgz artifacts/SHA256SUMS package.json native-artifacts

@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync,
-  readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync,
+  readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -344,6 +344,30 @@ test("native upgrade reuses only an unchanged digest backup", () => {
   writeFileSync(backup, f.previous, { mode: 0o755 });
   expect(f.run().status).toBe(0);
   expect(readFileSync(backup, "utf8")).toBe(f.previous);
+});
+
+test("native upgrade keeps only the three most recent digest backups", () => {
+  const f = fixture();
+  const bin = join(f.prefix, "bin");
+  const [oldest, older, newer, newest] = ["a", "b", "c", "d"].map((label, index) => {
+    const path = join(bin, `xcb.previous.${hash(label)}`);
+    writeFileSync(path, label, { mode: 0o500 });
+    const seconds = 1_700_000_000 + index * 60;
+    utimesSync(path, seconds, seconds);
+    return path;
+  });
+  const unrelated = join(bin, "xcb.previous.notes");
+  writeFileSync(unrelated, "keep");
+  utimesSync(unrelated, 1_600_000_000, 1_600_000_000);
+  expect(f.run().status).toBe(0);
+  const backup = join(bin, `xcb.previous.${hash(f.previous)}`);
+  expect(readFileSync(backup, "utf8")).toBe(f.previous);
+  // The two newest older backups stay; the two oldest go.
+  expect(existsSync(newest!)).toBe(true);
+  expect(existsSync(newer!)).toBe(true);
+  expect(existsSync(older!)).toBe(false);
+  expect(existsSync(oldest!)).toBe(false);
+  expect(readFileSync(unrelated, "utf8")).toBe("keep");
 });
 
 test("native upgrade refuses a symlink destination and leaves its target untouched", () => {
