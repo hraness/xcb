@@ -12,8 +12,28 @@ version bump pull request by renaming `## Unreleased` to the version.
 
 ## Unreleased
 
-xcb now runs GPT-6-Sol on Codex.
+Automatic routing now follows a preference stack you can edit: for each
+kind of task, an ordered list of provider/model/effort patterns says which
+models xcb prefers, the newest release of a model family wins within a
+pattern, and Devin serves as a fallback. xcb now runs GPT-6-Sol on Codex.
 
+- Managed tasks, unpinned `xcb run`, `xcb --json route` without a model
+  pin, and continuation after a usage limit order the routes that can take
+  the task by the `routing` stack in `config.json`: build-outs prefer Astra
+  at ultra, then Fable at max; large tasks prefer Astra at max, then Fable;
+  most tasks prefer Sol at ultra, then Opus at max; mechanical tasks prefer
+  Sol at max, then Opus. A pattern such as `codex/gpt-*-sol/ultra` matches
+  every Sol release and the newest wins, so a new model needs no
+  configuration change. The route reason names the tier and the pattern
+  that decided.
+- `routing.never` lists routes xcb never uses, including by an explicit
+  `--model` pin, which is refused instead of widened; the default excludes
+  SWE models on Devin, which also leave the built-in favorites.
+  `routing.fallback_providers` (default: Devin) names providers used only
+  when no other provider can take the task now.
+- `xcb routing show` prints the effective stack with the observed models
+  each pattern matches; `xcb routing never add|remove <pattern>` edits the
+  exclusions. Sol 6.x releases are now recognized model families.
 - GPT-6-Sol (`gpt-6-sol`) on Codex CLI 0.159.0 passes the tool, callback, and
   sandbox checks at every reasoning level, so `xcb models` lists it and routing
   can pick it. GPT-6.1-Sol follows once a stable Codex build bundles it; Codex

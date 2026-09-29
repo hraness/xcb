@@ -327,16 +327,24 @@ fn only_a_completed_turn_without_text_or_effects_reports_no_reply() {
 fn favorites_precede_provider_modes_and_other_models() {
     let mut choices = vec![
         route("a", "other").model,
-        route("a", "gpt-6-astra-max").model,
         route("a", "swe-2-high").model,
+        route("a", "gpt-6-astra-max").model,
+        route("a", "gpt-5-6-sol-max").model,
     ];
     sort_choices(&mut choices, &default_preferences());
+    // SWE models are no longer favorites: the built-in routing stack never
+    // uses them, so they sort with the other unlisted models.
     assert_eq!(
         choices
             .iter()
             .map(|choice| choice.id.as_str())
             .collect::<Vec<_>>(),
-        ["swe-2-high", "gpt-6-astra-max", "other"]
+        ["gpt-6-astra-max", "gpt-5-6-sol-max", "other", "swe-2-high"]
+    );
+    assert!(
+        default_preferences()
+            .iter()
+            .all(|favorite| !favorite.model.as_str().starts_with("swe-"))
     );
 }
 

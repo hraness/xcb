@@ -93,6 +93,11 @@ pub(crate) struct Classification {
     pub features: Features,
     pub judged: bool,
     pub substantial: bool,
+    /// The judge's difficulty and scope answers on the questions' 1–5 scale
+    /// (criterion index plus one); `None` without a judged answer. The
+    /// preference stack's `buildout` tier reads them.
+    pub difficulty: Option<f64>,
+    pub scope: Option<f64>,
 }
 
 impl Classification {
@@ -135,10 +140,12 @@ fn score(
     let kind = answer("kind")?.choice()?.0;
     // Score answers are used verbatim, exactly as in the manifest. The native
     // Judge wire contract validates their five-criterion index range 0..=4.
+    let difficulty = scalar("difficulty")?;
+    let scope = scalar("scope")?;
     let features = with_judge_evidence(
         route_features(task, complex_cue, routine_cue),
-        scalar("difficulty")?,
-        scalar("scope")?,
+        difficulty,
+        scope,
         scalar("ambiguity")?,
         scalar("stakes")?,
         answer("frontier")?.noul()?,
@@ -155,6 +162,8 @@ fn score(
         features,
         judged: true,
         substantial: false,
+        difficulty: Some(difficulty + 1.0),
+        scope: Some(scope + 1.0),
     })
 }
 
@@ -173,6 +182,8 @@ pub(crate) async fn classify(
         features: route_features(task, complex_cue, routine_cue),
         judged: false,
         substantial,
+        difficulty: None,
+        scope: None,
     };
     // This guarantee is independent of remote availability and cannot be
     // demoted by a classifier, including its historical question/probe gate.

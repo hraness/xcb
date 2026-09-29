@@ -60,6 +60,9 @@ pub fn choose_model(
             })
             .collect();
         return match matches.as_slice() {
+            [choice] if config.routing.excluded(choice) => {
+                Err(xcb_core::Error::Invalid(crate::routing_stack::EXCLUDED_BY_NEVER).into())
+            }
             [choice] => Ok(choice.clone()),
             [] => Err(Error::Unavailable(
                 "model not observed; refresh the catalog",
@@ -2490,7 +2493,7 @@ mod tests {
         let workspace = crate::private::directory(&base.join("workspace")).unwrap();
         let model = ModelChoice {
             provider: Provider::Devin,
-            id: Id::new("swe-test").unwrap(),
+            id: Id::new("synthetic-test").unwrap(),
             label: "Synthetic".into(),
             mode: xcb_core::models::Mode::Fixed,
             resolved: None,
@@ -2885,6 +2888,19 @@ mod tests {
             choose_model(&store, Provider::Devin, None, &config)
                 .unwrap()
                 .key(),
+            "devin/gpt-6-astra-max"
+        );
+        // A pinned model that routing.never excludes is refused, not widened.
+        let refused = choose_model(&store, Provider::Devin, Some("devin/swe-2-high"), &config)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("routing.never"), "{refused}");
+        let mut allowed = Config::default();
+        allowed.routing.never.clear();
+        assert_eq!(
+            choose_model(&store, Provider::Devin, Some("devin/swe-2-high"), &allowed)
+                .unwrap()
+                .key(),
             "devin/swe-2-high"
         );
     }
@@ -2910,7 +2926,7 @@ mod tests {
         };
         let model = ModelChoice {
             provider: Provider::Devin,
-            id: Id::new("swe-test").unwrap(),
+            id: Id::new("synthetic-test").unwrap(),
             label: "Synthetic".into(),
             mode: xcb_core::models::Mode::Fixed,
             resolved: None,
@@ -2990,7 +3006,7 @@ mod tests {
             .unwrap();
         let model = ModelChoice {
             provider: Provider::Devin,
-            id: Id::new("swe-test").unwrap(),
+            id: Id::new("synthetic-test").unwrap(),
             label: "Synthetic".into(),
             mode: xcb_core::models::Mode::Fixed,
             resolved: None,

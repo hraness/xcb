@@ -366,6 +366,11 @@ enum Commands {
         #[command(subcommand)]
         command: Option<JudgeCommand>,
     },
+    /// Show the routing preference stack, or edit the routes never used.
+    Routing {
+        #[command(subcommand)]
+        command: Option<RoutingCommand>,
+    },
     /// Check provider builds, accounts, and unfinished runs.
     ///
     /// Exits 0 when an account can take a task and nothing needs your
@@ -815,6 +820,30 @@ enum JudgeCommand {
     Disable,
     /// Send one live noul question to verify the key and endpoint.
     Test,
+}
+#[derive(Subcommand)]
+enum RoutingCommand {
+    /// Show each tier's route patterns and the observed models each one
+    /// matches, the routes never used, and the fallback providers.
+    Show,
+    /// Edit the routes never used: `add <pattern>` or `remove <pattern>`.
+    Never {
+        #[command(subcommand)]
+        command: NeverCommand,
+    },
+}
+#[derive(Subcommand)]
+enum NeverCommand {
+    /// Exclude every route the pattern matches (provider/model-glob[/effort]).
+    Add {
+        /// Route pattern such as devin/swe-* or codex/gpt-5.6-sol/low.
+        pattern: String,
+    },
+    /// Stop excluding a pattern.
+    Remove {
+        /// A pattern listed by `xcb routing show`.
+        pattern: String,
+    },
 }
 #[derive(Subcommand)]
 enum HookCommand {
@@ -3192,6 +3221,93 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         }
         Some(Commands::Config) => {
             print_json(config)?;
+            Ok(0)
+        }
+        Some(Commands::Routing { command }) => {
+            use xcb_runtime::routing_stack::{RoutePattern, Tier, pattern_matches};
+            match command {
+                Some(RoutingCommand::Never { command }) => {
+                    let (mut fresh, revision) = Config::load(store.root())?;
+                    match command {
+                        NeverCommand::Add { pattern } => {
+                            RoutePattern::parse(&pattern)?;
+                            if !fresh.routing.never.contains(&pattern) {
+                                fresh.routing.never.push(pattern.clone());
+                            }
+                            fresh.validate()?;
+                            fresh.save(store.root(), revision.as_deref())?;
+                            println!("Never routes to {pattern}.");
+                        }
+                        NeverCommand::Remove { pattern } => {
+                            let before = fresh.routing.never.len();
+                            fresh.routing.never.retain(|entry| *entry != pattern);
+                            if fresh.routing.never.len() == before {
+                                return Err(Error::Unavailable(
+                                    "pattern is not in routing.never; xcb routing show lists them",
+                                ));
+                            }
+                            fresh.save(store.root(), revision.as_deref())?;
+                            println!("Routes to {pattern} are allowed again.");
+                        }
+                    }
+                    return Ok(0);
+                }
+                Some(RoutingCommand::Show) | None => (),
+            }
+            let models = store.model_catalog()?.union();
+            let stack = &config.routing;
+            if cli.json {
+                let tiers: serde_json::Map<String, serde_json::Value> = Tier::ALL
+                    .into_iter()
+                    .map(|tier| {
+                        Ok((
+                            tier.to_string(),
+                            serde_json::to_value(pattern_matches(stack.patterns(tier), &models))?,
+                        ))
+                    })
+                    .collect::<Result<_>>()?;
+                print_json(json!({
+                    "tiers": tiers,
+                    "never": pattern_matches(&stack.never, &models),
+                    "fallbackProviders": stack.fallback_providers,
+                }))?;
+                return Ok(0);
+            }
+            let print = |patterns: &[String]| {
+                if patterns.is_empty() {
+                    println!("  (none)");
+                }
+                for entry in pattern_matches(patterns, &models) {
+                    let matched = if entry.models.is_empty() {
+                        "no observed model".to_owned()
+                    } else {
+                        entry.models.join(", ")
+                    };
+                    println!("  #{} {:<28} {}", entry.position, entry.pattern, matched);
+                }
+            };
+            for tier in Tier::ALL {
+                println!("{tier}");
+                print(stack.patterns(tier));
+            }
+            println!("never");
+            print(&stack.never);
+            println!(
+                "fallback providers: {}",
+                if stack.fallback_providers.is_empty() {
+                    "none".to_owned()
+                } else {
+                    stack
+                        .fallback_providers
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            );
+            println!(
+                "A tier's first matching pattern decides; the newest version of a family wins within a pattern. Edit routing in config.json to change the stack."
+            );
             Ok(0)
         }
         Some(Commands::Recover {

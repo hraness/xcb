@@ -52,19 +52,23 @@ field except `version`, `workspace`, and `task` is optional.
 Pins limit the choice; xcb never falls back outside them. With no pins, xcb
 considers accounts with a supported provider build that are signed in,
 enabled, idle, and not at a known usage limit, with a model recently seen in
-the provider's catalog. It ranks those models by task type, relative quality,
-cost, and latency, remaining usage, and your configured favorites, and an
-optional judge can only reorder routes that already qualify. See
-[quota routing](quota-routing.md) for the rules.
+the provider's catalog. It orders those models by your
+[preference stack](quota-routing.md#preference-stack), then by task type,
+relative quality, cost, and latency, remaining usage, and your configured
+favorites, and an optional judge can only reorder routes that already
+qualify. A pinned `model` that the stack's `never` list excludes fails with
+`unavailable`. See [quota routing](quota-routing.md) for the rules.
 
 ## Response
 
 Top-level fields are camelCase; the fields inside `outcome` are snake_case.
 A chosen route reports `provider`, `account`, the full `model` key, a display
 `label`, and a short `reason` for a person to read: how xcb classified the
-task, the capability tier (`standard` or `frontier`), and the model's relative
-quality, cost, and speed. It explains the choice and is not a price or quality
-guarantee. A public pricing promotion is named in the reason but never changes
+task, the capability tier (`standard` or `frontier`), the model's relative
+quality, cost, and speed, and the preference-stack tier and pattern position
+that decided (`tier default · stack #1`). The route object has no other
+fields; the stack tier is reported only inside `reason`. It explains the
+choice and is not a price or quality guarantee. A public pricing promotion is named in the reason but never changes
 which route wins. A dry run returns:
 
 ```json

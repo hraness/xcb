@@ -4,7 +4,9 @@ use crate::{
     judge, now_ms,
     offers::OfferState,
     process::Pin,
-    reflex, runner,
+    reflex,
+    routing_stack::{self, EXCLUDED_BY_NEVER, Tier},
+    runner,
     store::{ModelCatalog, Store},
     summary, task_classifier,
 };
@@ -53,6 +55,12 @@ pub struct RouteDecision {
     pub model: ModelChoice,
     pub profile: ModelProfile,
     pub reason: String,
+    /// The preference-stack tier the task was assigned (see [`assign_tier`]).
+    pub tier: Tier,
+    /// One-based position of the stack pattern the route matched; `None`
+    /// when no pattern in the tier matched and the profile order decided.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack_position: Option<usize>,
     /// The route reflex decision behind the tier choice, when reflexes run.
     /// Callers that own a durable subject record it as an observation.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -119,6 +127,17 @@ struct Candidate {
     /// equal-score routes rotate across accounts instead of always picking
     /// the same one.
     last_used_ms: u64,
+    /// Zero-based index of the first preference-stack pattern of the task's
+    /// tier this route matches; `None` sorts after every match.
+    stack: Option<usize>,
+    /// Family version, newest first among routes one pattern matches.
+    version: Vec<u64>,
+}
+
+impl Candidate {
+    fn stack_rank(&self) -> usize {
+        self.stack.unwrap_or(usize::MAX)
+    }
 }
 
 /// Everything the router knows after ranking: the ordered shortlist and the
@@ -128,6 +147,7 @@ struct Ranking {
     classification: task_classifier::Classification,
     reflex: Option<reflex::Decision>,
     class: TaskClass,
+    tier: Tier,
     models: Vec<ModelChoice>,
     catalog: ModelCatalog,
     connected: Vec<AccountRow>,
@@ -136,35 +156,52 @@ struct Ranking {
 }
 
 fn effort(model: &ModelChoice) -> String {
-    model
-        .effort
-        .as_ref()
-        .map(ToString::to_string)
-        .or_else(|| {
-            [
-                "ultra", "xhigh", "max", "high", "medium", "low", "minimal", "none",
-            ]
-            .into_iter()
-            .find(|level| model.id.as_str().ends_with(&format!("-{level}")))
-            .map(str::to_owned)
-        })
-        .unwrap_or_else(|| "medium".into())
+    routing_stack::effort_of(model)
 }
 
 fn identity(model: &ModelChoice) -> String {
-    model
-        .resolved
-        .as_ref()
-        .map(Id::as_str)
-        .unwrap_or(model.id.as_str())
-        .to_ascii_lowercase()
-        .replace('.', "-")
+    routing_stack::identity(model)
 }
 
 /// Base (effort-independent) quality of a recognized model family.
 pub(crate) fn family_quality(model: &ModelChoice) -> Option<u16> {
     let (quality, _, _, recognized) = family_profile(&identity(model));
     recognized.then_some(quality)
+}
+
+/// The numeric version of a versioned family name: `<prefix><digits>(-<digits>)*<suffix>`
+/// followed by a family boundary, such as `gpt-6-1-sol` for `("gpt-", "-sol")`
+/// or `claude-fable-5-2` for `("claude-fable-", "")`. A new release of a known
+/// family is recognized without a table change.
+fn family_version(identity: &str, prefix: &str, suffix: &str) -> Option<Vec<u64>> {
+    let numeric =
+        |segment: &str| !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit());
+    let rest = identity.strip_prefix(prefix)?;
+    let (version, tail) = if suffix.is_empty() {
+        // The leading numeric segments are the version; a variant such as
+        // `-fast` or a context suffix such as `[1m]` may follow.
+        let main = &rest[..rest.find('[').unwrap_or(rest.len())];
+        let mut end = 0;
+        let mut cursor = 0;
+        for segment in main.split('-') {
+            if !numeric(segment) {
+                break;
+            }
+            end = cursor + segment.len();
+            cursor = end + 1;
+        }
+        (&rest[..end], &rest[end..])
+    } else {
+        rest.split_once(suffix)?
+    };
+    if !(tail.is_empty() || tail.starts_with('-') || tail.starts_with('[')) {
+        return None;
+    }
+    let segments: Vec<u64> = version
+        .split('-')
+        .map(|segment| numeric(segment).then(|| segment.parse().ok()).flatten())
+        .collect::<Option<_>>()?;
+    (!segments.is_empty()).then_some(segments)
 }
 
 fn family_profile(identity: &str) -> (u16, u16, u16, bool) {
@@ -174,18 +211,34 @@ fn family_profile(identity: &str) -> (u16, u16, u16, bool) {
                 .strip_prefix(name)
                 .is_some_and(|suffix| suffix.starts_with('-') || suffix.starts_with('['))
     };
-    if family("gpt-6-astra") {
+    let versioned = |prefix: &str, suffix: &str| {
+        family_version(identity, prefix, suffix)
+            .or_else(|| family_version(identity, &format!("claude-{prefix}"), suffix))
+    };
+    if let Some(version) = family_version(identity, "gpt-", "-astra")
+        && version >= vec![6]
+    {
         (100, 92, 72, true)
     } else if family("claude-opus-5") || family("opus-5") {
         (98, 96, 82, true)
-    } else if family("claude-fable-5-1") || family("fable-5-1") {
+    } else if let Some(version) = versioned("fable-", "")
+        && version >= vec![5, 1]
+    {
         (97, 82, 68, true)
     } else if family("swe-2") {
         (96, 28, 45, true)
     } else if family("claude-sonnet-5") || family("sonnet-5") {
         (92, 55, 50, true)
-    } else if family("gpt-5-6-sol") {
-        (89, 45, 52, true)
+    } else if let Some(version) = family_version(identity, "gpt-", "-sol")
+        && version >= vec![5, 6]
+    {
+        // Sol 6.x sits between Sol 5.6 and Astra; a later major keeps the
+        // 6.x profile until it is measured.
+        if version >= vec![6] {
+            (94, 60, 55, true)
+        } else {
+            (89, 45, 52, true)
+        }
     } else if family("swe-1-7") {
         (82, 22, 30, true)
     } else if family("claude-haiku") || family("haiku") || family("gpt-5-6-luna") {
@@ -398,37 +451,46 @@ pub fn profile_models(
         now,
         class,
         task_classifier::substantial(task) || class == TaskClass::Complex,
+        |_| None,
     )
 }
 
+/// `stack` is the preference-stack position of a model for the task's tier.
+/// A model the stack names is always in the per-provider shortlist, ahead of
+/// the quality and utility order that fills the rest of it.
 fn profile_models_for_class(
     models: &[ModelChoice],
     offers: &OfferState,
     now: u64,
     class: TaskClass,
     frontier: bool,
+    stack: impl Fn(&ModelChoice) -> Option<usize>,
 ) -> Vec<ProfiledModel> {
-    let mut by_provider: BTreeMap<Provider, Vec<ProfiledModel>> = BTreeMap::new();
+    let mut by_provider: BTreeMap<Provider, Vec<(usize, ProfiledModel)>> = BTreeMap::new();
     for model in models.iter().filter(|model| model.mode == Mode::Fixed) {
-        by_provider
-            .entry(model.provider)
-            .or_default()
-            .push(ProfiledModel {
+        by_provider.entry(model.provider).or_default().push((
+            stack(model).unwrap_or(usize::MAX),
+            ProfiledModel {
                 key: model.key(),
                 label: model.label.clone(),
                 provider: model.provider,
                 profile: base_profile(model, offers, now),
-            });
+            },
+        ));
     }
     let mut rows = Vec::new();
     for (_, mut provider) in by_provider {
-        provider.sort_by(|left, right| {
-            quality_priority(frontier, &right.profile)
-                .cmp(&quality_priority(frontier, &left.profile))
+        provider.sort_by(|(left_stack, left), (right_stack, right)| {
+            left_stack
+                .cmp(right_stack)
+                .then_with(|| {
+                    quality_priority(frontier, &right.profile)
+                        .cmp(&quality_priority(frontier, &left.profile))
+                })
                 .then_with(|| utility(class, &right.profile).cmp(&utility(class, &left.profile)))
                 .then_with(|| left.key.cmp(&right.key))
         });
-        rows.extend(provider.into_iter().take(12));
+        rows.extend(provider.into_iter().take(12).map(|(_, row)| row));
     }
     assign_pareto_layers(&mut rows);
     rows.sort_by(|left, right| {
@@ -464,6 +526,7 @@ fn eligible_profiles(
     task: &str,
     frontier: bool,
     eligible: impl Fn(&ModelChoice) -> bool,
+    stack: impl Fn(&ModelChoice) -> Option<usize>,
 ) -> BTreeMap<String, ModelProfile> {
     // Exclusions must precede the bounded shortlist. Otherwise exhausting the
     // first twelve models makes every later catalog entry unreachable.
@@ -472,7 +535,7 @@ fn eligible_profiles(
         .filter(|model| selectable_model(model) && eligible(model))
         .cloned()
         .collect();
-    profile_models_for_class(&models, offers, now, classify_task(task), frontier)
+    profile_models_for_class(&models, offers, now, classify_task(task), frontier, stack)
         .into_iter()
         .map(|row| (row.key, row.profile))
         .collect()
@@ -499,15 +562,18 @@ pub async fn smart_route(
 
 /// The routes that could replace a usage-limited one, best first: the same
 /// filters and ranking as [`smart_route`] (supported build, signed in, idle,
-/// no known usage limit, quality tier, favorites, usage pace, then
-/// least-recently-used account), with the failed route, every route the
-/// task already tried, and any account that reported an account-wide limit
-/// left out. Over that order, routes are grouped to keep the subscription
-/// rotation close to the work: the same model on another account first
-/// (quality preserved), then the same provider's other models, then other
-/// providers. A pinned provider or model is a hard constraint and never
-/// widens. An empty list means nothing can take the task now; the caller
-/// explains why from the account view.
+/// no known usage limit, preference stack, quality tier, favorites, usage
+/// pace, then least-recently-used account), with the failed route, every
+/// route the task already tried, and any account that reported an
+/// account-wide limit left out. The preference stack decides first, so after
+/// an account limit the next pick is the same stack pattern on another
+/// account, then the tier's next pattern. Among routes at the same stack
+/// position, routes are grouped to keep the subscription rotation close to
+/// the work: the same model on another account first (quality preserved),
+/// then the same provider's other models, then other providers. A pinned
+/// provider or model is a hard constraint and never widens. An empty list
+/// means nothing can take the task now; the caller explains why from the
+/// account view.
 pub async fn failover_routes(
     store: &Store,
     config: &Config,
@@ -568,24 +634,24 @@ async fn failover_routes_with_admitted(
         Err(Error::Unavailable(_)) => return Ok(vec![]),
         Err(error) => return Err(error),
     };
-    let mut routes: Vec<_> = ranking
-        .candidates
+    let mut candidates = ranking.candidates;
+    // Stable: within each group the router's order (utility, Pareto layer,
+    // least recently used account) is kept.
+    let current_key = model.key();
+    candidates.sort_by_key(|candidate| {
+        (
+            candidate.stack_rank(),
+            candidate.model.provider != model.provider,
+            candidate.model.key() != current_key,
+        )
+    });
+    Ok(candidates
         .into_iter()
         .map(|candidate| FailoverRoute {
             account: candidate.account,
             model: candidate.model,
         })
-        .collect();
-    // Stable: within each group the router's order (utility, Pareto layer,
-    // least recently used account) is kept.
-    let current_key = model.key();
-    routes.sort_by_key(|route| {
-        (
-            route.model.provider != model.provider,
-            route.model.key() != current_key,
-        )
-    });
-    Ok(routes)
+        .collect())
 }
 
 async fn route_with_admitted(
@@ -602,6 +668,7 @@ async fn route_with_admitted(
         classification,
         reflex,
         class,
+        tier,
         models,
         catalog,
         connected,
@@ -633,8 +700,13 @@ async fn route_with_admitted(
         ),
         None => " · quota timing unmeasured".into(),
     };
+    let stack_position = candidate.stack.map(|index| index + 1);
+    let stack_reason = match stack_position {
+        Some(position) => format!(" · tier {tier} · stack #{position}"),
+        None => format!(" · tier {tier} · no stack match"),
+    };
     let reason = format!(
-        "{}{} · {} tier · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}{}",
+        "{}{} · {} tier · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}{}{}",
         warning.unwrap_or_default(),
         classification.reason(),
         if classification.frontier {
@@ -651,6 +723,7 @@ async fn route_with_admitted(
         candidate.profile.quality,
         candidate.profile.relative_cost,
         candidate.profile.relative_latency,
+        stack_reason,
         quota_reason,
         candidate
             .profile
@@ -664,8 +737,44 @@ async fn route_with_admitted(
         model: candidate.model,
         profile: candidate.profile,
         reason,
+        tier,
+        stack_position,
         reflex,
     })
+}
+
+/// The preference-stack tier of a task. Signals that call for more capability
+/// are checked first, then the routine keyword class, then the default:
+///
+/// - `buildout`: the judge answered, says the task warrants a frontier model,
+///   and rated scope and difficulty at least 4 on their 1–5 scales; or,
+///   without a judge answer, the prompt is substantial (at least 400 words or
+///   8 KiB) and carries a complex keyword cue (architecture, migration,
+///   security, race, concurrency, redesign, root cause, adversarial,
+///   refactor).
+/// - `meaty`: the classifier says frontier (the judge's answer, a substantial
+///   prompt, or an active route reflex; without a judge, a complex keyword
+///   cue), or the judge's kind is `resume`.
+/// - `mechanical`: a routine keyword cue (format, rename, typo, status,
+///   summarize, explain, docs, documentation) and none of the above.
+/// - `default`: everything else.
+pub(crate) fn assign_tier(
+    class: TaskClass,
+    classification: &task_classifier::Classification,
+) -> Tier {
+    let judged_frontier = classification.judged && classification.frontier;
+    let big = |score: Option<f64>| score.is_some_and(|score| score >= 4.0);
+    if judged_frontier && big(classification.scope) && big(classification.difficulty)
+        || !classification.judged && classification.substantial && class == TaskClass::Complex
+    {
+        Tier::Buildout
+    } else if classification.frontier || classification.kind.as_deref() == Some("resume") {
+        Tier::Meaty
+    } else if class == TaskClass::Routine {
+        Tier::Mechanical
+    } else {
+        Tier::Default
+    }
 }
 
 /// Ranks every eligible route for the request. The result is never empty:
@@ -765,6 +874,16 @@ async fn rank_with_admitted(
     )
     .await;
     let reflex = route_reflex(store.root(), config, &mut classification).await;
+    let stack = &config.routing;
+    // A pinned model the owner excluded is refused, never widened.
+    if let Some(key) = required_model
+        && models
+            .iter()
+            .any(|model| model.key() == key && stack.excluded(model))
+    {
+        return Err(xcb_core::Error::Invalid(EXCLUDED_BY_NEVER).into());
+    }
+    let tier = assign_tier(class, &classification);
     let profile_by_key = eligible_profiles(
         &models,
         &offers,
@@ -773,17 +892,20 @@ async fn rank_with_admitted(
         classification.frontier,
         |model| {
             required_model.is_none_or(|key| model.key() == key)
+                && !stack.excluded(model)
                 && accounts.iter().any(|account| {
                     catalog.offers(&account.id, account.provider, model)
                         && !excluded_routes.contains(&format!("{} · {}", model.key(), account.id))
                 })
         },
+        |model| stack.position(tier, model),
     );
     let mut candidates = Vec::new();
     for model in &models {
         let Some(profile) = profile_by_key.get(&model.key()).cloned() else {
             continue;
         };
+        let position = stack.position(tier, model);
         for account in &accounts {
             let route_key = format!("{} · {}", model.key(), account.id);
             if !catalog.offers(&account.id, account.provider, model)
@@ -805,21 +927,42 @@ async fn rank_with_admitted(
                 utility: score,
                 quota_pressure: quota_pressure.get(&account.id).cloned().flatten(),
                 last_used_ms: last_used.get(&account.id).copied().unwrap_or(0),
+                stack: position,
+                version: position
+                    .map(|_| routing_stack::version(model))
+                    .unwrap_or_default(),
             });
         }
     }
-    // An expensive/favored route or an external judgment cannot displace the
-    // strongest known eligible quality tier when the task demands frontier.
-    retain_quality_tier(&mut candidates, classification.frontier);
-    // Score, then Pareto layer, decide; among routes they leave tied the
-    // account that ran a session longest ago goes first, so subscriptions
-    // rotate instead of the lowest id always winning. Quality tiers,
-    // favorites, pins and usage pace are all inside the score and are never
-    // overridden by recency.
+    // A fallback provider's routes count only when nothing else can take the
+    // task now.
+    if candidates
+        .iter()
+        .any(|candidate| !stack.is_fallback(candidate.model.provider))
+    {
+        candidates.retain(|candidate| !stack.is_fallback(candidate.model.provider));
+    }
+    // The preference stack decides quality for the routes it names. Among
+    // the rest, an expensive/favored route or an external judgment cannot
+    // displace the strongest known eligible quality tier when the task
+    // demands frontier.
+    let (matched, mut unmatched): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|candidate| candidate.stack.is_some());
+    retain_quality_tier(&mut unmatched, classification.frontier);
+    let mut candidates = matched;
+    candidates.extend(unmatched);
+    // The stack position decides first, then the newest family version among
+    // routes one pattern matches. Score, then Pareto layer, decide the rest;
+    // among routes they leave tied the account that ran a session longest
+    // ago goes first, so subscriptions rotate instead of the lowest id always
+    // winning. Quality tiers, favorites, pins and usage pace are all inside
+    // the score and are never overridden by recency.
     candidates.sort_by(|left, right| {
-        right
-            .utility
-            .cmp(&left.utility)
+        left.stack_rank()
+            .cmp(&right.stack_rank())
+            .then_with(|| right.version.cmp(&left.version))
+            .then_with(|| right.utility.cmp(&left.utility))
             .then_with(|| left.profile.pareto_layer.cmp(&right.profile.pareto_layer))
             .then_with(|| left.last_used_ms.cmp(&right.last_used_ms))
             .then_with(|| left.model.key().cmp(&right.model.key()))
@@ -847,6 +990,7 @@ async fn rank_with_admitted(
         classification,
         reflex,
         class,
+        tier,
         models,
         catalog,
         connected,
@@ -1264,6 +1408,7 @@ mod tests {
         models.push(model(Provider::Devin, "gpt-6-astra-ultra", None, None));
         store.set_models(Provider::Devin, &models).unwrap();
         let mut config = Config::default();
+        config.routing.never.clear();
         config.favorites.insert(
             0,
             xcb_core::models::Preference {
@@ -1328,7 +1473,7 @@ mod tests {
         store
             .set_models(
                 Provider::Devin,
-                &[model(Provider::Devin, "swe-2-high", None, None)],
+                &[model(Provider::Devin, "gpt-6-astra-medium", None, None)],
             )
             .unwrap();
         let config = Config::default();
@@ -1635,6 +1780,10 @@ mod tests {
             .unwrap();
         let mut config = Config::default();
         config.extensions.judge.enabled = false;
+        // This test is about usage meters, not the preference stack: Devin
+        // is an ordinary target and its SWE model is allowed.
+        config.routing.never.clear();
+        config.routing.fallback_providers.clear();
         let none = BTreeSet::new();
         let no_accounts = BTreeSet::new();
         let admitted = [Provider::Claude, Provider::Devin].into();
@@ -1683,6 +1832,8 @@ mod tests {
                 utility,
                 quota_pressure: None,
                 last_used_ms: 0,
+                stack: None,
+                version: Vec::new(),
             }
         };
         let mut candidates = vec![build("future-model", 10000), build("claude-haiku", -100)];
@@ -2233,12 +2384,21 @@ mod tests {
             "implement a fix",
             false,
             |m| m.id.as_str() == "swe-2-variant-19",
+            |_| None,
         );
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles["devin/swe-2-variant-19"].pareto_layer, 1);
         assert!(
-            eligible_profiles(&models, &OfferState::default(), 2, "task", false, |_| false)
-                .is_empty()
+            eligible_profiles(
+                &models,
+                &OfferState::default(),
+                2,
+                "task",
+                false,
+                |_| false,
+                |_| None
+            )
+            .is_empty()
         );
     }
 
@@ -2345,7 +2505,8 @@ mod tests {
         store
             .set_account_models(&first, &[shared.clone(), exclusive.clone()])
             .unwrap();
-        let config = Config::default();
+        let mut config = Config::default();
+        config.routing.never.clear();
         let prompt = "details ".repeat(400);
         let admitted = [Provider::Devin].into();
         let no_routes = BTreeSet::new();
@@ -2398,5 +2559,448 @@ mod tests {
         let next = route(&excluded, &no_accounts, None).await.unwrap();
         assert_eq!(next.model.key(), shared.key());
         assert!(route(&excluded, &no_accounts, Some(&key)).await.is_err());
+    }
+
+    #[test]
+    fn versioned_family_profiles_recognize_new_releases() {
+        let quality =
+            |provider, id| family_quality(&model(provider, id, None, None)).expect("recognized");
+        assert_eq!(quality(Provider::Codex, "gpt-5.6-sol"), 89);
+        assert_eq!(quality(Provider::Codex, "gpt-6-sol"), 94);
+        assert_eq!(quality(Provider::Codex, "gpt-6.1-sol"), 94);
+        assert_eq!(quality(Provider::Devin, "gpt-6-1-sol-max"), 94);
+        assert_eq!(quality(Provider::Codex, "gpt-6-astra"), 100);
+        assert_eq!(quality(Provider::Codex, "gpt-7-astra"), 100);
+        assert_eq!(quality(Provider::Claude, "claude-fable-5-1"), 97);
+        assert_eq!(quality(Provider::Claude, "claude-fable-5-2[1m]"), 97);
+        assert_eq!(quality(Provider::Claude, "fable-6"), 97);
+        for unrecognized in ["gpt-6-solar", "gpt-5-sol", "fable-5", "gpt-sol"] {
+            assert_eq!(
+                family_quality(&model(Provider::Codex, unrecognized, None, None)),
+                None,
+                "{unrecognized}"
+            );
+        }
+        assert!(family_version("gpt-6-1-sol", "gpt-", "-sol").unwrap() > vec![6]);
+        assert_eq!(
+            family_version("claude-fable-5-1[1m]", "claude-fable-", ""),
+            Some(vec![5, 1])
+        );
+    }
+
+    /// The tier table: judged answers and prompt shape decide, the routine
+    /// cue only when nothing asks for more.
+    #[tokio::test]
+    async fn tiers_follow_the_documented_table() {
+        let judged = |frontier, kind: &str, difficulty, scope| task_classifier::Classification {
+            frontier,
+            source: "test",
+            score_milli: None,
+            kind: Some(kind.into()),
+            features: xcb_core::reflex::route_features("task", false, false),
+            judged: true,
+            substantial: false,
+            difficulty: Some(difficulty),
+            scope: Some(scope),
+        };
+        let tier = |class, classification: &task_classifier::Classification| {
+            assign_tier(class, classification)
+        };
+        assert_eq!(
+            tier(TaskClass::Balanced, &judged(true, "implement", 4.0, 4.0)),
+            Tier::Buildout
+        );
+        assert_eq!(
+            tier(TaskClass::Balanced, &judged(true, "implement", 4.0, 3.0)),
+            Tier::Meaty
+        );
+        assert_eq!(
+            tier(TaskClass::Balanced, &judged(true, "implement", 3.0, 5.0)),
+            Tier::Meaty
+        );
+        assert_eq!(
+            tier(TaskClass::Balanced, &judged(false, "resume", 2.0, 2.0)),
+            Tier::Meaty
+        );
+        assert_eq!(
+            tier(TaskClass::Routine, &judged(false, "implement", 2.0, 2.0)),
+            Tier::Mechanical
+        );
+        assert_eq!(
+            tier(TaskClass::Balanced, &judged(false, "implement", 2.0, 2.0)),
+            Tier::Default
+        );
+        // Without a judge: the routine cue, a complex cue, and prompt size.
+        async fn plain(task: &str) -> Tier {
+            let class = classify_task(task);
+            let classification = task_classifier::classify(
+                task,
+                None,
+                class == TaskClass::Complex,
+                class == TaskClass::Routine,
+            )
+            .await;
+            assign_tier(class, &classification)
+        }
+        assert_eq!(plain("fix a typo in the docs").await, Tier::Mechanical);
+        assert_eq!(plain("fix a test").await, Tier::Default);
+        assert_eq!(plain("redesign the scheduler").await, Tier::Meaty);
+        let long = "details ".repeat(400);
+        assert_eq!(plain(&long).await, Tier::Meaty);
+        let long_complex = format!("redesign the architecture. {long}");
+        assert_eq!(plain(&long_complex).await, Tier::Buildout);
+        assert_eq!(
+            plain(&format!("fix a typo. {long}")).await,
+            Tier::Meaty,
+            "a substantial prompt is never mechanical"
+        );
+    }
+
+    /// Codex ids are limited to the qualified catalog, so the newest-version
+    /// rule is exercised on Claude (Fable 5.2 over 5.1) here and on Codex ids
+    /// in the pattern tests.
+    fn stack_models(store: &Store) {
+        store
+            .set_models(
+                Provider::Codex,
+                &[
+                    model(Provider::Codex, "gpt-5.6-sol", None, Some("ultra")),
+                    model(Provider::Codex, "gpt-5.6-sol", None, Some("max")),
+                    model(Provider::Codex, "gpt-6-astra", None, Some("ultra")),
+                    model(Provider::Codex, "gpt-6-astra", None, Some("max")),
+                ],
+            )
+            .unwrap();
+        store
+            .set_models(
+                Provider::Claude,
+                &[
+                    model(Provider::Claude, "claude-fable-5-1", None, Some("max")),
+                    model(Provider::Claude, "claude-fable-5-2", None, Some("max")),
+                    model(Provider::Claude, "opus[1m]", None, Some("max")),
+                    model(
+                        Provider::Claude,
+                        "default",
+                        Some("claude-opus-5-5"),
+                        Some("high"),
+                    ),
+                    model(
+                        Provider::Claude,
+                        "sonnet",
+                        Some("claude-sonnet-5"),
+                        Some("max"),
+                    ),
+                ],
+            )
+            .unwrap();
+    }
+
+    /// The stack outranks inferred quality: a default-tier task goes to the
+    /// newest Sol at ultra although Astra profiles higher, a build-out goes
+    /// to Astra at ultra ahead of Fable, and when every Astra account is at
+    /// a limit the build-out goes to Fable at max.
+    #[tokio::test]
+    async fn preference_stack_orders_eligible_routes_and_the_newest_version_wins() {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
+        let codex = account(&store, Provider::Codex);
+        let claude = account(&store, Provider::Claude);
+        stack_models(&store);
+        let mut config = Config::default();
+        config.extensions.judge.enabled = false;
+        let none = BTreeSet::new();
+        let no_accounts = BTreeSet::new();
+        let admitted = [Provider::Codex, Provider::Claude].into();
+        let request = |task, excluded_accounts| RouteRequest {
+            task,
+            required_provider: None,
+            preferred_provider: None,
+            required_model: None,
+            excluded_routes: &none,
+            excluded_accounts,
+            account: None,
+        };
+        let plain = route_with_admitted(
+            &store,
+            &config,
+            request("fix a test", &no_accounts),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(plain.model.key(), "codex/gpt-5.6-sol/ultra");
+        assert_eq!(plain.tier, Tier::Default);
+        assert_eq!(plain.stack_position, Some(1));
+        assert!(
+            plain.reason.contains(" · tier default · stack #1"),
+            "{}",
+            plain.reason
+        );
+        let without_codex = BTreeSet::from([codex.clone()]);
+        let second = route_with_admitted(
+            &store,
+            &config,
+            request("fix a test", &without_codex),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.model.key(), "claude/opus[1m]/max");
+        assert_eq!(second.account, claude);
+        assert_eq!(second.stack_position, Some(2));
+        let routine = route_with_admitted(
+            &store,
+            &config,
+            request("fix a typo", &no_accounts),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(routine.model.key(), "codex/gpt-5.6-sol/max");
+        assert_eq!(routine.tier, Tier::Mechanical);
+        let buildout_prompt = format!("redesign the architecture. {}", "details ".repeat(400));
+        let buildout = route_with_admitted(
+            &store,
+            &config,
+            request(&buildout_prompt, &no_accounts),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(buildout.model.key(), "codex/gpt-6-astra/ultra");
+        assert_eq!(buildout.tier, Tier::Buildout);
+        assert!(
+            buildout.reason.contains(" · tier buildout · stack #1"),
+            "{}",
+            buildout.reason
+        );
+        let now = now_ms().saturating_sub(1);
+        store
+            .record_quota(&xcb_core::usage::QuotaPoint {
+                pool: store.account(&codex).unwrap().quota_pool,
+                window: Id::new("codex.primary").unwrap(),
+                used_percent: 100.0,
+                observed_at_ms: now,
+                resets_at_ms: now + 60_000,
+            })
+            .unwrap();
+        let fable = route_with_admitted(
+            &store,
+            &config,
+            request(&buildout_prompt, &no_accounts),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fable.model.key(),
+            "claude/claude-fable-5-2/max",
+            "the newest Fable wins within the pattern"
+        );
+        assert_eq!(fable.stack_position, Some(2));
+        // A route the stack does not name still runs when nothing named is
+        // eligible; the reason says so.
+        let mut sparse = config.clone();
+        sparse.routing.tiers.r#default = vec!["codex/gpt-*-astra/ultra".into()];
+        let unmatched = route_with_admitted(
+            &store,
+            &sparse,
+            request("fix a test", &no_accounts),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(unmatched.model.provider, Provider::Claude);
+        assert_eq!(unmatched.stack_position, None);
+        assert!(
+            unmatched
+                .reason
+                .contains(" · tier default · no stack match"),
+            "{}",
+            unmatched.reason
+        );
+    }
+
+    /// After an account limit the next pick is the same stack pattern on the
+    /// other account, then the tier's next pattern; the rest of the tier's
+    /// unmatched routes follow.
+    #[tokio::test]
+    async fn failover_follows_the_stack_across_accounts_before_the_next_pattern() {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
+        let first = account(&store, Provider::Codex);
+        let second = account(&store, Provider::Codex);
+        let claude = account(&store, Provider::Claude);
+        stack_models(&store);
+        let mut config = Config::default();
+        config.extensions.judge.enabled = false;
+        let none = BTreeSet::new();
+        let admitted = [Provider::Codex, Provider::Claude].into();
+        let prompt = format!("redesign the architecture. {}", "details ".repeat(400));
+        let astra = model(Provider::Codex, "gpt-6-astra", None, Some("ultra"));
+        let limited = BTreeSet::from([first.clone()]);
+        let routes = failover_routes_with_admitted(
+            &store,
+            &config,
+            FailoverRequest {
+                task: &prompt,
+                account: &first,
+                model: &astra,
+                failure: Failure::AccountQuota,
+                tried: &none,
+                limited_accounts: &limited,
+                required_provider: None,
+                required_model: None,
+            },
+            &admitted,
+        )
+        .await
+        .unwrap();
+        let keys: Vec<_> = routes
+            .iter()
+            .map(|route| format!("{}/{}", route.account, route.model.key()))
+            .collect();
+        assert_eq!(
+            keys[0],
+            format!("{second}/codex/gpt-6-astra/ultra"),
+            "{keys:?}"
+        );
+        assert_eq!(
+            keys[1],
+            format!("{claude}/claude/claude-fable-5-2/max"),
+            "{keys:?}"
+        );
+        assert_eq!(
+            keys[2],
+            format!("{claude}/claude/claude-fable-5-1/max"),
+            "{keys:?}"
+        );
+        assert!(keys.len() > 2, "{keys:?}");
+        assert!(!keys.iter().any(|key| key.starts_with(&format!("{first}/"))));
+    }
+
+    /// Devin is a fallback provider: its routes are used only when no other
+    /// provider can take the task, and its SWE models never.
+    #[tokio::test]
+    async fn fallback_provider_is_used_only_when_nothing_else_is_eligible_and_never_excludes_pins()
+    {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let work = crate::private::directory(&base.join("work")).unwrap();
+        let codex = account(&store, Provider::Codex);
+        let devin = account(&store, Provider::Devin);
+        let sol = model(Provider::Codex, "gpt-5.6-sol", None, Some("ultra"));
+        store
+            .set_models(Provider::Codex, std::slice::from_ref(&sol))
+            .unwrap();
+        store
+            .set_models(
+                Provider::Devin,
+                &[
+                    model(Provider::Devin, "swe-2-high", None, None),
+                    model(Provider::Devin, "swe-2-max", None, None),
+                    model(Provider::Devin, "gpt-5-6-sol-max", None, None),
+                    model(Provider::Devin, "gpt-6-astra-medium", None, None),
+                ],
+            )
+            .unwrap();
+        let mut config = Config::default();
+        config.extensions.judge.enabled = false;
+        let none = BTreeSet::new();
+        let no_accounts = BTreeSet::new();
+        let admitted = [Provider::Codex, Provider::Devin].into();
+        let request = |required_model| RouteRequest {
+            task: "fix a test",
+            required_provider: None,
+            preferred_provider: None,
+            required_model,
+            excluded_routes: &none,
+            excluded_accounts: &no_accounts,
+            account: None,
+        };
+        let plain = route_with_admitted(&store, &config, request(None), &admitted)
+            .await
+            .unwrap();
+        assert_eq!(plain.account, codex);
+        // Codex busy: the fallback provider takes the task, ranked by the
+        // same tier patterns (the default tier names Sol), never SWE.
+        let session = store
+            .create_session(&codex, sol.clone(), &work, now_ms())
+            .unwrap();
+        let run = store
+            .prepare_run(&session.id, session.revision, now_ms())
+            .unwrap();
+        let fallback = route_with_admitted(&store, &config, request(None), &admitted)
+            .await
+            .unwrap();
+        assert_eq!(fallback.account, devin);
+        assert_eq!(fallback.model.key(), "devin/gpt-5-6-sol-max");
+        assert_eq!(
+            fallback.stack_position, None,
+            "Devin never matches a codex/ pattern"
+        );
+        let failover = failover_routes_with_admitted(
+            &store,
+            &config,
+            FailoverRequest {
+                task: "fix a test",
+                account: &codex,
+                model: &sol,
+                failure: Failure::AccountQuota,
+                tried: &none,
+                limited_accounts: &no_accounts,
+                required_provider: None,
+                required_model: None,
+            },
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert!(
+            failover
+                .iter()
+                .all(|route| !route.model.id.as_str().starts_with("swe-")),
+            "{failover:?}"
+        );
+        store
+            .settle(&run, xcb_core::session::State::Idle, now_ms())
+            .unwrap();
+        // A pin on an excluded model is refused, not widened.
+        let refused = route_with_admitted(
+            &store,
+            &config,
+            request(Some("devin/swe-2-high")),
+            &admitted,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(refused.contains("routing.never"), "{refused}");
+        let pinned = route_with_admitted(
+            &store,
+            &config,
+            request(Some("devin/gpt-6-astra-medium")),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(pinned.model.key(), "devin/gpt-6-astra-medium");
+        // Without the fallback rule Devin competes on the profile order and
+        // an allowed SWE model is an ordinary route again.
+        config.routing.fallback_providers.clear();
+        config.routing.never.clear();
+        let open = route_with_admitted(
+            &store,
+            &config,
+            request(Some("devin/swe-2-high")),
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(open.model.key(), "devin/swe-2-high");
     }
 }
