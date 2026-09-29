@@ -10,6 +10,10 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+- Releases now include a Linux ARM64 build, `xcb-<version>-linux-aarch64.tar.gz`, built on an ARM64 runner with the same glibc 2.34 floor as the x86_64 build. CI builds it on every push to `main`.
+
 ## 0.11.2 - 2026-09-29
 
 xcb keeps a separate model list for each account, so two accounts of the same
