@@ -10,6 +10,10 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+- The GitHub release step checks each uploaded file once instead of downloading every uploaded file again after each upload, which made a failed GitHub API call likely once releases carried eleven files.
+
 ## 0.12.0 - 2026-09-29
 
 xcb now ships for Windows x86_64 and Linux ARM64. On Windows, providers run

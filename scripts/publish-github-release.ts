@@ -317,9 +317,12 @@ async function readDraftById(id: number): Promise<ExactDraft> {
   return draft;
 }
 
-async function verifyDraftAssets(draft: ExactDraft): Promise<readonly string[]> {
+async function verifyDraftAssets(
+  draft: ExactDraft,
+  only: readonly string[] = sources,
+): Promise<readonly string[]> {
   const missing: string[] = [];
-  for (const source of sources) {
+  for (const source of only) {
     const expectedName = basename(source);
     const asset = draft.assets.find((candidate) => candidate.name === expectedName);
     if (asset === undefined) {
@@ -347,9 +350,11 @@ async function verifyDraftAssets(draft: ExactDraft): Promise<readonly string[]> 
 
 async function completeDraftAssets(draft: ExactDraft): Promise<ExactDraft> {
   let current = await readDraftById(draft.id);
-  for (const source of sources) {
-    const missing = await verifyDraftAssets(current);
-    if (!missing.includes(source)) continue;
+  // Prove the assets already present once, then prove each upload by
+  // itself; re-downloading every asset after each upload made a transient
+  // API failure likely once releases carried eleven assets.
+  const missing = await verifyDraftAssets(current);
+  for (const source of missing) {
     await run([
       "gh", "api", "--method", "POST",
       "-H", "Accept: application/vnd.github+json",
@@ -358,7 +363,9 @@ async function completeDraftAssets(draft: ExactDraft): Promise<ExactDraft> {
       `https://uploads.github.com/repos/${publicRepository}/releases/${String(current.id)}/assets?name=${encodeURIComponent(basename(source))}`,
     ]);
     current = await readDraftById(draft.id);
-    await verifyDraftAssets(current);
+    if ((await verifyDraftAssets(current, [source])).length !== 0) {
+      throw new Error(`Uploaded draft asset ${basename(source)} is missing.`);
+    }
   }
   return current;
 }
