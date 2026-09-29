@@ -147,7 +147,7 @@ export function RouteSplit({ theme }: Readonly<{ theme?: MockupTheme }>) {
               <span className="hkm-title">{pane.title}</span>
               <span />
             </div>
-            <pre className="xcb-route-code"><SampleText>{pane.code}</SampleText></pre>
+            <div className="xcb-route-code"><SampleText>{pane.code}</SampleText></div>
           </div>
         ))}
       </div>

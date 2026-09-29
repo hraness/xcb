@@ -66,7 +66,7 @@ const authoredBeats: readonly LaunchBeat[] = [
     post: "Link your machines with xcb link. From any of them, xcb fleet shows what each one is doing, and xcb dispatch sends a task to the one at home. Task content is end-to-end encrypted, on a relay you run yourself.",
     visual: { kind: "mockup", id: "fleet", state: {} },
     alt: "Illustration of xcb fleet on a laptop: three linked machines, and a task sent to the desktop at home.",
-    detailHref: "/docs/remote-operations",
+    detailHref: "https://github.com/hraness/xcb/blob/main/docs/remote-operations.md",
   },
   {
     id: "how",

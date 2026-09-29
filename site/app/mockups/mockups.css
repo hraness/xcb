@@ -150,6 +150,7 @@
   .xcb-mock .xcb-route-split {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    align-items: start;
     gap: 14px;
   }
 
@@ -160,7 +161,12 @@
     background: light-dark(#fbfbfc, #111214);
     color: var(--hkm-fg);
     font: 400 12.5px/1.55 var(--hkm-mono);
-    white-space: pre;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .xcb-mock .xcb-route-code > .hkm-sample {
+    white-space: inherit;
   }
 
   .xcb-mock .xcb-run {

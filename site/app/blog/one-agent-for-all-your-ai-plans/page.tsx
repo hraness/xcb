@@ -39,7 +39,7 @@ export function generateMetadata(): Metadata {
 const GO_DEEPER = [
   { href: "/blog/introducing-excalibur", label: "Follow one task from sign-in to its recorded outcome" },
   { href: "/docs/how-routing-works", label: "See how xcb picks an account" },
-  { href: "/docs/remote-operations", label: "Link your machines" },
+  { href: "https://github.com/hraness/xcb/blob/main/docs/remote-operations.md", label: "Link your machines" },
   { href: "/compare", label: "Compare xcb with other agent tools" },
 ] as const;
 

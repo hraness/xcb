@@ -13,7 +13,10 @@ import {
   taskRows,
   threadLines,
 } from "../app/mockups/fixtures";
-import { findBlogPost } from "../app/blog/posts";
+import { blogPosts, findBlogPost } from "../app/blog/posts";
+import { assertArticleVideo } from "@hraness/design-kit";
+import { docsTopics } from "../app/docs/topics";
+import { launchFilm } from "../app/launch/film";
 import { renderSocialKitMarkdown } from "../app/launch/social-kit-markdown";
 import { publishedRelease } from "../app/publication";
 
@@ -113,5 +116,24 @@ describe("xcb illustration shapes", () => {
     const route = await read("docs/route.md");
     const parsed = JSON.parse(routeResponse) as Record<string, unknown>;
     for (const key of Object.keys(parsed)) expect(route).toContain(`"${key}"`);
+  });
+
+  test("the launch film names only files that exist", async () => {
+    if (launchFilm === null) return;
+    assertArticleVideo(launchFilm.video);
+    const { video } = launchFilm;
+    for (const path of [...video.sources.map((source) => source.src), video.poster, video.captions]) {
+      expect(await Bun.file(join(import.meta.dir, "..", "public", path)).exists()).toBe(true);
+    }
+  });
+
+  test("every beat's internal detail link is a page that exists", async () => {
+    const pages = new Set([...docsTopics.map((topic) => `/docs/${topic.slug}`), ...blogPosts.map((entry) => `/blog/${entry.slug}`)]);
+    for (const beat of launchBeats) {
+      const href = beat.detailHref;
+      if (href === undefined || !href.startsWith("/")) continue;
+      const route = join(import.meta.dir, "..", "app", href, "page.tsx");
+      expect(pages.has(href) || (await Bun.file(route).exists())).toBe(true);
+    }
   });
 });
