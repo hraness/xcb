@@ -137,10 +137,16 @@ bytes:
 
 Every later `v*` tag is then unattended: the preflight proves the OIDC
 exchange in a dry run, the writer publishes the exact reviewed tarball
-with provenance and waits up to 15 minutes for npm to serve it, and
+with provenance and waits up to 25 minutes for npm to serve it, and
 admission verifies the registry bytes, npm `latest`,
 the trusted-publisher identity, and the Sigstore certificate bound to this
 repository, workflow, tag, and run.
+
+If the npm job fails after npm accepted the publish, use "Re-run failed
+jobs" on the same run. The retry does not publish again: the dry run passes
+over the version conflict only when npm already serves the reviewed
+tarball's integrity, and the writer then checks the exact latest bytes and
+records the release as already published for admission.
 
 ## Repository protections
 

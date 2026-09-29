@@ -32,6 +32,32 @@ export type NpmPublisherResult = Readonly<{
   trustedExchangeProven: boolean;
 }>;
 
+/**
+ * Whether a failed OIDC dry run may be passed over because a later attempt of
+ * the same run is retrying after an earlier attempt already published. Only a
+ * version conflict qualifies, only after the admitted attempt, and only when
+ * the registry already serves the exact integrity of the reviewed tarball;
+ * the publish step then re-verifies the exact latest bytes and admission
+ * verifies the run-bound provenance.
+ */
+export function oidcPreflightConflictIsPriorPublish(
+  input: Readonly<{
+    currentAttempt: number;
+    existingIntegrity: string | null;
+    expectedIntegrity: string;
+    failure: NpmPublisherFailure | null;
+    preflightAttempt: number;
+  }>,
+): boolean {
+  return input.failure === "version_conflict"
+    && Number.isSafeInteger(input.preflightAttempt)
+    && input.preflightAttempt > 0
+    && Number.isSafeInteger(input.currentAttempt)
+    && input.currentAttempt > input.preflightAttempt
+    && /^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(input.expectedIntegrity)
+    && input.existingIntegrity === input.expectedIntegrity;
+}
+
 type PublisherChild = Readonly<{
   exited: Promise<number>;
   kill: (signal?: number | NodeJS.Signals) => void;

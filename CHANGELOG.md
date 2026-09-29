@@ -14,6 +14,15 @@ version bump pull request by renaming `## Unreleased` to the version.
 
 - On Linux, `xcb doctor --provider claude --qualify-sandbox` runs the sandbox test from the xcb binary and saves the result Claude needs, so a release install no longer needs a source checkout or Bun. The result now records Ubuntu's AppArmor user-namespace setting: when a reboot turns the restriction back on after a `sysctl` workaround, `xcb doctor` says the sandbox is no longer ready and explains the fix instead of reporting it ready. The documented fix is now xcb's AppArmor profile for `/usr/bin/bwrap` only, which survives reboots. Results saved by older versions must be taken again.
 - Releases now include a Linux ARM64 build, `xcb-<version>-linux-aarch64.tar.gz`, built on an ARM64 runner with the same glibc 2.34 floor as the x86_64 build. CI builds it on every push to `main`.
+- The npm release step no longer fails a publish that npm accepted. npm now
+  reports the trusted-publisher configuration id without its `oidc:`
+  prefix, and the release check rejected that form for 0.11.1 and 0.11.2.
+  Both forms are accepted now.
+- The npm release step waits up to 25 minutes for npm to serve a new
+  version, polling more slowly as it waits, and logs what npm returned.
+- Re-running the failed npm job after npm accepted the publish now
+  finishes the release. The retry checks that npm serves the exact tarball
+  from the run and does not publish again.
 
 ## 0.11.2 - 2026-09-29
 

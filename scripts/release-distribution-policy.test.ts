@@ -213,6 +213,45 @@ describe("public release distribution policy", () => {
     }
   });
 
+  test("accepts the prefixed and bare npm trusted-publisher configuration ids", () => {
+    const exactRelease = {
+      name: "@hraness/xcb",
+      version,
+      license: "MIT",
+      dist: {
+        attestations: {
+          provenance: { predicateType: "https://slsa.dev/provenance/v1" },
+          url: `https://registry.npmjs.org/-/npm/v1/attestations/@hraness%2fxcb@${version}`,
+        },
+        integrity: "sha512-QUJDRA==",
+        shasum: "b".repeat(40),
+        tarball: `https://registry.npmjs.org/@hraness/xcb/-/xcb-${version}.tgz`,
+      },
+    };
+    const withConfig = (oidcConfigId: string) => ({
+      ...exactRelease,
+      _npmUser: { ...npmUser, trustedPublisher: { id: "github", oidcConfigId } },
+    });
+    // npm served the prefixed form through 0.11.0 and the bare form from 0.11.1.
+    for (const accepted of [
+      "oidc:54a0a757-5c7a-46ed-a2f5-484c594064d5",
+      "54a0a757-5c7a-46ed-a2f5-484c594064d5",
+    ]) {
+      expect(parseNpmRelease(withConfig(accepted), version).integrity).toBe("sha512-QUJDRA==");
+    }
+    for (const rejected of [
+      "",
+      "oidc:",
+      "OIDC:54a0a757-5c7a-46ed-a2f5-484c594064d5",
+      "token:54a0a757-5c7a-46ed-a2f5-484c594064d5",
+      "54A0A757-5C7A-46ED-A2F5-484C594064D5",
+      "54a0a757-5c7a-46ed-a2f5-484c594064d5\n",
+      " 54a0a757-5c7a-46ed-a2f5-484c594064d5",
+    ]) {
+      expect(() => parseNpmRelease(withConfig(rejected), version)).toThrow("trusted-publisher provenance");
+    }
+  });
+
   test("requires two exact immutable GitHub artifacts and their bytes", () => {
     const parsed = parseGitHubRelease(release(), version, notes);
     expect(parsed.natives).toHaveLength(0);

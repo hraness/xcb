@@ -468,8 +468,8 @@ jobs:
       contents: none
       id-token: write
     runs-on: ubuntu-24.04
-    # npm publish (2 minutes) plus the 15-minute visibility window.
-    timeout-minutes: 25
+    # npm publish (2 minutes) plus the 25-minute visibility window.
+    timeout-minutes: 35
     outputs:
       npm_completion: ${{ steps.npm_publish.outputs.npm_completion }}
       npm_completion_run_attempt: ${{ steps.npm_publish.outputs.npm_completion_run_attempt }}
@@ -525,7 +525,9 @@ jobs:
         run: bun run ./writer/scripts/release-artifact-checksum.ts check artifacts/*.tgz artifacts/SHA256SUMS
       # A first (or repeated-failure) publish attempt proves the OIDC exchange
       # in a dry run before any bytes are written; a same-run retry only
-      # observes the existing release and never reaches the publisher.
+      # observes the existing release and never reaches the publisher. A
+      # re-run of this job alone still carries `absent`, so the dry run passes
+      # over a version conflict only when npm serves the reviewed integrity.
       - name: Prove the npm OIDC exchange without publishing
         if: env.PRE_NPM_STATE == 'absent'
         run: bun run ./writer/scripts/check-npm-trusted-publisher-oidc.ts artifacts/*.tgz

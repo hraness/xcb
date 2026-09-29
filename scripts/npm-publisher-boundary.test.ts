@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import {
   assertNpmPublisherIdentity,
   type NpmPublisherSpawn,
+  oidcPreflightConflictIsPriorPublish,
   runNpmPublisher,
 } from "./npm-publisher-boundary";
 
@@ -439,6 +440,33 @@ describe("npm trusted-publisher boundary", () => {
       expect(JSON.stringify(result)).not.toContain(directory!);
     } finally {
       if (directory !== undefined) rmSync(directory, { force: true, recursive: true });
+    }
+  });
+});
+
+describe("OIDC preflight retry after a prior publish", () => {
+  const integrity = "sha512-QUJDRA==";
+  const retry = {
+    currentAttempt: 2,
+    existingIntegrity: integrity,
+    expectedIntegrity: integrity,
+    failure: "version_conflict" as const,
+    preflightAttempt: 1,
+  };
+
+  test("passes over a conflict only for a later attempt with the exact integrity", () => {
+    expect(oidcPreflightConflictIsPriorPublish(retry)).toBe(true);
+    for (const refused of [
+      { ...retry, currentAttempt: 1 },
+      { ...retry, currentAttempt: 0, preflightAttempt: 0 },
+      { ...retry, failure: "authorization_rejected" as const },
+      { ...retry, failure: null },
+      { ...retry, existingIntegrity: null },
+      { ...retry, existingIntegrity: "sha512-T1RIRVI=" },
+      { ...retry, existingIntegrity: "not-integrity", expectedIntegrity: "not-integrity" },
+      { ...retry, currentAttempt: Number.NaN },
+    ]) {
+      expect(oidcPreflightConflictIsPriorPublish(refused)).toBe(false);
     }
   });
 });

@@ -22,7 +22,76 @@ import {
 import { trustedPublishingEnvironment } from "./release-process-environment.ts";
 
 /** How long a publish waits for npm to serve the new version as latest. */
-const NPM_VISIBILITY_WINDOW_MILLISECONDS = 15 * 60_000;
+export const NPM_VISIBILITY_WINDOW_MILLISECONDS = 25 * 60_000;
+const NPM_VISIBILITY_FIRST_DELAY_MILLISECONDS = 5_000;
+const NPM_VISIBILITY_MAXIMUM_DELAY_MILLISECONDS = 60_000;
+
+/** Delay before visibility poll `attempt` (1-based): 5s doubling to 60s. */
+export function npmVisibilityDelay(attempt: number): number {
+  if (!Number.isSafeInteger(attempt) || attempt <= 0) {
+    throw new Error("npm visibility delay requires a positive attempt.");
+  }
+  if (attempt >= 5) return NPM_VISIBILITY_MAXIMUM_DELAY_MILLISECONDS;
+  return Math.min(
+    NPM_VISIBILITY_FIRST_DELAY_MILLISECONDS * 2 ** (attempt - 1),
+    NPM_VISIBILITY_MAXIMUM_DELAY_MILLISECONDS,
+  );
+}
+
+export type NpmVisibilityResult<T> = Readonly<{
+  attempts: number;
+  lastFailure: unknown;
+  observed: T | null;
+}>;
+
+/**
+ * Poll `lookup` until it returns an exact release or the bounded window
+ * closes. `lookup` returns null while npm does not serve the version yet and
+ * throws while the served metadata is not (yet) the exact, provenance-bearing
+ * latest release; both keep waiting. Each change of state is logged with its
+ * elapsed time so a failed run shows what npm served and for how long.
+ */
+export async function awaitNpmVisibility<T>(
+  input: Readonly<{
+    log: (line: string) => void;
+    lookup: () => Promise<T | null>;
+    now: () => number;
+    sleep: (milliseconds: number) => Promise<void>;
+    windowMilliseconds: number;
+  }>,
+): Promise<NpmVisibilityResult<T>> {
+  const started = input.now();
+  const deadline = started + input.windowMilliseconds;
+  let attempts = 0;
+  let lastFailure: unknown;
+  let lastState: string | undefined;
+  for (;;) {
+    attempts += 1;
+    let state: string;
+    try {
+      const candidate = await input.lookup();
+      if (candidate !== null) {
+        return Object.freeze({ attempts, lastFailure, observed: candidate });
+      }
+      state = "the exact version is not served yet";
+    } catch (error) {
+      lastFailure = error;
+      state = error instanceof Error ? error.message : String(error);
+    }
+    const elapsed = input.now() - started;
+    if (state !== lastState) {
+      input.log(
+        `npm visibility poll ${String(attempts)} at ${String(Math.round(elapsed / 1_000))}s: ${state}`,
+      );
+      lastState = state;
+    }
+    const remaining = deadline - input.now();
+    if (remaining <= 0) {
+      return Object.freeze({ attempts, lastFailure, observed: null });
+    }
+    await input.sleep(Math.min(npmVisibilityDelay(attempts), remaining));
+  }
+}
 
 export type NpmWriterTransition = "observe_existing" | "publish";
 
@@ -376,6 +445,17 @@ async function main(): Promise<void> {
     }
   }
 
+  async function requireExistingTarballBytes(
+    actual: CompleteRelease,
+  ): Promise<void> {
+    const existingBytes = await fetchExistingTarball(actual.version.tarball);
+    if (!Buffer.from(existingBytes).equals(bytes)) {
+      throw new Error(
+        `${coordinate} existing tarball differs from the reviewed workflow artifact.`,
+      );
+    }
+  }
+
   async function recordCompletion(
     mode: "observed_existing" | "published",
   ): Promise<void> {
@@ -398,57 +478,60 @@ async function main(): Promise<void> {
       throw new Error("npm publication transition lost its existing release.");
     }
     requireExactRelease(existing);
-    const existingBytes = await fetchExistingTarball(existing.version.tarball);
-    if (!Buffer.from(existingBytes).equals(bytes)) {
-      throw new Error(
-        `${coordinate} existing tarball differs from the reviewed workflow artifact.`,
-      );
-    }
+    await requireExistingTarballBytes(existing);
     await recordCompletion("observed_existing");
     console.log(
       `${coordinate} already contains the exact MIT, trusted-publisher npm latest tarball; publish is idempotently complete.`,
     );
   } else {
     const publishExitCode = await publishTarball();
+    if (publishExitCode !== 0 && currentAttempt === preflightAttempt) {
+      // Whether or not the version later appears, a rejected first publish
+      // in the admitted attempt cannot complete; do not wait out the window.
+      throw new Error(
+        `npm publish exited ${String(publishExitCode)} for ${coordinate} in the admitted attempt; refusing an ambiguous same-attempt publication.`,
+      );
+    }
 
-    let observed: CompleteRelease | null = null;
-    let lookupFailure: unknown;
     // npm can take several minutes to show a trusted-publisher version: the
     // v0.10.0 publish became readable about five minutes after npm exited.
-    const deadline = Date.now() + NPM_VISIBILITY_WINDOW_MILLISECONDS;
-    let attempt = 0;
-    while (Date.now() < deadline) {
-      if (attempt > 0) await Bun.sleep(10_000);
-      attempt += 1;
-      try {
+    // The per-version document is read first because the packument behind
+    // `latest` can lag it; completion still requires both to be exact.
+    const { attempts, lastFailure, observed } = await awaitNpmVisibility({
+      log: (line) => console.log(line),
+      lookup: async () => {
         const candidate = await lookupCompleteRelease();
-        if (candidate !== null) {
-          requireExactRelease(candidate);
-          observed = candidate;
-          break;
-        }
-      } catch (error) {
-        observed = null;
-        lookupFailure = error;
-      }
-    }
+        if (candidate !== null) requireExactRelease(candidate);
+        return candidate;
+      },
+      now: () => Date.now(),
+      sleep: (milliseconds) => Bun.sleep(milliseconds),
+      windowMilliseconds: NPM_VISIBILITY_WINDOW_MILLISECONDS,
+    });
     if (observed === null) {
-      const detail = lookupFailure instanceof Error
-        ? ` Last registry error: ${lookupFailure.message}`
+      const detail = lastFailure instanceof Error
+        ? ` Last registry error: ${lastFailure.message}`
         : "";
       throw new Error(
-        `npm publish did not produce a verifiable MIT, provenance-bearing npm latest ${coordinate} release.${detail}`,
+        `npm publish did not produce a verifiable MIT, provenance-bearing npm latest ${coordinate} release after ${String(attempts)} polls over ${String(NPM_VISIBILITY_WINDOW_MILLISECONDS / 60_000)} minutes.${detail}`,
       );
     }
-    if (publishExitCode !== 0) {
-      throw new Error(
-        `${coordinate} appeared after npm rejected this attempt; refusing an ambiguous same-attempt race.`,
+    if (publishExitCode === 0) {
+      await recordCompletion("published");
+      console.log(
+        `${coordinate} is publicly readable as npm latest with exact bytes and trusted-publisher metadata.`,
+      );
+    } else {
+      // A later attempt of this run, after an earlier attempt published but
+      // failed before completion while npm still hid the version: npm
+      // refuses the republish, and the exact bytes it now serves as latest
+      // are this run's release (admission verifies the run-bound provenance).
+      await requireExistingTarballBytes(observed);
+      await recordCompletion("observed_existing");
+      console.log(
+        `${coordinate} was already published with the exact MIT, trusted-publisher npm latest tarball; publish is idempotently complete.`,
       );
     }
-    await recordCompletion("published");
-    console.log(
-      `${coordinate} is publicly readable as npm latest with exact bytes and trusted-publisher metadata.`,
-    );
   }
   console.log(
     `${coordinate} is ready for separate read-only cryptographic provenance admission.`,
