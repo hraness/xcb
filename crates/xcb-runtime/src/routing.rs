@@ -2732,11 +2732,7 @@ mod tests {
         assert_eq!(plain.model.key(), "codex/gpt-5.6-sol/ultra");
         assert_eq!(plain.tier, Tier::Default);
         assert_eq!(plain.stack_position, Some(1));
-        assert!(
-            plain.reason.contains(" · tier default · stack #1"),
-            "{}",
-            plain.reason
-        );
+        assert!(plain.reason.contains(" · tier default · stack #1"));
         let without_codex = BTreeSet::from([codex.clone()]);
         let second = route_with_admitted(
             &store,
@@ -2770,11 +2766,7 @@ mod tests {
         .unwrap();
         assert_eq!(buildout.model.key(), "codex/gpt-6-astra/ultra");
         assert_eq!(buildout.tier, Tier::Buildout);
-        assert!(
-            buildout.reason.contains(" · tier buildout · stack #1"),
-            "{}",
-            buildout.reason
-        );
+        assert!(buildout.reason.contains(" · tier buildout · stack #1"));
         let now = now_ms().saturating_sub(1);
         store
             .record_quota(&xcb_core::usage::QuotaPoint {
@@ -2816,9 +2808,7 @@ mod tests {
         assert!(
             unmatched
                 .reason
-                .contains(" · tier default · no stack match"),
-            "{}",
-            unmatched.reason
+                .contains(" · tier default · no stack match")
         );
     }
 
