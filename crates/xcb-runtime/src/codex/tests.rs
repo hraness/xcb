@@ -331,6 +331,15 @@ fn failed_turns_preserve_fixed_diagnostics_and_terminal_classification() {
             Some(Failure::Policy),
             "provider policy rejected",
         ),
+        // Codex 0.159.0 ends a turn whose actions its own review layer denied
+        // too often. That is the provider's policy, not the account's usage
+        // limit, so it neither exhausts the account nor triggers quota failover.
+        (
+            "tooManyDenials",
+            Terminal::Failed,
+            Some(Failure::Policy),
+            "provider policy rejected",
+        ),
         // Codex 0.158.0 reports an unavailable Flex tier separately from an
         // overloaded service. Both are transient provider capacity, not the
         // account's usage limit, so neither triggers quota failover.
@@ -565,7 +574,8 @@ fn exact_native_echo_trace_replays_with_current_wire_shapes() {
     replay_native_echo_trace(include_str!("wire-echo-frames.json"));
 }
 
-// Codex 0.157.1 recorded the current echo trace apart from timestamps and IDs.
+// Codex 0.157.1 and 0.158.0 recorded the current echo trace apart from
+// timestamps and IDs.
 #[test]
 fn previous_supported_build_echo_trace_replays_with_current_controls() {
     replay_native_echo_trace(include_str!("wire-echo-frames-0.156.1.json"));
@@ -955,6 +965,27 @@ fn failed_terminal_classifies_and_abandons_unresolved_tool_calls() {
         }
     )));
     assert!(c.calls["call1"].completed);
+    // Codex 0.159.0 documents `turn.error` for interrupted turns too. The
+    // interruption still settles as cancelled, and the error's text is not
+    // surfaced.
+    let mut c = started();
+    c.accept(notice("item/started", call_item())).unwrap();
+    let (events, _) = c
+        .accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"interrupted","error":{"codexErrorInfo":"tooManyDenials","message":"SYNTHETIC_SECRET user@example.invalid"}}}}))
+        .unwrap();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::Result {
+            terminal: Terminal::Cancelled,
+            ..
+        }
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Quota { .. }))
+    );
+    assert!(!format!("{events:?}").contains("SYNTHETIC"));
     let mut c = started();
     c.accept(notice("item/started", call_item())).unwrap();
     assert!(
@@ -1004,6 +1035,39 @@ fn early_turn_errors_classify_before_turn_admission() {
         }),
         Some(Failure::Authentication)
     );
+    // Codex 0.159.0's `tooManyDenials` is a policy outcome on the error
+    // notification as well, in both the string and nested tag forms.
+    for code in [
+        json!("tooManyDenials"),
+        json!({"tooManyDenials": {"secret": "SYNTHETIC_NESTED_SECRET"}}),
+    ] {
+        let mut c = codec();
+        early(&mut c);
+        let (events, _) = c
+            .accept(json!({"method":"error","params":{"threadId":"thread1","turnId":"turn9","willRetry":false,"error":{"codexErrorInfo":code,"message":"SYNTHETIC_SECRET"}}}))
+            .unwrap();
+        assert_eq!(
+            events.iter().find_map(|event| match event {
+                Event::Quota { failure, .. } => *failure,
+                _ => None,
+            }),
+            Some(Failure::Policy)
+        );
+        let diagnostic = events
+            .iter()
+            .find_map(|event| match event {
+                Event::Diagnostic(value) => Some(serde_json::to_value(value).unwrap()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            diagnostic
+                .as_str()
+                .unwrap()
+                .contains("provider policy rejected")
+        );
+        assert!(!diagnostic.as_str().unwrap().contains("SYNTHETIC"));
+    }
     for mut notification in [
         json!({"method":"error","params":{"threadId":"thread1","turnId":"other","willRetry":false,"error":{"message":"x"}}}),
         json!({"method":"error","params":{"threadId":"foreign","turnId":"turn9","willRetry":false,"error":{"message":"x"}}}),

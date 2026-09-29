@@ -10,6 +10,19 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+xcb now runs Codex CLI 0.159.0.
+
+- Codex CLI 0.159.0 on macOS ARM64 passes the executable, tool, configuration,
+  and sandbox checks, so `xcb doctor` no longer reports it as a build xcb can't
+  run. The previous supported builds, 0.158.0, 0.157.1, and 0.156.1, remain
+  supported.
+- When Codex ends a turn because its own review step refused the turn's
+  actions too many times, xcb records a policy failure. It does not count the
+  failure against the account's usage limit, and it does not move the task to
+  another account.
+
 ## 0.13.0 - 2026-09-29
 
 xcb now rotates subscriptions when a provider reports a usage limit. An

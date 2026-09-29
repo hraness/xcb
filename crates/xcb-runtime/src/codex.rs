@@ -112,7 +112,9 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
         "unauthorized" => Some(category::AUTHENTICATION),
         "contextWindowExceeded" => Some("provider context window exceeded"),
         "flexUnavailable" | "serverOverloaded" => Some(category::PROVIDER_CAPACITY),
-        "cyberPolicy" | "misalignmentPolicyViolation" | "sandboxError" => {
+        // `tooManyDenials` (Codex 0.159.0): the provider's own review layer
+        // refused the turn's actions too often. A policy outcome, not quota.
+        "cyberPolicy" | "misalignmentPolicyViolation" | "sandboxError" | "tooManyDenials" => {
             Some("provider policy rejected the operation")
         }
         _ => None,
@@ -1086,9 +1088,10 @@ impl CodexProtocol {
                 let failure = match error_tag(&p["error"]) {
                     "usageLimitExceeded" => Some(Failure::AccountQuota),
                     "unauthorized" => Some(Failure::Authentication),
-                    "cyberPolicy" | "misalignmentPolicyViolation" | "sandboxError" => {
-                        Some(Failure::Policy)
-                    }
+                    "cyberPolicy"
+                    | "misalignmentPolicyViolation"
+                    | "sandboxError"
+                    | "tooManyDenials" => Some(Failure::Policy),
                     _ => None,
                 };
                 if let Some(failure) = failure {
@@ -1141,9 +1144,10 @@ impl CodexProtocol {
                         let failure = match tag {
                             "usageLimitExceeded" => Some(Failure::AccountQuota),
                             "unauthorized" => Some(Failure::Authentication),
-                            "cyberPolicy" | "misalignmentPolicyViolation" | "sandboxError" => {
-                                Some(Failure::Policy)
-                            }
+                            "cyberPolicy"
+                            | "misalignmentPolicyViolation"
+                            | "sandboxError"
+                            | "tooManyDenials" => Some(Failure::Policy),
                             // Capacity shortages are transient and provider-wide:
                             // they neither exhaust this account nor fail over.
                             "flexUnavailable" | "serverOverloaded" => Some(Failure::Transport),

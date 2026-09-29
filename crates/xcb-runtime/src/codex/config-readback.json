@@ -36,42 +36,38 @@
     "browser_use": null,
     "computer_use": null,
     "desktop": null,
-    "js_repl_node_path": null,
-    "memories": null,
-    "oss_provider": null,
-    "chatgpt_base_url": "https://chatgpt.com/backend-api/",
-    "allow_login_shell": false,
-    "notify": [],
-    "default_permissions": null,
-    "tui": null,
-    "agents": null,
-    "profiles": {},
-    "experimental_realtime_start_instructions": null,
-    "mcp_optional_startup_grace_ms": null,
-    "auto_review": null,
-    "mcp_oauth_callback_port": null,
-    "show_raw_agent_reasoning": null,
-    "experimental_realtime_ws_base_url": null,
-    "experimental_realtime_ws_backend_prompt": null,
-    "sqlite_home": null,
-    "hooks": null,
-    "suppress_unstable_features_warning": null,
-    "notice": null,
-    "experimental_compact_prompt_file": null,
-    "cli_auth_credentials_store": "file",
-    "model_instructions_file": null,
-    "responses_api_metadata": null,
-    "model_providers": {},
     "tool_suggest": null,
-    "mcp_servers": {},
-    "mcp_enterprise_managed_auth": null,
-    "allow_symlinked_codex_home": null,
-    "project_doc_fallback_filenames": [],
-    "permissions": null,
-    "js_repl_node_module_dirs": null,
-    "tool_output_token_limit": null,
-    "thread_unload_delay_secs": null,
+    "model_catalog_json": "/synthetic/catalog.json",
+    "oss_provider": null,
+    "apps_mcp_product_sku": null,
+    "js_repl_node_path": null,
+    "marketplaces": {},
+    "history": {
+      "persistence": "none",
+      "max_bytes": null
+    },
+    "otel": null,
+    "project_root_markers": [
+      ".git"
+    ],
+    "cli_auth_credentials_store": "file",
+    "experimental_realtime_ws_startup_context": null,
     "log_dir": null,
+    "openai_base_url": null,
+    "js_repl_node_module_dirs": null,
+    "include_environment_context": true,
+    "profile": null,
+    "realtime": null,
+    "include_collaboration_mode_instructions": true,
+    "feedback": {
+      "enabled": false
+    },
+    "windows": null,
+    "ghost_snapshot": null,
+    "background_terminal_max_timeout": 300000,
+    "mcp_servers": {},
+    "experimental_compact_prompt_file": null,
+    "experimental_realtime_ws_base_url": null,
     "features": {
       "code_mode": false,
       "multi_agent_v2": false,
@@ -109,60 +105,36 @@
       "tool_suggest": true,
       "windows_sandbox_service": false
     },
-    "ghost_snapshot": null,
-    "skills": {
-      "bundled": {
-        "enabled": false
-      },
-      "include_instructions": false
-    },
-    "check_for_update_on_startup": false,
-    "profile": null,
-    "disable_paste_burst": null,
-    "model_post_turn_compact_threshold_percent": null,
-    "include_collaboration_mode_instructions": true,
-    "mcp_oauth_credentials_store": "file",
-    "experimental_thread_store_endpoint": null,
-    "windows": null,
-    "plugins": {},
-    "experimental_thread_store": null,
-    "background_terminal_max_timeout": 300000,
-    "history": {
-      "persistence": "none",
-      "max_bytes": null
-    },
-    "projects": null,
-    "project_doc_max_bytes": 0,
-    "experimental_realtime_ws_startup_context": null,
-    "openai_base_url": null,
-    "hide_agent_reasoning": false,
-    "feedback": {
-      "enabled": false
-    },
-    "model_catalog_json": "/synthetic/catalog.json",
     "include_apps_instructions": true,
-    "apps_mcp_product_sku": null,
+    "show_raw_agent_reasoning": null,
+    "mcp_optional_startup_grace_ms": null,
+    "projects": null,
+    "agents": null,
+    "thread_unload_delay_secs": null,
+    "permissions": null,
+    "include_permissions_instructions": true,
+    "notice": null,
+    "personality": null,
+    "responses_api_metadata": null,
+    "file_opener": "vscode",
+    "notify": [],
+    "allow_login_shell": false,
+    "memories": null,
     "orchestrator": {
       "skills": {
         "enabled": false
       },
       "mcp": null
     },
-    "personality": null,
-    "experimental_realtime_webrtc_call_base_url": null,
-    "experimental_realtime_ws_model": null,
-    "realtime": null,
-    "include_permissions_instructions": true,
-    "file_opener": "vscode",
-    "project_root_markers": [
-      ".git"
-    ],
-    "otel": null,
+    "hooks": null,
+    "model_providers": {},
+    "tui": null,
+    "model_post_turn_compact_threshold_percent": null,
     "experimental_use_unified_exec_tool": null,
-    "audio": null,
-    "cloud": null,
-    "goals": null,
-    "include_environment_context": true,
+    "plugins": {},
+    "experimental_thread_store": null,
+    "mcp_oauth_credentials_store": "file",
+    "mcp_enterprise_managed_auth": null,
     "shell_environment_policy": {
       "inherit": "none",
       "ignore_default_excludes": null,
@@ -172,58 +144,46 @@
       "filters": null,
       "experimental_use_profile": null
     },
+    "experimental_thread_store_endpoint": null,
+    "suppress_unstable_features_warning": null,
+    "disable_paste_burst": null,
+    "project_doc_fallback_filenames": [],
     "mcp_oauth_callback_url": null,
+    "goals": null,
     "plan_mode_reasoning_effort": null,
-    "marketplaces": {}
+    "cloud": null,
+    "skills": {
+      "bundled": {
+        "enabled": false
+      },
+      "include_instructions": false
+    },
+    "default_permissions": null,
+    "chatgpt_base_url": "https://chatgpt.com/backend-api/",
+    "profiles": {},
+    "tool_output_token_limit": null,
+    "check_for_update_on_startup": false,
+    "sqlite_home": null,
+    "experimental_realtime_ws_backend_prompt": null,
+    "audio": null,
+    "experimental_realtime_webrtc_call_base_url": null,
+    "auto_review": null,
+    "model_instructions_file": null,
+    "project_doc_max_bytes": 0,
+    "mcp_oauth_callback_port": null,
+    "experimental_realtime_ws_model": null,
+    "allow_symlinked_codex_home": null,
+    "hide_agent_reasoning": false,
+    "experimental_realtime_start_instructions": null
   },
   "origins": {
-    "features.remote_control": {
+    "features.workspace_dependencies": {
       "name": {
         "type": "user",
         "file": "/synthetic/scratch/profile/config.toml",
         "profile": null
       },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "approval_policy": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "analytics.enabled": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.computer_use": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "orchestrator.skills.enabled": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "model_provider": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
     },
     "features.image_generation": {
       "name": {
@@ -231,263 +191,7 @@
         "file": "/synthetic/scratch/profile/config.toml",
         "profile": null
       },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.hooks": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.multi_agent_v2.enabled": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "shell_environment_policy.inherit": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.realtime_conversation": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "forced_login_method": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.code_mode.enabled": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "sandbox_mode": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "mcp_oauth_credentials_store": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.plugin_sharing": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "apps._default.destructive_enabled": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "skills.bundled.enabled": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.skill_search": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "web_search": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "apps._default.open_world_enabled": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "history.persistence": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.worktrees": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.multi_agent": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "apps._default.enabled": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "cli_auth_credentials_store": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "feedback.enabled": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.memories": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "model_catalog_json": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.system_proxy_fallback": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "project_doc_max_bytes": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.apps": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.guardianv2.thread_context": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.skill_mcp_dependency_install": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.shell_tool": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "allow_login_shell": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.in_app_browser": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.daemon_auto_start": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
-    },
-    "features.browser_use": {
-      "name": {
-        "type": "user",
-        "file": "/synthetic/scratch/profile/config.toml",
-        "profile": null
-      },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
     },
     "check_for_update_on_startup": {
       "name": {
@@ -495,55 +199,55 @@
         "file": "/synthetic/scratch/profile/config.toml",
         "profile": null
       },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
     },
-    "features.remote_plugin": {
+    "allow_login_shell": {
       "name": {
         "type": "user",
         "file": "/synthetic/scratch/profile/config.toml",
         "profile": null
       },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
     },
-    "features.guardian_reuse_parent_compaction": {
+    "cli_auth_credentials_store": {
       "name": {
         "type": "user",
         "file": "/synthetic/scratch/profile/config.toml",
         "profile": null
       },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
     },
-    "skills.include_instructions": {
+    "features.apps": {
       "name": {
         "type": "user",
         "file": "/synthetic/scratch/profile/config.toml",
         "profile": null
       },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
     },
-    "features.plugins": {
+    "features.shell_tool": {
       "name": {
         "type": "user",
         "file": "/synthetic/scratch/profile/config.toml",
         "profile": null
       },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
     },
-    "features.auth_elicitation": {
+    "features.in_app_browser": {
       "name": {
         "type": "user",
         "file": "/synthetic/scratch/profile/config.toml",
         "profile": null
       },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
     },
-    "features.workspace_dependencies": {
+    "analytics.enabled": {
       "name": {
         "type": "user",
         "file": "/synthetic/scratch/profile/config.toml",
         "profile": null
       },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
     },
     "features.shell_snapshot": {
       "name": {
@@ -551,7 +255,279 @@
         "file": "/synthetic/scratch/profile/config.toml",
         "profile": null
       },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.hooks": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.plugins": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.browser_use": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "skills.include_instructions": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.memories": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.remote_plugin": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.worktrees": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.realtime_conversation": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.multi_agent": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "apps._default.destructive_enabled": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "project_doc_max_bytes": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.code_mode.enabled": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "web_search": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.skill_mcp_dependency_install": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "model_catalog_json": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.guardian_reuse_parent_compaction": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.plugin_sharing": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "feedback.enabled": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "skills.bundled.enabled": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "apps._default.enabled": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.system_proxy_fallback": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "approval_policy": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "orchestrator.skills.enabled": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.multi_agent_v2.enabled": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.daemon_auto_start": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "sandbox_mode": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "mcp_oauth_credentials_store": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "apps._default.open_world_enabled": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.skill_search": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "model_provider": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.guardianv2.thread_context": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.auth_elicitation": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.remote_control": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "shell_environment_policy.inherit": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
     },
     "features.unified_exec": {
       "name": {
@@ -559,7 +535,31 @@
         "file": "/synthetic/scratch/profile/config.toml",
         "profile": null
       },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b"
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "history.persistence": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "forced_login_method": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
+    },
+    "features.computer_use": {
+      "name": {
+        "type": "user",
+        "file": "/synthetic/scratch/profile/config.toml",
+        "profile": null
+      },
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55"
     }
   },
   "layers": [
@@ -569,7 +569,7 @@
         "file": "/synthetic/scratch/profile/config.toml",
         "profile": null
       },
-      "version": "sha256:df13168d9d6cc7f0171c61296f6a80c63629a2f77c0a2bf78b8f9ee09459c97b",
+      "version": "sha256:c0c85d290fb4fe100ab474a0e959eb50b2985a2f21051382e9f19c1451d5fe55",
       "config": {
         "model_catalog_json": "/synthetic/catalog.json",
         "model_provider": "openai",
