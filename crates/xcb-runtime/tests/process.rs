@@ -1,3 +1,6 @@
+// These tests drive Unix permission bits, symlinks, or /bin/sh fixtures;
+// the Windows custody rules are covered by the platform tests.
+#![cfg(unix)]
 use std::time::Duration;
 use tokio::process::Command;
 use xcb_runtime::process::{StreamProcess, capture};

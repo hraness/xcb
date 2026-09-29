@@ -257,11 +257,7 @@ pub fn read(store: &Store, account: &Id, request: &Id) -> Result<Option<Diagnost
     let parent = store.root().join("accounts").join(account.as_str());
     // Do not use a directory-creation helper on this read-only path.
     let metadata = crate::os::lstat(&parent)?;
-    if !metadata.dir
-        || !metadata.owned
-        || !metadata.private
-        || parent.canonicalize()? != parent
-    {
+    if !metadata.dir || !metadata.owned || !metadata.private || parent.canonicalize()? != parent {
         return Err(Error::PrivateState);
     }
     let bytes = match private::read(&parent.join(FILE), MAX_BYTES) {

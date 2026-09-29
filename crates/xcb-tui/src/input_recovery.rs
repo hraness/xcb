@@ -185,9 +185,7 @@ impl RecoveryJournal {
             .directory
             .open_file(&format!("{}.json", self.id), MAX_JOURNAL_BYTES)
         {
-            Ok(file) if self.snapshot_identity == Some(FileIdentity::of_file(&file)?) => {
-                Ok(())
-            }
+            Ok(file) if self.snapshot_identity == Some(FileIdentity::of_file(&file)?) => Ok(()),
             Err(error)
                 if error.kind() == io::ErrorKind::NotFound && self.snapshot_identity.is_none() =>
             {
@@ -214,7 +212,8 @@ impl Drop for RecoveryJournal {
                 .directory
                 .open_file(&format!("{}.lock", self.id), 0)
                 .is_ok_and(|file| {
-                    FileIdentity::of_file(&file).is_ok_and(|identity| identity == self.lock_identity)
+                    FileIdentity::of_file(&file)
+                        .is_ok_and(|identity| identity == self.lock_identity)
                 })
         {
             let _ = self.directory.unlink(&format!("{}.lock", self.id));
@@ -290,9 +289,7 @@ pub fn read(entry: &RecoveryEntry) -> io::Result<RecoverySnapshot> {
     (&file)
         .take(MAX_JOURNAL_BYTES + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_JOURNAL_BYTES
-        || FileIdentity::of_file(&file)? != entry.identity
-    {
+    if bytes.len() as u64 > MAX_JOURNAL_BYTES || FileIdentity::of_file(&file)? != entry.identity {
         return Err(invalid("Input snapshot changed; reopen recovery"));
     }
     directory.check()?;
@@ -391,9 +388,8 @@ pub fn remove(entry: &RecoveryEntry) -> io::Result<()> {
     if directory
         .open_file(&lock_name, u64::MAX)
         .is_ok_and(|other| {
-            FileIdentity::of_file(&other).is_ok_and(|theirs| {
-                FileIdentity::of_file(&lock.0).is_ok_and(|ours| theirs == ours)
-            })
+            FileIdentity::of_file(&other)
+                .is_ok_and(|theirs| FileIdentity::of_file(&lock.0).is_ok_and(|ours| theirs == ours))
         })
     {
         directory.unlink(&lock_name)?;
@@ -779,7 +775,10 @@ mod sys {
 
     #[cfg(unix)]
     pub(super) fn lock(file: &File) -> io::Result<()> {
-        Ok(rustix::fs::flock(file, rustix::fs::FlockOperation::LockExclusive)?)
+        Ok(rustix::fs::flock(
+            file,
+            rustix::fs::FlockOperation::LockExclusive,
+        )?)
     }
     #[cfg(windows)]
     pub(super) fn lock(file: &File) -> io::Result<()> {

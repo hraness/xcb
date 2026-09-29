@@ -1473,8 +1473,7 @@ impl ManagedStore {
                     "managed state was written by a newer xcb",
                 ));
             }
-            crate::os::owner_only(OpenOptions::new().write(true).create_new(true))
-                .open(&target)?;
+            crate::os::owner_only(OpenOptions::new().write(true).create_new(true)).open(&target)?;
             connection.execute(
                 "VACUUM INTO ?1",
                 [target.to_str().ok_or(Error::PrivateState)?],

@@ -11,6 +11,7 @@ use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, RenameFlags};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::{
     fs::File,
@@ -18,7 +19,6 @@ use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::Component,
 };
-use std::path::{Path, PathBuf};
 use xcb_core::{MAX_TEXT_BYTES, policy::EffectState};
 
 #[derive(Debug, Serialize)]

@@ -33,7 +33,7 @@ fn now_ms() -> u64 {
 
 const AUTH_PROVIDER: &str = "xcb-otp-v1";
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "session_refresh_tests.rs"]
 mod session_refresh_tests;
 

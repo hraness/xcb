@@ -3,9 +3,9 @@
 use super::git_snapshot;
 #[cfg(unix)]
 use super::{Workspace, components, io};
-use crate::{Result, digest, private};
 #[cfg(unix)]
 use crate::{Error, coordination};
+use crate::{Result, digest, private};
 #[cfg(unix)]
 use base64::{Engine, engine::general_purpose::STANDARD};
 #[cfg(unix)]

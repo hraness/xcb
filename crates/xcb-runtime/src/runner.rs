@@ -262,11 +262,7 @@ fn launch_directory_metadata(path: &Path) -> Result<crate::os::Stamp> {
     // Inspection must not use ensure_private_directory: a path concurrently
     // removed by its owner must stay absent, including during a dry run.
     let metadata = crate::os::lstat(path)?;
-    if !metadata.dir
-        || !metadata.owned
-        || !metadata.private
-        || path.canonicalize()? != path
-    {
+    if !metadata.dir || !metadata.owned || !metadata.private || path.canonicalize()? != path {
         return Err(Error::PrivateState);
     }
     Ok(metadata)

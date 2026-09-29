@@ -1,3 +1,6 @@
+// These tests drive Unix permission bits, symlinks, or /bin/sh fixtures;
+// the Windows custody rules are covered by the platform tests.
+#![cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use xcb_core::{
     Id, Provider,

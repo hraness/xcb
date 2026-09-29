@@ -692,11 +692,7 @@ fn managed_migration_guard_until(
 ) -> Result<Option<private::ExclusiveLock>> {
     let path = root.join("supervisor.lock");
     let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false);
+    options.read(true).write(true).create(true).truncate(false);
     let file = crate::os::no_follow(crate::os::owner_only(&mut options), false).open(&path)?;
     private::check_file(&file, 4096)?;
     private::same_file(&path, &file)?;
