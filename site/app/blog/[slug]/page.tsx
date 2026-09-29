@@ -7,12 +7,13 @@ import { JsonLdScript } from "@hraness/web-discovery/json-ld";
 import { SiteHeader } from "../../site-header";
 import { blogArticleDiscovery, blogRelatedProducts, blogSite } from "../discovery";
 import { blogBodies, blogStatusLabel } from "../posts.generated";
-import { blogAuthor, blogFeedPath, blogPosts, blogTitle, findBlogPost } from "../posts";
+import { blogAuthor, blogFeedPath, blogTitle, findBlogPost, markdownBlogPosts } from "../posts";
 
 export const dynamicParams = false;
 
 export function generateStaticParams() {
-  return blogPosts.map(({ slug }) => ({ slug }));
+  // A beats post has its own route beside this one.
+  return markdownBlogPosts.map(({ slug }) => ({ slug }));
 }
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {

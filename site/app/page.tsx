@@ -11,6 +11,8 @@ import {
 import { PlatformInstall } from "@hraness/design-kit/react";
 import { AskAiAboutThis } from "@hraness/ui";
 import { CodeBlock } from "./code-block";
+import { RouterShowcase } from "./mockups/showcase";
+import "./mockups/mockups.css";
 import { providerStatus } from "./docs/provider-status";
 import { installPlatforms, runsOnPlatforms } from "./install/platforms";
 import { publishedRelease } from "./publication";
@@ -80,6 +82,7 @@ export default function Home() {
             align="start"
             backdrop={false}
             className="xcb-hero"
+            frame={<RouterShowcase className="xcb-home-showcase" />}
             name="Excalibur (xcb)"
             heading={heading}
             headingId="hero-title"
@@ -87,6 +90,8 @@ export default function Home() {
             actions={[{ href: "/install", label: "Install xcb" }, { href: "#use", label: "See how it works" }]}
             boundary={`Free and open source · ${releaseStatusLabel(publishedRelease)}`}
           />
+
+          <p className="xcb-launch-link"><a className="xcb-text-link" href="/blog/one-agent-for-all-your-ai-plans">Introducing Excalibur: the short version →</a></p>
 
           <MarketingSection id="router" heading="Use your quota before it resets" headingId="router-title" summary="Let xcb choose among your subscriptions when you send a task. It favors unused Claude and Codex quota approaching a reset when fresh usage reports are available.">
             <MarketingPillars

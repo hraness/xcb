@@ -41,6 +41,10 @@ const cardCopy: Readonly<Record<string, { description: string; headline?: string
   "/compare/opencode": { description: "OpenCode is an open agent for 75+ providers. xcb runs tasks on your own plans." },
   "/compare/openrouter": { description: "OpenRouter bills per token. xcb sends each task to a plan you already pay for." },
   "/blog": { description: "How xcb routes coding tasks across your Claude, Codex, and Devin plans." },
+  "/blog/one-agent-for-all-your-ai-plans": {
+    headline: "Excalibur: one agent for all your AI plans",
+    description: "Short posts on what xcb does when you pay for more than one AI coding plan.",
+  },
   "/blog/introducing-excalibur": { description: "xcb sends each coding task to an idle Claude, Codex, or Devin account of yours." },
   "/blog/how-xcb-uses-gobstopper": { description: "xcb swaps old tool output for a short marker and keeps the original locally." },
   "/blog/replayable-task-history": { description: "xcb tasks verify replays a task offline and fails if a record was edited." },

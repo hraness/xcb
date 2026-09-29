@@ -6,6 +6,8 @@ import type {
   ArticleSourceItem,
 } from "@hraness/design-kit";
 
+import { launchPostSlug } from "../launch/beats";
+
 /**
  * The xcb blog registry. Each post's body lives in `content/blog/<slug>.md`
  * and is rendered by `scripts/sync-blog.ts`; this file owns titles, dates,
@@ -53,6 +55,15 @@ const wordcell = (path: string) => `https://github.com/hraness/wordcell/blob/7b6
 const designKitPortfolio = "https://github.com/hraness/design-kit/blob/v0.17.0/src/portfolio.generated.json";
 const xcbAt = (rev: string, path: string) => `https://github.com/hraness/xcb/blob/${rev}/${path}`;
 
+/**
+ * The launch beats have no independent review yet, so the post ships
+ * quarantined (readable by link, noindex). A separate read-only review that
+ * checks each beat against the sources below sets this and the lifecycle.
+ */
+const beatsReview: ArticleReview | null = null;
+const beatsAt = (path: string) => xcbAt("a242be4", path);
+const beatsCheckedOn: ArticleIsoDate = "2026-09-29";
+
 /** Introducing Excalibur's fact check read xcb at 27dc148 and the two external sites on this date. */
 const launch = (path: string) => xcbAt("27dc148", path);
 const launchCheckedOn: ArticleIsoDate = "2026-09-27";
@@ -72,6 +83,11 @@ export type BlogPost = Readonly<{
   relation: string | "all" | null;
   /** True when the body carries the `{{release.version}}` status sentence itself. */
   statusInBody: boolean;
+  /**
+   * `"beats"` for a launch post built from `app/launch/beats.ts` with its own
+   * route; every other post is Markdown in `content/blog/<slug>.md`.
+   */
+  format?: "beats";
   sources: readonly ArticleSourceItem[];
   admission: ArticleAdmission;
 }>;
@@ -99,6 +115,50 @@ function post(
 }
 
 export const blogPosts: readonly BlogPost[] = [
+  post({
+    slug: launchPostSlug,
+    title: "Introducing Excalibur: one agent for all your AI coding plans",
+    dek: "Bite-size posts on what xcb does for people who pay for more than one of Claude, Codex, and Devin, each with its own illustration.",
+    eyebrow: "Launch",
+    published: "2026-09-29",
+    keywords: ["xcb", "Excalibur", "Claude Code", "Codex", "Devin", "multiple AI subscriptions", "usage limits", "coding agents"],
+    relation: "all",
+    statusInBody: true,
+    format: "beats",
+    sources: [
+      { title: "xcb README: providers, how routing works, everyday commands, limits", href: beatsAt("README.md"), checkedOn: beatsCheckedOn },
+      { title: "Quota routing: fresh usage within five minutes, Claude and Codex windows, failover on a reported limit", href: beatsAt("docs/quota-routing.md"), checkedOn: beatsCheckedOn },
+      { title: "Remote operations: xcb link, fleet, dispatch, end-to-end encrypted task content, your own relay", href: beatsAt("docs/remote-operations.md"), checkedOn: beatsCheckedOn },
+      { title: "Route contract: the JSON request and result", href: beatsAt("docs/route.md"), checkedOn: beatsCheckedOn },
+      { title: "Launch facts and beats", href: beatsAt("site/app/launch/facts.ts"), checkedOn: beatsCheckedOn },
+      { title: "Published release record", href: beatsAt("site/published-release.json"), checkedOn: beatsCheckedOn },
+    ],
+    admission: {
+      lifecycle: "quarantined",
+      readerJob: "Decide in a minute whether xcb is for you when you pay for more than one AI coding plan, and share the one piece that makes the case.",
+      nonObviousAnswer: "xcb does not add capacity; it spends the quota you already have in the right order, favoring unused quota close to a reset, and moves a task to another account when a provider reports a limit mid-task.",
+      originalContribution: "Ten standalone claims, each checked against xcb's README and docs at the pinned commit and paired with an illustration drawn from the CLI's own output shapes, which the social posts are cut from without rewording.",
+      hostFit: "The product's own launch post on its own host, with the long introduction at /blog/introducing-excalibur as its technical companion.",
+      nearestUrls: [
+        { url: "/blog/introducing-excalibur", distinction: "The introduction follows one task through sign-in, sandbox, and recorded outcome in long form; this post gives the same product as short standalone claims for a first look and for sharing." },
+        { url: "/", distinction: "The home page answers setup questions and installs; this post makes the case one claim at a time." },
+      ],
+      observations: [
+        "Every number in the post comes from app/launch/facts.ts, and tests read the README and docs to check each one.",
+        "The illustrations reuse the exact line shapes `xcb accounts`, `xcb tasks`, `xcb attention`, and `xcb fleet` print, and a test fails if a shape drifts from the CLI source.",
+      ],
+      scores: { readerUtility: 2, originalEvidence: 1, factualConfidence: 2, hostFit: 2, voiceIntegrity: 2, maintenanceValue: 1 },
+      review: beatsReview,
+      reassessOn: "2026-11-10",
+      harmIfWrong: "A reader could expect xcb to add usage, to keep provider plugins inside its runs, or to move every task on any limit, and pay for a plan they would not use.",
+      refreshTriggers: [
+        "xcb release tag bump (site/published-release.json)",
+        "A change to quota routing freshness, the windows xcb reads, or failover on a reported limit",
+        "A change to xcb link, fleet, dispatch, or relay encryption",
+        "A change to the output shapes of xcb accounts, tasks, attention, or fleet",
+      ],
+    },
+  }),
   post({
     slug: "introducing-excalibur",
     title: "Introducing Excalibur",
@@ -347,6 +407,9 @@ export const blogPosts: readonly BlogPost[] = [
     },
   }),
 ];
+
+/** Posts whose body is Markdown in `content/blog/<slug>.md`. */
+export const markdownBlogPosts: readonly BlogPost[] = blogPosts.filter((entry) => entry.format !== "beats");
 
 export function findBlogPost(slug: string): BlogPost | undefined {
   return blogPosts.find((entry) => entry.slug === slug);

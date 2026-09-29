@@ -12,7 +12,7 @@ import { articleJsonLd, createBlogSitemapPaths } from "@hraness/web-discovery";
 import { blogArticleDiscovery, blogRelatedProducts, blogSite } from "../app/blog/discovery";
 import { blogAtomFeed } from "../app/blog/feed";
 import { blogBodies, blogStatusLabel } from "../app/blog/posts.generated";
-import { blogPath, blogPostPath, blogPosts, indexableBlogPosts } from "../app/blog/posts";
+import { blogPath, blogPostPath, blogPosts, indexableBlogPosts, markdownBlogPosts } from "../app/blog/posts";
 import { publishedRelease } from "../app/publication";
 import nextConfig from "../next.config";
 import { renderBlogBody } from "../scripts/blog-html";
@@ -85,8 +85,8 @@ describe("xcb blog", () => {
 
   test("has one Markdown body per post and renders each one", async () => {
     const files = (await readdir(join(site, "content/blog"))).filter((name) => name.endsWith(".md")).sort();
-    expect(files).toEqual(blogPosts.map(({ slug }) => `${slug}.md`).sort());
-    for (const entry of blogPosts) {
+    expect(files).toEqual(markdownBlogPosts.map(({ slug }) => `${slug}.md`).sort());
+    for (const entry of markdownBlogPosts) {
       const markdown = await read(`content/blog/${entry.slug}.md`);
       const rendered = renderBlogBody(markdown, "v0.0.0");
       expect(blogBodies[entry.slug]?.html).toBeDefined();
@@ -101,7 +101,7 @@ describe("xcb blog", () => {
   test("renders the release status from the published release record", () => {
     const expected = publishedRelease === null ? "In development" : `Latest release: v${publishedRelease.version}`;
     expect(blogStatusLabel).toBe(expected);
-    for (const entry of blogPosts.filter(({ statusInBody }) => statusInBody)) {
+    for (const entry of markdownBlogPosts.filter(({ statusInBody }) => statusInBody)) {
       expect(blogBodies[entry.slug]?.html).toContain(publishedRelease === null ? "none yet" : `v${publishedRelease.version}`);
     }
   });
