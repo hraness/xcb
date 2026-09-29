@@ -9,6 +9,7 @@ export const nativePlatforms = [
   { platform: "darwin-aarch64", label: "macOS ARM64 (Apple silicon)" },
   { platform: "linux-x86_64", label: "Linux x86_64" },
   { platform: "linux-aarch64", label: "Linux ARM64" },
+  { platform: "windows-x86_64", label: "Windows x86_64" },
 ] as const;
 
 export type NativePlatform = (typeof nativePlatforms)[number]["platform"];
@@ -46,7 +47,8 @@ function parseNativeAsset(value: unknown, version: string): NativeAsset {
   if (typeof platform !== "string" || !platformNames.has(platform)) {
     throw new TypeError("Native release asset names an unsupported platform.");
   }
-  const expectedUrl = `${releaseRoot}${version}/xcb-${version}-${platform}.tar.gz`;
+  const extension = platform.startsWith("windows-") ? "zip" : "tar.gz";
+  const expectedUrl = `${releaseRoot}${version}/xcb-${version}-${platform}.${extension}`;
   if (url !== expectedUrl || sha256Url !== `${expectedUrl}.sha256`) {
     throw new TypeError("Native release asset must bind the exact xcb archive and checksum for its version and platform.");
   }

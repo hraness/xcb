@@ -169,6 +169,11 @@ records the release as already published for admission.
 integration on `main`. The site is informational only; it carries no product
 runtime and no release authority.
 
+The site serves `https://xcb.sh/install.ps1` the same way from
+`scripts/install.ps1` (`irm https://xcb.sh/install.ps1 | iex`), but only once the
+published release carries a `windows-x86_64` entry; until then it serves a
+one-line refusal.
+
 The site also serves `https://xcb.sh/install.sh`, the one-line installer
 (`curl -fsSL https://xcb.sh/install.sh | sh`). Its body is
 `scripts/install.sh`, copied at build time by `site/scripts/sync-installer.ts`,
@@ -183,7 +188,13 @@ not carry, and it serves no binaries.
 The `native_artifact` job inside `.github/workflows/release.yml` builds `xcb`
 for Linux x86_64 on `ubuntu-22.04`, Linux ARM64 on `ubuntu-22.04-arm`, and
 macOS ARM64 on `macos-15` from the verified tag commit through
-`scripts/build-native.sh`. Each binary is built natively on its own
+`scripts/build-native.sh`, and Windows x86_64 on `windows-2025` through
+`scripts/build-native-windows.ps1`. The Windows asset is
+`xcb-<version>-windows-x86_64.zip` holding exactly one entry, `xcb.exe`, with
+the same adjacent `.sha256` and build provenance attestation; it is not
+Authenticode-signed, so SmartScreen may prompt on first run. The script
+re-admits the zip the way `scripts/install.ps1` does, and CI installs a
+debug-build zip through `install.ps1` twice on every Rust change. Each binary is built natively on its own
 architecture; nothing is cross-compiled. The Linux binaries link against the
 runner's glibc, so the build image sets the oldest glibc the release
 supports: `scripts/check-glibc-floor.py` fails the release when the
@@ -232,7 +243,8 @@ After public release verification passes, set:
   compatibility package asset, or `null` when the release carries none.
 - `native`: a list with at most one entry per built platform, each
   `{ "platform", "url", "sha256Url" }`. Admitted platforms are
-  `darwin-aarch64`, `linux-x86_64`, and `linux-aarch64`; `url` must be the exact
+  `darwin-aarch64`, `linux-x86_64`, `linux-aarch64`, and `windows-x86_64` (a
+  `.zip`); `url` must be the exact
   `.../v<version>/xcb-<version>-<platform>.tar.gz` asset and `sha256Url` that
   URL plus `.sha256`. Omit a platform whose asset does not exist; the site
   then says it must be built from source.

@@ -85,6 +85,7 @@ jobs:
               - 'package.json'
               - 'qualified-builds.json'
               - 'scripts/install.sh'
+              - 'scripts/install.ps1'
               - 'docs/sdk.md'
               - 'crates/xcb-runtime/src/claude.rs'
               - 'crates/xcb-runtime/src/codex/config.rs'
@@ -113,6 +114,7 @@ jobs:
               - '.github/workflows/release.yml'
             rust:
               - 'crates/**'
+              - 'scripts/*.ps1'
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
@@ -582,6 +584,37 @@ jobs:
         env:
           TMP: ${{ runner.temp }}
           TEMP: ${{ runner.temp }}
+      # Package the debug binary the tests just built exactly like a release
+      # zip, then install it twice through scripts/install.ps1 from a
+      # loopback server: a fresh install and an in-place replacement.
+      - name: Package and install the Windows zip
+        shell: pwsh
+        env:
+          XCB_CARGO_PROFILE: dev
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/build-native-windows.ps1
+          $version = (Select-String -LiteralPath Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', 'artifacts' -PassThru -WindowStyle Hidden
+          try {
+            Start-Sleep -Seconds 2
+            $env:XCB_VERSION = $version
+            $env:XCB_INSTALL_PREFIX = Join-Path $env:RUNNER_TEMP 'xcb-install'
+            $env:XCB_RELEASE_BASE_URL = 'http://127.0.0.1:8765'
+            $env:XCB_ADD_PATH = 'no'
+            $env:XCB_STATE = Join-Path $env:RUNNER_TEMP 'xcb-state'
+            foreach ($attempt in 1, 2) {
+              ./scripts/install.ps1
+              $installed = Join-Path $env:XCB_INSTALL_PREFIX 'bin\xcb.exe'
+              $reported = ((& $installed --version) | Out-String).Trim()
+              if ($reported -cne "xcb $version") { throw "installed xcb reports '$reported'" }
+            }
+            Get-Content (Join-Path $env:XCB_INSTALL_PREFIX 'share\xcb\install.json')
+            & $installed doctor
+            Write-Host "xcb doctor exited $LASTEXITCODE"
+          } finally {
+            Stop-Process -Id $server.Id -Force
+          }
 
   required:
     # The one check branch policy requires. A job may be skipped only because

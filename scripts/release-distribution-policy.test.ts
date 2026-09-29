@@ -355,6 +355,12 @@ describe("public release distribution policy", () => {
       { archive: "xcb-0.8.1-linux-x86_64.tar.gz", checksum: "xcb-0.8.1-linux-x86_64.tar.gz.sha256" },
       { archive: "xcb-0.8.1-darwin-aarch64.tar.gz", checksum: "xcb-0.8.1-darwin-aarch64.tar.gz.sha256" },
     ]);
+    expect(nativeAssetFilePairs([
+      "xcb-0.8.1-windows-x86_64.zip",
+      "xcb-0.8.1-windows-x86_64.zip.sha256",
+    ], version)).toEqual([
+      { archive: "xcb-0.8.1-windows-x86_64.zip", checksum: "xcb-0.8.1-windows-x86_64.zip.sha256" },
+    ]);
     expect(nativeAssetFilePairs([], version)).toEqual([]);
     for (const names of [
       ["xcb-0.8.1-linux-x86_64.tar.gz"],
@@ -362,6 +368,8 @@ describe("public release distribution policy", () => {
       ["xcb-0.8.2-linux-x86_64.tar.gz", "xcb-0.8.2-linux-x86_64.tar.gz.sha256"],
       ["xcb-0.8.1-linux-x86_64.tar.gz", "xcb-0.8.1-linux-x86_64.tar.gz"],
       ["xcb-0.8.1-linux-x86_64.tar.gz", "other.sha256"],
+      ["xcb-0.8.1-windows-x86_64.tar.gz", "xcb-0.8.1-windows-x86_64.tar.gz.sha256"],
+      ["xcb-0.8.1-linux-x86_64.zip", "xcb-0.8.1-linux-x86_64.zip.sha256"],
     ]) {
       expect(() => nativeAssetFilePairs(names, version)).toThrow();
     }
