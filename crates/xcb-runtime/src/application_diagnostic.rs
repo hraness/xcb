@@ -257,7 +257,11 @@ pub fn read(store: &Store, account: &Id, request: &Id) -> Result<Option<Diagnost
     let parent = store.root().join("accounts").join(account.as_str());
     // Do not use a directory-creation helper on this read-only path.
     let metadata = crate::os::lstat(&parent)?;
-    if !metadata.dir || !metadata.owned || !metadata.private || parent.canonicalize()? != parent {
+    if !metadata.dir
+        || !metadata.owned
+        || !metadata.private
+        || xcb_core::canonical(&parent)? != parent
+    {
         return Err(Error::PrivateState);
     }
     let bytes = match private::read(&parent.join(FILE), MAX_BYTES) {
@@ -356,7 +360,7 @@ mod tests {
     #[test]
     fn diagnostics_are_private_bounded_request_bound_and_require_owned_run() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
         let account = store
             .add_account(Provider::Devin, "Synthetic", 1, None)
             .unwrap();
@@ -421,7 +425,7 @@ mod tests {
     fn diagnostic_reads_reject_wrong_provider_extra_fields_and_nonprivate_parent() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
         let account = store
             .add_account(Provider::Devin, "Synthetic", 1, None)
             .unwrap();

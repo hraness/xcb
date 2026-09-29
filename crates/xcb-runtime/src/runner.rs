@@ -262,7 +262,7 @@ fn launch_directory_metadata(path: &Path) -> Result<crate::os::Stamp> {
     // Inspection must not use ensure_private_directory: a path concurrently
     // removed by its owner must stay absent, including during a dry run.
     let metadata = crate::os::lstat(path)?;
-    if !metadata.dir || !metadata.owned || !metadata.private || path.canonicalize()? != path {
+    if !metadata.dir || !metadata.owned || !metadata.private || xcb_core::canonical(path)? != path {
         return Err(Error::PrivateState);
     }
     Ok(metadata)
@@ -699,7 +699,7 @@ pub(crate) async fn prepare(
     let env_file = egress::write_forwarder_env(&scratch, &child_env(&home, &config, &tmp, token))?;
     let socket_dir = private::directory(&directory.join("egress"))?;
     let socket = socket_dir.join("egress.sock");
-    let xcb = std::env::current_exe()?.canonicalize()?;
+    let xcb = xcb_core::canonical(&std::env::current_exe()?)?;
     // The planner mounts the executable and the forwarder runtime itself;
     // read_only carries only the shared-library closure the dynamic loader
     // needs — provider snapshot and runtime alike.
@@ -2576,7 +2576,7 @@ mod tests {
         };
 
         let root = tempfile::tempdir().unwrap();
-        let root = root.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(&root.path()).unwrap();
         let pin = Pin {
             provider: Provider::Claude,
             executable: root.join("synthetic-provider"),
@@ -2714,7 +2714,7 @@ mod tests {
         for interfere_with_socket in [false, true] {
             // Keep Unix socket paths below the platform's small length bound.
             let root = tempfile::tempdir_in("/tmp").unwrap();
-            let base = root.path().canonicalize().unwrap();
+            let base = xcb_core::canonical(root.path()).unwrap();
             let store = Store::open(&base.join("state")).unwrap();
             let account = store
                 .add_account(Provider::Claude, "Test", 1, None)
@@ -2759,7 +2759,7 @@ mod tests {
     async fn preparation_failure_requires_bridge_stop_before_releasing_account() {
         for interfere_with_socket in [false, true] {
             let root = tempfile::tempdir_in("/tmp").unwrap();
-            let base = root.path().canonicalize().unwrap();
+            let base = xcb_core::canonical(root.path()).unwrap();
             let store = Store::open(&base.join("state")).unwrap();
             let account = store
                 .add_account(Provider::Claude, "Test", 1, None)
@@ -2804,7 +2804,7 @@ mod tests {
     #[tokio::test]
     async fn rejected_launch_closes_its_bridge_before_removing_artifacts() {
         let root = tempfile::tempdir_in("/tmp").unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let mut artifacts = LaunchArtifacts::create(&base).unwrap();
         let directory = artifacts.directory.clone();
         artifacts.retain_before_launch();
@@ -2829,7 +2829,7 @@ mod tests {
     #[test]
     fn launch_artifacts_require_join_and_settled_effects_after_spawn() {
         let root = tempfile::tempdir().unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         for (spawned, joined, effects, retained) in [
             (false, false, EffectState::None, false),
             (true, false, EffectState::None, true),
@@ -2852,7 +2852,7 @@ mod tests {
     #[test]
     fn artifact_cleanup_preserves_a_replaced_directory() {
         let root = tempfile::tempdir().unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let artifacts = LaunchArtifacts::create(&base).unwrap();
         let path = artifacts.directory.clone();
         std::fs::rename(&path, base.join("original")).unwrap();
@@ -2865,7 +2865,7 @@ mod tests {
     #[test]
     fn artifact_cleanup_preserves_a_replaced_owner_lock() {
         let root = tempfile::tempdir().unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let artifacts = LaunchArtifacts::create(&base).unwrap();
         let path = artifacts.directory.clone();
         let lock_path = path.join(LAUNCH_OWNER_LOCK);
@@ -2908,7 +2908,7 @@ mod tests {
     #[test]
     fn rejected_workspace_write_settles_receipt_and_releases_account() {
         let root = tempfile::tempdir().unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let workspace_root = base.join("work");
         std::fs::create_dir(&workspace_root).unwrap();
         std::fs::write(workspace_root.join("file"), "current").unwrap();
@@ -2944,7 +2944,7 @@ mod tests {
     #[test]
     fn a_missing_tool_receipt_and_prior_uncertainty_never_release_effect_custody() {
         let root = tempfile::tempdir().unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
@@ -2978,7 +2978,7 @@ mod tests {
     #[test]
     fn linux_launch_plan_is_accepted_by_the_planner() {
         let root = tempfile::tempdir().unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let directory = base.join("run");
         let scratch = directory.join("scratch");
         let cwd = scratch.join("work");
@@ -3310,7 +3310,7 @@ mod tests {
                 (false, false, false, true),
             ] {
                 let root = tempfile::tempdir().unwrap();
-                let base = root.path().canonicalize().unwrap();
+                let base = xcb_core::canonical(root.path()).unwrap();
                 let workspace = base.join("work");
                 std::fs::create_dir(&workspace).unwrap();
                 let store = Arc::new(Store::open(&base.join("state")).unwrap());
@@ -3474,7 +3474,7 @@ mod tests {
 
         for (stage, expected) in [(0, Some(false)), (1, None), (2, None), (3, Some(true))] {
             let root = tempfile::tempdir().unwrap();
-            let base = root.path().canonicalize().unwrap();
+            let base = xcb_core::canonical(root.path()).unwrap();
             let workspace = private::directory(&base.join("work")).unwrap();
             let store = Arc::new(Store::open(&base.join("state")).unwrap());
             let account = store
@@ -3636,7 +3636,7 @@ mod tests {
     #[tokio::test]
     async fn legal_or_oversized_tool_output_is_a_tool_error_not_a_turn_failure() {
         let root = tempfile::tempdir().unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let workspace = base.join("work");
         std::fs::create_dir(&workspace).unwrap();
         // A legal 256 KiB file is rejected by the read limit, not the turn.
@@ -3746,7 +3746,7 @@ mod tests {
     #[tokio::test]
     async fn cancellation_during_initialization_joins_and_releases_without_submitting_a_turn() {
         let root = tempfile::tempdir().unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let workspace = base.join("work");
         std::fs::create_dir(&workspace).unwrap();
         let store = Arc::new(Store::open(&base.join("state")).unwrap());
@@ -3863,7 +3863,7 @@ mod tests {
         }
         for joined in [true, false] {
             let root = tempfile::tempdir().unwrap();
-            let base = root.path().canonicalize().unwrap();
+            let base = xcb_core::canonical(root.path()).unwrap();
             let workspace = base.join("work");
             std::fs::create_dir(&workspace).unwrap();
             let store = Arc::new(Store::open(&base.join("state")).unwrap());
@@ -3935,7 +3935,7 @@ mod tests {
             receive_failure: Option<Error>,
         ) -> (Outcome, Arc<Store>, Id) {
             let root = tempfile::tempdir().unwrap();
-            let base = root.path().canonicalize().unwrap();
+            let base = xcb_core::canonical(root.path()).unwrap();
             let workspace = base.join("work");
             std::fs::create_dir(&workspace).unwrap();
             let store = Arc::new(Store::open(&base.join("state")).unwrap());
@@ -4096,7 +4096,7 @@ mod tests {
         }
 
         let root = tempfile::tempdir().unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let workspace = base.join("work");
         std::fs::create_dir(&workspace).unwrap();
         let store = Arc::new(Store::open(&base.join("state")).unwrap());
@@ -4180,7 +4180,7 @@ mod tests {
     #[test]
     fn a_live_owner_keeps_its_launch_directory_through_a_sweep() {
         let root = tempfile::tempdir_in("/tmp").unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         private::directory(&base.join("runs")).unwrap();
 
         let live = LaunchArtifacts::create(&base).unwrap();
@@ -4219,7 +4219,7 @@ mod tests {
     #[test]
     fn a_directory_without_an_owner_lock_is_reported_not_removed() {
         let root = tempfile::tempdir_in("/tmp").unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         private::directory(&base.join("runs")).unwrap();
         let legacy = private::directory(&base.join("runs").join("launch_legacyfixture")).unwrap();
         std::fs::write(legacy.join("provider"), b"0123456789").unwrap();
@@ -4244,7 +4244,7 @@ mod tests {
     #[test]
     fn settled_launch_receipts_allow_reclamation_but_dry_run_is_read_only() {
         let root = tempfile::tempdir_in("/tmp").unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let mut artifacts = LaunchArtifacts::create(&base).unwrap();
         let path = artifacts.path().to_path_buf();
         artifacts.retain_before_launch();
@@ -4278,7 +4278,7 @@ mod tests {
     #[test]
     fn a_replaced_launch_identity_cannot_reuse_a_settlement_receipt() {
         let root = tempfile::tempdir_in("/tmp").unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let mut artifacts = LaunchArtifacts::create(&base).unwrap();
         let path = artifacts.path().to_path_buf();
         artifacts.record_reclaimable().unwrap();
@@ -4300,7 +4300,7 @@ mod tests {
     #[test]
     fn the_sweep_ignores_names_it_does_not_own() {
         let root = tempfile::tempdir_in("/tmp").unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let runs = private::directory(&base.join("runs")).unwrap();
         // Not a launch directory at all.
         let unrelated = private::directory(&runs.join("keep_me")).unwrap();
@@ -4324,7 +4324,7 @@ mod tests {
     #[test]
     fn a_retained_directory_survives_its_owner() {
         let root = tempfile::tempdir_in("/tmp").unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         private::directory(&base.join("runs")).unwrap();
         let mut artifacts = LaunchArtifacts::create(&base).unwrap();
         let path = artifacts.directory.clone();

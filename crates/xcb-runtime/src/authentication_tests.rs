@@ -106,7 +106,7 @@ pub(crate) fn fail_authentication(store: &Store, account: &Id) -> Id {
 #[test]
 fn authentication_health_survives_restart_metadata_rotation_and_session_pruning() {
     let root = tempfile::tempdir().unwrap();
-    let state = root.path().canonicalize().unwrap().join("state");
+    let state = xcb_core::canonical(root.path()).unwrap().join("state");
     let store = Store::open(&state).unwrap();
     let account = account(&store, Provider::Codex);
     let session = fail_authentication(&store, &account);
@@ -153,7 +153,7 @@ fn authentication_health_survives_restart_metadata_rotation_and_session_pruning(
 #[test]
 fn authentication_health_codex_import_requires_changed_token_material() {
     let root = tempfile::tempdir().unwrap();
-    let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+    let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
     let account = account(&store, Provider::Codex);
     let session = fail_authentication(&store, &account);
     let source = private::directory(&store.root().join("replacement"))
@@ -194,7 +194,7 @@ fn authentication_health_codex_import_requires_changed_token_material() {
 fn authentication_health_token_import_keeps_unchanged_claude_and_devin_blocked() {
     for provider in [Provider::Claude, Provider::Devin] {
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let account = account(&store, provider);
         fail_authentication(&store, &account);
         let (old, new): (&[u8], &[u8]) = if provider == Provider::Claude {
@@ -222,7 +222,7 @@ fn authentication_health_token_import_keeps_unchanged_claude_and_devin_blocked()
 #[test]
 fn authentication_health_missing_legacy_table_is_read_only_and_not_backfilled() {
     let root = tempfile::tempdir().unwrap();
-    let state = root.path().canonicalize().unwrap().join("state");
+    let state = xcb_core::canonical(root.path()).unwrap().join("state");
     let store = Store::open(&state).unwrap();
     let account = account(&store, Provider::Codex);
     fail_authentication(&store, &account);
@@ -254,7 +254,7 @@ fn authentication_health_missing_legacy_table_is_read_only_and_not_backfilled() 
 fn authentication_health_codex_rejects_account_and_user_switches_before_publication() {
     for account_switch in [true, false] {
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let account = account(&store, Provider::Codex);
         let session = fail_authentication(&store, &account);
         let before_account = serde_json::to_value(store.account(&account).unwrap()).unwrap();

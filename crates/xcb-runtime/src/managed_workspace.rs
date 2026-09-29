@@ -736,7 +736,7 @@ pub struct MigrationConflict {
 /// The single chokepoint for every stored workspace string. `root` is the
 /// managed store root (`<state>/managed`). Returns the canonical path.
 pub fn validate_workspace_root(root: &Path, path: &Path) -> Result<String> {
-    let canonical = fs::canonicalize(path)?;
+    let canonical = xcb_core::canonical(path)?;
     if !canonical.is_dir() {
         return Err(Error::Unavailable("managed workspace is not a directory"));
     }
@@ -750,16 +750,18 @@ pub fn validate_workspace_root(root: &Path, path: &Path) -> Result<String> {
     }
     // Without a home directory the home, hidden and Library checks cannot
     // run, so nothing validates: the chokepoint fails closed.
-    let home = home_dir().ok_or(Error::Unavailable(
-        "home directory is unknown; set HOME to an absolute path",
-    ))?;
+    let home = home_dir().ok_or(Error::Unavailable(if cfg!(windows) {
+        "home directory is unknown; set USERPROFILE to an absolute path"
+    } else {
+        "home directory is unknown; set HOME to an absolute path"
+    }))?;
     if canonical == home || home.starts_with(&canonical) {
         return refuse("workspace is not allowed: home");
     }
     if let Ok(inside) = canonical.strip_prefix(&home)
         && inside.components().next().is_some_and(|first| {
             let first = first.as_os_str().to_string_lossy();
-            first.starts_with('.') || first == "Library"
+            first.starts_with('.') || first == "Library" || (cfg!(windows) && first == "AppData")
         })
     {
         return refuse("workspace is not allowed: hidden or library directory");
@@ -773,7 +775,7 @@ pub fn validate_workspace_root(root: &Path, path: &Path) -> Result<String> {
     state_roots.extend(private::default_root().ok());
     state_roots.extend(crate::coordination::default_root().ok());
     for state in state_roots {
-        let state = fs::canonicalize(&state).unwrap_or(state);
+        let state = xcb_core::canonical(&state).unwrap_or(state);
         if canonical.starts_with(&state) || state.starts_with(&canonical) {
             return refuse("workspace is not allowed: xcb state");
         }
@@ -805,15 +807,29 @@ pub fn validate_workspace_root(root: &Path, path: &Path) -> Result<String> {
     {
         return refuse("workspace is not allowed: system directory");
     }
+    #[cfg(windows)]
+    for variable in [
+        "SystemRoot",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramData",
+    ] {
+        if let Some(tree) = std::env::var_os(variable).map(PathBuf::from)
+            && let Ok(tree) = xcb_core::canonical(&tree)
+            && canonical.starts_with(&tree)
+        {
+            return refuse("workspace is not allowed: system directory");
+        }
+    }
     Ok(text.to_owned())
 }
 
 fn home_dir() -> Option<PathBuf> {
-    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let home = xcb_core::home_dir()?;
     if !home.is_absolute() {
         return None;
     }
-    Some(fs::canonicalize(&home).unwrap_or(home))
+    Some(xcb_core::canonical(&home).unwrap_or(home))
 }
 
 /// A `.git` directory, or a `gitdir:` file for a linked worktree.

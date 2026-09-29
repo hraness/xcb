@@ -12,7 +12,7 @@ struct Env {
 
 fn env() -> Env {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let state = base.join("state");
     let managed = ManagedStore::open(&state).unwrap();
     Env {
@@ -25,7 +25,7 @@ fn env() -> Env {
 
 fn dir(base: &Path, name: &str) -> PathBuf {
     fs::create_dir_all(base.join(name)).unwrap();
-    base.join(name).canonicalize().unwrap()
+    xcb_core::canonical(base.join(name)).unwrap()
 }
 
 fn text(path: &Path) -> &str {
@@ -151,7 +151,7 @@ struct Legacy {
 
 async fn legacy_store() -> Legacy {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let state = base.join("state");
     let work = dir(&base, "work");
     let managed = ManagedStore::open(&state).unwrap();
@@ -227,9 +227,7 @@ fn thread() -> Id {
 }
 
 fn home() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap())
-        .canonicalize()
-        .unwrap()
+    xcb_core::canonical(xcb_core::home_dir().unwrap()).unwrap()
 }
 
 fn refused(root: &Path, path: &Path, why: &str) {

@@ -1012,7 +1012,7 @@ impl Store {
     ) -> Result<Session> {
         let account = self.account(account_id)?;
         model.validate()?;
-        let workspace = workspace.canonicalize()?;
+        let workspace = xcb_core::canonical(workspace)?;
         if !workspace.is_dir()
             || workspace.starts_with(&self.root)
             || self.root.starts_with(&workspace)
@@ -2701,7 +2701,7 @@ mod tests {
     #[test]
     fn stopped_login_with_another_identity_releases_lease_without_replacing_auth() {
         let dir = root();
-        let state = dir.path().canonicalize().unwrap().join("state");
+        let state = xcb_core::canonical(dir.path()).unwrap().join("state");
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -2772,7 +2772,7 @@ mod tests {
             session::Role,
         };
         let directory = root();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let state = base.join("state");
         let workspace = base.join("work");
         let store = Store::open(&state).unwrap();
@@ -2870,7 +2870,7 @@ mod tests {
     #[test]
     fn quota_availability_adopts_only_new_observations_and_preserves_legacy_pool() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
@@ -2929,7 +2929,7 @@ mod tests {
     #[test]
     fn quota_availability_rechecks_at_lease_acquisition_and_summary_keeps_stale_block() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
@@ -2990,7 +2990,7 @@ mod tests {
     #[test]
     fn quota_availability_recording_requires_exact_owned_live_lease() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
@@ -3033,7 +3033,7 @@ mod tests {
     #[test]
     fn quota_spending_pressure_follows_generation_and_provider_scope() {
         let dir = root();
-        let store = Store::open(&dir.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(dir.path()).unwrap().join("state")).unwrap();
         let claude = store
             .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
@@ -3078,7 +3078,7 @@ mod tests {
     #[test]
     fn quota_availability_generation_rotation_invalidates_without_copying_history() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
@@ -3119,7 +3119,7 @@ mod tests {
     #[test]
     fn quota_availability_rejects_bad_generation_and_does_not_infer_other_scopes() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         for provider in Provider::ALL {
             let account = store.add_account(provider, "Test", 1, None).unwrap();
@@ -3163,7 +3163,7 @@ mod tests {
     #[test]
     fn read_only_discovery_reads_live_wal_without_initializing_or_writing() {
         let dir = root();
-        let path = dir.path().canonicalize().unwrap().join("state");
+        let path = xcb_core::canonical(dir.path()).unwrap().join("state");
         let writer = Store::open(&path).unwrap();
         let account = writer
             .add_account(Provider::Claude, "Max", 1, None)
@@ -3193,7 +3193,7 @@ mod tests {
     #[test]
     fn account_catalogs_are_kept_apart_and_fall_back_to_the_provider_list() {
         let dir = root();
-        let path = dir.path().canonicalize().unwrap().join("state");
+        let path = xcb_core::canonical(dir.path()).unwrap().join("state");
         let store = Store::open(&path).unwrap();
         let first = store.add_account(Provider::Devin, "Pro", 1, None).unwrap();
         let second = store.add_account(Provider::Devin, "Pro", 1, None).unwrap();
@@ -3264,10 +3264,10 @@ mod tests {
     #[test]
     fn read_only_discovery_does_not_create_or_migrate_state() {
         let dir = root();
-        let missing = dir.path().canonicalize().unwrap().join("missing");
+        let missing = xcb_core::canonical(dir.path()).unwrap().join("missing");
         assert!(Store::open_read_only(&missing).is_err());
         assert!(!missing.exists());
-        let path = dir.path().canonicalize().unwrap().join("state");
+        let path = xcb_core::canonical(dir.path()).unwrap().join("state");
         let writer = Store::open(&path).unwrap();
         writer
             .db()
@@ -3286,7 +3286,7 @@ mod tests {
     #[test]
     fn recovery_rejects_live_original_owner_and_preserves_receipts() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
@@ -3335,7 +3335,7 @@ mod tests {
     fn recovery_refusals_name_the_live_process_and_what_to_check() {
         use std::os::unix::process::CommandExt;
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let mut provider = std::process::Command::new("/bin/sleep")
@@ -3376,7 +3376,7 @@ mod tests {
     #[test]
     fn recovery_settles_running_run_and_marks_session_uncertain() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -3405,7 +3405,7 @@ mod tests {
     #[test]
     fn recovery_digest_binds_the_stored_serialization() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -3443,7 +3443,7 @@ mod tests {
         }
         for owner_kind in ["live", "missing", "absent"] {
             let dir = root();
-            let base = dir.path().canonicalize().unwrap();
+            let base = xcb_core::canonical(dir.path()).unwrap();
             let store = Store::open(&base.join("state")).unwrap();
             let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
             let session = store
@@ -3488,7 +3488,7 @@ mod tests {
     #[test]
     fn recovery_rejects_already_settled_run() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -3506,7 +3506,7 @@ mod tests {
     #[test]
     fn recovery_rejects_run_that_changed_since_proof() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -3521,7 +3521,7 @@ mod tests {
     #[test]
     fn recovery_rejects_run_when_lease_is_absent() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -3542,7 +3542,7 @@ mod tests {
     #[test]
     fn run_record_roundtrip_persists_session_model() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -3564,7 +3564,7 @@ mod tests {
     #[test]
     fn rebind_after_settlement_preserves_run_record_model() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let personal = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let work = store
@@ -3600,7 +3600,7 @@ mod tests {
     #[test]
     fn custody_version_defaults_legacy_records_and_is_always_serialized() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -3655,7 +3655,7 @@ mod tests {
         }
 
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -3692,7 +3692,7 @@ mod tests {
     #[test]
     fn custody_version_unknown_rejects_reads_and_recovery_without_releasing_lease() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let prepared = store.prepare_probe(&account.id, None, 2).unwrap();
@@ -3735,7 +3735,7 @@ mod tests {
     #[test]
     fn probe_run_records_model_or_none() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let model = choice();
@@ -3763,7 +3763,7 @@ mod tests {
     #[test]
     fn recovery_digest_matches_stored_payload_for_new_record() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -3786,7 +3786,7 @@ mod tests {
     #[test]
     fn recovery_digest_matches_stored_payload_for_legacy_record() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let session = store
@@ -3829,7 +3829,7 @@ mod tests {
     #[test]
     fn run_owner_distinguishes_a_live_foreign_run_from_an_unsettled_one() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let path = base.join("state");
         // Two handles on one state root stand in for two terminals.
         let owner = Store::open(&path).unwrap();
@@ -3918,7 +3918,7 @@ mod tests {
     #[test]
     fn command_marker_survives_stale_spawn_and_blocks_older_readers_and_settle() {
         let dir = root();
-        let store = Store::open(&dir.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(dir.path()).unwrap().join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
@@ -3960,7 +3960,7 @@ mod tests {
     #[test]
     fn command_custody_requires_exact_lease_owner_and_all_bound_fields() {
         let dir = root();
-        let path = dir.path().canonicalize().unwrap().join("state");
+        let path = xcb_core::canonical(dir.path()).unwrap().join("state");
         let store = Store::open(&path).unwrap();
         let sibling = Store::open(&path).unwrap();
         let account = store
@@ -4010,7 +4010,7 @@ mod tests {
     #[test]
     fn command_reconciliation_rechecks_stop_digest_and_custody_without_releasing_account() {
         let dir = root();
-        let base = dir.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(dir.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
@@ -4081,7 +4081,7 @@ mod tests {
     #[test]
     fn command_custody_rejects_malformed_records_and_absent_lease() {
         let dir = root();
-        let store = Store::open(&dir.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(dir.path()).unwrap().join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Test", 1, None)
             .unwrap();
@@ -4142,7 +4142,7 @@ mod observation_tests {
     fn fixture() -> (tempfile::TempDir, Store, RunRecord, Session) {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("work")).unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Codex, "Fixture", 1, None)

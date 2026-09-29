@@ -1168,7 +1168,8 @@ async fn execute<P: Protocol>(
     })
 }
 
-#[cfg(test)]
+// Drives provider or command-runner fixtures, which Windows builds refuse.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::protocol::Batch;
@@ -1333,8 +1334,9 @@ mod tests {
         SyntheticObservation,
     ) {
         let temp = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap());
+        let store = Arc::new(
+            Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap(),
+        );
         let account = store
             .add_account(Provider::Claude, "Synthetic", 1, None)
             .unwrap();
@@ -1496,8 +1498,9 @@ mod tests {
     async fn blocked_application_and_qualification_never_prepare_a_provider() {
         for provider in Provider::ALL {
             let temp = tempfile::tempdir().unwrap();
-            let store =
-                Arc::new(Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap());
+            let store = Arc::new(
+                Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap(),
+            );
             let account = crate::authentication_tests::account(&store, provider);
             let model = crate::authentication_tests::model(provider);
             store
@@ -1578,7 +1581,7 @@ mod tests {
     #[test]
     fn application_health_settlement_requires_join_and_rolls_back_with_lease_release() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Synthetic", 1, None)
             .unwrap();
@@ -1807,8 +1810,9 @@ mod tests {
     #[tokio::test]
     async fn qualification_generation_rejects_malformed_input_before_account_lookup() {
         let temp = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap());
+        let store = Arc::new(
+            Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap(),
+        );
         for expected in [
             "".into(),
             "a".repeat(63),
@@ -1842,7 +1846,7 @@ mod tests {
             for present in [false, true] {
                 let temp = tempfile::tempdir().unwrap();
                 let store =
-                    Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+                    Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
                 let account = store.add_account(provider, "Synthetic", 1, None).unwrap();
                 let path = store
                     .account_root(&account.id)
@@ -1886,7 +1890,7 @@ mod tests {
     #[test]
     fn qualification_generation_match_preserves_bytes_and_exclusive_custody() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Synthetic", 1, None)
             .unwrap();
@@ -1915,7 +1919,8 @@ mod tests {
     fn settled_qualification_publication_releases_after_evidence_read_failure() {
         for settled in [false, true] {
             let temp = tempfile::tempdir().unwrap();
-            let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+            let store =
+                Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
             let account = store
                 .add_account(Provider::Claude, "Synthetic", 1, None)
                 .unwrap();
@@ -1961,7 +1966,7 @@ mod tests {
     #[test]
     fn unproven_preparation_cleanup_retains_the_request_lease() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Store::open(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let store = Store::open(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
         let account = store
             .add_account(Provider::Claude, "Synthetic", 1, None)
             .unwrap();

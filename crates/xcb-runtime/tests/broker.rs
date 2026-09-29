@@ -30,7 +30,7 @@ fn default_dir_mode(dir: &Path) -> u32 {
 #[test]
 fn created_workspace_entries_take_the_process_umask() {
     let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
@@ -74,7 +74,7 @@ fn created_workspace_entries_take_the_process_umask() {
 #[test]
 fn a_corrupted_coordination_database_fails_writes_closed() {
     let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     // A garbage file at the workspace's lock-database path must fail the
@@ -113,7 +113,7 @@ fn workspace_writes_on_a_full_filesystem_fail_without_false_settlement() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let image = base.join("full.dmg");
     let mount = base.join("mount");
     fs::create_dir(&mount).unwrap();
@@ -199,7 +199,7 @@ fn workspace_writes_on_a_full_filesystem_fail_without_false_settlement() {
 #[test]
 fn workspace_tools_are_descriptor_rooted_and_revision_checked() {
     let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     fs::write(root.join("hello.txt"), "old").unwrap();
@@ -222,7 +222,7 @@ fn workspace_tools_are_descriptor_rooted_and_revision_checked() {
 #[test]
 fn workspace_symlinks_hardlinks_and_parent_paths_do_not_escape() {
     let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     fs::create_dir(base.join("work")).unwrap();
     fs::write(base.join("private.txt"), "private").unwrap();
     symlink(base.join("private.txt"), base.join("work/link")).unwrap();
@@ -242,7 +242,7 @@ fn workspace_symlinks_hardlinks_and_parent_paths_do_not_escape() {
 #[test]
 fn concurrent_workspace_writers_have_one_winner_and_preserve_permissions() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     for existing in [false, true] {
@@ -295,16 +295,17 @@ fn native_mutations_wait_for_bun_and_node_locks_and_survive_owner_exit() {
         .map(move |operation| (runtime, operation))
     }) {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let root = base.join("work");
         fs::create_dir(&root).unwrap();
         fs::write(root.join("shared"), "original").unwrap();
         let coordination = base.join("coordination");
         let ready = base.join("ready");
-        let module = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../src/cli/write-coordination.ts")
-            .canonicalize()
-            .unwrap();
+        let module = xcb_core::canonical(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../src/cli/write-coordination.ts"),
+        )
+        .unwrap();
         let script = r#"
             import { pathToFileURL } from 'node:url';
             import { writeFile } from 'node:fs/promises';
@@ -402,7 +403,7 @@ fn native_mutations_wait_for_bun_and_node_locks_and_survive_owner_exit() {
 #[test]
 fn workspace_coordination_cannot_overlap_the_workspace() {
     let directory = tempfile::tempdir().unwrap();
-    let root = directory.path().canonicalize().unwrap();
+    let root = xcb_core::canonical(directory.path()).unwrap();
     assert!(Workspace::open_with_coordination(&root, &root.join("locks")).is_err());
     assert!(Workspace::open_with_coordination(&root, root.parent().unwrap()).is_err());
 }
@@ -410,7 +411,7 @@ fn workspace_coordination_cannot_overlap_the_workspace() {
 #[test]
 fn native_mcp_tool_calls_refuse_unknown_keys_and_tools() {
     let dir = tempfile::tempdir().unwrap();
-    let workspace = Workspace::open(&dir.path().canonicalize().unwrap()).unwrap();
+    let workspace = Workspace::open(&xcb_core::canonical(dir.path()).unwrap()).unwrap();
     assert!(
         workspace
             .call("shell", &serde_json::json!({"command":"true"}))
@@ -431,7 +432,7 @@ fn observed_workspace_effects_distinguish_rejection_from_publication() {
     use serde_json::json;
     use xcb_core::policy::EffectState;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
@@ -461,7 +462,7 @@ fn workspace_directory_and_file_operations_are_durable_revision_checked_and_no_c
     use std::os::unix::fs::MetadataExt;
     use xcb_core::policy::EffectState;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
@@ -514,7 +515,7 @@ fn workspace_mutations_reject_escape_links_special_files_and_stale_revisions_wit
     use serde_json::json;
     use xcb_core::policy::EffectState;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     fs::create_dir(base.join("outside")).unwrap();
@@ -615,7 +616,7 @@ fn directory_partial_creation_remains_a_settled_effect_when_a_later_component_is
     use serde_json::json;
     use xcb_core::policy::EffectState;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
@@ -640,7 +641,7 @@ fn new_workspace_tool_schemas_are_closed_and_require_explicit_mutation_precondit
     use serde_json::json;
     use xcb_core::policy::EffectState;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     let workspace = Workspace::open_with_coordination(&root, &base.join("coordination")).unwrap();
@@ -682,7 +683,7 @@ fn new_workspace_tool_schemas_are_closed_and_require_explicit_mutation_precondit
 #[test]
 fn concurrent_renames_never_clobber_the_destination_or_lose_a_losing_source() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(12));
@@ -729,7 +730,7 @@ fn workspace_mutations_refuse_a_replaced_root_without_touching_either_tree() {
     use serde_json::json;
     use xcb_core::policy::EffectState;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     fs::write(root.join("file"), "original").unwrap();
@@ -768,7 +769,7 @@ fn workspace_mutations_refuse_a_replaced_root_without_touching_either_tree() {
 #[test]
 fn workspace_list_truncates_at_the_entry_bound_instead_of_failing() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     for index in 0..513 {
@@ -797,7 +798,7 @@ fn workspace_list_truncates_at_the_entry_bound_instead_of_failing() {
 #[test]
 fn workspace_search_matches_truncates_and_skips_binary_and_vendor_dirs() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     fs::write(root.join("needle.txt"), "first needle\nsecond needle\n").unwrap();
@@ -830,7 +831,7 @@ fn workspace_search_matches_truncates_and_skips_binary_and_vendor_dirs() {
 #[test]
 fn workspace_read_rejects_oversized_files_with_a_guided_tool_error() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let root = base.join("work");
     fs::create_dir(&root).unwrap();
     fs::write(root.join("big.txt"), "\n".repeat(256 * 1024)).unwrap();

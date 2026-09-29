@@ -7,7 +7,7 @@ use xcb_runtime::{auth, private, store::Store};
 #[test]
 fn importing_one_explicit_legacy_token_preserves_the_source() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let source = private::directory(&base.join("legacy")).unwrap();
     let fixture = b"sk-ant-oat01-synthetic_fixture_not_a_real_token";
     private::create(&source.join("claude-oauth-token"), fixture).unwrap();
@@ -27,7 +27,7 @@ fn importing_one_explicit_legacy_token_preserves_the_source() {
 fn tokens_rotate_atomically_and_invalid_input_preserves_the_current_credential() {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
         .add_account(Provider::Claude, "Test", 1, None)
@@ -68,7 +68,7 @@ fn tokens_rotate_atomically_and_invalid_input_preserves_the_current_credential()
 #[test]
 fn credential_rotation_rejects_symlink_targets() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
         .add_account(Provider::Claude, "Test", 1, None)
@@ -98,7 +98,7 @@ fn credential_rotation_rejects_symlink_targets() {
 fn claude_token_rotation_respects_busy_and_disabled_accounts() {
     for busy in [false, true] {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";
@@ -156,7 +156,7 @@ fn claude_token_rotation_respects_busy_and_disabled_accounts() {
 fn claude_token_receipt_failures_release_only_before_publication() {
     for after_publication in [false, true] {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";
@@ -227,7 +227,7 @@ fn codex_run(
 fn codex_auth_import_is_explicit_private_provider_scoped_and_preserves_its_source() {
     use std::os::unix::fs::MetadataExt;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let source = private::directory(&base.join("source"))
         .unwrap()
         .join("auth.json");
@@ -267,7 +267,7 @@ fn codex_auth_import_is_explicit_private_provider_scoped_and_preserves_its_sourc
 fn codex_auth_import_rejects_links_public_files_invalid_json_and_api_keys() {
     use std::os::unix::fs::{PermissionsExt, symlink};
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let source = private::directory(&base.join("source"))
         .unwrap()
         .join("auth.json");
@@ -312,7 +312,7 @@ fn codex_auth_import_rejects_links_public_files_invalid_json_and_api_keys() {
 #[test]
 fn codex_refresh_requires_joined_exclusive_account_custody_and_preserves_rotation() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let source = private::directory(&base.join("source"))
         .unwrap()
         .join("auth.json");
@@ -355,7 +355,7 @@ fn codex_refresh_requires_joined_exclusive_account_custody_and_preserves_rotatio
 fn codex_refresh_rejects_account_switch_and_stale_persistent_revision() {
     for scenario in ["account", "user", "revision", "directory"] {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let source = private::directory(&base.join("source"))
             .unwrap()
             .join("auth.json");
@@ -423,7 +423,7 @@ fn codex_refresh_rejects_account_switch_and_stale_persistent_revision() {
 #[test]
 fn codex_unstarted_discard_is_idempotent_and_snapshot_cannot_escape_state() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
         .add_account(Provider::Codex, "ChatGPT", 1, None)
@@ -460,7 +460,7 @@ fn codex_unstarted_discard_is_idempotent_and_snapshot_cannot_escape_state() {
 fn codex_device_login_plan_is_isolated_and_can_persist_a_fixture_without_spawning() {
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
         .add_account(Provider::Codex, "ChatGPT", 1, None)
@@ -475,7 +475,7 @@ fn codex_device_login_plan_is_isolated_and_can_persist_a_fixture_without_spawnin
         executable,
         version: "synthetic".into(),
         host_sha256: xcb_runtime::process::executable_digest(
-            &std::env::current_exe().unwrap().canonicalize().unwrap(),
+            &xcb_core::canonical(std::env::current_exe().unwrap()).unwrap(),
         )
         .unwrap(),
         observed_at_ms: 1,
@@ -515,7 +515,7 @@ fn codex_device_login_plan_is_isolated_and_can_persist_a_fixture_without_spawnin
 #[test]
 fn codex_account_import_validates_before_creating_account_and_copies_once() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let source = private::directory(&base.join("source"))
         .unwrap()
         .join("auth.json");
@@ -565,7 +565,7 @@ fn recovery_fixture_run(
 #[test]
 fn codex_recovery_preserves_refresh_and_retries_after_publication_before_receipt_commit() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store
         .add_account(Provider::Codex, "ChatGPT", 1, None)
@@ -644,7 +644,7 @@ fn codex_recovery_rejects_missing_or_changed_evidence_and_never_releases_custody
         "live-owner",
     ] {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Codex, "ChatGPT", 1, None)
@@ -732,7 +732,7 @@ fn codex_recovery_finishes_new_device_login_or_empty_failed_flow_without_spawnin
     use std::os::unix::fs::PermissionsExt;
     for completed in [false, true] {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store
             .add_account(Provider::Codex, "ChatGPT", 1, None)
@@ -749,7 +749,7 @@ fn codex_recovery_finishes_new_device_login_or_empty_failed_flow_without_spawnin
             executable,
             version: "synthetic".into(),
             host_sha256: xcb_runtime::process::executable_digest(
-                &std::env::current_exe().unwrap().canonicalize().unwrap(),
+                &xcb_core::canonical(std::env::current_exe().unwrap()).unwrap(),
             )
             .unwrap(),
             observed_at_ms: 1,
@@ -808,7 +808,7 @@ fn claude_login_pin(base: &std::path::Path, body: &str) -> xcb_runtime::process:
         executable,
         version: "synthetic".into(),
         host_sha256: xcb_runtime::process::executable_digest(
-            &std::env::current_exe().unwrap().canonicalize().unwrap(),
+            &xcb_core::canonical(std::env::current_exe().unwrap()).unwrap(),
         )
         .unwrap(),
         observed_at_ms: 1,
@@ -823,7 +823,7 @@ async fn claude_login_captures_privately_and_settles_joined_invalid_or_failed_ou
         "printf 'sk-ant-oat01-login_synthetic_fixture_not_real\\n'; exit 7",
     ] {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";
@@ -866,7 +866,7 @@ async fn claude_login_captures_privately_and_settles_joined_invalid_or_failed_ou
 #[tokio::test]
 async fn claude_login_cancellation_joins_before_releasing_and_busy_accounts_do_not_spawn() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let store = std::sync::Arc::new(Store::open(&base.join("state")).unwrap());
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     // Keep the blocking fixture in the owned leader. A shell waiting on a
@@ -921,7 +921,7 @@ async fn claude_login_cancellation_joins_before_releasing_and_busy_accounts_do_n
 async fn claude_login_preserves_a_changed_prior_token_and_retains_uncertain_receipts() {
     for fault in ["revision", "receipt"] {
         let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
         let store = std::sync::Arc::new(Store::open(&base.join("state")).unwrap());
         let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
         let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";
@@ -991,7 +991,7 @@ async fn claude_login_preserves_a_changed_prior_token_and_retains_uncertain_rece
 #[tokio::test]
 async fn dropped_claude_login_keeps_durable_custody_after_attempting_group_stop() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let store = std::sync::Arc::new(Store::open(&base.join("state")).unwrap());
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     // The host owns and reaps this leader directly, including after abort.
@@ -1036,7 +1036,7 @@ async fn dropped_claude_login_keeps_durable_custody_after_attempting_group_stop(
 #[test]
 fn explicit_claude_token_replacement_rotates_generation_before_publishing() {
     let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
     let store = Store::open(&base.join("state")).unwrap();
     let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
     let original = b"sk-ant-oat01-original_synthetic_fixture_not_real";

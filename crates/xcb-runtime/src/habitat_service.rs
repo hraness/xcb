@@ -74,18 +74,18 @@ fn homebrew_opt_path(canonical: &Path) -> Option<PathBuf> {
         .join(formula.file_name()?)
         .join("bin")
         .join(name);
-    (opt.canonicalize().ok()? == canonical).then_some(opt)
+    (xcb_core::canonical(&opt).ok()? == canonical).then_some(opt)
 }
 
 impl Service {
     pub fn plan(root: &Path, executable: &Path, home: &Path) -> Result<Self> {
-        let state = root.canonicalize()?;
+        let state = xcb_core::canonical(root)?;
         private::check_directory(&state)?;
-        let executable = stable_executable(executable.canonicalize()?);
+        let executable = stable_executable(xcb_core::canonical(executable)?);
         if !executable.is_file() {
             return Err(Error::PrivateState);
         }
-        let home = home.canonicalize()?;
+        let home = xcb_core::canonical(home)?;
         let (label, manifest) = identity(&state, &home);
         let coordination_root = std::env::var_os("XCB_COORDINATION_ROOT")
             .map(PathBuf::from)
@@ -208,8 +208,8 @@ impl Service {
     }
 
     fn verify(&self, root: &Path, home: &Path) -> Result<()> {
-        let state = root.canonicalize()?;
-        let home = home.canonicalize()?;
+        let state = xcb_core::canonical(root)?;
+        let home = xcb_core::canonical(home)?;
         let (label, manifest) = identity(&state, &home);
         let canonical_shape = |p: &Path| {
             p.is_absolute()
@@ -447,7 +447,7 @@ pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
         private_directory(&directory)?;
     }
     let meta = crate::os::lstat(parent)?;
-    if !meta.dir || !meta.owned || !meta.unshared_write || parent.canonicalize()? != parent {
+    if !meta.dir || !meta.owned || !meta.unshared_write || xcb_core::canonical(parent)? != parent {
         return Err(Error::PrivateState);
     }
     let body = service.render()?;
@@ -530,7 +530,7 @@ pub(crate) fn private_directory(directory: &Path) -> Result<()> {
     if !metadata.dir
         || !metadata.owned
         || !metadata.unshared_write
-        || directory.canonicalize()? != directory
+        || xcb_core::canonical(directory)? != directory
     {
         return Err(Error::PrivateState);
     }
@@ -644,7 +644,7 @@ mod tests {
     fn service_is_scoped_and_paths_are_xml_data() {
         let root = tempfile::tempdir().unwrap();
         let state =
-            private::directory(&root.path().canonicalize().unwrap().join("state<&")).unwrap();
+            private::directory(&xcb_core::canonical(root.path()).unwrap().join("state<&")).unwrap();
         let exe = std::env::current_exe().unwrap();
         let service = Service::plan(&state, &exe, root.path()).unwrap();
         let text = service.render_with_output("/dev/null").unwrap();
@@ -652,7 +652,8 @@ mod tests {
         assert!(text.contains("<integer>60</integer>"));
         assert!(!text.contains("KeepAlive"));
         assert!(!text.contains("/bin/sh"));
-        let other = private::directory(&root.path().canonicalize().unwrap().join("other")).unwrap();
+        let other =
+            private::directory(&xcb_core::canonical(root.path()).unwrap().join("other")).unwrap();
         assert_ne!(
             service.label,
             Service::plan(&other, &exe, root.path()).unwrap().label
@@ -663,7 +664,8 @@ mod tests {
     #[test]
     fn active_supervisor_prevents_removal_guard() {
         let root = tempfile::tempdir().unwrap();
-        let root = private::directory(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let root =
+            private::directory(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let owner = lock(&root, "supervisor.lock").unwrap();
         assert!(lock(&root, "supervisor.lock").is_err());
         drop(owner);
@@ -687,12 +689,19 @@ mod tests {
             return;
         }
         let home = tempfile::tempdir().unwrap();
-        let state = private::directory(&home.path().canonicalize().unwrap().join("state")).unwrap();
+        let state =
+            private::directory(&xcb_core::canonical(home.path()).unwrap().join("state")).unwrap();
         let executable = std::env::current_exe().unwrap();
         let service = Service::plan(&state, &executable, home.path()).unwrap();
         let text = service.render().unwrap();
         let log = service.log_path();
-        assert!(log.starts_with(home.path().canonicalize().unwrap().join("Library/Logs/xcb")));
+        assert!(
+            log.starts_with(
+                xcb_core::canonical(home.path())
+                    .unwrap()
+                    .join("Library/Logs/xcb")
+            )
+        );
         assert!(text.contains(&format!(
             "<key>StandardErrorPath</key><string>{}</string>",
             log.display()
@@ -746,7 +755,7 @@ mod tests {
     fn homebrew_keg_binary_is_recorded_through_its_opt_link() {
         use std::os::unix::fs::symlink;
         let root = tempfile::tempdir().unwrap();
-        let prefix = root.path().canonicalize().unwrap();
+        let prefix = xcb_core::canonical(root.path()).unwrap();
         let keg = |version: &str| {
             let bin = prefix.join(format!("Cellar/xcb/{version}/bin"));
             fs::create_dir_all(&bin).unwrap();
@@ -783,7 +792,7 @@ mod tests {
         symlink("../Cellar/xcb/1.2.4", prefix.join("opt/xcb")).unwrap();
         assert_eq!(Service::plan(&state, &old, &home).unwrap().executable, old);
         fs::remove_dir_all(prefix.join("Cellar/xcb/1.2.3")).unwrap();
-        assert_eq!(stable.canonicalize().unwrap(), new);
+        assert_eq!(xcb_core::canonical(&stable).unwrap(), new);
         assert_eq!(
             Service::plan(&state, &new, &home).unwrap().executable,
             stable
@@ -796,14 +805,15 @@ mod tests {
         let exe = std::env::current_exe().unwrap();
         assert_eq!(
             Service::plan(&state, &exe, &home).unwrap().executable,
-            exe.canonicalize().unwrap()
+            xcb_core::canonical(&exe).unwrap()
         );
     }
 
     #[test]
     fn ownership_survives_removed_binary_and_retains_coordination_scope() {
         let root = tempfile::tempdir().unwrap();
-        let state = private::directory(&root.path().canonicalize().unwrap().join("state")).unwrap();
+        let state =
+            private::directory(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
         let mut service =
             Service::plan(&state, &std::env::current_exe().unwrap(), root.path()).unwrap();
         service.executable = state.join("removed-xcb");
@@ -823,7 +833,7 @@ mod tests {
     #[test]
     fn systemd_unit_restarts_the_supervisor_and_quotes_its_paths() {
         let root = tempfile::tempdir().unwrap();
-        let home = root.path().canonicalize().unwrap();
+        let home = xcb_core::canonical(root.path()).unwrap();
         let state = private::directory(&home.join("state 100% $HOME")).unwrap();
         let exe = std::env::current_exe().unwrap();
         let mut service = Service::plan(&state, &exe, &home).unwrap();
@@ -867,7 +877,7 @@ mod tests {
             return;
         }
         let root = tempfile::tempdir().unwrap();
-        let home = root.path().canonicalize().unwrap();
+        let home = xcb_core::canonical(root.path()).unwrap();
         let state = private::directory(&home.join("state")).unwrap();
         let service = Service::plan(&state, &std::env::current_exe().unwrap(), &home).unwrap();
         assert!(service.label.starts_with("xcb-habitat-"));

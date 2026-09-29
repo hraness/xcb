@@ -948,7 +948,7 @@ mod tests {
     #[test]
     fn install_records_must_use_the_installer_layout() {
         let root = tempfile::tempdir().unwrap();
-        let root = root.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(root.path()).unwrap();
         assert_eq!(install_record(&root).unwrap(), None);
         let prefix = root.join("prefix");
         write_manifest(

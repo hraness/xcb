@@ -208,7 +208,8 @@ impl Protocol for ClaudeProtocol {
     }
 }
 
-#[cfg(test)]
+// Drives provider or command-runner fixtures, which Windows builds refuse.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use xcb_core::{Id, Provider, models::Mode};

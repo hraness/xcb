@@ -81,14 +81,14 @@ impl ExecutablePin {
         if !path.is_absolute() {
             return Err(unavailable());
         }
-        let path = path.canonicalize()?;
+        let path = xcb_core::canonical(path)?;
         let sha256 = process::executable_digest(&path)?;
         Ok(Self { path, sha256 })
     }
 
     fn verify(&self) -> Result<()> {
         if !self.path.is_absolute()
-            || self.path.canonicalize()? != self.path
+            || xcb_core::canonical(&self.path)? != self.path
             || process::executable_digest(&self.path)? != self.sha256
         {
             return Err(unavailable());
@@ -137,7 +137,7 @@ fn interpreter(executable: &Path) -> Result<Option<ExecutablePin>> {
 }
 
 fn vault_metadata(vault: &Path) -> Result<crate::os::Stamp> {
-    if !vault.is_absolute() || vault.canonicalize()? != vault {
+    if !vault.is_absolute() || xcb_core::canonical(vault)? != vault {
         return Err(unavailable());
     }
     let metadata = crate::os::lstat(vault)?;
@@ -152,7 +152,7 @@ impl WordcellConfig {
         if !vault.is_absolute() {
             return Err(unavailable());
         }
-        let vault = vault.canonicalize()?;
+        let vault = xcb_core::canonical(vault)?;
         let metadata = vault_metadata(&vault)?;
         let executable = ExecutablePin::admit(executable)?;
         let interpreter = interpreter(&executable.path)?;
@@ -460,7 +460,7 @@ test -f "${11}" || exit 4
 printf '{"changed":true,"path":"%s.md","revision":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' "$3"
 "#,
         );
-        let custody = root.path().canonicalize().unwrap().join("custody");
+        let custody = xcb_core::canonical(root.path()).unwrap().join("custody");
         let (_sender, cancel) = watch::channel(false);
         let first = config
             .promote(&promotion(), &custody, cancel.clone())
@@ -490,7 +490,7 @@ printf '{"changed":true,"path":"%s.md","revision":"sha256:aaaaaaaaaaaaaaaaaaaaaa
         let receipt = config
             .promote_with_deadline(
                 &promotion(),
-                &root.path().canonicalize().unwrap().join("custody"),
+                &xcb_core::canonical(root.path()).unwrap().join("custody"),
                 cancel,
                 Duration::from_millis(50),
             )
@@ -508,7 +508,7 @@ printf '{"changed":true,"path":"%s.md","revision":"sha256:aaaaaaaaaaaaaaaaaaaaaa
         let receipt = config
             .promote(
                 &promotion(),
-                &root.path().canonicalize().unwrap().join("custody"),
+                &xcb_core::canonical(root.path()).unwrap().join("custody"),
                 cancel.clone(),
             )
             .await
@@ -524,7 +524,7 @@ printf '{"changed":true,"path":"%s.md","revision":"sha256:aaaaaaaaaaaaaaaaaaaaaa
     #[tokio::test]
     async fn prelaunch_cancellation_creates_no_promotion_receipt() {
         let (root, config) = fixture("printf '{}'");
-        let custody = root.path().canonicalize().unwrap().join("custody");
+        let custody = xcb_core::canonical(root.path()).unwrap().join("custody");
         let (_sender, cancel) = watch::channel(true);
         assert!(
             config

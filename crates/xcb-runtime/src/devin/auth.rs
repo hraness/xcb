@@ -196,7 +196,7 @@ fn read_import_source(source: &Path) -> Result<Zeroizing<Vec<u8>>> {
     .map_err(|_| Error::PrivateState)?;
     let bytes = Zeroizing::new(read.bytes);
     let after = std::fs::symlink_metadata(source)?;
-    if source.canonicalize()? != source
+    if xcb_core::canonical(source)? != source
         || !before.is_file()
         || !after.is_file()
         || before.dev() != read.identity.dev
@@ -225,7 +225,7 @@ fn read_import_source(source: &Path) -> Result<Zeroizing<Vec<u8>>> {
 pub fn import_account(store: &Store, source: &Path) -> Result<Id> {
     if !source.is_absolute()
         || source.file_name().and_then(|name| name.to_str()) != Some("credentials.toml")
-        || source.canonicalize()? != source
+        || xcb_core::canonical(source)? != source
     {
         return Err(Error::PrivateState);
     }

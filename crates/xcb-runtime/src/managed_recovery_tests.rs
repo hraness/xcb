@@ -19,7 +19,7 @@ async fn prepared() -> Fixture {
 
 async fn prepared_with_goal(goal: String) -> Fixture {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let state = base.join("state");
     let workspace = private::directory(&base.join("work")).unwrap();
     let managed = ManagedStore::open(&state).unwrap();

@@ -56,7 +56,7 @@ pub fn dispatch(
         WorkspaceCommand::List => list(&store, json),
         WorkspaceCommand::Add { dir, name } => {
             let path = store.admit_workspace(
-                &cwd.canonicalize()?.join(dir),
+                &xcb_core::canonical(cwd)?.join(dir),
                 "command",
                 name.as_deref(),
             )?;
@@ -71,14 +71,16 @@ pub fn dispatch(
         WorkspaceCommand::Hide { scope } => {
             let path = match registered(&store, &scope, cwd)? {
                 Some(path) => path,
-                None => store.resolve_scope(&scope, &cwd.canonicalize()?)?,
+                None => store.resolve_scope(&scope, &xcb_core::canonical(cwd)?)?,
             };
             store.hide_workspace(&path)?;
             report_visibility(&store, &path, json, "Hid")
         }
         WorkspaceCommand::Show { scope } => {
-            let path = hidden_named(&store, &scope)?
-                .map_or_else(|| store.resolve_scope(&scope, &cwd.canonicalize()?), Ok)?;
+            let path = hidden_named(&store, &scope)?.map_or_else(
+                || store.resolve_scope(&scope, &xcb_core::canonical(cwd)?),
+                Ok,
+            )?;
             store.show_workspace(&path)?;
             report_visibility(&store, &path, json, "Showing")
         }
@@ -107,7 +109,9 @@ pub fn dispatch(
 fn registered(store: &ManagedStore, value: &str, cwd: &Path) -> Result<Option<String>> {
     let entries = store.all_workspaces()?;
     let joined = lexical(&cwd.join(value));
-    let base = cwd.canonicalize().ok().map(|cwd| lexical(&cwd.join(value)));
+    let base = xcb_core::canonical(cwd)
+        .ok()
+        .map(|cwd| lexical(&cwd.join(value)));
     if let Some(entry) = entries.iter().find(|entry| {
         let path = Path::new(&entry.path);
         entry.path == value || path == joined || base.as_deref() == Some(path)

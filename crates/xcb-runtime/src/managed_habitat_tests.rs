@@ -8,7 +8,7 @@ struct Fixture {
 }
 async fn fixture() -> Fixture {
     let root = tempfile::tempdir().unwrap();
-    let physical_root = root.path().canonicalize().unwrap();
+    let physical_root = xcb_core::canonical(root.path()).unwrap();
     let state = private::directory(&physical_root.join("state")).unwrap();
     let workspace = private::directory(&physical_root.join("project")).unwrap();
     let managed = ManagedStore::open(&state).unwrap();
@@ -858,7 +858,7 @@ async fn worker_in_a_cannot_get_update_complete_or_search_memory_of_b() {
 #[tokio::test]
 async fn thread_children_carry_inherited_bindings_and_replay_exactly() {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let state = private::directory(&base.join("state")).unwrap();
     let a = private::directory(&base.join("project")).unwrap();
     let managed = Arc::new(ManagedStore::open(&state).unwrap());

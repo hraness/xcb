@@ -16,7 +16,7 @@ struct Env {
 /// A store at `base/state`; project directories are its siblings.
 fn env() -> Env {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let state = private::directory(&base.join("state")).unwrap();
     let managed = Arc::new(ManagedStore::open(&state).unwrap());
     let xcb = Arc::new(Store::open(&state).unwrap());
@@ -30,7 +30,7 @@ fn env() -> Env {
 
 fn dir(base: &Path, name: &str) -> PathBuf {
     fs::create_dir_all(base.join(name)).unwrap();
-    base.join(name).canonicalize().unwrap()
+    xcb_core::canonical(base.join(name)).unwrap()
 }
 
 fn git_repo(base: &Path, name: &str) -> PathBuf {
@@ -313,7 +313,7 @@ async fn file_token_binds_its_repo() {
 async fn ssh_and_library_prompt_tokens_refused() {
     let e = env();
     let before = footprint(&e.managed);
-    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let home = xcb_core::home_dir().unwrap();
     let mut evidence = vec![("in /etc/hosts fix it", "system directory")];
     if home.join(".ssh").is_dir() {
         evidence.push(("cd ~/.ssh and tidy it", "hidden or library directory"));

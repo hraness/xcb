@@ -230,7 +230,7 @@ pub fn executable_digest(path: &Path) -> Result<String> {
     // fstat of the open descriptor: the identity below names the inode the
     // digest is computed from, never a re-resolved path.
     let identity = FileIdentity::of_file(&file)?;
-    let key = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    let key = xcb_core::canonical(path).unwrap_or_else(|_| path.to_owned());
     {
         let cache = verified_digests()
             .lock()
@@ -374,7 +374,7 @@ struct HostExecutable {
 }
 impl HostExecutable {
     fn capture(path: PathBuf) -> Result<Self> {
-        let path = path.canonicalize()?;
+        let path = xcb_core::canonical(&path)?;
         let sha256 = executable_digest(&path)?;
         Ok(Self { path, sha256 })
     }
@@ -448,7 +448,7 @@ fn discover_executable(provider: Provider, explicit: Option<&Path>) -> Result<Pa
         if !path.is_absolute() {
             return Err(Error::Unavailable("provider path must be absolute"));
         }
-        let path = path.canonicalize()?;
+        let path = xcb_core::canonical(&path)?;
         if executable_file(&path).is_err() && !repair_executable_mode(&path)? {
             return Err(Error::Unavailable(
                 "executable ownership, permissions, or size is invalid",
@@ -460,7 +460,7 @@ fn discover_executable(provider: Provider, explicit: Option<&Path>) -> Result<Pa
     for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).take(128)
     {
         let candidate = directory.join(provider.as_str());
-        if let Ok(path) = candidate.canonicalize()
+        if let Ok(path) = xcb_core::canonical(&candidate)
             && (executable_file(&path).is_ok()
                 || (repair_executable_mode(&path).unwrap_or(false)
                     && executable_file(&path).is_ok()))
@@ -502,7 +502,7 @@ impl Pin {
         if executable_file(&self.executable).is_err() {
             repair_executable_mode(&self.executable)?;
         }
-        if self.executable.canonicalize()? != self.executable
+        if xcb_core::canonical(&self.executable)? != self.executable
             || executable_digest(&self.executable)? != self.sha256
         {
             return Err(Error::Unavailable("runtime changed; run xcb doctor again"));
@@ -567,7 +567,7 @@ impl Pin {
     #[cfg(target_os = "macos")]
     pub(crate) fn host_snapshot(&self, directory: &Path) -> Result<PathBuf> {
         self.verify()?;
-        let source_path = std::env::current_exe()?.canonicalize()?;
+        let source_path = xcb_core::canonical(&std::env::current_exe()?)?;
         let path = directory.join("xcb-helper");
         snapshot_executable(&executable_file(&source_path)?, &path)?;
         if executable_digest(&path)? != self.host_sha256 {
@@ -1720,7 +1720,7 @@ mod tests {
     fn discovery_repairs_only_owned_single_link_ordinary_executables() {
         let directory = tempfile::tempdir().unwrap();
         let path = write_executable(directory.path(), 0o777);
-        let canonical = path.canonicalize().unwrap();
+        let canonical = xcb_core::canonical(&path).unwrap();
         assert_eq!(
             discover(Provider::Claude, Some(&canonical)).unwrap(),
             canonical
@@ -1784,9 +1784,7 @@ mod tests {
     #[test]
     fn pin_verify_repairs_an_owned_world_writable_executable() {
         let directory = tempfile::tempdir().unwrap();
-        let path = write_executable(directory.path(), 0o777)
-            .canonicalize()
-            .unwrap();
+        let path = xcb_core::canonical(write_executable(directory.path(), 0o777)).unwrap();
         let sha256 = digest_file(fs::File::open(&path).unwrap(), 1 << 20).unwrap();
         let (_, host_sha256) = host_identity().unwrap();
         let pin = Pin {
@@ -1869,8 +1867,8 @@ mod tests {
     #[test]
     fn repeated_pin_loads_verify_against_one_executable_digest() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
         host_identity().unwrap();
         let pin = codex_pin(&root, &executable, uncached_digest(&executable));
         let digested = digested_executables(&pin.executable);
@@ -1887,8 +1885,8 @@ mod tests {
     #[test]
     fn touched_and_resized_executables_are_digested_again() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
         host_identity().unwrap();
         let pin = codex_pin(&root, &executable, uncached_digest(&executable));
         Pin::load(&root, Provider::Codex).unwrap();
@@ -1912,8 +1910,8 @@ mod tests {
     #[test]
     fn a_replaced_inode_with_the_same_size_is_digested_again() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
         host_identity().unwrap();
         let pin = codex_pin(&root, &executable, uncached_digest(&executable));
         Pin::load(&root, Provider::Codex).unwrap();
@@ -1948,8 +1946,8 @@ mod tests {
     #[test]
     fn a_pinned_provider_update_cannot_move_the_custodied_executable() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
         let pin = claude_pin(&root, &executable, "2.1.300");
         let custody = pin.executable.clone();
         assert!(custody.starts_with(root.join("providers").join("bin")));
@@ -1974,8 +1972,8 @@ mod tests {
     #[test]
     fn load_heals_a_pin_bound_to_a_replaced_host_binary() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
         let pin = claude_pin(&root, &executable, "2.1.300");
         let record = root.join("providers").join("claude.json");
         let stale = "0".repeat(64);
@@ -2005,8 +2003,8 @@ mod tests {
     #[test]
     fn load_migrates_a_live_path_pin_into_custody() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
         let (_, host_sha256) = host_identity().unwrap();
         let legacy = Pin {
             provider: Provider::Claude,
@@ -2033,14 +2031,14 @@ mod tests {
         let path = directory.join("provider");
         fs::write(&path, format!("#!/bin/sh\necho {version}\n")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-        path.canonicalize().unwrap()
+        xcb_core::canonical(&path).unwrap()
     }
 
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn refresh_keeps_an_admitted_saved_pin_when_launchd_path_cannot_find_it() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let home = private::directory(&root.join("home")).unwrap();
         let executable = version_script(&root, "2.1.300");
         let pin = claude_pin(&root, &executable, "2.1.300");
@@ -2095,7 +2093,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_names_an_unsupported_saved_build_instead_of_missing_path() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let home = private::directory(&root.join("home")).unwrap();
         let executable = version_script(&root, "codex-cli 0.0.0");
         codex_pin(&root, &executable, uncached_digest(&executable));
@@ -2126,7 +2124,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_rechecks_denial_when_saved_bytes_are_unchanged_or_path_is_missing() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let home = private::directory(&root.join("home")).unwrap();
         let executable = version_script(&root, "2.1.300");
         let pin = claude_pin(&root, &executable, "2.1.300");
@@ -2159,7 +2157,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_adopts_an_admitted_update_and_keeps_routes_on_the_pin() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let home = private::directory(&root.join("home")).unwrap();
         let executable = version_script(&root, "2.1.300");
         let pin = claude_pin(&root, &executable, "2.1.300");
@@ -2184,7 +2182,7 @@ mod tests {
     #[tokio::test]
     async fn a_pending_codex_build_adopts_once_the_catalog_lists_it() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let home = private::directory(&root.join("home")).unwrap();
         let executable = version_script(&root, "codex-cli 0.156.1");
         let pin = codex_pin(&root, &executable, uncached_digest(&executable));
@@ -2223,7 +2221,7 @@ mod tests {
     async fn an_xcb_upgrade_reconsiders_pending_builds_without_a_catalog_entry() {
         for prior in ["old-host", "missing-host", "raw-digest"] {
             let directory = tempfile::tempdir().unwrap();
-            let root = directory.path().canonicalize().unwrap();
+            let root = xcb_core::canonical(directory.path()).unwrap();
             let home = private::directory(&root.join("home")).unwrap();
             let executable = version_script(&root, "2.1.300");
             claude_pin(&root, &executable, "2.1.300");
@@ -2268,7 +2266,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_parks_an_unadmitted_build_for_the_catalog() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let home = private::directory(&root.join("home")).unwrap();
         let executable = version_script(&root, "2.1.300");
         let pin = claude_pin(&root, &executable, "2.1.300");
@@ -2303,7 +2301,7 @@ mod tests {
     #[tokio::test]
     async fn an_inspection_failure_stays_rejected_until_the_bytes_change() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let home = private::directory(&root.join("home")).unwrap();
         let executable = version_script(&root, "2.1.300");
         claude_pin(&root, &executable, "2.1.300");
@@ -2326,7 +2324,7 @@ mod tests {
     #[tokio::test]
     async fn a_catalog_denied_build_is_rejected_outright() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let home = private::directory(&root.join("home")).unwrap();
         let executable = version_script(&root, "2.1.300");
         claude_pin(&root, &executable, "2.1.300");
@@ -2356,7 +2354,7 @@ mod tests {
     #[tokio::test]
     async fn a_raw_digest_marker_is_read_as_pending() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let home = private::directory(&root.join("home")).unwrap();
         let executable = version_script(&root, "2.1.300");
         claude_pin(&root, &executable, "2.1.300");
@@ -2388,7 +2386,7 @@ mod tests {
     #[tokio::test]
     async fn refresh_leaves_unpinned_providers_to_doctor() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let home = private::directory(&root.join("home")).unwrap();
         let executable = version_script(&root, "2.1.300");
         let report = refresh_provider(&root, Provider::Claude, Some(&executable), &home).await;
@@ -2399,8 +2397,8 @@ mod tests {
     #[test]
     fn snapshot_clones_then_proves_the_pinned_bytes() {
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
-        let executable = write_executable(&root, 0o755).canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let executable = xcb_core::canonical(write_executable(&root, 0o755)).unwrap();
         let pin = codex_pin(&root, &executable, uncached_digest(&executable));
         let launch = private::directory(&root.join("launch")).unwrap();
         let snapshot = pin.snapshot(&launch).unwrap();
@@ -2431,7 +2429,7 @@ mod tests {
             .unwrap_or_else(std::env::temp_dir);
         fs::create_dir_all(&base).unwrap();
         let directory = tempfile::tempdir_in(&base).unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let executable = root.join("codex");
         {
             // 150 MiB of xorshift filler with the pretty-printed catalog

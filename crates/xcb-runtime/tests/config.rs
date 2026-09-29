@@ -19,7 +19,7 @@ fn useful_local_extensions_default_on_and_publishing_defaults_off() {
 #[test]
 fn config_changes_are_revision_guarded_and_unknown_keys_refuse() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().canonicalize().unwrap().join("state");
+    let path = xcb_core::canonical(dir.path()).unwrap().join("state");
     private::directory(&path).unwrap();
     let (mut config, revision) = Config::load(&path).unwrap();
     assert!(revision.is_none());
@@ -43,7 +43,8 @@ fn config_changes_are_revision_guarded_and_unknown_keys_refuse() {
 #[test]
 fn concurrent_config_writers_cannot_both_replace_the_same_revision() {
     let directory = tempfile::tempdir().unwrap();
-    let root = private::directory(&directory.path().canonicalize().unwrap().join("state")).unwrap();
+    let root =
+        private::directory(&xcb_core::canonical(directory.path()).unwrap().join("state")).unwrap();
     for round in 0..12 {
         let path = root.join(format!("settings-{round}.json"));
         private::create(&path, b"original").unwrap();

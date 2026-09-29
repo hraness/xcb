@@ -239,7 +239,9 @@ mod tests {
     async fn authenticated_bridge_preserves_the_exact_request_and_reply() {
         let directory = tempfile::tempdir_in("/tmp").unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = directory.path().canonicalize().unwrap().join("broker.sock");
+        let path = xcb_core::canonical(directory.path())
+            .unwrap()
+            .join("broker.sock");
         let mut bridge = DevinBridge::bind(&path).unwrap();
         let config = bridge.configuration(Path::new("/synthetic/xcb")).unwrap();
         assert_eq!(config["mcpServers"]["xcb"]["args"], json!(["broker-stdio"]));
@@ -268,7 +270,9 @@ mod tests {
     async fn wrong_token_never_reaches_the_broker() {
         let directory = tempfile::tempdir_in("/tmp").unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = directory.path().canonicalize().unwrap().join("broker.sock");
+        let path = xcb_core::canonical(directory.path())
+            .unwrap()
+            .join("broker.sock");
         let mut bridge = DevinBridge::bind(&path).unwrap();
         let mut client = UnixStream::connect(path).await.unwrap();
         client.write_all(b"{\"token\":\"wrong\"}\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n").await.unwrap();
@@ -285,7 +289,9 @@ mod tests {
     async fn shutdown_joins_a_partial_frame_without_waiting_on_peer_input() {
         let directory = tempfile::tempdir_in("/tmp").unwrap();
         std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let path = directory.path().canonicalize().unwrap().join("broker.sock");
+        let path = xcb_core::canonical(directory.path())
+            .unwrap()
+            .join("broker.sock");
         let mut bridge = DevinBridge::bind(&path).unwrap();
         let mut client = UnixStream::connect(path).await.unwrap();
         client.write_all(b"{\"token\":").await.unwrap();

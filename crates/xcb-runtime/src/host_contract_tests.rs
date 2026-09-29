@@ -20,7 +20,7 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let base = dir.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(dir.path()).unwrap();
     let workspace = private::directory(&base.join("work")).unwrap();
     let state = base.join("state");
     let store = Store::open(&state).unwrap();

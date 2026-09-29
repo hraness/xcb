@@ -48,7 +48,7 @@ fn input(workspace: &Path, event: Event) -> HookInput {
 #[tokio::test]
 async fn hooks_are_disabled_until_enabled_and_receive_no_inherited_secret() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = xcb_core::canonical(temp.path()).unwrap();
     let state = private::directory(&root.join("state")).unwrap();
     Store::open(&state).unwrap();
     let executable = script(
@@ -76,7 +76,7 @@ async fn hooks_are_disabled_until_enabled_and_receive_no_inherited_secret() {
 #[tokio::test]
 async fn changed_and_stalled_hooks_fail_closed_without_escaping_the_deadline() {
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().canonicalize().unwrap();
+    let root = xcb_core::canonical(temp.path()).unwrap();
     let state = private::directory(&root.join("state")).unwrap();
     Store::open(&state).unwrap();
     let executable = script(&root, "hook.sh", "#!/bin/sh\nsleep 10\n");

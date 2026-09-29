@@ -50,7 +50,7 @@ fn request_is_closed_bounded_and_requires_explicit_selection() {
 #[test]
 fn capabilities_do_not_claim_qualification_or_expose_state_paths() {
     let root = tempfile::tempdir().unwrap();
-    let store = Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap();
+    let store = Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
     let account = store
         .add_account(Provider::Claude, "Synthetic", 1, None)
         .unwrap();
@@ -86,7 +86,8 @@ fn capabilities_do_not_claim_qualification_or_expose_state_paths() {
 #[tokio::test]
 async fn unqualified_request_has_no_provider_or_session_effects() {
     let root = tempfile::tempdir().unwrap();
-    let store = Arc::new(Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap());
+    let store =
+        Arc::new(Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap());
     let account = store
         .add_account(Provider::Claude, "Synthetic", 1, None)
         .unwrap();
@@ -112,7 +113,8 @@ async fn unqualified_request_has_no_provider_or_session_effects() {
 #[tokio::test]
 async fn invalid_and_precancelled_requests_prove_request_local_non_start() {
     let root = tempfile::tempdir().unwrap();
-    let store = Arc::new(Store::open(&root.path().canonicalize().unwrap().join("state")).unwrap());
+    let store =
+        Arc::new(Store::open(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap());
     for (invalid, cancelled, code) in [
         (true, false, FailureCode::InvalidRequest),
         (false, true, FailureCode::Cancelled),

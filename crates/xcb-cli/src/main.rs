@@ -1325,7 +1325,7 @@ fn set_update_policy(
 ) -> Result<()> {
     use xcb_runtime::update::{self, Policy};
     let state = update::set_policy(root, policy)?;
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = xcb_core::home_dir();
     let scheduled = if policy == Policy::Disable {
         if let Some(home) = &home {
             update::remove_scheduler(home)?;
@@ -1567,9 +1567,9 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         ) => {
             unreachable!("early dispatch returns above")
         }
-        None => managed_chat(store, cli.cwd.canonicalize()?, None, false, cli.json).await,
+        None => managed_chat(store, xcb_core::canonical(&cli.cwd)?, None, false, cli.json).await,
         Some(Commands::Chat { resume, new }) => {
-            managed_chat(store, cli.cwd.canonicalize()?, resume, new, cli.json).await
+            managed_chat(store, xcb_core::canonical(&cli.cwd)?, resume, new, cli.json).await
         }
         Some(Commands::Resume { id }) => {
             let id = id
@@ -1630,7 +1630,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 .transpose()?;
             let mut model = model;
             if model.as_deref().is_none_or(|model| model == "auto") {
-                let workspace = cli.cwd.canonicalize()?;
+                let workspace = xcb_core::canonical(&cli.cwd)?;
                 let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
                 let (preference, required) =
                     managed.initial_route_preferences(&workspace, &prompt)?;
@@ -1661,7 +1661,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             }
             let session = kernel::new_session(
                 &store,
-                &cli.cwd.canonicalize()?,
+                &xcb_core::canonical(&cli.cwd)?,
                 &config,
                 account.as_ref(),
                 model.as_deref(),
@@ -2000,7 +2000,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     }
                 }
                 Some(ModelCommand::Route { task, provider }) => {
-                    let workspace = cli.cwd.canonicalize()?;
+                    let workspace = xcb_core::canonical(&cli.cwd)?;
                     let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
                     let placement = route_workspace_preview(&managed, &workspace, &task)?;
                     let (preference, required) =
@@ -2634,9 +2634,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             habitat::memory(store.root(), &cli.cwd, command, cli.json).await
         }
         Some(Commands::Service { command }) => {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .ok_or(Error::PrivateState)?;
+            let home = xcb_core::home_dir().ok_or(Error::PrivateState)?;
             let executable = std::env::current_exe()?;
             if matches!(command, Some(ServiceCommand::Plan)) {
                 let plan =
@@ -3775,8 +3773,7 @@ mod async_stack_tests {
         std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)
             .spawn(|| {
-                let directory = std::env::temp_dir()
-                    .canonicalize()
+                let directory = xcb_core::canonical(std::env::temp_dir())
                     .unwrap()
                     .join(xcb_runtime::new_id("xcb_renewal_stack").as_str());
                 private::directory(&directory).unwrap();
@@ -3811,8 +3808,7 @@ mod codex_import_tests {
 
     impl Fixture {
         fn new() -> Self {
-            let root = std::env::temp_dir()
-                .canonicalize()
+            let root = xcb_core::canonical(std::env::temp_dir())
                 .unwrap()
                 .join(xcb_runtime::new_id("xcb_codex_import").as_str());
             private::directory(&root.join("source")).unwrap();
@@ -4034,11 +4030,13 @@ mod setup_tests {
 
     #[test]
     fn setup_requires_new_sign_in_after_rejection_even_when_models_refresh() {
-        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
-            "xcb-setup-auth-{}-{}",
-            std::process::id(),
-            xcb_runtime::new_id("fixture")
-        ));
+        let root = xcb_core::canonical(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "xcb-setup-auth-{}-{}",
+                std::process::id(),
+                xcb_runtime::new_id("fixture")
+            ));
         let store = Store::open(&root).unwrap();
         let account = store
             .add_account(Provider::Claude, "Fixture", 1, None)
@@ -4105,11 +4103,13 @@ mod thread_entry_tests {
 
     impl Scratch {
         fn new(name: &str) -> Self {
-            let base = std::env::temp_dir().canonicalize().unwrap().join(format!(
-                "xcb-cli-entry-{name}-{}-{}",
-                std::process::id(),
-                now_ms()
-            ));
+            let base = xcb_core::canonical(std::env::temp_dir())
+                .unwrap()
+                .join(format!(
+                    "xcb-cli-entry-{name}-{}-{}",
+                    std::process::id(),
+                    now_ms()
+                ));
             let _ = std::fs::remove_dir_all(&base);
             std::fs::create_dir_all(&base).unwrap();
             Self(base)
@@ -4120,7 +4120,7 @@ mod thread_entry_tests {
         fn dir(&self, name: &str) -> PathBuf {
             let path = self.0.join(name);
             std::fs::create_dir_all(&path).unwrap();
-            path.canonicalize().unwrap()
+            xcb_core::canonical(&path).unwrap()
         }
         fn repo(&self, name: &str) -> PathBuf {
             let path = self.dir(name);
@@ -4292,7 +4292,7 @@ mod thread_entry_tests {
                 .is_none(),
             "the preview never creates the thread"
         );
-        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let home = xcb_core::home_dir().unwrap();
         let placement = route_workspace_preview(&managed, &home, "fix the tests").unwrap();
         assert_ne!(
             placement_parts(&placement).map(|(_, source)| source),
@@ -4796,8 +4796,7 @@ mod tests {
 
     #[test]
     fn catalog_selection_requires_explicit_devin_credentials_and_rejects_ambient_discovery() {
-        let directory = std::env::temp_dir()
-            .canonicalize()
+        let directory = xcb_core::canonical(std::env::temp_dir())
             .unwrap()
             .join(xcb_runtime::new_id("xcb_cli").as_str());
         let store = Store::open(&directory).unwrap();

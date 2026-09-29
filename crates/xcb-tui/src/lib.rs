@@ -685,12 +685,13 @@ fn resolve_project(view: &View, value: &str) -> Result<String, String> {
     }
     if value.contains('/') || value.starts_with('~') || value == "." || value == ".." {
         let expanded = match value.strip_prefix('~') {
-            Some(rest) if rest.is_empty() || rest.starts_with('/') => std::env::var_os("HOME")
-                .map(|home| std::path::PathBuf::from(home).join(rest.trim_start_matches('/'))),
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                xcb_core::home_dir().map(|home| home.join(rest.trim_start_matches('/')))
+            }
             _ => Some(std::path::PathBuf::from(value)),
         };
         return expanded
-            .and_then(|path| std::fs::canonicalize(path).ok())
+            .and_then(|path| xcb_core::canonical(path).ok())
             .filter(|path| path.is_dir())
             .and_then(|path| path.to_str().map(str::to_owned))
             .ok_or_else(|| format!("`{value}` is not a directory"));

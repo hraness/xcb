@@ -1440,5 +1440,6 @@ impl Protocol for CodexProtocol {
     }
 }
 
-#[cfg(test)]
+// Drives provider or command-runner fixtures, which Windows builds refuse.
+#[cfg(all(test, unix))]
 mod tests;

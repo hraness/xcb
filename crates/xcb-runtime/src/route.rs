@@ -247,8 +247,7 @@ pub async fn dispatch(
     if *cancel.borrow() {
         return Err(Box::new(fail(RouteCode::Cancelled)));
     }
-    let workspace = PathBuf::from(&request.workspace)
-        .canonicalize()
+    let workspace = xcb_core::canonical(PathBuf::from(&request.workspace))
         .ok()
         .filter(|path| path.is_dir())
         .ok_or_else(|| Box::new(fail(RouteCode::InvalidRequest)))?;
@@ -549,8 +548,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let workspace = directory.path().join("work");
         std::fs::create_dir(&workspace).unwrap();
-        let store =
-            Arc::new(Store::open(&directory.path().canonicalize().unwrap().join("state")).unwrap());
+        let store = Arc::new(
+            Store::open(&xcb_core::canonical(directory.path()).unwrap().join("state")).unwrap(),
+        );
         let (_send, cancel) = watch::channel(false);
         let observer: Observer = Arc::new(|_| ());
         let mut request = request();
@@ -565,8 +565,9 @@ mod tests {
     #[tokio::test]
     async fn a_missing_workspace_is_an_invalid_request() {
         let directory = tempfile::tempdir().unwrap();
-        let store =
-            Arc::new(Store::open(&directory.path().canonicalize().unwrap().join("state")).unwrap());
+        let store = Arc::new(
+            Store::open(&xcb_core::canonical(directory.path()).unwrap().join("state")).unwrap(),
+        );
         let (_send, cancel) = watch::channel(false);
         let observer: Observer = Arc::new(|_| ());
         let mut request = request();

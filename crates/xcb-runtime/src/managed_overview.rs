@@ -335,9 +335,9 @@ const MAX_UI_WORKSPACES: usize = 256;
 /// A typed directory argument with a leading `~` expanded and a relative
 /// path joined to this process's working directory.
 pub(super) fn expand_home(value: &str) -> PathBuf {
-    let path = match (value.strip_prefix('~'), std::env::var_os("HOME")) {
+    let path = match (value.strip_prefix('~'), xcb_core::home_dir()) {
         (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with('/') => {
-            PathBuf::from(home).join(rest.trim_start_matches('/'))
+            home.join(rest.trim_start_matches('/'))
         }
         _ => PathBuf::from(value),
     };

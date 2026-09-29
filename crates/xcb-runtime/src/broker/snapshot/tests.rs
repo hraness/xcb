@@ -9,7 +9,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let base = temp.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(temp.path()).unwrap();
         let root = base.join("workspace");
         fs::create_dir(&root).unwrap();
         let workspace =
@@ -105,10 +105,7 @@ fn snapshot_round_trips_binary_and_excludes_controls_dependencies_and_secrets() 
     );
     assert_eq!(snapshot.excluded.len(), 7);
     let saved = private::directory(
-        &fixture
-            ._temp
-            .path()
-            .canonicalize()
+        &xcb_core::canonical(fixture._temp.path())
             .unwrap()
             .join("private-output"),
     )
@@ -461,7 +458,9 @@ fn snapshot_and_publication_share_the_same_path_depth_bound() {
 fn command_publication_rejects_post_snapshot_symlink_targets_without_writing_outside() {
     for parent_alias in [false, true] {
         let fixture = Fixture::new();
-        let outside = fixture._temp.path().canonicalize().unwrap().join("outside");
+        let outside = xcb_core::canonical(fixture._temp.path())
+            .unwrap()
+            .join("outside");
         fs::create_dir(&outside).unwrap();
         fs::write(outside.join("input"), b"outside canary").unwrap();
         let snapshot = fixture.workspace.command_snapshot().unwrap();

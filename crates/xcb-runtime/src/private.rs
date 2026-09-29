@@ -396,7 +396,8 @@ mod tests {
     #[test]
     fn a_publication_time_guard_rejection_preserves_the_target_and_removes_staging() {
         let temp = tempfile::TempDir::new().unwrap();
-        let root = super::directory(&temp.path().canonicalize().unwrap().join("state")).unwrap();
+        let root =
+            super::directory(&xcb_core::canonical(temp.path()).unwrap().join("state")).unwrap();
         let target = root.join("guarded.json");
         super::create(&target, b"original").unwrap();
         let checks = std::cell::Cell::new(0);

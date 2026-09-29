@@ -600,7 +600,7 @@ impl App {
                 .map(|session| session.workspace.as_str())
         };
         workspace
-            .and_then(|workspace| std::path::Path::new(workspace).canonicalize().ok())
+            .and_then(|workspace| xcb_core::canonical(std::path::Path::new(workspace)).ok())
             .and_then(|path| path.to_str().map(|path| format!("unbound:{path}")))
             .is_some_and(|workspace| workspace == input.context)
     }
@@ -698,7 +698,7 @@ fn context_key(id: Option<&Id>) -> String {
                 "unbound:{}",
                 std::env::current_dir()
                     .ok()
-                    .and_then(|path| path.canonicalize().ok())
+                    .and_then(|path| xcb_core::canonical(&path).ok())
                     .and_then(|path| path.to_str().map(str::to_owned))
                     .unwrap_or_else(|| "unavailable".into())
             )
@@ -943,9 +943,7 @@ mod tests {
         drop(previous);
         let mut app = App::default();
         app.view.conversation = Some(id("c_destination"));
-        let workspace = std::env::current_dir()
-            .unwrap()
-            .canonicalize()
+        let workspace = xcb_core::canonical(std::env::current_dir().unwrap())
             .unwrap()
             .to_str()
             .unwrap()

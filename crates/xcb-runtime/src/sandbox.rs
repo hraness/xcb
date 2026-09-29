@@ -7,7 +7,7 @@ use std::{
 
 fn canonical(path: &Path) -> Result<String> {
     let text = path.to_str().ok_or(Error::PrivateState)?;
-    if !path.is_absolute() || !xcb_core::bounded_path(text) || path.canonicalize()? != path {
+    if !path.is_absolute() || !xcb_core::bounded_path(text) || xcb_core::canonical(path)? != path {
         return Err(Error::PrivateState);
     }
     Ok(text.to_owned())
@@ -15,7 +15,7 @@ fn canonical(path: &Path) -> Result<String> {
 
 fn canonical_child(path: &Path) -> Result<String> {
     let name = path.file_name().ok_or(Error::PrivateState)?;
-    let parent = path.parent().ok_or(Error::PrivateState)?.canonicalize()?;
+    let parent = xcb_core::canonical(path.parent().ok_or(Error::PrivateState)?)?;
     if parent.join(name) != path {
         return Err(Error::PrivateState);
     }
@@ -229,7 +229,7 @@ pub struct BwrapPin {
 }
 impl BwrapPin {
     pub fn admit(path: &Path) -> Result<Self> {
-        if path.canonicalize()? != path {
+        if xcb_core::canonical(path)? != path {
             return Err(Error::Unavailable("sandbox wrapper is not canonical"));
         }
         let sha256 = process::wrapper_digest(path)?;
@@ -239,7 +239,7 @@ impl BwrapPin {
         })
     }
     pub fn verify(&self) -> Result<()> {
-        if self.executable.canonicalize()? != self.executable
+        if xcb_core::canonical(&self.executable)? != self.executable
             || process::wrapper_digest(&self.executable)? != self.sha256
         {
             return Err(Error::Unavailable("sandbox wrapper changed"));
@@ -266,7 +266,7 @@ pub fn bwrap_candidate() -> Option<PathBuf> {
                 .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
                 .unwrap_or(false)
         })
-        .find_map(|path| path.canonicalize().ok())
+        .find_map(|path| xcb_core::canonical(path).ok())
 }
 
 pub struct LinuxSandbox {
@@ -391,7 +391,7 @@ pub fn bwrap_launch(
         .read_only
         .iter()
         .map(|path| {
-            let source = path.canonicalize()?;
+            let source = xcb_core::canonical(path)?;
             Ok((canonical_len(&source)?, mount_target(path)?))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -642,7 +642,7 @@ mod tests {
 
     fn make_layout(egress: Egress, socket: bool, forwarder: bool) -> Layout {
         let root = tempfile::tempdir().unwrap();
-        let base = root.path().canonicalize().unwrap();
+        let base = xcb_core::canonical(root.path()).unwrap();
         let executable = base.join("provider");
         file(&executable, 0o500);
         let scratch = base.join("scratch");
@@ -1006,7 +1006,7 @@ mod tests {
         let many = vec!["a".to_owned(); 257];
         assert!(bwrap_launch(&layout.pin, &layout.spec, &many, &env(), &cwd(&layout)).is_err());
         let outside = tempfile::tempdir().unwrap();
-        let cwd = outside.path().canonicalize().unwrap();
+        let cwd = xcb_core::canonical(outside.path()).unwrap();
         assert!(bwrap_launch(&layout.pin, &layout.spec, &[], &env(), &cwd).is_err());
     }
 

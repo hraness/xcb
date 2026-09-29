@@ -558,14 +558,14 @@ mod tests {
     fn catalog_cache_is_keyed_by_the_exact_executable_digest() {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
         let executable = root.join("codex");
         let mut bytes = b"synthetic codex binary\n".to_vec();
         bytes.extend(serde_json::to_vec_pretty(&fixture_catalog_source()).unwrap());
         bytes.push(0);
         std::fs::write(&executable, &bytes).unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let executable = executable.canonicalize().unwrap();
+        let executable = xcb_core::canonical(&executable).unwrap();
         let sha256 = crate::process::executable_digest(&executable).unwrap();
         let (_, host_sha256) = crate::process::host_identity().unwrap();
         let pin = Pin {

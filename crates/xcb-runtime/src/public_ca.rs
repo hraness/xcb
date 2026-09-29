@@ -112,8 +112,12 @@ mod tests {
     #[test]
     fn public_ca_snapshot_is_private_single_link_and_not_replaced() {
         let directory = tempfile::tempdir().unwrap();
-        let root =
-            private::directory(&directory.path().canonicalize().unwrap().join("launch")).unwrap();
+        let root = private::directory(
+            &xcb_core::canonical(directory.path())
+                .unwrap()
+                .join("launch"),
+        )
+        .unwrap();
         let target = snapshot(&root).unwrap();
         let first = private::read(&target, LIMIT as usize).unwrap();
         assert_eq!(target.metadata().unwrap().nlink(), 1);

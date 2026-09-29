@@ -15,7 +15,7 @@ struct Env {
 /// A store at `base/state`; project directories are its siblings.
 fn env() -> Env {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let state = private::directory(&base.join("state")).unwrap();
     let managed = Arc::new(ManagedStore::open(&state).unwrap());
     let xcb = Arc::new(Store::open(&state).unwrap());
@@ -41,7 +41,7 @@ fn repo(base: &Path, name: &str) -> PathBuf {
         .unwrap();
     assert!(status.success());
     assert!(path.join(".git").is_dir());
-    path.canonicalize().unwrap()
+    xcb_core::canonical(&path).unwrap()
 }
 
 fn text(path: &Path) -> &str {
@@ -434,7 +434,7 @@ fn disposition(conflicts: &[MigrationConflict], kind: &str, conversation: &Id) -
 #[tokio::test]
 async fn v6_fixture_upgrade_then_thread_use() {
     let root = tempfile::tempdir().unwrap();
-    let base = root.path().canonicalize().unwrap();
+    let base = xcb_core::canonical(root.path()).unwrap();
     let state = base.join("state");
     let work = repo(&base, "work");
     let other = repo(&base, "other");
