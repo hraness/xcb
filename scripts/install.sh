@@ -30,14 +30,26 @@ main() {
 
   os=$(uname -s)
   arch=$(uname -m)
+  # The hosts with release archives. scripts/install-native.sh accepts the
+  # same set.
   case "$os/$arch" in
-    Darwin/arm64 | Darwin/aarch64 | Linux/x86_64 | Linux/amd64) ;;
+    Darwin/arm64 | Darwin/aarch64) platform=darwin-aarch64 ;;
+    Linux/x86_64 | Linux/amd64) platform=linux-x86_64 ;;
+    Linux/aarch64 | Linux/arm64) platform=linux-aarch64 ;;
     Darwin/x86_64) fail "there is no release build for Intel Macs yet; build from source: $guide#source" ;;
     *) fail "there is no release build for $os/$arch yet; build from source: $guide#source" ;;
   esac
 
   command -v curl >/dev/null 2>&1 || fail "curl is required"
   command -v tar >/dev/null 2>&1 || fail "tar is required"
+
+  # Older releases have no archive for every platform. Only a definite 404
+  # stops here; any other answer is left to the installer's own download.
+  asset="https://github.com/$repository/releases/download/v$version/xcb-$version-$platform.tar.gz"
+  asset_status=$(curl -sIL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 60 \
+    -o /dev/null -w '%{http_code}' "$asset" 2>/dev/null) || asset_status=
+  [ "$asset_status" != 404 ] \
+    || fail "xcb $version has no release build for $os $arch; build from source: $guide#source"
 
   temporary=$(mktemp -d "${TMPDIR:-/tmp}/xcb-install.XXXXXX")
   trap 'rm -rf "$temporary"' EXIT
