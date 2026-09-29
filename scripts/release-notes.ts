@@ -66,6 +66,7 @@ export function renderReleaseNotes(input: ReleaseNotesInput): string {
   const archive = distribution.releaseArchiveName(version);
   const download = `https://github.com/${repository}/releases/download/${tag}`;
   const native = `xcb-${version}-<platform>.tar.gz`;
+  const windows = `xcb-${version}-windows-x86_64.zip`;
   return [
     section.summary,
     "## Changes",
@@ -78,11 +79,17 @@ export function renderReleaseNotes(input: ReleaseNotesInput): string {
       `cd xcb && XCB_VERSION=${version} ./scripts/install-native.sh`,
       "```",
     ].join("\n"),
+    "On Windows x86_64, this installs `xcb.exe` from the release's `.zip` into `%LOCALAPPDATA%\\Programs\\xcb\\bin`. It is not code-signed, and Claude Code, Codex, and Devin run only in the Linux build inside WSL2:",
+    [
+      "```powershell",
+      `$env:XCB_VERSION = '${version}'; irm https://raw.githubusercontent.com/${repository}/${tag}/scripts/install.ps1 | iex`,
+      "```",
+    ].join("\n"),
     "Install the TypeScript SDK and `xcb-compat` CLI from the release tarball:",
     ["```sh", `npm install ${download}/${archive}`, "```"].join("\n"),
     "## Verify",
     [
-      `- Checksums: \`SHA256SUMS\` lists the SHA-256 of \`${archive}\`, and each \`${native}\` has its own \`.sha256\` file.`,
+      `- Checksums: \`SHA256SUMS\` lists the SHA-256 of \`${archive}\`, and each \`${native}\` and \`${windows}\` has its own \`.sha256\` file.`,
       `- Source commit: \`${commit}\``,
       `- Build provenance: \`gh attestation verify ${native} -R ${repository}\`. The [publishing guide](https://github.com/${repository}/blob/${tag}/docs/publishing.md) describes how each file is built and checked.`,
     ].join("\n"),

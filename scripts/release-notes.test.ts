@@ -73,6 +73,8 @@ describe("release notes from CHANGELOG.md", () => {
     );
     expect(body).toContain("git clone --depth 1 --branch v1.2.3 https://github.com/hraness/xcb.git xcb");
     expect(body).toContain("XCB_VERSION=1.2.3 ./scripts/install-native.sh");
+    expect(body).toContain("$env:XCB_VERSION = '1.2.3'; irm https://raw.githubusercontent.com/");
+    expect(body).toContain("xcb-1.2.3-windows-x86_64.zip");
     expect(body).toContain(`Source commit: \`${commit}\``);
     expect(body).toContain("https://github.com/hraness/xcb/blob/v1.2.3/docs/publishing.md");
     expect(body).not.toMatch(/latest|What's Changed|Full Changelog|Generated with|Canonical GitHub release for/u);
