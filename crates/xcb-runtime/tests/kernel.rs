@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::{
     fs,
     sync::{Arc, mpsc::sync_channel},
@@ -6,8 +7,10 @@ use std::{
 use xcb_core::{
     Id, Provider,
     models::{Mode, ModelChoice},
+    policy::Failure,
     session::{Attachment, State},
-    ui::{Intent, Update},
+    ui::{AccountRow, Intent, Update, View},
+    usage::Estimate,
 };
 use xcb_runtime::{kernel, store::Store};
 
@@ -219,4 +222,65 @@ fn explicit_model_selects_its_provider_instead_of_an_unrelated_default_account()
         )
         .is_err()
     );
+}
+
+/// When a usage limit stops a turn and nothing else can take the task, the
+/// terminal is told so in public words: the limited account, why each other
+/// account was passed over, and the earliest known reset.
+#[test]
+fn a_usage_limit_without_a_fallback_is_explained_not_silent() {
+    let now = 1_700_000_000_000;
+    let row = |id: &str, provider: Provider| AccountRow {
+        id: Id::new(id).unwrap(),
+        provider,
+        name: format!("{provider}/{id}"),
+        email: None,
+        subscription: "Max".into(),
+        remaining_percent: None,
+        resets_at_ms: None,
+        quota_blocked_until_ms: None,
+        runway: Estimate::unknown("quota_or_burn_unmeasured"),
+        busy: false,
+        enabled: true,
+        authentication_required: false,
+    };
+    let view = View {
+        accounts: vec![
+            AccountRow {
+                remaining_percent: Some(0.0),
+                resets_at_ms: Some(now + 90 * 60_000),
+                ..row("limited", Provider::Claude)
+            },
+            AccountRow {
+                busy: true,
+                ..row("working", Provider::Claude)
+            },
+            AccountRow {
+                enabled: false,
+                ..row("parked", Provider::Codex)
+            },
+        ],
+        models: vec![choice()],
+        ..View::default()
+    };
+    let credentialed = view.accounts.iter().map(|row| row.id.clone()).collect();
+    let notice = kernel::failover_unavailable_notice(&kernel::FailoverNoticeInput {
+        view: &view,
+        account: &Id::new("limited").unwrap(),
+        model: &choice(),
+        failure: Failure::AccountQuota,
+        tried: &BTreeSet::new(),
+        limited_accounts: &BTreeSet::new(),
+        admitted: &Provider::ALL.into_iter().collect(),
+        credentialed: &credentialed,
+        required_provider: None,
+        now,
+    });
+    assert_eq!(
+        notice,
+        "Usage limit on claude · claude/limited · no other account is able to take the task now · 1 busy with another task · 1 disabled · earliest known reset in ~1h 30m"
+    );
+    for internal in ["lease", "custody", "eligible", "admitted", "credential"] {
+        assert!(!notice.contains(internal), "{notice}");
+    }
 }
