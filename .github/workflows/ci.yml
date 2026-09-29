@@ -597,7 +597,14 @@ jobs:
           $version = (Select-String -LiteralPath Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
           $server = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', 'artifacts' -PassThru -WindowStyle Hidden
           try {
-            Start-Sleep -Seconds 2
+            # Wait until the loopback server serves the zip; a fixed sleep
+            # raced its startup on a busy runner.
+            $zipUrl = "http://127.0.0.1:8765/xcb-$version-windows-x86_64.zip"
+            $ready = $false
+            foreach ($try in 1..60) {
+              try { Invoke-WebRequest -UseBasicParsing -Method Head -Uri $zipUrl | Out-Null; $ready = $true; break } catch { Start-Sleep -Milliseconds 500 }
+            }
+            if (-not $ready) { throw "loopback server did not serve $zipUrl within 30 s" }
             $env:XCB_VERSION = $version
             $env:XCB_INSTALL_PREFIX = Join-Path $env:RUNNER_TEMP 'xcb-install'
             $env:XCB_RELEASE_BASE_URL = 'http://127.0.0.1:8765'
