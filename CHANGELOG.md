@@ -10,11 +10,11 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.11.2 - 2026-09-29
 
 xcb keeps a separate model list for each account, so two accounts of the same
 provider on different plans no longer share one list. xcb also supports Codex
-CLI 0.158.0.
+CLI 0.158.0, and a model can now run its own checks with `workspace_exec`.
 
 - Before, each refresh replaced the provider's single model list with what
   one account reported. A model only one Devin or Claude plan offers could be
@@ -29,8 +29,14 @@ CLI 0.158.0.
 - `xcb models` names the accounts that can use a model when some account of
   that provider cannot. `xcb models --json` adds an `accounts` field with
   their ids to each row.
-- The command runner setup `--refresh` no longer fails with `public-cache-ack ValueError` after the runner VM restarts. Acknowledging a published dependency cache now remounts it read-only and rehashes it, as prepare and recover already do.
-- `workspace_exec` now accepts an absolute `cwd` inside the workspace and runs there. Before, a model that passed its absolute working directory got `invalid bounded offline command` on every call and could not run its own checks. Refusals now name the field that was wrong.
+- The command runner setup `--refresh` no longer fails with
+  `public-cache-ack ValueError` after the runner VM restarts. Acknowledging a
+  published dependency cache now remounts it read-only and rehashes it, as
+  prepare and recover already do.
+- `workspace_exec` now accepts an absolute `cwd` inside the workspace and runs
+  there. Before, a model that passed its absolute working directory got
+  `invalid bounded offline command` on every call and could not run its own
+  checks. Refusals now name the field that was wrong.
 - Codex CLI 0.158.0 on macOS ARM64 passes the executable, tool, configuration,
   and sandbox checks. The previous supported builds, 0.157.1 and 0.156.1,
   remain supported.
