@@ -132,8 +132,9 @@ session's unix-socket bridge via the shipped in-namespace CONNECT forwarder
 (`sandbox/loopback-forwarder.cjs`), which hands the provider standard
 `HTTPS_PROXY` semantics on a loopback port — no provider cooperation needed.
 When that surface cannot be admitted (no bwrap, or a host that refuses
-unprivileged user namespaces — stock Ubuntu 23.10+ requires
-`sysctl kernel.apparmor_restrict_unprivileged_userns=0`), the CLI refuses to
+unprivileged user namespaces — stock Ubuntu 23.10+ needs xcb's exact-path
+AppArmor profile for `/usr/bin/bwrap`, shipped as
+`crates/xcb-runtime/src/qualification/xcb-bwrap.apparmor`), the CLI refuses to
 run rather than fall back unsandboxed. Unsupported platforms refuse execution
 without an admitted OS-confinement boundary. The sandbox adds enforcement to
 the broker boundary.
@@ -777,9 +778,12 @@ the chain: a stock `curl` under `HTTPS_PROXY` traverses forwarder → bridge →
 a local `openssl s_server`, proving the stock-binary path without provider
 cooperation. The `Check` workflow's `Linux kernel-boundary probes` job runs
 all three on `ubuntu-24.04` CI when the probes or sandbox sources change and
-uploads the JSON evidence — including the recorded fact that Ubuntu's
-default AppArmor user-namespace restriction blocks bwrap entirely until the
-host lifts it (`kernel.apparmor_restrict_unprivileged_userns=0`).
+uploads the JSON evidence. That job leaves Ubuntu's AppArmor user-namespace
+restriction on and installs xcb's exact-path bwrap profile instead; it also
+runs the native test (`xcb doctor --provider claude --qualify-sandbox`),
+which ports the same three probes into the xcb binary and writes the receipt
+the Linux launcher requires. The receipt records the AppArmor restriction,
+so a reboot that turns it back on after a `sysctl` workaround invalidates it.
 
 ## Ownership boundaries
 

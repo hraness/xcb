@@ -268,49 +268,80 @@ pub struct LinuxSandbox {
     pub admitted: bool,
     pub unprivileged_userns_clone: Option<bool>,
     pub max_user_namespaces: Option<u64>,
+    /// Live `kernel.apparmor_restrict_unprivileged_userns`: `Some(true)` on
+    /// Ubuntu 23.10+ unless lifted; `None` when the kernel has no such knob.
+    pub apparmor_restricted: Option<bool>,
+    /// What the recorded sandbox test says about this host now.
+    pub receipt: ReceiptStatus,
     pub qualified: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReceiptStatus {
+    /// No bwrap to judge a receipt against.
+    NotChecked,
+    /// The sandbox test has never run here (or its result was removed).
+    Missing,
+    /// A receipt exists but can't be read, including one from an older xcb.
+    Unreadable,
+    Checked(crate::qualification::Verdict),
+}
+
 pub fn linux_sandbox(root: &std::path::Path) -> LinuxSandbox {
-    let sysctl = |path: &str| {
-        std::fs::read_to_string(path)
-            .ok()
-            .map(|text| text.trim().to_owned())
-    };
+    use crate::qualification::{LinuxQualification, Namespaces};
     let candidate = bwrap_candidate();
     let pin = candidate
         .as_deref()
         .and_then(|path| BwrapPin::admit(path).ok());
     let admitted = pin.is_some();
-    let userns_clone = sysctl("/proc/sys/kernel/unprivileged_userns_clone");
-    let max_userns = sysctl("/proc/sys/user/max_user_namespaces");
-    let qualified = match (&pin, &candidate) {
-        (Some(pin), Some(candidate)) => crate::qualification::LinuxQualification::load(root)
-            .is_ok_and(|receipt| {
-                receipt.qualified(
-                    candidate,
-                    &pin.sha256,
-                    // The receipt's facts are compared against the live host —
-                    // with the emitter's normalization: an unreadable knob
-                    // records "absent"/"0", never a missing field.
-                    &crate::qualification::Namespaces {
-                        unprivileged_userns_clone: userns_clone
-                            .clone()
-                            .unwrap_or_else(|| "absent".into()),
-                        max_user_namespaces: max_userns.clone().unwrap_or_else(|| "0".into()),
-                    },
-                    crate::now_ms(),
-                )
-            }),
-        _ => false,
+    let live = Namespaces::live();
+    let receipt = match (&pin, &candidate) {
+        (Some(pin), Some(candidate)) => match LinuxQualification::load(root) {
+            // The receipt's facts are compared against the live host.
+            Ok(receipt) => ReceiptStatus::Checked(receipt.verdict(
+                candidate,
+                &pin.sha256,
+                &live,
+                crate::now_ms(),
+            )),
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                ReceiptStatus::Missing
+            }
+            Err(_) => ReceiptStatus::Unreadable,
+        },
+        _ => ReceiptStatus::NotChecked,
     };
+    let qualified = receipt == ReceiptStatus::Checked(crate::qualification::Verdict::Qualified);
     LinuxSandbox {
         admitted,
         candidate,
-        unprivileged_userns_clone: userns_clone.map(|value| value == "1"),
-        max_user_namespaces: max_userns.and_then(|value| value.parse().ok()),
+        unprivileged_userns_clone: (live.unprivileged_userns_clone != "absent")
+            .then(|| live.unprivileged_userns_clone == "1"),
+        max_user_namespaces: live.max_user_namespaces.parse().ok(),
+        apparmor_restricted: (live.apparmor_restrict_unprivileged_userns != "absent")
+            .then(|| live.apparmor_restricted()),
+        receipt,
         qualified,
     }
+}
+
+/// Shared-library closure of one dynamic executable via `ldd`: every
+/// absolute path in the output (ELF interpreter and DT_NEEDED resolutions
+/// alike). Paths stay unresolved here; the planner mounts each resolved file
+/// at this declared location. A static executable yields an empty closure.
+pub fn shared_library_closure(executable: &Path) -> Result<Vec<PathBuf>> {
+    let output = std::process::Command::new("ldd").arg(executable).output()?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let paths: std::collections::BTreeSet<PathBuf> = text
+        .split_whitespace()
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+        .map(Path::to_owned)
+        .collect();
+    Ok(paths.into_iter().collect())
 }
 
 fn inside(inner: &str, outer: &str) -> bool {

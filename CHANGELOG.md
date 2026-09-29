@@ -12,6 +12,7 @@ version bump pull request by renaming `## Unreleased` to the version.
 
 ## Unreleased
 
+- On Linux, `xcb doctor --provider claude --qualify-sandbox` runs the sandbox test from the xcb binary and saves the result Claude needs, so a release install no longer needs a source checkout or Bun. The result now records Ubuntu's AppArmor user-namespace setting: when a reboot turns the restriction back on after a `sysctl` workaround, `xcb doctor` says the sandbox is no longer ready and explains the fix instead of reporting it ready. The documented fix is now xcb's AppArmor profile for `/usr/bin/bwrap` only, which survives reboots. Results saved by older versions must be taken again.
 - Releases now include a Linux ARM64 build, `xcb-<version>-linux-aarch64.tar.gz`, built on an ARM64 runner with the same glibc 2.34 floor as the x86_64 build. CI builds it on every push to `main`.
 
 ## 0.11.2 - 2026-09-29

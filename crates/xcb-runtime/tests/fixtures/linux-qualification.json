@@ -1,23 +1,24 @@
 {
-  "schema": "xcb.qualification.linux.v1",
+  "schema": "xcb.qualification.linux.v2",
   "wrapper": {
     "path": "/usr/bin/bwrap",
     "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   },
   "namespaces": {
-    "unprivileged_userns_clone": "absent",
-    "max_user_namespaces": "0"
+    "unprivileged_userns_clone": "1",
+    "max_user_namespaces": "63439",
+    "apparmor_restrict_unprivileged_userns": "1"
   },
   "probes": {
-    "linux-sandbox": {
-      "exit_code": 0,
-      "passed": true
-    },
     "linux-egress": {
       "exit_code": 0,
       "passed": true
     },
     "linux-loopback": {
+      "exit_code": 0,
+      "passed": true
+    },
+    "linux-sandbox": {
       "exit_code": 0,
       "passed": true
     }

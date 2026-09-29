@@ -1,0 +1,10 @@
+# Lets /usr/bin/bwrap create unprivileged user namespaces while Ubuntu's
+# kernel.apparmor_restrict_unprivileged_userns stays on for everything else.
+# Install: sudo install -m 0644 xcb-bwrap.apparmor /etc/apparmor.d/xcb-bwrap
+#          sudo apparmor_parser -r /etc/apparmor.d/xcb-bwrap
+abi <abi/4.0>,
+include <tunables/global>
+
+profile xcb-bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}

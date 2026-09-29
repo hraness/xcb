@@ -272,18 +272,20 @@ xcb accounts refresh <account-id>
 xcb models`}</Code>
       <p><code>--plan</code> is a label shown in <code>xcb accounts</code>; xcb doesn’t check it against your subscription. If xcb finds the wrong Claude Code, point it at the right one with <code>xcb doctor --provider claude --executable /absolute/path/to/claude</code>. xcb keeps a private copy of that executable, so a Claude Code auto-update can’t change it mid-task.</p>
       <h3 id="claude-on-linux">Claude on Linux</h3>
-      <p>On Linux, xcb runs Claude inside <code>bwrap</code> only after checks on that machine prove the sandbox works. You need <code>bwrap</code> at <code>/usr/bin/bwrap</code>, unprivileged user namespaces (on Ubuntu 24.04, <code>sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0</code>), a source checkout, and Bun 1.3.14. From the checkout:</p>
-      <Code>{`BWRAP="$(command -v bwrap)"
-SHA="$(sha256sum "$BWRAP" | cut -d' ' -f1)"
-mkdir -p evidence
-for probe in linux-sandbox linux-egress linux-loopback; do
-  code=0
-  bun "qualification/$probe.ts" --bwrap "$BWRAP" --bwrap-sha256 "$SHA" > "evidence/$probe.json" || code=$?
-  echo "$code" > "evidence/$probe.exitcode"
-done
-bun qualification/build-receipt.ts "$BWRAP" "$SHA" evidence/linux-qualification.json
-install -D -m 600 evidence/linux-qualification.json ~/.local/share/xcb/qualification/linux.json`}</Code>
-      <p>The result is valid for 30 days, for that <code>bwrap</code> binary and those namespace settings. On Linux, <code>xcb doctor</code> shows whether the sandbox is ready.</p>
+      <p>On Linux, xcb runs Claude inside <code>bwrap</code> only after a sandbox test on that machine shows the sandbox works. The test runs without signing in and uses no model. You need <code>bwrap</code> at <code>/usr/bin/bwrap</code> (<code>sudo apt install bubblewrap</code> on Ubuntu).</p>
+      <p>Ubuntu 23.10 and later stop programs from creating user namespaces unless an AppArmor profile allows it, and <code>bwrap</code> needs them. Install xcb’s profile, which allows this for <code>/usr/bin/bwrap</code> only and survives a reboot:</p>
+      <Code>{`sudo tee /etc/apparmor.d/xcb-bwrap >/dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile xcb-bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/xcb-bwrap`}</Code>
+      <p>Then run the test:</p>
+      <Code>{`xcb doctor --provider claude --qualify-sandbox`}</Code>
+      <p>The result is valid for 30 days, for that <code>bwrap</code> binary and the kernel’s user-namespace settings when the test ran. Turning off the AppArmor restriction with <code>sysctl</code> instead works only until the next reboot, when the setting returns and xcb asks you to run the test again. On Linux, <code>xcb doctor</code> shows whether the sandbox is ready and what to do when it isn’t.</p>
       <h2 id="codex" className="xcb-provider-heading"><ProviderMark mark="codex" label="Codex" size={24} />Codex</h2>
       <Code>{`xcb setup codex`}</Code>
       <p>Setup supervises the Codex CLI’s ChatGPT device sign-in in a private profile; follow the code shown in the terminal. To reuse a ChatGPT sign-in you already have, copy its <code>auth.json</code> into a new xcb account instead:</p>
@@ -513,7 +515,7 @@ xcb recover <run-id> --yes   # confirm the process is gone and release the accou
       <p>When the login service runs xcb in the background, macOS may block it from folders such as Documents, Desktop, or Downloads. <code>xcb service status</code> then reports “xcb can’t open files in ~/Documents: macOS access is off for xcb.” Turn on xcb under that folder in System Settings › Privacy &amp; Security › Files &amp; Folders, or open the pane directly:</p>
       <Code>{`open 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders'`}</Code>
       <h2 id="linux-sandbox">Claude won’t start on Linux</h2>
-      <p>“native OS confinement is not qualified on this platform” means the sandbox checks haven’t run on this machine, are older than 30 days, or no longer match its <code>bwrap</code> or namespace settings. Run the <a href="/docs/providers#claude-on-linux">Linux sandbox checks</a> again.</p>
+      <p>“native OS confinement is not qualified on this platform” means the sandbox test hasn’t run on this machine, is older than 30 days, or no longer matches its <code>bwrap</code> or user-namespace settings. A reboot that turns Ubuntu’s AppArmor restriction back on is the usual cause. <code>xcb doctor</code> names the reason. Install the <a href="/docs/providers#claude-on-linux">bwrap AppArmor profile</a> if it asks, then run <code>xcb doctor --provider claude --qualify-sandbox</code>.</p>
       <h2 id="config">config.json is rejected</h2>
       <p>“config.json is incompatible with this xcb build” means the file has a key or value this build doesn’t accept, often after going back to an older release. Fix the key, or remove it to use the default; the <a href="/docs/reference#configuration">configuration reference</a> lists valid values.</p>
       <h2 id="help">Get help</h2>

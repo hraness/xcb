@@ -503,7 +503,7 @@ pub async fn run(
             },
         });
         if let Some(status) = &sandbox {
-            report["sandbox"] = json!({"backend":"bwrap","candidate":status.candidate,"admitted":status.admitted,"unprivilegedUsernsClone":status.unprivileged_userns_clone,"maxUserNamespaces":status.max_user_namespaces,"qualified":status.qualified});
+            report["sandbox"] = json!({"backend":"bwrap","candidate":status.candidate,"admitted":status.admitted,"unprivilegedUsernsClone":status.unprivileged_userns_clone,"maxUserNamespaces":status.max_user_namespaces,"apparmorRestricted":status.apparmor_restricted,"receipt":receipt_code(&status.receipt),"qualified":status.qualified,"fix":sandbox_fix(status)});
         }
         report["checks"] = json!({
             "passed": tally.passed,
@@ -558,6 +558,9 @@ pub async fn run(
     }
     if let Some(status) = &sandbox {
         println!("{}", sandbox_line(style, status));
+        if let Some(fix) = sandbox_fix(status) {
+            println!("  {fix}");
+        }
     }
     println!(
         "{} judge: {} · key {judge_key_name} · {judge_endpoint}",
@@ -624,6 +627,8 @@ fn install_step(provider: Provider) -> String {
 /// The Linux sandbox check. Without a working bwrap and a current sandbox
 /// test result for this machine, xcb starts no provider here.
 fn sandbox_line(style: ux::Style, status: &xcb_runtime::sandbox::LinuxSandbox) -> String {
+    use xcb_runtime::qualification::Verdict;
+    use xcb_runtime::sandbox::ReceiptStatus;
     let userns = match (status.unprivileged_userns_clone, status.max_user_namespaces) {
         (Some(false), _) | (_, Some(0)) => " · user namespaces are restricted",
         _ => "",
@@ -631,15 +636,44 @@ fn sandbox_line(style: ux::Style, status: &xcb_runtime::sandbox::LinuxSandbox) -
     let (symbol, detail) = match &status.candidate {
         Some(path) if status.admitted && status.qualified => (
             ux::Symbol::Ok,
-            format!("bwrap at {} passed xcb's sandbox checks", path.display()),
+            format!("bwrap at {} passed xcb's sandbox test", path.display()),
         ),
-        Some(path) if status.admitted => (
-            ux::Symbol::Warn,
-            format!(
-                "bwrap at {} works, but this machine has no current sandbox test result, so xcb won't start providers here",
-                path.display()
-            ),
-        ),
+        Some(path) if status.admitted => {
+            let why = match &status.receipt {
+                ReceiptStatus::Missing | ReceiptStatus::NotChecked => {
+                    "this machine has no sandbox test result yet".to_owned()
+                }
+                ReceiptStatus::Unreadable | ReceiptStatus::Checked(Verdict::Schema) => {
+                    "its sandbox test result is from an older xcb".to_owned()
+                }
+                ReceiptStatus::Checked(Verdict::WrapperChanged) => {
+                    "bwrap changed since the sandbox test".to_owned()
+                }
+                ReceiptStatus::Checked(Verdict::AppArmorChanged { recorded, live }) => format!(
+                    "Ubuntu's AppArmor user-namespace restriction changed since the sandbox test (was {recorded}, now {live}; a reboot resets it)"
+                ),
+                ReceiptStatus::Checked(Verdict::NamespacesChanged) => {
+                    "the kernel's user-namespace settings changed since the sandbox test".to_owned()
+                }
+                ReceiptStatus::Checked(Verdict::Stale) => {
+                    "its sandbox test result is more than 30 days old".to_owned()
+                }
+                ReceiptStatus::Checked(Verdict::NamespacesUnusable) => {
+                    "the sandbox test found user namespaces turned off".to_owned()
+                }
+                ReceiptStatus::Checked(Verdict::ProbesFailed(failed)) => {
+                    format!("the last sandbox test failed ({})", failed.join(", "))
+                }
+                ReceiptStatus::Checked(Verdict::Qualified) => "the sandbox test passed".to_owned(),
+            };
+            (
+                ux::Symbol::Warn,
+                format!(
+                    "bwrap at {} is installed, but {why}, so xcb won't start providers here",
+                    path.display()
+                ),
+            )
+        }
         Some(path) => (
             ux::Symbol::Warn,
             format!(
@@ -653,6 +687,173 @@ fn sandbox_line(style: ux::Style, status: &xcb_runtime::sandbox::LinuxSandbox) -
         ),
     };
     format!("{} sandbox: {detail}{userns}", style.symbol(symbol))
+}
+
+const QUALIFY_SANDBOX: &str = "xcb doctor --provider claude --qualify-sandbox";
+
+/// The one fix for an unready Linux sandbox. When Ubuntu's AppArmor
+/// restriction is on, the exact-path bwrap profile comes first: lifting the
+/// global sysctl instead doesn't survive a reboot.
+fn sandbox_fix(status: &xcb_runtime::sandbox::LinuxSandbox) -> Option<String> {
+    use xcb_runtime::qualification::Verdict;
+    use xcb_runtime::sandbox::ReceiptStatus;
+    if status.qualified {
+        return None;
+    }
+    if status.candidate.is_none() {
+        return Some(
+            "install bubblewrap (sudo apt install bubblewrap), then run ".to_owned()
+                + QUALIFY_SANDBOX,
+        );
+    }
+    let needs_profile = status.apparmor_restricted == Some(true)
+        && matches!(
+            status.receipt,
+            ReceiptStatus::Missing
+                | ReceiptStatus::Unreadable
+                | ReceiptStatus::Checked(Verdict::AppArmorChanged { .. })
+                | ReceiptStatus::Checked(Verdict::ProbesFailed(_))
+        );
+    Some(if needs_profile {
+        format!(
+            "allow bwrap through AppArmor with xcb's profile (xcb.sh/docs/providers#claude-on-linux), then run {QUALIFY_SANDBOX}"
+        )
+    } else {
+        format!("run {QUALIFY_SANDBOX}")
+    })
+}
+
+fn receipt_code(receipt: &xcb_runtime::sandbox::ReceiptStatus) -> &'static str {
+    use xcb_runtime::qualification::Verdict;
+    use xcb_runtime::sandbox::ReceiptStatus;
+    match receipt {
+        ReceiptStatus::NotChecked => "not-checked",
+        ReceiptStatus::Missing => "missing",
+        ReceiptStatus::Unreadable => "unreadable",
+        ReceiptStatus::Checked(verdict) => match verdict {
+            Verdict::Qualified => "current",
+            Verdict::Schema => "unreadable",
+            Verdict::WrapperChanged => "bwrap-changed",
+            Verdict::AppArmorChanged { .. } => "apparmor-changed",
+            Verdict::NamespacesChanged => "namespaces-changed",
+            Verdict::Stale => "stale",
+            Verdict::NamespacesUnusable => "namespaces-unusable",
+            Verdict::ProbesFailed(_) => "probes-failed",
+        },
+    }
+}
+
+/// What each sandbox probe proves, for people.
+fn probe_sentence(name: &str) -> &'static str {
+    match name {
+        "linux-sandbox" => "files outside the task folder stay hidden and the network is off",
+        "linux-egress" => "network traffic can leave only through xcb's bridge",
+        "linux-loopback" => "a standard HTTPS client reaches the network through xcb's proxy",
+        _ => "sandbox probe",
+    }
+}
+
+/// `xcb doctor --qualify-sandbox`: run the Linux sandbox test and save the
+/// result Claude needs. Exits 0 only when this machine now qualifies.
+pub async fn qualify_sandbox(
+    root: &Path,
+    provider: Option<Provider>,
+    as_json: bool,
+) -> Result<i32> {
+    if provider.is_some_and(|provider| provider != Provider::Claude) {
+        return Err(Error::guided(
+            "xcb runs only Claude on Linux, so the sandbox test is for Claude",
+            QUALIFY_SANDBOX,
+        ));
+    }
+    if !cfg!(target_os = "linux") {
+        return Err(Error::Guided {
+            message: "the sandbox test is for Linux; macOS uses its built-in sandbox".into(),
+            next: None,
+        });
+    }
+    #[cfg(unix)]
+    {
+        qualify_sandbox_unix(root, as_json).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, as_json);
+        Err(Error::Unavailable("the sandbox test runs on Linux only"))
+    }
+}
+
+#[cfg(unix)]
+async fn qualify_sandbox_unix(root: &Path, as_json: bool) -> Result<i32> {
+    use xcb_runtime::qualification::{APPARMOR_BWRAP_PROFILE, APPARMOR_BWRAP_PROFILE_PATH};
+    let style = ux::Style::stdout();
+    if xcb_runtime::sandbox::bwrap_candidate().is_none() {
+        return Err(Error::guided(
+            "bwrap isn't installed, so xcb can't test its sandbox",
+            "sudo apt install bubblewrap",
+        ));
+    }
+    if !as_json {
+        println!(
+            "{} Testing xcb's bwrap sandbox on this machine. No account or model is used.",
+            style.symbol(ux::Symbol::Next)
+        );
+    }
+    let run = xcb_runtime::qualification::probe::qualify(root).await?;
+    let restricted = run.receipt.namespaces.apparmor_restricted();
+    if as_json {
+        crate::print_json(json!({
+            "qualified": run.qualified,
+            "receiptPath": run.receipt_path,
+            "receipt": run.receipt,
+            "probes": run.probes,
+            "apparmorRestricted": restricted,
+            "apparmorProfile": (!run.qualified && restricted).then_some(APPARMOR_BWRAP_PROFILE),
+        }))?;
+        return Ok(i32::from(!run.qualified));
+    }
+    for probe in &run.probes {
+        let symbol = if probe.passed {
+            ux::Symbol::Ok
+        } else {
+            ux::Symbol::Fail
+        };
+        let reason = probe
+            .stderr
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .filter(|_| !probe.passed)
+            .map(|line| format!(" ({})", line.trim()))
+            .unwrap_or_default();
+        println!(
+            "{} {}: {}{reason}",
+            style.symbol(symbol),
+            probe.name,
+            probe_sentence(probe.name)
+        );
+    }
+    if run.qualified {
+        println!(
+            "{} Saved the result to {}. It stays valid for 30 days, or until bwrap or the kernel's user-namespace settings change.",
+            style.symbol(ux::Symbol::Ok),
+            run.receipt_path.display()
+        );
+        ux::next("xcb setup claude");
+        return Ok(0);
+    }
+    println!(
+        "{} This machine didn't pass the sandbox test, so xcb won't start Claude here.",
+        style.symbol(ux::Symbol::Fail)
+    );
+    if restricted {
+        println!(
+            "Ubuntu's AppArmor setting blocks bwrap from creating user namespaces. Allow it for bwrap only with xcb's profile:\n\n\
+             sudo tee {APPARMOR_BWRAP_PROFILE_PATH} >/dev/null <<'EOF'\n{APPARMOR_BWRAP_PROFILE}EOF\n\
+             sudo apparmor_parser -r {APPARMOR_BWRAP_PROFILE_PATH}\n"
+        );
+    }
+    ux::next(QUALIFY_SANDBOX);
+    Ok(1)
 }
 
 #[cfg(test)]

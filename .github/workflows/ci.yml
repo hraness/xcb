@@ -65,6 +65,11 @@ jobs:
               - '.github/workflows/ci.yml'
             qualification:
               - 'qualification/**'
+              - 'crates/xcb-runtime/src/qualification.rs'
+              - 'crates/xcb-runtime/src/qualification/**'
+              - 'crates/xcb-runtime/src/sandbox.rs'
+              - 'crates/xcb-runtime/src/egress.rs'
+              - 'crates/xcb-cli/src/doctor.rs'
               - 'src/os-sandbox.ts'
               - 'src/egress-bridge.ts'
               - 'src/egress-client.ts'
@@ -319,10 +324,15 @@ jobs:
           retention-days: 7
 
   qualification:
-    # Credential-free kernel-boundary evidence for the Linux bwrap backend.
-    # Runs when the probes, sandbox sources, or this workflow change.
+    # Credential-free kernel-boundary evidence for the Linux bwrap backend,
+    # on a stock ubuntu-24.04 with the AppArmor user-namespace restriction
+    # left on and xcb's exact-path bwrap profile installed. The native test
+    # (`xcb doctor --qualify-sandbox`) runs from the Native build's Linux
+    # binary; the TypeScript probes cross-check the TS SDK backend on the
+    # same host. Runs when the probes, sandbox sources, or this workflow
+    # change.
     name: Linux kernel-boundary probes
-    needs: changes
+    needs: [changes, native-build]
     if: needs.changes.outputs.qualification == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -335,9 +345,20 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Install boundary tooling
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap iproute2 util-linux curl openssl
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends bubblewrap apparmor iproute2 util-linux curl openssl
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: xcb-ubuntu-22.04
+          path: ${{ runner.temp }}/xcb-bin
+      - name: Install the Linux release binary
+        run: |
+          XCB_BIN="$RUNNER_TEMP/xcb-bin/xcb"
+          echo "XCB_BIN=$XCB_BIN" >> "$GITHUB_ENV"
+          echo "XCB_STATE_ROOT=$RUNNER_TEMP/xcb-state" >> "$GITHUB_ENV"
+          mv "$RUNNER_TEMP/xcb-bin/xcb-ubuntu-22.04" "$XCB_BIN"
+          chmod 0755 "$XCB_BIN"
+          "$XCB_BIN" --version
       - name: Namespace capability facts
-        id: facts
         run: |
           mkdir -p evidence
           {
@@ -345,46 +366,78 @@ jobs:
             echo "unprivileged_userns_clone=$(cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo absent)"
             echo "max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces 2>/dev/null || echo absent)"
             echo "bwrap=$(command -v bwrap) $(bwrap --version 2>&1 | head -1)"
-            echo "unshare_probe=$(unshare -Urn true 2>&1 && echo ok || echo denied)"
             echo "bwrap_minimal=$(bwrap --unshare-all --ro-bind /bin/true /bin/true -- /bin/true 2>&1 && echo ok || echo denied)"
           } | tee evidence/env-facts.txt
-      - name: Probes under the host default restriction (informational)
+      - name: Without the profile, the native test refuses to qualify
         run: |
-          BWRAP="$(command -v bwrap)"
-          SHA="$(sha256sum "$BWRAP" | cut -d' ' -f1)"
-          status=0
-          for probe in linux-sandbox linux-egress linux-loopback; do
-            if [ -f "qualification/$probe.ts" ]; then
-              bun "qualification/$probe.ts" --bwrap "$BWRAP" --bwrap-sha256 "$SHA" > "evidence/restricted-$probe.json" 2> "evidence/restricted-$probe.stderr" || status=1
-            fi
-          done
-          echo "restricted_status=$status" >> evidence/restricted-status.txt
-          exit 0
-      - name: Lift the AppArmor userns restriction for evidence
+          code=0
+          "$XCB_BIN" --state "$XCB_STATE_ROOT" --json doctor --provider claude --qualify-sandbox > evidence/restricted-native.json || code=$?
+          echo "restricted_native_exit=$code" | tee -a evidence/env-facts.txt
+          if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = "1" ]; then
+            test "$code" -ne 0
+            python3 -I -c 'import json,sys; r=json.load(open("evidence/restricted-native.json")); sys.exit(0 if r["qualified"] is False and r["apparmorProfile"] else 1)'
+          fi
+      - name: Install xcb's exact-path AppArmor profile for bwrap
         run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          echo "unshare_probe_after=$(unshare -Urn true 2>&1 && echo ok || echo denied)" | tee -a evidence/env-facts.txt
-      - name: Run probes and collect evidence
+          sudo install -m 0644 crates/xcb-runtime/src/qualification/xcb-bwrap.apparmor /etc/apparmor.d/xcb-bwrap
+          sudo apparmor_parser -r /etc/apparmor.d/xcb-bwrap
+          {
+            echo "apparmor_restrict_with_profile=$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo absent)"
+            echo "bwrap_minimal_with_profile=$(bwrap --unshare-all --ro-bind /bin/true /bin/true -- /bin/true 2>&1 && echo ok || echo denied)"
+          } | tee -a evidence/env-facts.txt
+      - name: TypeScript probes (SDK backend cross-check)
         id: probes
         run: |
           BWRAP="$(command -v bwrap)"
           SHA="$(sha256sum "$BWRAP" | cut -d' ' -f1)"
           status=0
           for probe in linux-sandbox linux-egress linux-loopback; do
-            if [ -f "qualification/$probe.ts" ]; then
-              code=0
-              timeout 300 bun "qualification/$probe.ts" --bwrap "$BWRAP" --bwrap-sha256 "$SHA" > "evidence/$probe.json" 2> "evidence/$probe.stderr" || code=$?
-              # The process exit code is each probe's authoritative verdict;
-              # build-receipt.ts reads it to set the receipt's exit_code/passed.
-              echo "$code" > "evidence/$probe.exitcode"
-              if [ "$code" -ne 0 ]; then status=1; fi
-            fi
+            code=0
+            timeout 300 bun "qualification/$probe.ts" --bwrap "$BWRAP" --bwrap-sha256 "$SHA" > "evidence/$probe.json" 2> "evidence/$probe.stderr" || code=$?
+            echo "$code" > "evidence/$probe.exitcode"
+            if [ "$code" -ne 0 ]; then status=1; fi
           done
-          # build-receipt exits nonzero when any probe's recorded verdict is a
-          # failure, so a red probe can no longer ship a passing receipt.
-          bun qualification/build-receipt.ts "$BWRAP" "$SHA" evidence/linux-qualification.json || status=1
-          if [ ! -f evidence/linux-qualification.json ]; then status=1; fi
           echo "status=$status" >> "$GITHUB_OUTPUT"
+      - name: Native sandbox test writes the receipt
+        id: native
+        run: |
+          code=0
+          "$XCB_BIN" --state "$XCB_STATE_ROOT" --json doctor --provider claude --qualify-sandbox > evidence/native-qualification.json || code=$?
+          cp "$XCB_STATE_ROOT/qualification/linux.json" evidence/linux-qualification.json || true
+          "$XCB_BIN" --state "$XCB_STATE_ROOT" doctor --provider claude --qualify-sandbox > evidence/native-qualification.txt 2>&1 || true
+          echo "status=$code" >> "$GITHUB_OUTPUT"
+      - name: Doctor admits the receipt, and refuses it once the AppArmor setting drifts
+        id: admission
+        run: |
+          doctor() { "$XCB_BIN" --state "$XCB_STATE_ROOT" --json doctor > "evidence/$1.json" || true; }
+          check() {
+            python3 -I - "evidence/$1.json" "$2" "$3" <<'EOF'
+          import json, sys
+          sandbox = json.load(open(sys.argv[1]))["sandbox"]
+          want_qualified, want_receipt = sys.argv[2] == "true", sys.argv[3]
+          print(sys.argv[1], sandbox)
+          sys.exit(0 if sandbox["qualified"] is want_qualified and sandbox["receipt"] == want_receipt else 1)
+          EOF
+          }
+          doctor doctor-qualified && check doctor-qualified true current
+          # A receipt must bind the live AppArmor setting: flip it, and the
+          # same receipt stops admitting the host until it is flipped back.
+          before="$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)"
+          after=$((1 - before))
+          sudo sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$after"
+          doctor doctor-drifted
+          sudo sysctl -w "kernel.apparmor_restrict_unprivileged_userns=$before"
+          check doctor-drifted false apparmor-changed
+          doctor doctor-restored && check doctor-restored true current
+      - name: Native and TypeScript probes agree
+        run: |
+          python3 -I - <<'EOF'
+          import json, pathlib
+          native = {p["name"]: p["passed"] for p in json.load(open("evidence/native-qualification.json"))["probes"]}
+          ts = {name: pathlib.Path(f"evidence/{name}.exitcode").read_text().strip() == "0" for name in native}
+          print("native", native, "typescript", ts)
+          assert native == ts, "native and TypeScript probes disagree"
+          EOF
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -392,7 +445,7 @@ jobs:
           path: evidence/
           if-no-files-found: warn
       - name: Require probe evidence
-        if: steps.probes.outputs.status != '0'
+        if: steps.probes.outputs.status != '0' || steps.native.outputs.status != '0'
         run: exit 1
 
   required:

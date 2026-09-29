@@ -38,10 +38,15 @@
   checks; its `contact-workspace.ts` is a vendored synthetic fixture, not a
   TextButler import. `linux-sandbox.ts` is the bwrap kernel-boundary probe,
   `linux-egress.ts` is the CONNECT-bridge boundary probe, and
-  `linux-loopback.ts` is the stock-binary forwarder probe; all are evidence,
-  not activation. The `Check` workflow's `Linux kernel-boundary probes` job
-  runs them on `ubuntu-24.04` when the probes or sandbox sources change (or on
-  `workflow_dispatch`) and uploads the JSON evidence.
+  `linux-loopback.ts` is the stock-binary forwarder probe; all are evidence
+  for the TypeScript SDK backend, not activation. The native receipt the
+  Linux launcher admits comes from `xcb doctor --qualify-sandbox`
+  (`crates/xcb-runtime/src/qualification/probe.rs`), which runs the same three
+  probes from the xcb binary. The `Check` workflow's `Linux kernel-boundary
+  probes` job runs both on `ubuntu-24.04` with the AppArmor restriction on and
+  the shipped `xcb-bwrap.apparmor` profile installed, when the probes or
+  sandbox sources change (or on `workflow_dispatch`), and uploads the JSON
+  evidence.
 - `scripts/` holds the dist build, packed-package smoke check, and the
   dependency-free release writers and admission checks.
 - `site/` is the informational xcb product page (Next.js, canonical origin

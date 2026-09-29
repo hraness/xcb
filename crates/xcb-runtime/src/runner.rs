@@ -562,8 +562,8 @@ fn provider_args(model: &ModelChoice, tools: bool) -> Vec<String> {
 /// it anywhere. The planner owns the executable and forwarder-runtime binds;
 /// `read_only` carries only the dynamic-loader/library closure — repeating a
 /// path the plan already mounts used to be a fatal "bind target duplicated".
-#[cfg(any(target_os = "linux", test))]
-fn linux_spec(
+#[cfg(any(unix, test))]
+pub(crate) fn linux_spec(
     executable: PathBuf,
     runtime: PathBuf,
     scratch: PathBuf,
@@ -587,27 +587,6 @@ fn linux_spec(
             port: 48123,
         }),
     }
-}
-
-/// Shared-library closure of one dynamic executable via `ldd` — the same
-/// contract as qualification/linux-loopback.ts `lddClosure()`: every absolute
-/// path in the output (ELF interpreter and DT_NEEDED resolutions alike).
-/// Paths stay unresolved here; the planner mounts each resolved file at this
-/// declared location. A static executable yields an empty closure.
-#[cfg(target_os = "linux")]
-fn shared_library_closure(executable: &Path) -> Result<Vec<PathBuf>> {
-    let output = std::process::Command::new("ldd").arg(executable).output()?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let paths: BTreeSet<PathBuf> = text
-        .split_whitespace()
-        .map(Path::new)
-        .filter(|path| path.is_absolute())
-        .map(Path::to_owned)
-        .collect();
-    Ok(paths.into_iter().collect())
 }
 
 #[cfg(target_os = "linux")]
@@ -739,8 +718,8 @@ pub(crate) async fn prepare(
     // The planner mounts the executable and the forwarder runtime itself;
     // read_only carries only the shared-library closure the dynamic loader
     // needs — provider snapshot and runtime alike.
-    let mut read_only = shared_library_closure(&executable)?;
-    read_only.extend(shared_library_closure(&xcb)?);
+    let mut read_only = sandbox::shared_library_closure(&executable)?;
+    read_only.extend(sandbox::shared_library_closure(&xcb)?);
     let policy_path = directory.join("sandbox.json");
     artifacts.retain_before_launch();
     let bridge =
@@ -2632,14 +2611,7 @@ mod tests {
         receipt.wrapper.path = candidate;
         receipt.wrapper.sha256 = wrapper.sha256;
         receipt.observed_at_ms = now_ms();
-        receipt.namespaces.unprivileged_userns_clone =
-            std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
-                .map(|value| value.trim().to_owned())
-                .unwrap_or_else(|_| "absent".into());
-        receipt.namespaces.max_user_namespaces =
-            std::fs::read_to_string("/proc/sys/user/max_user_namespaces")
-                .map(|value| value.trim().to_owned())
-                .unwrap_or_else(|_| "0".into());
+        receipt.namespaces = crate::qualification::Namespaces::live();
         let path = root.join(LINUX_QUALIFICATION_NAME);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let write = |receipt: &LinuxQualification| {

@@ -382,6 +382,11 @@ enum Commands {
         /// state; nothing is changed.
         #[arg(long, conflicts_with_all = ["provider", "executable"])]
         upgrade_plan: bool,
+        /// Linux: test xcb's bwrap sandbox on this machine and save the
+        /// result Claude needs before it runs here. Run it again after a
+        /// bwrap update or a change to the kernel's user-namespace settings.
+        #[arg(long, conflicts_with_all = ["executable", "upgrade_plan"])]
+        qualify_sandbox: bool,
     },
     /// Print the effective configuration as JSON.
     Config,
@@ -425,6 +430,13 @@ enum Commands {
     /// Internal: stdio bridge used by a provider's MCP helper.
     #[command(name = "broker-stdio", hide = true)]
     BrokerStdio,
+    /// Internal: the confined half of the Linux sandbox test.
+    #[command(name = "sandbox-probe", hide = true)]
+    SandboxProbe {
+        /// Probe kind and its paths.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Internal: in-namespace loopback CONNECT forwarder for sandboxed children.
     #[command(name = "egress-forward", hide = true)]
     EgressForward {
@@ -1131,7 +1143,7 @@ fn require_supported(root: &std::path::Path, pin: &Pin) -> Result<()> {
         if !xcb_runtime::sandbox::linux_sandbox(root).qualified {
             return Err(Error::guided(
                 "xcb can't run Claude Code until this machine passes its Linux sandbox checks",
-                "run the sandbox checks at xcb.sh/docs/providers#claude-on-linux, then run xcb doctor --provider claude",
+                "run xcb doctor --provider claude --qualify-sandbox (xcb.sh/docs/providers#claude-on-linux)",
             ));
         }
     } else if !cfg!(target_os = "macos") {
@@ -1365,6 +1377,17 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
     {
         return egress_forward(socket, *port, lo_up, env_file, *target_port, child).await;
     }
+    // The sandbox test's confined half runs inside bwrap with no state root
+    // bound, exactly like the forwarder: it reads only its arguments.
+    if let Some(Commands::SandboxProbe { args }) = &cli.command {
+        #[cfg(unix)]
+        return Ok(xcb_runtime::qualification::probe::inside(args));
+        #[cfg(not(unix))]
+        {
+            let _ = args;
+            return Err(Error::Unavailable("the sandbox test runs on Linux only"));
+        }
+    }
     let root = cli.state.unwrap_or(private::default_root()?);
     if matches!(&cli.command, Some(Commands::ManagedDaemon)) {
         return xcb_runtime::managed::daemon(root).await;
@@ -1409,6 +1432,15 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
     }) = &cli.command
     {
         return workspaces::upgrade_plan(&root, cli.json);
+    }
+    // The sandbox test writes only its receipt, so it opens no store.
+    if let Some(Commands::Doctor {
+        qualify_sandbox: true,
+        provider,
+        ..
+    }) = &cli.command
+    {
+        return doctor::qualify_sandbox(&root, *provider, cli.json).await;
     }
     // Remote-fleet commands live entirely in cloud custody and the relay;
     // they never open the managed store.
@@ -1931,6 +1963,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             provider,
             executable,
             upgrade_plan: _,
+            qualify_sandbox: _,
         }) => {
             doctor::run(
                 &root,
@@ -3359,6 +3392,8 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             child,
         }) => egress_forward(&socket, port, &lo_up, &env_file, target_port, &child).await,
         Some(Commands::BrokerStdio) => broker_stdio().await,
+        // Dispatched before any state opens.
+        Some(Commands::SandboxProbe { .. }) => Ok(2),
         Some(Commands::Completions { shell }) => {
             // `clap_complete` panics on a closed pipe, so render into a buffer
             // and write it through the pipe-tolerant stdout helper.
@@ -3641,7 +3676,12 @@ async fn main() {
     // stderr whoever runs them.
     let protocol = matches!(
         cli.command,
-        Some(Commands::ManagedDaemon | Commands::BrokerStdio | Commands::EgressForward { .. })
+        Some(
+            Commands::ManagedDaemon
+                | Commands::BrokerStdio
+                | Commands::EgressForward { .. }
+                | Commands::SandboxProbe { .. }
+        )
     );
     let code = match dispatch(cli).await {
         Ok(code) => code,
@@ -5565,8 +5605,28 @@ mod tests {
             Some(Commands::Doctor {
                 upgrade_plan: true,
                 provider: None,
-                executable: None
+                executable: None,
+                qualify_sandbox: false,
             })
+        ));
+        let cli =
+            Cli::try_parse_from(["xcb", "doctor", "--provider", "claude", "--qualify-sandbox"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Doctor {
+                qualify_sandbox: true,
+                provider: Some(Provider::Claude),
+                ..
+            })
+        ));
+        assert!(
+            Cli::try_parse_from(["xcb", "doctor", "--qualify-sandbox", "--upgrade-plan"]).is_err()
+        );
+        let cli = Cli::try_parse_from(["xcb", "sandbox-probe", "loopback"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::SandboxProbe { args }) if args == ["loopback"]
         ));
         assert!(
             Cli::try_parse_from(["xcb", "doctor", "--upgrade-plan", "--provider", "claude"])
