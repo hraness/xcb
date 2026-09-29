@@ -804,7 +804,7 @@ managed launcher or new production qualification is bundled or implicitly enable
 
 The application owns its daemon, contact enrollment, message classification policy,
 conversation history, memory format, prefix formatting and GhostGet/Linq access.
-Xcb owns the execution seam. The model cannot choose a workspace or contact
+xcb owns the execution seam. The model cannot choose a workspace or contact
 in broker input. `WorkspaceFiles` and `PublicWeb` are trusted host ports. TextButler supplies its confined file implementation and uses `createPublicWeb()` by default. Custom replacements must preserve file confinement and public-network policy across DNS and every redirect. URL syntax validation alone is insufficient. The supplied web client admits public unicast addresses, rejects mixed public/private DNS answers, pins the selected address while preserving TLS hostname verification, and validates each redirect anew. It fetches bounded UTF-8 text only; it does not carry account cookies or authorization headers.
 
 Messaging ports only stage proposed actions and return an intent ID. They must never

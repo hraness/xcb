@@ -138,8 +138,8 @@ descriptions, CLI help, and TUI text. Follow `STYLE.md` and `WRITING.md`.
   “Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
   subscriptions you already pay for.” The page descriptions, README lead,
   `llms.txt` lead, `package.json` description, support value proposition, and
-  CLI `about` use this sentence or a shortening of it. The portfolio registry line lives in
-  hraness/jungle; propose changes there.
+  CLI `about` use this sentence or a shortening of it. The portfolio registry
+  line lives in hraness/jungle; propose changes there.
 - The product name is “Excalibur (xcb)”. Use it for the first mention on each
   page and in titles, site names, share cards, and package descriptions. Later
   mentions may use `xcb` (lowercase, also at the start of a sentence), which is

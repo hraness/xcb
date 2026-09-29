@@ -41,7 +41,7 @@ fn invalid() -> Error {
     Error::Unavailable("daemon is outside the bounded ALGAL process contract")
 }
 
-/// Algal store, service and mailbox errors carry no provider-visible detail;
+/// ALGAL store, service and mailbox errors carry no provider-visible detail;
 /// they surface as evidence unavailability.
 fn store_fault() -> Error {
     Error::Unavailable("daemon process evidence unavailable")
@@ -1208,9 +1208,9 @@ impl ManagedStore {
             .is_some_and(|p| required && preference != Some(p));
         let source_manifest: Value = serde_json::from_str(POLICY)?;
         let policy_digest = Manifest::parse(&source_manifest)
-            .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?
+            .map_err(|_| Error::Unavailable("ALGAL transition policy rejected"))?
             .digest()
-            .map_err(|_| Error::Unavailable("Algal transition policy rejected"))?;
+            .map_err(|_| Error::Unavailable("ALGAL transition policy rejected"))?;
         let mut task = ManagedTask {
             version: 1, id, operation: Id::new(format!("op_{}", digest(format!("xcb-daemon-operation-v1\0{source}"))))?,
             source_message: source.clone(), conversation: meta.conversation.clone(), workspace: meta.workspace.clone(),
