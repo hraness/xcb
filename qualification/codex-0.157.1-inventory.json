@@ -1,13 +1,13 @@
 {
   "schema": "xcb.codex-scripted-inventory.v1",
-  "observedDate": "2026-09-27",
+  "observedDate": "2026-09-29",
   "platform": "macos-arm64",
   "version": "0.157.1",
   "binarySha256": "27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
   "harnessSha256": "f97f8220eef14b8ccca6868b61ff09f6d7d12321ad5ab0b65b10c8ed98c93369",
-  "candidate": false,
-  "bakedVersion": "0.157.1",
-  "bakedBinarySha256": "27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+  "candidate": true,
+  "bakedVersion": "0.159.0",
+  "bakedBinarySha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
   "schemaSha256": "4da87cc14ef44c732db3404c0704a5eb902bb3a271151762052a785fdb2be056",
   "schemaCommand": "codex app-server generate-json-schema --experimental --out DIR",
   "schemaDigestAlgorithm": "sha256(sorted relative schema path + NUL + raw generated JSON bytes + NUL)",
@@ -19,6 +19,7 @@
   "scope": "exact native tool manifest serialization and callback rejection, not authenticated provider egress",
   "models": [
     "gpt-6-astra",
+    "gpt-6-sol",
     "gpt-5.6-sol"
   ],
   "catalogSource": "exact checked executable embedded ModelsResponse JSON",
@@ -63,7 +64,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "9f3a361b4356ef4a6f5a97ff451ed8a33d758b093a73f392e13d17ce7f314052"
+      "evidenceSha256": "be801a60de055c528f6bf1efd488d5c48d1644d3168fb21e03d1f988a448dd1a"
     },
     {
       "model": "gpt-6-astra",
@@ -77,7 +78,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "9c09247861edd58d5d0e144eb72ad78e361f83f2bf01be43a5f3b1dc7696f9e2"
+      "evidenceSha256": "bb3d5604eb1dacfe3193933a8d31518e993f94a7ef06de0ac112a2c8c46a36e9"
     },
     {
       "model": "gpt-6-astra",
@@ -91,7 +92,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "16b762885c5009c21c036fc7bc5dff64793bc7248001334179f714733428b487"
+      "evidenceSha256": "352cd6d27647efd0f57389845cefd9256f319b3b3c5727aca15b07c6028fe008"
     },
     {
       "model": "gpt-6-astra",
@@ -105,7 +106,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "17edb162642cc2e6836fe94b6f2d7e4907d2edea9a23ff991ca0f762969c5b33"
+      "evidenceSha256": "eb9fc12df26361e4ff674e1bc1f8d3dcfd37d5ec8d02b35db5e544957fcd265c"
     },
     {
       "model": "gpt-6-astra",
@@ -119,7 +120,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "c4226b12777c11ef552e8b2d757a2c352dd8209e90e35531b4c4aeddbeba7968"
+      "evidenceSha256": "b45e34a9debbcd2e5277e5aebb67670fe6c9b27c1fc112c927460b2aaede4280"
     },
     {
       "model": "gpt-6-astra",
@@ -133,7 +134,91 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "0598204ece2737acbd96942028d4f79af52423822f9ced3590fa795e3ea65b3a"
+      "evidenceSha256": "b999f6e622c234e907243c98873f2b88d8cec9056741161ac4cd0c15d8f0b0c8"
+    },
+    {
+      "model": "gpt-6-sol",
+      "reasoningEffort": "low",
+      "wireReasoningEffort": "low",
+      "requests": 12,
+      "emptyManifestVerified": true,
+      "exactDynamicManifestVerified": true,
+      "permittedCallbackVerified": true,
+      "forgedBuiltinRejections": 9,
+      "rootExitCode": 0,
+      "stdioJoined": true,
+      "listenerJoined": true,
+      "evidenceSha256": "06a9f6c1286a895c65d81e515972cbc15a4a4486620384966f7034cb72a67d52"
+    },
+    {
+      "model": "gpt-6-sol",
+      "reasoningEffort": "medium",
+      "wireReasoningEffort": "medium",
+      "requests": 12,
+      "emptyManifestVerified": true,
+      "exactDynamicManifestVerified": true,
+      "permittedCallbackVerified": true,
+      "forgedBuiltinRejections": 9,
+      "rootExitCode": 0,
+      "stdioJoined": true,
+      "listenerJoined": true,
+      "evidenceSha256": "c58777c7185fd34371c3bc4ec46f272cc766edd71217873a4a1afecac1903a17"
+    },
+    {
+      "model": "gpt-6-sol",
+      "reasoningEffort": "high",
+      "wireReasoningEffort": "high",
+      "requests": 12,
+      "emptyManifestVerified": true,
+      "exactDynamicManifestVerified": true,
+      "permittedCallbackVerified": true,
+      "forgedBuiltinRejections": 9,
+      "rootExitCode": 0,
+      "stdioJoined": true,
+      "listenerJoined": true,
+      "evidenceSha256": "af47386068c8f3993160f599642e704cca41c069f0844e8e4a7325ae764d9b45"
+    },
+    {
+      "model": "gpt-6-sol",
+      "reasoningEffort": "xhigh",
+      "wireReasoningEffort": "xhigh",
+      "requests": 12,
+      "emptyManifestVerified": true,
+      "exactDynamicManifestVerified": true,
+      "permittedCallbackVerified": true,
+      "forgedBuiltinRejections": 9,
+      "rootExitCode": 0,
+      "stdioJoined": true,
+      "listenerJoined": true,
+      "evidenceSha256": "3493b070d3b5d963d2544067031683bf98e65433246d00b175c94fdc18dfeea3"
+    },
+    {
+      "model": "gpt-6-sol",
+      "reasoningEffort": "max",
+      "wireReasoningEffort": "max",
+      "requests": 12,
+      "emptyManifestVerified": true,
+      "exactDynamicManifestVerified": true,
+      "permittedCallbackVerified": true,
+      "forgedBuiltinRejections": 9,
+      "rootExitCode": 0,
+      "stdioJoined": true,
+      "listenerJoined": true,
+      "evidenceSha256": "7f663e3c4482490cadb8e7516984412b943e5e35a94b06cd9c6bab6dbbb191f9"
+    },
+    {
+      "model": "gpt-6-sol",
+      "reasoningEffort": "ultra",
+      "wireReasoningEffort": "max",
+      "requests": 12,
+      "emptyManifestVerified": true,
+      "exactDynamicManifestVerified": true,
+      "permittedCallbackVerified": true,
+      "forgedBuiltinRejections": 9,
+      "rootExitCode": 0,
+      "stdioJoined": true,
+      "listenerJoined": true,
+      "evidenceSha256": "648d3d6481e7efeaca853bf4787ee37a4088e8fe4e1d68400d44fc580b93671a"
     },
     {
       "model": "gpt-5.6-sol",
@@ -147,7 +232,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "6c9b79ec79f0a96dada415ffb92608114a191cf42f4201cfbab539ee70913e0b"
+      "evidenceSha256": "b2194a18f6fa8eb7a4e4725c1253a213505bf3742b9186b30dfc66214deba2a3"
     },
     {
       "model": "gpt-5.6-sol",
@@ -161,7 +246,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "6dff1713728413c80b8c2a37df329f34eacab76f7956309f8846fffa2225b802"
+      "evidenceSha256": "f8e9bbc4aafea29f0ee5f7693f47f068c39b45e0ad24dd69f6b97ef58d486ae8"
     },
     {
       "model": "gpt-5.6-sol",
@@ -175,7 +260,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "9b758342e8995e7f89a6ed340f3540774e3f489c2623694a67a3c1fd9bb13f99"
+      "evidenceSha256": "c1f7596df2eda7ee44cd634ef820d8a7e59b864065a81c716bbe5daaeec6c899"
     },
     {
       "model": "gpt-5.6-sol",
@@ -189,7 +274,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "b5e462395f0ce9e4714a79f728976f19863bfeb08fe1b8ed5c2423cff8b6af21"
+      "evidenceSha256": "006729c85d3285cc9929f45b240af6b56674855f5e4bcda19be02d23d68a9dac"
     },
     {
       "model": "gpt-5.6-sol",
@@ -203,7 +288,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "e7975b6093b5b2992eef1dce4cb9e567697eb9681f429988f16da41200aef31e"
+      "evidenceSha256": "de8fbdf44f29595583c08119d42ae4a5174bf5552b4b3fdc4abfc0cd9bdc25e4"
     },
     {
       "model": "gpt-5.6-sol",
@@ -217,7 +302,7 @@
       "rootExitCode": 0,
       "stdioJoined": true,
       "listenerJoined": true,
-      "evidenceSha256": "252e34802561906ee53cd7acd01571058604387dd76f51aacb620f201f325139"
+      "evidenceSha256": "ede11a26446984b11d33628e97859ca77e326b8dd47b68a52c395d8a05ac74da"
     }
   ],
   "limitations": [

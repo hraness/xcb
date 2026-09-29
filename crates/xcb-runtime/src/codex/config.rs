@@ -35,7 +35,7 @@ pub const REVIEWED_BUILDS: &[(&str, &str, &str)] = &[
         "0f15f18e41d59367b3655adac23fe1525be483dc38f6fd56d07fc627eb802129",
     ),
 ];
-pub const QUALIFIED_MODELS: &[&str] = &["gpt-6-astra", "gpt-5.6-sol"];
+pub const QUALIFIED_MODELS: &[&str] = &["gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol"];
 pub const ARGS: &[&str] = &["app-server", "--strict-config", "--listen", "stdio://"];
 pub const ACCOUNT_FEATURES: &[&str] = &[
     "apps",

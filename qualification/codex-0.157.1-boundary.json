@@ -1,14 +1,14 @@
 {
   "schema": "xcb.codex-native-boundary.v1",
-  "observedDate": "2026-09-27",
+  "observedDate": "2026-09-29",
   "platform": "macos-arm64",
   "version": "0.157.1",
   "binarySha256": "27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
   "sandboxFunctionSha256": "3d1f1500b33e1f192f2304dedd53d5e31cbea5e46e54bd5d04778490fc770a75",
-  "providerProbeSha256": "7e98dc9ce8918eb64297b311ebec3159e9d7fec53a5095983c638d83240a27af",
-  "providerReceiptSha256": "205f71bf6222bd3b5bfe8fd1ce193121da42a42aa6e8285cb55e0e8317bdecdb",
+  "providerProbeSha256": "676f5d1b5053932fc0c0cf306d019317414d7752b64a7f38d263be785cf24006",
+  "providerReceiptSha256": "2e051047e408f7df714aade083a0a29b95d03e96cf713578eab521cfd2ba5c79",
   "kernelProbeSha256": "68b0f415a4a913477a3677b39f264d11d42ed40758588590d5a61eafc44abae1",
-  "kernelReceiptSha256": "eda67e69c94d359924e24639367c5574c698693b0ba9f8caf5a60131df53518d",
+  "kernelReceiptSha256": "90cd13a557e2c5aca667713ac9548adc2afcd5dd6aaa2f6dc665ce4afe73f93c",
   "providerChecks": [
     {
       "label": "scratch read",

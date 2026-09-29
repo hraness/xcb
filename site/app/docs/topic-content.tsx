@@ -294,7 +294,7 @@ xcb accounts refresh <account-id>`}</Code>
       <p>To reconnect an existing account, add <code>--account</code>. The sign-in must belong to the same account, and its credentials must have changed to clear a previous sign-in failure:</p>
       <Code>{`xcb accounts import-codex --account <account-id> --source /absolute/path/to/auth.json
 xcb accounts refresh <account-id>`}</Code>
-      <p>Import leaves the source file in place and copies no Codex settings, plugins, or sessions. Updating an existing account preserves its enabled state and usage limits. API-key sign-ins aren’t accepted. xcb runs Codex with the gpt-6-astra and gpt-5.6-sol models.</p>
+      <p>Import leaves the source file in place and copies no Codex settings, plugins, or sessions. Updating an existing account preserves its enabled state and usage limits. API-key sign-ins aren’t accepted. xcb runs Codex with the gpt-6-astra, gpt-6-sol, and gpt-5.6-sol models.</p>
       <h2 id="devin" className="xcb-provider-heading"><ProviderMark mark="devin" label="Devin" size={24} />Devin</h2>
       <p>Sign in with the Devin CLI, then copy that sign-in into xcb:</p>
       <Code>{`devin auth login
