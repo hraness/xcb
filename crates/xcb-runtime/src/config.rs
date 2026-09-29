@@ -1,4 +1,4 @@
-use crate::{Error, Result, digest, private};
+use crate::{Error, Result, digest, private, routing_stack::RoutingConfig};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, path::Path};
 use xcb_core::{
@@ -139,6 +139,10 @@ pub struct Config {
     /// reopen sooner, while Devin reports no comparable window at all.
     /// Range: one minute to seven days.
     pub quota_limit_cooldown_ms: u64,
+    /// The routing preference stack: ordered route patterns per task tier,
+    /// routes never used, and providers that serve only as a fallback. See
+    /// [`crate::routing_stack`].
+    pub routing: RoutingConfig,
     pub extensions: Extensions,
 }
 pub const DEFAULT_QUOTA_LIMIT_COOLDOWN_MS: u64 = 1_800_000;
@@ -153,6 +157,7 @@ impl Default for Config {
             auto_failover: true,
             turn_timeout_ms: 1_800_000,
             quota_limit_cooldown_ms: DEFAULT_QUOTA_LIMIT_COOLDOWN_MS,
+            routing: RoutingConfig::default(),
             extensions: Extensions::default(),
         }
     }
@@ -190,7 +195,7 @@ impl Config {
         if keys.len() != self.favorites.len() {
             return Err(xcb_core::Error::Invalid("duplicate favorite").into());
         }
-        Ok(())
+        self.routing.validate()
     }
     pub fn load(root: &Path) -> Result<(Self, Option<String>)> {
         let path = root.join("config.json");
@@ -218,5 +223,87 @@ impl Config {
             Some(revision) => private::replace(&path, &bytes, revision),
             None => private::create(&path, &bytes),
         }
+    }
+}
+
+#[cfg(test)]
+mod routing_config_tests {
+    use super::*;
+
+    fn state(directory: &tempfile::TempDir) -> std::path::PathBuf {
+        private::directory(&xcb_core::canonical(directory.path()).unwrap().join("state")).unwrap()
+    }
+
+    fn load(json: &str) -> Result<Config> {
+        let directory = tempfile::tempdir().unwrap();
+        let root = state(&directory);
+        private::create(&root.join("config.json"), json.as_bytes()).unwrap();
+        Config::load(&root).map(|(config, _)| config)
+    }
+
+    #[test]
+    fn routing_defaults_apply_when_the_key_is_absent_or_partial() {
+        let absent = load(r#"{"turn_timeout_ms": 5000}"#).unwrap();
+        assert_eq!(
+            absent.routing,
+            crate::routing_stack::RoutingConfig::default()
+        );
+        assert_eq!(absent.routing.never, ["devin/swe-*"]);
+        assert_eq!(
+            absent.routing.fallback_providers,
+            [xcb_core::Provider::Devin]
+        );
+        let partial =
+            load(r#"{"routing": {"never": [], "tiers": {"meaty": ["claude/*fable*/max"]}}}"#)
+                .unwrap();
+        assert!(partial.routing.never.is_empty());
+        assert_eq!(partial.routing.tiers.meaty, ["claude/*fable*/max"]);
+        assert_eq!(
+            partial.routing.tiers.buildout,
+            crate::routing_stack::RoutingConfig::default()
+                .tiers
+                .buildout
+        );
+        assert_eq!(
+            partial.routing.fallback_providers,
+            [xcb_core::Provider::Devin]
+        );
+    }
+
+    #[test]
+    fn routing_rejects_malformed_patterns_unknown_keys_and_long_lists() {
+        let message = |json: &str| load(json).unwrap_err().to_string();
+        assert!(message(r#"{"routing": {"never": ["devin"]}}"#).contains("provider/model-glob"));
+        assert!(
+            message(r#"{"routing": {"tiers": {"default": ["openai/gpt-*/high"]}}}"#)
+                .contains("provider")
+        );
+        assert!(
+            message(r#"{"routing": {"tiers": {"default": ["codex/gpt-*/turbo"]}}}"#)
+                .contains("effort")
+        );
+        assert!(
+            message(r#"{"routing": {"fallback_providers": ["openai"]}}"#).contains("incompatible")
+        );
+        assert!(message(r#"{"routing": {"tiers": {"huge": []}}}"#).contains("incompatible"));
+        assert!(message(r#"{"routing": {"delegate": true}}"#).contains("incompatible"));
+        let long = format!(
+            r#"{{"routing": {{"never": [{}]}}}}"#,
+            std::iter::repeat_n("\"devin/swe-*\"", 65)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert!(message(&long).contains("routing patterns"));
+    }
+
+    #[test]
+    fn routing_round_trips_through_save_and_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = state(&directory);
+        let mut config = Config::default();
+        config.routing.never.push("codex/gpt-5.6-sol/low".into());
+        config.save(&root, None).unwrap();
+        let (loaded, _) = Config::load(&root).unwrap();
+        assert_eq!(loaded.routing, config.routing);
     }
 }

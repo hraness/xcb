@@ -61,8 +61,6 @@ pub struct Preference {
 /// default.
 pub fn default_preferences() -> Vec<Preference> {
     [
-        (Provider::Devin, "swe-2-high", None),
-        (Provider::Devin, "swe-2-max", None),
         (Provider::Devin, "gpt-6-astra-max", None),
         (Provider::Devin, "gpt-5-6-sol-max", None),
         (Provider::Claude, "default", Some("high")),

@@ -668,6 +668,7 @@ const commandGroups: readonly Readonly<{ id: string; title: string; commands: re
   { id: "commands-accounts", title: "Accounts and models", commands: [
     ["accounts", "List accounts; add, login, token, refresh, default, disable, enable, import-codex, import-devin, import-agentmixer"],
     ["models", "List models; refresh, default, tiers, route"],
+    ["routing", "Show which models each kind of task prefers; never add, never remove"],
     ["offers", "Show public plan offers (not checked against your account)"],
   ] },
   { id: "commands-tasks", title: "Conversations and tasks", commands: [
@@ -707,6 +708,7 @@ const configKeys: readonly (readonly [string, string, string])[] = [
   ["turn_timeout_ms", "1800000", "Deadline for one provider turn, 1,000 to 3,600,000 ms"],
   ["default_account", "null", "Account for new direct sessions; set with xcb accounts default"],
   ["favorites", "built-in list", "Preferred models that break ties when routing, up to 128"],
+  ["routing", "built-in stack", "Which models each kind of task prefers (tiers of provider/model/effort patterns), routes never used, and fallback providers; xcb routing show prints it"],
   ["auto_failover", "true", "Continue a managed task on another route after a usage limit"],
   ["pane", "\"focus\"", "Pane shown in direct sessions"],
   ["reduced_motion", "false", "Turn off terminal animation"],

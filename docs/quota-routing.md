@@ -131,6 +131,96 @@ The separation of account health from active work and selection was informed by
 xcb retains its own custody and provider contracts; no Underclass source code
 was copied.
 
+## Preference stack
+
+Automatic routing (managed tasks, unpinned `xcb run`, `xcb --json route`
+without a model pin, and failover) follows a preference stack: for each kind
+of task, an ordered list of route patterns. The stack is applied after every
+account check above, so it orders the routes that can take the task now and
+never adds one. Defaults ship with xcb; `routing` in `config.json` overrides
+them, and `xcb routing show` prints the effective stack with the observed
+models each pattern matches.
+
+```json
+"routing": {
+  "never": ["devin/swe-*"],
+  "fallback_providers": ["devin"],
+  "tiers": {
+    "buildout":   ["codex/gpt-*-astra/ultra", "claude/*fable*/max"],
+    "meaty":      ["codex/gpt-*-astra/max",   "claude/*fable*/max"],
+    "default":    ["codex/gpt-*-sol/ultra",   "claude/opus*/max"],
+    "mechanical": ["codex/gpt-*-sol/max",     "claude/opus*/max"]
+  }
+}
+```
+
+Every key is optional and keeps its default when absent. Each list holds at
+most 64 patterns.
+
+**Patterns.** A pattern is `provider/model-glob[/effort]`. The provider is
+`claude`, `codex`, `devin`, or `*`. The model glob (`*` any run of
+characters, `?` one character) is matched against the model's id and, for a
+Claude alias such as `opus` or `default`, also against the id the catalog
+resolved it to, lowercased with `.` written as `-` and with or without the
+provider prefix: `gpt-*-sol` matches `gpt-5.6-sol`, `gpt-6-sol`, and
+`gpt-6.1-sol`; `*fable*` matches `claude-fable-5-1`; `opus*` matches `opus`,
+`opus[1m]`, and a `default` alias resolved to `claude-opus-5-5`. The effort
+must match exactly (`ultra`, `xhigh`, `max`, `high`, `medium`, `low`,
+`minimal`, `none`, or `*`); an absent effort matches every effort. Devin ids
+carry the effort as a suffix (`gpt-6-astra-medium`), so for Devin the suffix
+is removed before matching and the pattern's effort segment is ignored.
+Malformed patterns are refused with a message naming the segment at fault.
+
+**Tiers.** Each task is assigned one tier, printed in the route reason as
+`tier default · stack #1` (the pattern position that decided) or `no stack
+match`:
+
+- `mechanical`: the prompt carries a routine cue (format, rename, typo,
+  status, summarize, explain, docs, documentation) and none of the signals
+  below.
+- `buildout`: the optional judge answered, says the task warrants a frontier
+  model, and rated both scope and difficulty at least 4 on their 1–5 scales;
+  or, without a judge answer, the prompt is substantial (at least 400 words
+  or 8 KiB) and carries a complex cue (architecture, migration, security,
+  race, concurrency, redesign, root cause, adversarial, refactor).
+- `meaty`: the task otherwise warrants a frontier model (the judge's answer,
+  an active route reflex, a substantial prompt, or, without a judge, a
+  complex cue), or the judge classed the prompt as resuming earlier work.
+- `default`: everything else.
+
+`xcb resume` is unchanged: a resumed direct session keeps its saved model.
+
+**Ranking.** Among the routes that can take the task, the first pattern of
+the tier that a route matches decides: a route matching pattern #1 outranks
+every route matching #2, and routes matching no pattern come after all
+matched ones. Within one pattern the newest version of a model family wins
+(`gpt-6.1-sol` over `gpt-5.6-sol`), so a new Fable, Astra, or Sol release is
+preferred without a configuration change. The existing order (task type,
+relative quality, cost, and latency, remaining usage before a reset,
+favorites, then the account that ran a session longest ago) breaks the
+remaining ties. For a default-tier task Sol at ultra therefore outranks
+Astra, and for a build-out Astra at ultra outranks Fable at max; when every
+Astra account is at a usage limit the build-out goes to Fable. The
+substantial-prompt rule and the judge decide the tier; they no longer pick
+the model directly when a pattern matches. Among routes matching no pattern,
+a substantial prompt still gets the highest known quality.
+
+**Never.** A route matching a `never` pattern is not used anywhere: not by
+automatic routing, not by failover, and not by an explicit `--model` or route
+pin, which is refused with `excluded by routing.never` instead of widened.
+`xcb routing never add <pattern>` and `xcb routing never remove <pattern>`
+edit the list. The built-in default excludes SWE models on Devin.
+
+**Fallback providers.** Routes on a fallback provider are considered only
+when no route on any other provider can take the task now (every other
+account is at a usage limit, busy, signed out, or disabled). They are then
+ranked by the same tier patterns and the profile order. Devin is the built-in
+fallback.
+
+**Pins and constraints.** An opening “Use Claude/Codex/Devin”, `--account`,
+`--provider`, and `--model` still narrow the routes first; the stack orders
+what remains. A pinned model that matches no pattern still runs.
+
 ## Automatic capability selection
 
 Native managed tasks and unpinned `xcb run` use the same automatic selector.
@@ -158,11 +248,13 @@ is not a live-wire conformance fixture. Native tests preserve the fitted
 numeric inputs while using valid probability distributions; invalid bucket
 responses fall back instead of weakening judge validation.
 
-A prompt with at least 400 words or 8 KiB requests the highest known quality
-among eligible routes independently of classifier availability. This is an
-explicit xcb policy, not a claim made by the fitted classifier. Lower price,
-quota percentage, favorites and provider preference cannot demote that quality
-tier. Explicit provider/model constraints still narrow eligibility first.
+A prompt with at least 400 words or 8 KiB is assigned at least the `meaty`
+tier of the [preference stack](#preference-stack) independently of classifier
+availability, and among routes matching no pattern requests the highest known
+quality. This is an explicit xcb policy, not a claim made by the fitted
+classifier. Lower price, quota percentage, favorites and provider preference
+cannot demote that quality tier. Explicit provider/model constraints still
+narrow eligibility first.
 
 If observed usage exhaustion excludes a stronger connected admitted model, the
 selected route explains the downgrade. Busy, disconnected and unqualified

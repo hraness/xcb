@@ -28,8 +28,13 @@ provider's own report. The route that hit the limit, every route this task
 already ran, and any account that reported an account-wide limit during this
 task are left out.
 
-Among those, xcb ranks routes as [quota routing](quota-routing.md) does, then
-groups them to keep the subscription rotation close to the work:
+Among those, xcb ranks routes as [quota routing](quota-routing.md) does. The
+[preference stack](quota-routing.md#preference-stack) decides first: after an
+account limit the next pick is the same stack pattern on another account
+(the account that ran a session longest ago), then the tier's next pattern,
+so a build-out that started on Astra moves to Astra on another account before
+it moves to Fable. Routes at the same stack position are grouped to keep the
+subscription rotation close to the work:
 
 1. the same model on another account, so quality is preserved;
 2. the same provider's other models;
