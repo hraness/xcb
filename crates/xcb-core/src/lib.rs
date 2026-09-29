@@ -190,9 +190,13 @@ pub fn relative_path(value: &str) -> bool {
 pub fn absolute_clean(path: &std::path::Path) -> bool {
     use std::path::Component;
     path.is_absolute()
-        && path
-            .components()
-            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+        && path.components().all(|part| {
+            matches!(
+                part,
+                // A drive or UNC prefix only ever appears on Windows.
+                Component::Prefix(_) | Component::RootDir | Component::Normal(_)
+            )
+        })
 }
 
 /// Exact inode identity for custody and freshness proofs, read from live
@@ -215,6 +219,74 @@ pub struct FileIdentity {
 }
 
 impl FileIdentity {
+    /// The identity of an open file or directory (`fstat`).
+    pub fn of_file(file: &std::fs::File) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self::of(&file.metadata()?))
+        }
+        #[cfg(windows)]
+        {
+            Ok(Self::of_facts(
+                &xcb_platform::file_facts(file)?,
+                &file.metadata()?,
+            ))
+        }
+    }
+
+    /// The identity of `path` itself, never a symlink's target (`lstat`).
+    pub fn of_path(path: &std::path::Path) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self::of(&std::fs::symlink_metadata(path)?))
+        }
+        #[cfg(windows)]
+        {
+            let file = xcb_platform::open_metadata(path)?;
+            Ok(Self::of_facts(
+                &xcb_platform::file_facts(&file)?,
+                &file.metadata()?,
+            ))
+        }
+    }
+
+    /// Windows has no stable `st_ino` in `Metadata`: identity comes from the
+    /// handle (volume serial, file index, link count, owner and DACL), and
+    /// the times from the same handle's metadata. `mode` carries the kind
+    /// and whether the DACL is private (`0o600`/`0o700`) or not (`0o644`).
+    #[cfg(windows)]
+    fn of_facts(facts: &xcb_platform::Facts, metadata: &std::fs::Metadata) -> Self {
+        use std::os::windows::fs::MetadataExt;
+        let kind = match facts.kind {
+            xcb_platform::Kind::File => 0o100_000,
+            xcb_platform::Kind::Directory => 0o040_000,
+            xcb_platform::Kind::ReparsePoint => 0o120_000,
+        };
+        let permissions = match (facts.private, facts.kind) {
+            (true, xcb_platform::Kind::Directory) => 0o700,
+            (true, _) => 0o600,
+            (false, _) => 0o644,
+        };
+        let time = |ticks: u64| {
+            (
+                (ticks / 10_000_000) as i64,
+                ((ticks % 10_000_000) * 100) as i64,
+            )
+        };
+        Self {
+            dev: facts.volume,
+            ino: facts.index,
+            mode: kind | permissions,
+            uid: u32::from(!facts.owned),
+            gid: 0,
+            links: facts.links,
+            size: facts.len,
+            mtime: time(metadata.last_write_time()),
+            ctime: time(metadata.creation_time()),
+        }
+    }
+
+    #[cfg(unix)]
     pub fn of(metadata: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
         Self {

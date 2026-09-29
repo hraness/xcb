@@ -1,0 +1,26 @@
+[package]
+name = "xcb-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Windows file-custody and process primitives for xcb."
+
+# The one crate allowed to call the operating system through FFI. Every other
+# workspace crate keeps `unsafe_code = "forbid"`; this crate denies it and
+# re-allows it only inside its Windows module.
+[lints.rust]
+unsafe_code = "deny"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+] }
+
+[target.'cfg(windows)'.dev-dependencies]
+tempfile = "=3.27.0"
