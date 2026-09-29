@@ -98,6 +98,8 @@ test("the install page offers one command, copyable highlighted code, and a prom
   expect(html).toContain("glibc 2.34");
   expect(html).not.toContain(".tar.gz");
   expect(agentPrompt).toContain(installCommand);
+  expect(agentPrompt).toContain(windowsInstallCommand);
+  expect(agentPrompt).toContain("WSL2");
 });
 
 test("the shared header keeps a named home link and exact-artwork foil fallback", () => {

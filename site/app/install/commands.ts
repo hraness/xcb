@@ -12,4 +12,4 @@ export const pathCommand = 'export PATH="$HOME/.local/bin:$PATH"';
  * agent. It installs and checks xcb but leaves sign-in to the person, because
  * sign-in opens a browser and uses their account.
  */
-export const agentPrompt = `Install xcb on this machine. Run \`${installCommand}\`, then make sure \`xcb --version\` works; if the shell can't find it, add ~/.local/bin to my PATH in my shell profile. Then run \`xcb doctor\` and tell me which providers are ready and the one command I should run next. Don't sign in for me.`;
+export const agentPrompt = `Install xcb on this machine. On macOS or Linux, run \`${installCommand}\`; if the shell can't find \`xcb\` afterwards, add ~/.local/bin to my PATH in my shell profile. On native Windows, run \`${windowsInstallCommand}\` in PowerShell instead; if \`xcb\` isn't found, add %LOCALAPPDATA%\\Programs\\xcb\\bin to my user PATH. On native Windows the providers run in WSL2. Make sure \`xcb --version\` works, then run \`xcb doctor\` and tell me which providers are ready and the one command I should run next. Don't sign in for me.`;
