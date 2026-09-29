@@ -16,6 +16,6 @@ immutable GitHub Release; compare the published SHA-256 (61b10c093d29474e162ed41
 run `xcb --version` and `xcb models route --help`. The excerpt keeps the
 warning that the configured judge may run and selection can change.
 
-Shared design-kit 0.30.1 (install commands use its PlatformInstall), site-footer 0.20.0 and immutable 3df4 snapshots.
+Shared design-kit 0.30.2 (install commands use its PlatformInstall), site-footer 0.20.0 and immutable 3df4 snapshots.
 Keep keyboard focus, saved appearance, visible phone navigation and local
 code scrolling. Desktop/phone light/dark visual checks remain required.
