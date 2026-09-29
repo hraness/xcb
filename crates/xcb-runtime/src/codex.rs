@@ -111,6 +111,7 @@ fn rpc_failure(method: &'static str, error: &Value) -> Error {
         "usageLimitExceeded" => Some(category::CODEX_USAGE_LIMIT),
         "unauthorized" => Some(category::AUTHENTICATION),
         "contextWindowExceeded" => Some("provider context window exceeded"),
+        "flexUnavailable" | "serverOverloaded" => Some(category::PROVIDER_CAPACITY),
         "cyberPolicy" | "misalignmentPolicyViolation" | "sandboxError" => {
             Some("provider policy rejected the operation")
         }
@@ -1143,6 +1144,9 @@ impl CodexProtocol {
                             "cyberPolicy" | "misalignmentPolicyViolation" | "sandboxError" => {
                                 Some(Failure::Policy)
                             }
+                            // Capacity shortages are transient and provider-wide:
+                            // they neither exhaust this account nor fail over.
+                            "flexUnavailable" | "serverOverloaded" => Some(Failure::Transport),
                             "contextWindowExceeded" => None,
                             _ => Some(Failure::Unknown),
                         };

@@ -23,7 +23,7 @@
         "activeFlags": []
       }
     },
-    "emittedAtMs": 1790553297516
+    "emittedAtMs": 1790655608052
   },
   {
     "method": "turn/started",
@@ -35,19 +35,19 @@
         "itemsView": "notLoaded",
         "status": "inProgress",
         "error": null,
-        "startedAt": 1790553297,
+        "startedAt": 1790655608,
         "completedAt": null,
         "durationMs": null
       }
     },
-    "emittedAtMs": 1790553297516
+    "emittedAtMs": 1790655608052
   },
   {
     "method": "item/started",
     "params": {
       "item": {
         "type": "userMessage",
-        "id": "01a0e54b-126e-7760-b085-ee7673636914",
+        "id": "01a0eb64-34f5-7f61-ad94-f9e6491d8c43",
         "clientId": null,
         "content": [
           {
@@ -59,16 +59,16 @@
       },
       "threadId": "thread1",
       "turnId": "turn1",
-      "startedAtMs": 1790553297518
+      "startedAtMs": 1790655608053
     },
-    "emittedAtMs": 1790553297518
+    "emittedAtMs": 1790655608053
   },
   {
     "method": "item/completed",
     "params": {
       "item": {
         "type": "userMessage",
-        "id": "01a0e54b-126e-7760-b085-ee7673636914",
+        "id": "01a0eb64-34f5-7f61-ad94-f9e6491d8c43",
         "clientId": null,
         "content": [
           {
@@ -80,9 +80,9 @@
       },
       "threadId": "thread1",
       "turnId": "turn1",
-      "completedAtMs": 1790553297518
+      "completedAtMs": 1790655608053
     },
-    "emittedAtMs": 1790553297518
+    "emittedAtMs": 1790655608053
   },
   {
     "method": "item/started",
@@ -102,9 +102,9 @@
       },
       "threadId": "thread1",
       "turnId": "turn1",
-      "startedAtMs": 1790553297524
+      "startedAtMs": 1790655608059
     },
-    "emittedAtMs": 1790553297524
+    "emittedAtMs": 1790655608059
   },
   {
     "method": "item/tool/call",
@@ -143,9 +143,9 @@
       },
       "threadId": "thread1",
       "turnId": "turn1",
-      "completedAtMs": 1790553297525
+      "completedAtMs": 1790655608060
     },
-    "emittedAtMs": 1790553297525
+    "emittedAtMs": 1790655608060
   },
   {
     "method": "thread/tokenUsage/updated",
@@ -172,7 +172,7 @@
         "modelContextWindow": 258400
       }
     },
-    "emittedAtMs": 1790553297525
+    "emittedAtMs": 1790655608060
   },
   {
     "method": "account/rateLimits/updated",
@@ -190,7 +190,7 @@
         "rateLimitReachedType": null
       }
     },
-    "emittedAtMs": 1790553297525
+    "emittedAtMs": 1790655608060
   },
   {
     "method": "item/started",
@@ -206,9 +206,9 @@
       },
       "threadId": "thread1",
       "turnId": "turn1",
-      "startedAtMs": 1790553297528
+      "startedAtMs": 1790655608063
     },
-    "emittedAtMs": 1790553297528
+    "emittedAtMs": 1790655608063
   },
   {
     "method": "item/completed",
@@ -224,9 +224,9 @@
       },
       "threadId": "thread1",
       "turnId": "turn1",
-      "completedAtMs": 1790553297528
+      "completedAtMs": 1790655608063
     },
-    "emittedAtMs": 1790553297528
+    "emittedAtMs": 1790655608063
   },
   {
     "method": "thread/tokenUsage/updated",
@@ -253,7 +253,7 @@
         "modelContextWindow": 258400
       }
     },
-    "emittedAtMs": 1790553297528
+    "emittedAtMs": 1790655608063
   },
   {
     "method": "account/rateLimits/updated",
@@ -271,7 +271,7 @@
         "rateLimitReachedType": null
       }
     },
-    "emittedAtMs": 1790553297528
+    "emittedAtMs": 1790655608063
   },
   {
     "method": "thread/status/changed",
@@ -281,7 +281,7 @@
         "type": "idle"
       }
     },
-    "emittedAtMs": 1790553297528
+    "emittedAtMs": 1790655608064
   },
   {
     "method": "turn/completed",
@@ -303,11 +303,11 @@
         "itemsView": "summary",
         "status": "completed",
         "error": null,
-        "startedAt": 1790553297,
-        "completedAt": 1790553297,
-        "durationMs": 12
+        "startedAt": 1790655608,
+        "completedAt": 1790655608,
+        "durationMs": 13
       }
     },
-    "emittedAtMs": 1790553297528
+    "emittedAtMs": 1790655608064
   }
 ]

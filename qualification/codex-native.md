@@ -2,11 +2,14 @@
 
 The Rust adapter supports the exact macOS Codex executables identified in
 `crates/xcb-runtime/src/codex/config.rs`. The current inventory in
-`codex-0.157.1-inventory.json` records synthetic model requests and callback
-checks, and `codex-0.157.1-boundary.json` records the filesystem, process and
-kernel checks. `codex-0.157.1-schema-review.json` records the protocol changes.
-The `codex-0.156.1-compatibility-*.json` files repeat the checks for the previous
-build with the current configuration; its historical receipts are retained.
+`codex-0.158.0-inventory.json` records synthetic model requests and callback
+checks, and `codex-0.158.0-boundary.json` records the filesystem, process and
+kernel checks. `codex-0.158.0-schema-review.json` records the protocol changes
+and feature defaults. The retained 0.157.1 build keeps its `codex-0.157.1-*.json`
+evidence, recorded with the same launch configuration. The
+`codex-0.156.1-compatibility-*.json` files repeat the checks for the oldest
+retained build with the current configuration; its historical receipts are
+retained.
 These probes exercise the production Seatbelt policy. None of
 them logs in, reads existing credentials, or sends a model request.
 

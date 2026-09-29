@@ -13,7 +13,8 @@ version bump pull request by renaming `## Unreleased` to the version.
 ## Unreleased
 
 xcb keeps a separate model list for each account, so two accounts of the same
-provider on different plans no longer share one list.
+provider on different plans no longer share one list. xcb also supports Codex
+CLI 0.158.0.
 
 - Before, each refresh replaced the provider's single model list with what
   one account reported. A model only one Devin or Claude plan offers could be
@@ -30,6 +31,13 @@ provider on different plans no longer share one list.
   their ids to each row.
 - The command runner setup `--refresh` no longer fails with `public-cache-ack ValueError` after the runner VM restarts. Acknowledging a published dependency cache now remounts it read-only and rehashes it, as prepare and recover already do.
 - `workspace_exec` now accepts an absolute `cwd` inside the workspace and runs there. Before, a model that passed its absolute working directory got `invalid bounded offline command` on every call and could not run its own checks. Refusals now name the field that was wrong.
+- Codex CLI 0.158.0 on macOS ARM64 passes the executable, tool, configuration,
+  and sandbox checks. The previous supported builds, 0.157.1 and 0.156.1,
+  remain supported.
+- When Codex reports that the Flex processing tier or the service is
+  temporarily out of capacity, xcb records a temporary provider failure. It no
+  longer treats the account as failed for an unknown reason, and it does not
+  count the failure against the account's usage limit.
 
 ## 0.11.1 - 2026-09-28
 
