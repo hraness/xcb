@@ -192,7 +192,7 @@ impl SupervisorIdentity {
         Ok(PreparedIdentity { record, stamp })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn publish(root: &Path, record: Record) -> Result<Self> {
         Self::prepare_record(record)?.publish(root)
     }

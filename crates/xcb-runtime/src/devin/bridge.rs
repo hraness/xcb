@@ -26,6 +26,7 @@ pub(crate) struct Request {
     pub reply: oneshot::Sender<Option<Value>>,
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) struct DevinBridge {
     path: PathBuf,
     token: String,
@@ -133,7 +134,7 @@ impl DevinBridge {
         })
     }
 
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", all(test, unix))), allow(dead_code))]
     pub(crate) fn configuration(&self, helper: &Path) -> Result<Value> {
         let helper = helper
             .to_str()

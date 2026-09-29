@@ -167,7 +167,7 @@ pub(crate) async fn close_bridge(bridge: Option<egress::EgressBridge>) -> bool {
     }
 }
 
-#[cfg(any(test, target_os = "linux"))]
+#[cfg(any(all(test, unix), target_os = "linux"))]
 async fn discard_failed_preparation(
     artifacts: &mut LaunchArtifacts,
     bridge: egress::EgressBridge,
@@ -547,7 +547,7 @@ fn provider_args(model: &ModelChoice, tools: bool) -> Vec<String> {
 /// it anywhere. The planner owns the executable and forwarder-runtime binds;
 /// `read_only` carries only the dynamic-loader/library closure — repeating a
 /// path the plan already mounts used to be a fatal "bind target duplicated".
-#[cfg(any(unix, test))]
+#[cfg(unix)]
 pub(crate) fn linux_spec(
     executable: PathBuf,
     runtime: PathBuf,

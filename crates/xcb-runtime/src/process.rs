@@ -215,7 +215,7 @@ fn verified_digests() -> &'static std::sync::Mutex<BTreeMap<PathBuf, (FileIdenti
 static EXECUTABLE_DIGESTS: std::sync::Mutex<BTreeMap<PathBuf, usize>> =
     std::sync::Mutex::new(BTreeMap::new());
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn digested_executables(path: &Path) -> usize {
     EXECUTABLE_DIGESTS
         .lock()

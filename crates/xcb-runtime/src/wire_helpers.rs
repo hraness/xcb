@@ -4,6 +4,7 @@
 //! text in diagnostics.
 use crate::{Error, Result};
 use serde_json::Value;
+#[cfg(unix)]
 use std::io::{BufRead, Write};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use xcb_core::usage::COUNTER_LIMIT;
