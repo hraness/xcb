@@ -10,7 +10,7 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.14.0 - 2026-09-29
 
 Automatic routing now follows a preference stack you can edit: for each
 kind of task, an ordered list of provider/model/effort patterns says which
