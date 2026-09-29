@@ -654,6 +654,93 @@ pub const RISK: &[&str] = &[
     "wire",
 ];
 const FUTURE_SELF: &[&str] = &["i'll", "i will", "next i", "then i"];
+/// The worker names the option it prefers, so the operator's go-ahead is
+/// usually "go with your recommendation".
+const RECOMMEND: &[&str] = &[
+    "i recommend",
+    "i'd recommend",
+    "i would recommend",
+    "my recommendation",
+    "recommended",
+    "i'd go with",
+    "i would go with",
+    "i suggest",
+    "i'd suggest",
+    "my suggestion",
+    "i'd pick",
+    "i would pick",
+    "best option",
+];
+/// The worker hands the operator an action its own tools perform: a merge,
+/// a rerun, a push, a build command, cleaning its own scratch, or ending
+/// its own process. In the mined history the operator answered these with
+/// "you can do this yourself".
+const SELF_SERVICE: &[&str] = &[
+    "gh pr merge",
+    "gh run rerun",
+    "gh pr",
+    "gh run",
+    "rerun",
+    "re-run",
+    "merge",
+    "git push",
+    "push the branch",
+    "cargo",
+    "npm",
+    "bun",
+    "kill",
+    "rm -rf",
+    "clean up",
+    "cleanup",
+    "worktree",
+    "retry",
+    "restart",
+];
+/// The worker waits on the operator in so many words.
+const HANDOFF_TO_USER: &[&str] = &[
+    "waiting on you",
+    "waiting for you",
+    "over to you",
+    "your turn",
+    "needs you to",
+    "need you to",
+    "up to you",
+    "when you're ready",
+    "when you are ready",
+];
+/// Steps only the operator can take: signing in, one-time codes, secure OS
+/// prompts, secrets handed over by hand, payment, and facts only they know.
+/// A turn that names one is never continued or answered automatically.
+pub const OWNER_ONLY: &[&str] = &[
+    "sign in",
+    "sign-in",
+    "log in",
+    "login",
+    "device code",
+    "verification code",
+    "one-time",
+    "passkey",
+    "2fa",
+    "password",
+    "keychain",
+    "touch id",
+    "1password",
+    "paste the",
+    "paste your",
+    "copy the key",
+    "api key",
+    "secret",
+    "credential",
+    "pay",
+    "payment",
+    "billing",
+    "spend",
+    "which machine",
+    "which email",
+    "which account",
+    "in your browser",
+    "unlock",
+];
 const PROGRESSIVE_SUBJECTS: &[&str] = &["i'm", "we're", "now"];
 
 /// Lowercased last `chars` characters with typographic apostrophes folded,
@@ -875,6 +962,7 @@ pub fn settle_features(text: &str, facts: &TurnFacts, tool_calls: u32) -> Featur
     let open = end.matches("- [ ]").count().min(5);
     let words = text.split_whitespace().take(400).count();
     let calls = tool_calls.min(128);
+    let owner_only = any(&end, OWNER_ONLY);
     Features::from([
         ("promise_next".into(), flag(any(&end, PROMISE_NEXT))),
         ("awaiting".into(), flag(any(&end, AWAITING))),
@@ -897,6 +985,16 @@ pub fn settle_features(text: &str, facts: &TurnFacts, tool_calls: u32) -> Featur
         ("ask".into(), flag(any(&close, ASK))),
         ("user_act".into(), flag(any(&end, USER_ACT))),
         ("risk".into(), flag(any(&close, RISK))),
+        ("recommendation".into(), flag(any(&end, RECOMMEND))),
+        ("owner_only".into(), flag(owner_only)),
+        (
+            "self_service".into(),
+            flag(
+                !owner_only
+                    && (any(&end, AWAITING) || any(&end, USER_ACT) || any(&end, HANDOFF_TO_USER))
+                    && any(&end, SELF_SERVICE),
+            ),
+        ),
         ("report".into(), flag(report(text))),
         ("tools".into(), f64::from(calls).ln_1p() / 128f64.ln_1p()),
         ("no_tools".into(), flag(calls == 0)),
@@ -912,6 +1010,60 @@ pub fn settle_features(text: &str, facts: &TurnFacts, tool_calls: u32) -> Featur
             )),
         ),
     ])
+}
+
+/// Whether a settle decision may act on the turn at all: a turn that hands
+/// the operator a step only they can take ([`OWNER_ONLY`]) is theirs,
+/// whatever a head scores.
+pub fn owner_only(features: &Features) -> bool {
+    features
+        .get("owner_only")
+        .is_some_and(|value| *value >= 1.0)
+}
+
+/// The prompt an automatic run sends, worded for the settle head that
+/// started it and for how the turn ended: work the worker described as in
+/// flight is told to see it through, a step it parked on the operator that
+/// its own tools perform is handed back, and a question it answered with a
+/// recommendation is answered with that recommendation. Every variant keeps
+/// the task's existing scope and permissions.
+pub fn continuation_prompt(head: Option<&str>, features: Option<&Features>) -> String {
+    const SCOPE: &str = "Do not repeat completed effects or expand scope. Stop and ask one specific question if input or approval is required.";
+    let on = |name: &str| features.is_some_and(|f| f.get(name).is_some_and(|v| *v >= 1.0));
+    match head {
+        Some(SETTLE_UNFINISHED) if on("self_service") => format!(
+            "Your last turn waited for the user to do something your own tools can do. Do it yourself, within the original task and your existing permissions, then continue until the task is complete. Do not wait for the user for actions you can perform. {SCOPE}"
+        ),
+        Some(SETTLE_UNFINISHED) if on("awaiting") || on("progressive") => format!(
+            "Continue: the work you described as in flight is yours to see through. Keep going until the original task is complete and verified as you described; do not stop to report progress. {SCOPE}"
+        ),
+        Some(SETTLE_UNFINISHED) => format!(
+            "Your last turn ended before the original task was finished. Carry out the next step you described, then continue until the task is complete. {SCOPE}"
+        ),
+        Some(SETTLE_CONFIRM) if on("recommendation") => format!(
+            "Go with your recommendation, within the original task, and continue through every open item you listed. If a step would delete data, spend money, publish, or use new credentials, stop and ask instead. {SCOPE}"
+        ),
+        Some(SETTLE_CONFIRM) => format!(
+            "Yes, go ahead with the step you proposed, within the original task. If it would delete data, spend money, publish, or use new credentials, stop and ask instead. {SCOPE}"
+        ),
+        _ => format!("Continue the original task from the last confirmed checkpoint. {SCOPE}"),
+    }
+}
+
+/// Whether `text` is one of the prompts [`continuation_prompt`] produces, so
+/// a queued automatic prompt can be recognized and replaced.
+pub fn is_continuation_prompt(text: &str) -> bool {
+    let feature = |name: &str| Features::from([(name.to_owned(), 1.0)]);
+    [
+        continuation_prompt(None, None),
+        continuation_prompt(Some(SETTLE_UNFINISHED), None),
+        continuation_prompt(Some(SETTLE_UNFINISHED), Some(&feature("awaiting"))),
+        continuation_prompt(Some(SETTLE_UNFINISHED), Some(&feature("self_service"))),
+        continuation_prompt(Some(SETTLE_CONFIRM), None),
+        continuation_prompt(Some(SETTLE_CONFIRM), Some(&feature("recommendation"))),
+    ]
+    .iter()
+    .any(|prompt| prompt == text)
 }
 
 /// How a settled turn ended. `Done`, `StoppedShort` and `Confirm` refine the idle state
@@ -1560,6 +1712,23 @@ pub enum Reply {
 }
 
 const REPLY_PREFIXES: &[&str] = &["ok ", "okay ", "ok, ", "okay, ", "please ", "pls "];
+/// The operator sends a parked step back to the worker: evidence that the
+/// turn stopped short, like "continue".
+const SELF_SERVE_REPLIES: &[&str] = &[
+    "do it yourself",
+    "do this yourself",
+    "do that yourself",
+    "you can do this yourself",
+    "you can do it yourself",
+    "you can do that yourself",
+    "can't you",
+    "cant you",
+    "you don't need my",
+    "you dont need my",
+    "stop asking",
+    "no need to ask",
+    "without asking",
+];
 const CONTINUE_REPLIES: &[&str] = &[
     "continue",
     "keep going",
@@ -1740,7 +1909,10 @@ pub fn categorize_reply(text: &str) -> Reply {
     {
         head = rest.trim_start();
     }
-    if starts_with_phrase(head, CONTINUE_REPLIES) || head.trim_end_matches(['.', '!']) == "go" {
+    if starts_with_phrase(head, CONTINUE_REPLIES)
+        || head.trim_end_matches(['.', '!']) == "go"
+        || any(&lower, SELF_SERVE_REPLIES)
+    {
         Reply::Continue
     } else if starts_with_phrase(head, APPROVE_REPLIES) {
         Reply::Approve
@@ -2072,12 +2244,102 @@ mod tests {
     }
 
     #[test]
+    fn settle_features_read_recommendations_handoffs_and_owner_only_steps() {
+        let facts = facts(Terminal::Completed, EffectState::Settled);
+        let rec = settle_features(
+            "Two options: rewrite the parser or patch it. I recommend the patch. Which do you want?",
+            &facts,
+            4,
+        );
+        assert_eq!(rec["recommendation"], 1.0);
+        assert_eq!(rec["owner_only"], 0.0);
+        assert_eq!(rec["self_service"], 0.0);
+        let parked = settle_features(
+            "CI is green. Waiting on you to run gh pr merge 42, then I'll clean up.",
+            &facts,
+            9,
+        );
+        assert_eq!(parked["self_service"], 1.0);
+        assert_eq!(parked["owner_only"], 0.0);
+        // A merge the user must do because it needs their sign-in is theirs.
+        let theirs = settle_features(
+            "Waiting on you to sign in and merge the PR; the token I have is not allowed to.",
+            &facts,
+            9,
+        );
+        assert_eq!(theirs["owner_only"], 1.0);
+        assert_eq!(theirs["self_service"], 0.0);
+        assert!(owner_only(&theirs));
+        assert!(!owner_only(&parked));
+        for text in [
+            "Paste your API key here and I'll continue.",
+            "Approve the Keychain prompt on your Mac.",
+            "Which account should the deploy use?",
+            "Once you pay the invoice I can enable it.",
+        ] {
+            assert_eq!(
+                settle_features(text, &facts, 1)["owner_only"],
+                1.0,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn continuation_prompts_follow_the_head_and_the_turn() {
+        let feature = |name: &str| Features::from([(name.to_owned(), 1.0)]);
+        let generic = continuation_prompt(None, None);
+        assert!(generic.starts_with("Continue the original task"));
+        assert!(
+            continuation_prompt(Some(SETTLE_UNFINISHED), None)
+                .starts_with("Your last turn ended before")
+        );
+        assert!(
+            continuation_prompt(Some(SETTLE_UNFINISHED), Some(&feature("awaiting")))
+                .starts_with("Continue: the work you described as in flight")
+        );
+        assert!(
+            continuation_prompt(Some(SETTLE_UNFINISHED), Some(&feature("progressive")))
+                .starts_with("Continue: the work you described as in flight")
+        );
+        assert!(
+            continuation_prompt(Some(SETTLE_UNFINISHED), Some(&feature("self_service")))
+                .starts_with("Your last turn waited for the user")
+        );
+        assert!(
+            continuation_prompt(Some(SETTLE_CONFIRM), None)
+                .starts_with("Yes, go ahead with the step you proposed")
+        );
+        assert!(
+            continuation_prompt(Some(SETTLE_CONFIRM), Some(&feature("recommendation")))
+                .starts_with("Go with your recommendation")
+        );
+        // Every variant keeps the scope sentence and is recognized as one.
+        for (head, features) in [
+            (None, None),
+            (Some(SETTLE_UNFINISHED), None),
+            (Some(SETTLE_UNFINISHED), Some(feature("awaiting"))),
+            (Some(SETTLE_UNFINISHED), Some(feature("self_service"))),
+            (Some(SETTLE_CONFIRM), None),
+            (Some(SETTLE_CONFIRM), Some(feature("recommendation"))),
+        ] {
+            let prompt = continuation_prompt(head, features.as_ref());
+            assert!(prompt.contains("Do not repeat completed effects or expand scope."));
+            assert!(is_continuation_prompt(&prompt), "{prompt}");
+        }
+        assert!(!is_continuation_prompt("continue"));
+    }
+
+    #[test]
     fn replies_categorize_by_their_opening_words() {
         for (text, reply) in [
             ("continue", Reply::Continue),
             ("ok keep going", Reply::Continue),
             ("Please continue where you left off.", Reply::Continue),
             ("go", Reply::Continue),
+            ("cant you use wrangler to do this for me", Reply::Continue),
+            ("you can do this yourself with gh", Reply::Continue),
+            ("stop asking and finish it", Reply::Continue),
             ("yes", Reply::Approve),
             ("Yes please, go ahead", Reply::Approve),
             ("ok, do it", Reply::Approve),

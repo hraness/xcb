@@ -15,7 +15,22 @@ and every deterministic continuation gate passes. A turn categorized as
 "yes" only when the `confirm` head acts and the request names nothing risky.
 By default both heads are `auto`: they act only after your own replies
 certify their precision (see [Auto](#auto-acting-once-certified)), and they
-stop acting if it falls.
+stop acting if it falls. Both engines act the same way: the managed
+supervisor and the direct session loop behind `xcb run` and the terminal.
+
+The continuation prompt says what the turn's shape asked for. A report that
+describes work still in flight ("I'm waiting on CI") is told to see it
+through without stopping to report; a step the worker parked on you that its
+own tools perform (a merge, a rerun, a push, cleaning its own scratch) is
+handed back ("do it yourself, within your existing permissions"); a question
+the worker answered with its own recommendation is answered "go with your
+recommendation"; other stopped-short turns get "carry out the next step you
+described", and other confirmations "yes, go ahead". A turn that hands you a
+step only you can take — signing in, a one-time code, a Keychain or password
+prompt, a secret pasted by hand, a payment, or a fact only you know such as
+which account to use — is never continued or answered, whatever a head
+scores. A question the worker asked in words alone reaches the heads; a
+provider request that was denied during the turn does not.
 
 ## Shape
 
@@ -315,11 +330,13 @@ task settles again under the newer build.
   widens it. Route decisions only choose between admitted, eligible routes, and
   the substantial-prompt quality floor cannot be demoted, even by a replaced
   program. Settle continuation
-  still requires a joined, settled, idle worker with no pending attention,
-  failure or uncertain effect, a non-repeating response and remaining
-  attempt/time budget. A configured judge keeps its veto. The confirm risk
-  veto is in the runtime, not the replaceable program, so a custom program
-  cannot remove it.
+  still requires a joined, settled worker with no denied request, failure or
+  uncertain effect, a non-repeating response and remaining attempt/time
+  budget; a turn that ended with a question raised by its text alone is read
+  by the heads, one that hands you a step only you can take is not. A
+  configured judge keeps its veto and never starts a continuation. The
+  confirm risk veto and the owner-only cue list are in the runtime and core,
+  not the replaceable program, so a custom program cannot remove them.
 - A turn reconciled after a restart has no tool-call count, so settle leaves
   it uncategorized rather than scoring it as a turn that did no work.
 - Any reflex failure (unreadable ledger, rejected program, runtime error)
@@ -339,7 +356,8 @@ task settles again under the newer build.
 | Programs | `crates/xcb-runtime/reflexes/*.algal.json` |
 | Ledger, runner, admission, training | `crates/xcb-runtime/src/reflex.rs` |
 | Route integration | `routing.rs` (`route_reflex`) and `task_classifier.rs` |
-| Settle, continuation, confirm veto and implicit labels | `managed.rs` (`settle_decision`, `task_should_continue`, `continuation_outcome`, intake, cancel) |
+| Settle, continuation, confirm veto and implicit labels | `managed.rs` (`settle_decision`, `task_should_continue_inbox`, `continuation_outcome`, intake, cancel); direct sessions in `kernel.rs` (`settle_continuation`) |
+| Continuation prompts and the owner-only cues | `crates/xcb-core/src/reflex.rs` (`continuation_prompt`, `OWNER_ONLY`) |
 | CLI | `xcb reflex` |
 
 Adding a reflex means adding a `Reflex` variant, its heads and prior, a feature

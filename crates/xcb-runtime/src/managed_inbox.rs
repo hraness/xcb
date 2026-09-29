@@ -639,15 +639,7 @@ pub(super) fn append_batch(task: &mut ManagedTask, events: &[InboxEvent]) {
     if events.is_empty() {
         return;
     }
-    if task.attempts > 0
-        && [
-            None,
-            Some(xcb_core::reflex::SETTLE_UNFINISHED),
-            Some(xcb_core::reflex::SETTLE_CONFIRM),
-        ]
-        .into_iter()
-        .any(|kind| task.next_prompt == continuation_prompt(kind))
-    {
+    if task.attempts > 0 && xcb_core::reflex::is_continuation_prompt(&task.next_prompt) {
         task.next_prompt = CONTINUATION_PROMPT.into();
     }
     task.user_inputs.push(render(events));

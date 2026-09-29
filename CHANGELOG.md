@@ -10,6 +10,32 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+Automatic continuation now reads how a turn ended and answers the way you
+would: it sees in-flight work through, hands back steps the worker could
+have done itself, takes the worker's own recommendation, and leaves only
+the steps that need you.
+
+- A completed turn that describes work still in flight is told to see it
+  through; one that waits for you to run a merge, a rerun, a push or a
+  cleanup the worker's own tools perform is told to do it itself; a question
+  the worker answered with its own recommendation is answered "go with your
+  recommendation". A turn that hands you a step only you can take (a
+  sign-in, a one-time code, a Keychain or password prompt, a secret, a
+  payment, or a fact only you know) is never continued or answered.
+- A question the worker asked in words alone now reaches the settle heads,
+  so a routine "should I open the PR?" no longer stops a task; a denied
+  provider request still does.
+- Direct sessions and the terminal continue the way managed tasks do: a
+  turn the certified settle reflex reads as stopped short, or as a routine
+  request for a go-ahead, continues on its own within the same gates.
+- The continuation budget is eight turns in a row within an hour (was three
+  within ten minutes), and managed tasks get nine attempts (was four).
+- A configured judge only vetoes a continuation; it no longer starts one.
+- "Can't you do this yourself?" and "stop asking" replies now teach the
+  ledger that the turn stopped short.
+
 ## 0.14.0 - 2026-09-29
 
 Automatic routing now follows a preference stack you can edit: for each

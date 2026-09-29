@@ -310,6 +310,7 @@ async fn restart_recovers_exact_turn_limit_and_rejects_legacy_idle_inference() {
             .unwrap();
         let outcome = Outcome {
             tool_calls: Some(0),
+            text_attention: false,
             diagnostic: None,
             text: "Migration written; the turn limit interrupted the remaining checks".into(),
             facts: TurnFacts {

@@ -61,6 +61,7 @@ fn guidance(f: &Fixture, text: &str) -> InboxEvent {
 fn outcome() -> Outcome {
     Outcome {
         tool_calls: Some(0),
+        text_attention: false,
         diagnostic: None,
         text: "The work and checks are complete.".into(),
         state: State::Idle,
@@ -866,6 +867,7 @@ async fn inbox_wake_preserves_confirm_veto_and_uses_neutral_prompt() {
         let finished = Outcome {
             text: text.into(),
             tool_calls: Some(12),
+            text_attention: false,
             ..outcome()
         };
         record(&f, &prompt, &finished);
@@ -898,6 +900,7 @@ async fn reflex_continuation(f: &Fixture) -> ManagedTask {
     let stopped = Outcome {
         text: "Schema migrated. Next, I'll update the callers:".into(),
         tool_calls: Some(60),
+        text_attention: false,
         ..outcome()
     };
     record(f, &prompt, &stopped);
@@ -929,6 +932,7 @@ async fn inbox_steered_work_does_not_train_reflex_continuation() {
     );
     let completed = Outcome {
         tool_calls: Some(14),
+        text_attention: false,
         ..outcome()
     };
     record(&f, &prompt, &completed);
@@ -1009,6 +1013,7 @@ async fn late_guidance_neutralizes_automatic_checkpoints_but_preserves_explicit_
         let mut result = Outcome {
             text: text.into(),
             tool_calls: Some(tool_calls),
+            text_attention: false,
             ..outcome()
         };
         result.facts.terminal = terminal;
@@ -1020,7 +1025,7 @@ async fn late_guidance_neutralizes_automatic_checkpoints_but_preserves_explicit_
             .unwrap();
         assert_eq!(queued.state, TaskState::Queued, "{head:?}");
         assert_eq!(queued.acted.as_deref(), head);
-        let automatic = continuation_prompt(head);
+        let automatic = continuation_prompt(head, None);
         assert_eq!(queued.next_prompt, automatic);
         let accepted = guidance(&f, "Actually, stop at the review and report what is ready");
         let (events, projected) = fit(&queued, f.managed.inbox_pending(&queued).unwrap(), &[]);

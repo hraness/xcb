@@ -124,7 +124,7 @@ function HowRoutingWorks() {
       <p>The provider runs in an operating-system sandbox: Seatbelt on macOS, <code>bwrap</code> on Linux. It gets xcb’s file tools for the task’s folder, no shell of its own, and network access to port 443 only. See <a href="/docs/security">security and privacy</a> for what that covers.</p>
       <h2 id="record">4. Record how the run ended</h2>
       <p>When the provider process exits, xcb records the result: completed, needs your input, failed, or cancelled. If it can’t confirm that the provider stopped or what it changed, it records the run as uncertain, keeps the account held, and does not retry. <code>xcb recover</code> shows those runs; see <a href="/docs/troubleshooting#unfinished-run">troubleshooting</a>.</p>
-      <p>In the thread, a turn that stops at a usage limit continues on another route the task hasn’t tried yet, and a turn cut off by a turn or token limit can continue on its own (up to three times in a row within ten minutes by default). An uncertain run never moves to another account. <code>xcb --json route</code> runs exactly one turn and leaves retries to the caller.</p>
+      <p>In the thread, a turn that stops at a usage limit continues on another route the task hasn’t tried yet, and a turn cut off by a turn or token limit can continue on its own (up to eight times in a row within an hour by default). An uncertain run never moves to another account. <code>xcb --json route</code> runs exactly one turn and leaves retries to the caller.</p>
       <h2 id="preview">Preview a decision</h2>
       <Code>{`xcb models route --task "fix a race in the scheduler"   # the route xcb would pick here, now
 xcb models tiers --task "fix a race in the scheduler"   # every model's tier and scores`}</Code>
@@ -368,7 +368,7 @@ xcb panes check /absolute/path/to/pane.json
 xcb panes install /absolute/path/to/pane.json`}</Code>
       <p>Panes describe what the terminal shows. They can’t run code or give a provider new tools.</p>
       <h2 id="continuation">Continuation and context</h2>
-      <p>Two extensions are on by default. Auto-continue resumes a turn that a turn or token limit cut off, up to three times in a row within ten minutes, only after the turn ended cleanly with no question pending. Gobstopper context management trims old tool output from long sessions and keeps the originals in your local history.</p>
+      <p>Two extensions are on by default. Auto-continue resumes a turn that a turn or token limit cut off, up to eight times in a row within an hour, only after the turn ended cleanly; the settle reflex can also continue a turn that stopped short or answer a routine go-ahead, never a step only you can take. Gobstopper context management trims old tool output from long sessions and keeps the originals in your local history.</p>
       <Code>{`xcb plugins disable auto-continue
 xcb plugins disable gobstopper
 # Turn them back on:
@@ -712,7 +712,7 @@ const configKeys: readonly (readonly [string, string, string])[] = [
   ["auto_failover", "true", "Continue a managed task on another route after a usage limit"],
   ["pane", "\"focus\"", "Pane shown in direct sessions"],
   ["reduced_motion", "false", "Turn off terminal animation"],
-  ["extensions.auto_continue", "enabled, 3 in a row, 600000 ms", "max_consecutive 1 to 16; max_elapsed_ms 1,000 to 3,600,000"],
+  ["extensions.auto_continue", "enabled, 8 in a row, 3600000 ms", "max_consecutive 1 to 16; max_elapsed_ms 1,000 to 3,600,000"],
   ["extensions.gobstopper", "enabled at 250,000 tokens", "Context management: trigger_tokens, floor_tokens, min_interval_ms, min_savings_tokens"],
   ["extensions.usage", "true", "Local usage measurement"],
   ["extensions.hooks", "false", "Allow hooks to run"],
