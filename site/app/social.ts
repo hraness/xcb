@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { defineSocialImageSite, socialImageAlt as altFor } from "@hraness/web-discovery/social-image/card";
+import { defineSocialImageSite } from "@hraness/web-discovery/social-image/card";
 
 /**
  * The site's one social-image declaration. Every share card comes from the
- * shared @hraness/web-discovery template through this record; pages pass copy
- * only. The icon is the header's crossed-swords artwork, read from the repo
- * so the card and the header never drift. The theme is Tokyo Night light.
+ * shared @hraness/web-discovery template through this record; each route's
+ * `opengraph-image` passes only its page copy from `social-cards.ts`. The icon
+ * is the header's crossed-swords artwork, read from the repo so the card and
+ * the header never drift. The theme is Tokyo Night light.
  */
 const markSvg = readFileSync(join(process.cwd(), "public/marks/xcb.svg"));
 
@@ -22,11 +23,3 @@ export const socialSite = defineSocialImageSite({
     muted: "#6172b0",
   },
 });
-
-export const socialImageAlt = altFor(socialSite);
-
-/**
- * Pages that set their own `openGraph` metadata replace the inherited card, so
- * they list it explicitly through this constant.
- */
-export const socialImages = [{ url: "/opengraph-image", width: 1200, height: 630, alt: socialImageAlt }];

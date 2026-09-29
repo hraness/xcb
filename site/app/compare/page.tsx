@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { AskAiAboutThis } from "@hraness/ui";
 import { PageHeader, PageSection } from "../page-header";
 import { SiteHeader } from "../site-header";
-import { socialImages } from "../social";
 import { formatDate } from "./comparison-page";
 import { comparisonHeading, comparisonPath, comparisons } from "./comparisons";
 import { hubDescription, hubElsewhere, hubGroups, hubHeading, hubLead, hubTitle, hubUpdated } from "./hub";
@@ -12,8 +11,8 @@ export const metadata: Metadata = {
   title: hubTitle,
   description: hubDescription,
   alternates: { canonical: "/compare" },
-  openGraph: { title: hubTitle, description: hubDescription, siteName: "Excalibur (xcb)", type: "website", url: "/compare", images: socialImages },
-  twitter: { card: "summary_large_image", title: hubTitle, description: hubDescription, images: socialImages },
+  openGraph: { title: hubTitle, description: hubDescription, siteName: "Excalibur (xcb)", type: "website", url: "/compare" },
+  twitter: { card: "summary_large_image", title: hubTitle, description: hubDescription },
 };
 
 export default function Compare() {

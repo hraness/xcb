@@ -3,7 +3,6 @@ import { ArticleIndex } from "@hraness/design-kit/react/server";
 import { blogJsonLd } from "@hraness/web-discovery";
 import { JsonLdScript } from "@hraness/web-discovery/json-ld";
 import { SiteHeader } from "../site-header";
-import { socialImages } from "../social";
 import { blogArticleDiscovery, blogPublisher, blogSite } from "./discovery";
 import { blogDescription, blogFeedPath, blogPath, blogPostPath, blogTitle, indexableBlogPosts } from "./posts";
 
@@ -16,8 +15,8 @@ export const metadata: Metadata = {
     canonical: blogPath,
     types: { "application/atom+xml": [{ url: blogFeedPath, title: blogTitle }] },
   },
-  openGraph: { title, description: blogDescription, siteName: "Excalibur (xcb)", type: "website", url: blogPath, images: socialImages },
-  twitter: { card: "summary_large_image", title, description: blogDescription, images: socialImages },
+  openGraph: { title, description: blogDescription, siteName: "Excalibur (xcb)", type: "website", url: blogPath },
+  twitter: { card: "summary_large_image", title, description: blogDescription },
 };
 
 export default function Blog() {

@@ -1,6 +1,6 @@
 import { relatedFor } from "@hraness/design-kit/portfolio";
 import type { ArticleDiscovery, ArticleParty, FeedDiscovery, SearchSite } from "@hraness/web-discovery";
-import { socialImageAlt } from "../social";
+import { socialCardAlt } from "../social-cards";
 import { blogAuthor, blogDescription, blogFeedPath, blogPath, blogPostPath, blogTimestamp, blogTitle, type BlogPost } from "./posts";
 
 export const blogSite: SearchSite = {
@@ -35,11 +35,11 @@ export function blogArticleDiscovery(entry: BlogPost): ArticleDiscovery {
     keywords: entry.keywords,
     citations: entry.sources.map(({ href }) => href as `https://${string}`),
     image: {
-      path: "/opengraph-image",
+      path: `${blogPostPath(entry)}/opengraph-image/card`,
       contentType: "image/png",
       width: 1200,
       height: 630,
-      alt: socialImageAlt,
+      alt: socialCardAlt(blogPostPath(entry)),
     },
   };
 }
