@@ -141,6 +141,7 @@ async fn settle_child(f: &Fixture, child: &ManagedTask, text: &str) -> ManagedTa
         .unwrap();
     let outcome = Outcome {
         tool_calls: Some(0),
+        text_attention: false,
         text: text.into(),
         facts: xcb_core::policy::TurnFacts {
             terminal: Terminal::Completed,

@@ -1,9 +1,9 @@
 use crate::{
     Error, Result, attachments, auth,
-    config::Config,
-    digest, exports, hooks, judge, new_id, now_ms, panes, private,
+    config::{Config, ReflexMode},
+    digest, exports, hooks, judge, managed, new_id, now_ms, panes, private,
     process::Pin,
-    routing,
+    reflex, routing,
     runner::{self, Observer, Outcome, Progress, RunInput},
     store::Store,
     summary,
@@ -238,6 +238,65 @@ async fn judge_continuation(
         .get("continue_task")
         .and_then(judge::JudgeAnswer::noul)
         .is_some_and(|probability| probability >= JUDGE_CONTINUE_THRESHOLD))
+}
+
+/// A settle head's verdict on a completed direct turn: `Some((head,
+/// decision))` when the turn stopped short of the task or asked to confirm a
+/// routine step and the head may act. This is the envelope the managed
+/// supervisor applies (`task_should_continue_inbox`): the turn is joined
+/// with no failure, no denied request and no step only the user can take;
+/// it is not a repeat; the continuation budget holds; the `confirm` head
+/// also needs no risk cue and the veto list clear; under `auto` the head
+/// must be certified by the operator's labels, and about one turn in ten is
+/// left to them as unbiased evidence.
+async fn settle_continuation(
+    store: &Store,
+    config: &Config,
+    outcome: &Outcome,
+    session: &Id,
+    budget: ContinuationBudget,
+) -> Option<(&'static str, reflex::Decision)> {
+    let policy = &config.extensions.auto_continue;
+    if !policy.enabled
+        || budget.repeated
+        || budget.consecutive >= policy.max_consecutive
+        || budget.elapsed_ms >= policy.max_elapsed_ms
+        || !outcome.askable()
+        || outcome.denied()
+        || outcome.facts.terminal != Terminal::Completed
+        || !outcome.facts.joined
+        || outcome.facts.effects == EffectState::Uncertain
+        || outcome.facts.failure.is_some()
+    {
+        return None;
+    }
+    let decision = managed::settle_decision(store, config, outcome).await?;
+    if xcb_core::reflex::owner_only(&decision.features) {
+        return None;
+    }
+    let reflexes = &config.extensions.reflexes;
+    let head = match decision.value.as_str() {
+        "stopped_short" => xcb_core::reflex::SETTLE_UNFINISHED,
+        "confirm" if managed::confirmable(&decision, &outcome.text) => {
+            xcb_core::reflex::SETTLE_CONFIRM
+        }
+        _ => return None,
+    };
+    let acts = managed::head_acts(store.root(), reflexes, head, &decision.features)
+        && !(managed::head_mode(reflexes, head) == ReflexMode::Auto
+            && managed::held_turn(head, session, budget.turn));
+    acts.then_some((head, decision))
+}
+
+/// Where a direct session stands in its continuation budget when a turn
+/// settles: the turn number within this call, automatic turns in a row,
+/// time since the call started, and whether the output repeats the last.
+#[derive(Clone, Copy)]
+struct ContinuationBudget {
+    turn: u64,
+    consecutive: u32,
+    elapsed_ms: u64,
+    repeated: bool,
 }
 
 async fn configured_judge_continuation(
@@ -688,6 +747,8 @@ async fn execute_inner(
     let supervise = mode.supervise();
     let started = now_ms();
     let mut consecutive = 0u32;
+    // Turns this call ran, for the reflex ledger's observation subject.
+    let mut turn = 0u64;
     let mut previous_output = None;
     let mut tried = BTreeSet::new();
     // Accounts that reported an account-wide usage limit during this task.
@@ -765,6 +826,7 @@ async fn execute_inner(
         if current.account != session.account || current.model.key() != session.model.key() {
             return Ok(outcome);
         }
+        turn += 1;
         let current_config = Config::load(store.root())?.0;
         let output_digest = digest(&outcome.text);
         let repeat = previous_output.as_ref() == Some(&output_digest);
@@ -776,7 +838,35 @@ async fn execute_inner(
             elapsed_ms,
             repeat,
         );
-        let continue_turn = if deterministic_continue && current_config.extensions.judge.enabled {
+        // A completed turn the settle reflex reads as stopped short, or as a
+        // routine request for a go-ahead, continues the way the managed
+        // supervisor continues it; the deterministic gate covers limits.
+        let settled = if deterministic_continue {
+            None
+        } else {
+            tokio::select! {
+                biased;
+                _ = cancellation_requested(&mut cancel) => return Ok(outcome),
+                settled = settle_continuation(
+                    &store,
+                    &current_config,
+                    &outcome,
+                    &session_id,
+                    ContinuationBudget { turn, consecutive, elapsed_ms, repeated: repeat },
+                ) => settled,
+            }
+        };
+        if let Some((head, decision)) = &settled {
+            if let Ok(reflexes) = reflex::ReflexStore::open(store.root()) {
+                let _ = reflexes.observe(&format!("{}#{turn}", session_id.as_str()), decision);
+            }
+            observer(Progress::Notice(format!(
+                "Settle reflex `{head}` continues the task on its own"
+            )));
+        }
+        let continue_turn = if (deterministic_continue || settled.is_some())
+            && current_config.extensions.judge.enabled
+        {
             let judgment = tokio::select! {
                 biased;
                 _ = cancellation_requested(&mut cancel) => return Ok(outcome),
@@ -814,7 +904,7 @@ async fn execute_inner(
                 }
             }
         } else {
-            deterministic_continue
+            deterministic_continue || settled.is_some()
         };
         if *cancel.borrow() {
             return Ok(outcome);
@@ -836,7 +926,12 @@ async fn execute_inner(
                 "Auto-continue {consecutive}/{} · same task and permissions",
                 current_config.extensions.auto_continue.max_consecutive
             )));
-            text = "Continue the existing task from the last confirmed checkpoint. Do not repeat completed effects, expand the task, or answer for the user. Stop if approval or missing input is required.".into();
+            text = match &settled {
+                Some((head, decision)) => {
+                    xcb_core::reflex::continuation_prompt(Some(head), Some(&decision.features))
+                }
+                None => "Continue the existing task from the last confirmed checkpoint. Do not repeat completed effects, expand the task, or answer for the user. Stop if approval or missing input is required.".into(),
+            };
             attachments = vec![];
             role = Role::System;
             continue;
@@ -2068,6 +2163,7 @@ mod tests {
         let tried = BTreeSet::new();
         let mut outcome = Outcome {
             tool_calls: Some(0),
+            text_attention: false,
             diagnostic: None,
             text: "Saved the migration; remaining tests need to run".into(),
             state: State::Failed,
@@ -2122,6 +2218,7 @@ mod tests {
     fn quota_outcome(failure: Failure) -> Outcome {
         Outcome {
             tool_calls: Some(0),
+            text_attention: false,
             diagnostic: None,
             text: "Saved the migration; remaining tests need to run".into(),
             state: State::Failed,
