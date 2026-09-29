@@ -13,6 +13,15 @@ version bump pull request by renaming `## Unreleased` to the version.
 ## Unreleased
 
 - Releases now include a Linux ARM64 build, `xcb-<version>-linux-aarch64.tar.gz`, built on an ARM64 runner with the same glibc 2.34 floor as the x86_64 build. CI builds it on every push to `main`.
+- The npm release step no longer fails a publish that npm accepted. npm now
+  reports the trusted-publisher configuration id without its `oidc:`
+  prefix, and the release check rejected that form for 0.11.1 and 0.11.2.
+  Both forms are accepted now.
+- The npm release step waits up to 25 minutes for npm to serve a new
+  version, polling more slowly as it waits, and logs what npm returned.
+- Re-running the failed npm job after npm accepted the publish now
+  finishes the release. The retry checks that npm serves the exact tarball
+  from the run and does not publish again.
 
 ## 0.11.2 - 2026-09-29
 
