@@ -10,7 +10,6 @@ use crate::{
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::OpenOptions,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -429,13 +428,14 @@ fn model_account(
 fn workspace_lease(store: &Store, session: &Session) -> Result<private::ExclusiveLock> {
     let directory = private::directory(&store.root().join("workspace-runs"))?;
     let path = directory.join(format!("{}.lock", digest(session.workspace.as_bytes())));
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(path)?;
+    let file = crate::os::owner_only(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(path)?;
     private::check_file(&file, 4096)?;
     match file.try_lock() {
         Ok(()) => (),

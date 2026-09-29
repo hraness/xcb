@@ -227,10 +227,7 @@ impl FileIdentity {
         }
         #[cfg(windows)]
         {
-            Ok(Self::of_facts(
-                &xcb_platform::file_facts(file)?,
-                &file.metadata()?,
-            ))
+            Ok(Self::of_facts(&xcb_platform::file_facts(file)?))
         }
     }
 
@@ -242,21 +239,17 @@ impl FileIdentity {
         }
         #[cfg(windows)]
         {
-            let file = xcb_platform::open_metadata(path)?;
-            Ok(Self::of_facts(
-                &xcb_platform::file_facts(&file)?,
-                &file.metadata()?,
-            ))
+            Ok(Self::of_facts(&xcb_platform::path_facts(path)?))
         }
     }
 
-    /// Windows has no stable `st_ino` in `Metadata`: identity comes from the
-    /// handle (volume serial, file index, link count, owner and DACL), and
-    /// the times from the same handle's metadata. `mode` carries the kind
-    /// and whether the DACL is private (`0o600`/`0o700`) or not (`0o644`).
+    /// Windows `Metadata` has no stable file index, so identity comes from
+    /// a handle: volume serial, file index, link count, owner, DACL, and the
+    /// last-write and change times. `mode` carries the kind and whether the
+    /// DACL is private (`0o600`/`0o700`) or not (`0o644`); `uid` is 0 when
+    /// this user owns the object.
     #[cfg(windows)]
-    fn of_facts(facts: &xcb_platform::Facts, metadata: &std::fs::Metadata) -> Self {
-        use std::os::windows::fs::MetadataExt;
+    fn of_facts(facts: &xcb_platform::Facts) -> Self {
         let kind = match facts.kind {
             xcb_platform::Kind::File => 0o100_000,
             xcb_platform::Kind::Directory => 0o040_000,
@@ -267,10 +260,10 @@ impl FileIdentity {
             (true, _) => 0o600,
             (false, _) => 0o644,
         };
-        let time = |ticks: u64| {
+        let time = |ticks: i64| {
             (
-                (ticks / 10_000_000) as i64,
-                ((ticks % 10_000_000) * 100) as i64,
+                ticks.div_euclid(10_000_000),
+                ticks.rem_euclid(10_000_000) * 100,
             )
         };
         Self {
@@ -281,8 +274,8 @@ impl FileIdentity {
             gid: 0,
             links: facts.links,
             size: facts.len,
-            mtime: time(metadata.last_write_time()),
-            ctime: time(metadata.creation_time()),
+            mtime: time(facts.written),
+            ctime: time(facts.changed),
         }
     }
 

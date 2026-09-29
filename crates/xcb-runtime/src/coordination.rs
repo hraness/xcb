@@ -1,8 +1,7 @@
-use crate::{Error, Result, digest, private};
+use crate::{Error, Result, digest, os, private};
 use rusqlite::{Connection, OpenFlags};
 use std::{
-    fs::{self, OpenOptions},
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    fs::OpenOptions,
     path::{Path, PathBuf},
     sync::{Condvar, Mutex, OnceLock},
     time::{Duration, Instant},
@@ -77,8 +76,16 @@ pub(crate) fn default_root() -> Result<PathBuf> {
     if let Some(root) = std::env::var_os("XCB_COORDINATION_ROOT") {
         return Ok(PathBuf::from(root));
     }
-    let home = std::env::var_os("HOME").ok_or(Error::PrivateState)?;
-    Ok(PathBuf::from(home).join(".local/share/xcb-coordination"))
+    #[cfg(unix)]
+    {
+        let home = std::env::var_os("HOME").ok_or(Error::PrivateState)?;
+        Ok(PathBuf::from(home).join(".local/share/xcb-coordination"))
+    }
+    #[cfg(windows)]
+    {
+        let local = xcb_platform::local_app_data().ok_or(Error::PrivateState)?;
+        Ok(local.join("xcb-coordination"))
+    }
 }
 
 impl Coordination {
@@ -105,23 +112,23 @@ impl Coordination {
             Some(checked) => checked,
             None => {
                 let directory = private::directory(&self.root)?;
-                let metadata = fs::symlink_metadata(&directory)?;
+                let metadata = os::lstat(&directory)?;
                 let workspace = self.workspace.to_str().ok_or(Error::PrivateState)?;
                 let path = directory.join(format!("{}.sqlite", digest(workspace.as_bytes())));
                 self.checked.get_or_init(|| Checked {
                     path,
-                    dev: metadata.dev(),
-                    ino: metadata.ino(),
+                    dev: metadata.dev,
+                    ino: metadata.ino,
                 })
             }
         };
         let directory = checked.path.parent().ok_or(Error::PrivateState)?;
-        let current = fs::symlink_metadata(directory)?;
-        if !current.is_dir()
-            || current.dev() != checked.dev
-            || current.ino() != checked.ino
-            || current.uid() != rustix::process::getuid().as_raw()
-            || current.mode() & 0o077 != 0
+        let current = os::lstat(directory)?;
+        if !current.dir
+            || current.dev != checked.dev
+            || current.ino != checked.ino
+            || !current.owned
+            || !current.private
         {
             return Err(Error::PrivateState);
         }
@@ -129,33 +136,30 @@ impl Coordination {
     }
 }
 
-fn file_identity(metadata: &fs::Metadata, dev: u64, ino: u64) -> bool {
-    metadata.is_file()
-        && metadata.dev() == dev
-        && metadata.ino() == ino
-        && metadata.uid() == rustix::process::getuid().as_raw()
-        && metadata.mode() & 0o077 == 0
-        && metadata.nlink() == 1
+fn file_identity(metadata: &os::Stamp, dev: u64, ino: u64) -> bool {
+    metadata.file
+        && metadata.dev == dev
+        && metadata.ino == ino
+        && metadata.owned
+        && metadata.private
+        && metadata.links == 1
 }
 
 impl Coordination {
     /// Open and validate the lock database once: private file, correct
     /// journal mode and identity pinned for later lstat checks.
     fn open_connection(&self, path: &Path, deadline: Instant) -> Result<Cached> {
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(
-                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32,
-            )
-            .open(path)
+        match os::no_follow(
+            os::owner_only(OpenOptions::new().write(true).create_new(true)),
+            false,
+        )
+        .open(path)
         {
             Ok(file) => file.sync_all()?,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
             Err(error) => return Err(error.into()),
         }
-        let before = private::open_file(path, 64 * 1024)?.metadata()?;
+        let before = os::fstat(&private::open_file(path, 64 * 1024)?)?;
         let connection = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -168,14 +172,14 @@ impl Coordination {
         if !journal.eq_ignore_ascii_case("delete") {
             return Err(Error::Conflict("workspace coordination format changed"));
         }
-        let after = fs::symlink_metadata(path)?;
-        if !file_identity(&after, before.dev(), before.ino()) {
+        let after = os::lstat(path)?;
+        if !file_identity(&after, before.dev, before.ino) {
             return Err(Error::PrivateState);
         }
         Ok(Cached {
             connection,
-            dev: before.dev(),
-            ino: before.ino(),
+            dev: before.dev,
+            ino: before.ino,
         })
     }
 }
@@ -193,9 +197,7 @@ impl WriteLock<'_> {
         let cached = match slot.as_mut() {
             // A cached handle is still valid only while the lock path still
             // names the inode it was opened and verified against.
-            Some(cached) if file_identity(&fs::symlink_metadata(path)?, cached.dev, cached.ino) => {
-                cached
-            }
+            Some(cached) if file_identity(&os::lstat(path)?, cached.dev, cached.ino) => cached,
             Some(_) => {
                 // The lock file was replaced: close the stale handle and
                 // fail closed rather than locking the new inode sight unseen.
@@ -215,7 +217,7 @@ impl WriteLock<'_> {
         // The file could have been replaced between the identity check and
         // the lock; a mismatched inode must release the new transaction and
         // drop the stale handle rather than lock a shadow inode.
-        let after = fs::symlink_metadata(path)?;
+        let after = os::lstat(path)?;
         if !file_identity(&after, cached.dev, cached.ino) {
             let _ = cached.connection.execute_batch("ROLLBACK");
             slot.take();
@@ -243,6 +245,7 @@ impl Drop for WriteLock<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn local_writer_waiters_wake_on_release_and_time_out_when_held() {
@@ -282,11 +285,9 @@ mod tests {
         assert_eq!(path.parent().unwrap(), root);
         assert_eq!(coordination.database().unwrap(), path);
         fs::rename(&root, base.join("moved")).unwrap();
-        fs::create_dir(&root).unwrap();
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        private::directory(&root).unwrap();
         assert!(coordination.database().is_err());
         assert!(Coordination::new(&workspace, &workspace.join("locks")).is_err());
         assert!(Coordination::new(&workspace, &base).is_err());
     }
-    use std::os::unix::fs::PermissionsExt;
 }

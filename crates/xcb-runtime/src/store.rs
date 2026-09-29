@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::BTreeMap,
     fs,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
     time::Duration,
@@ -335,16 +334,10 @@ impl RunOwner {
     /// True while the recorded owning process still exists. A signal-permission
     /// failure also proves presence; only an absent or invalid pid does not.
     pub fn alive(&self) -> bool {
-        let Some(pid) = i32::try_from(self.pid)
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-        else {
+        if self.pid == 0 || i32::try_from(self.pid).is_err() {
             return false;
-        };
-        matches!(
-            rustix::process::test_kill_process(pid),
-            Ok(()) | Err(rustix::io::Errno::PERM)
-        )
+        }
+        crate::os::process_exists(self.pid) == Some(true)
     }
 }
 
@@ -384,17 +377,15 @@ impl RunRecord {
         let owner = self.owner.as_ref().ok_or(Error::Conflict(
             "run has no recorded owner; recovery custody cannot be proven",
         ))?;
-        let owner_pid = i32::try_from(owner.pid)
-            .ok()
-            .filter(|pid| *pid > 1)
-            .and_then(rustix::process::Pid::from_raw)
-            .ok_or(Error::Conflict("run owner identity is invalid"))?;
-        match rustix::process::test_kill_process(owner_pid) {
-            Err(rustix::io::Errno::SRCH) => (),
+        if owner.pid <= 1 || i32::try_from(owner.pid).is_err() {
+            return Err(Error::Conflict("run owner identity is invalid"));
+        }
+        match crate::os::process_exists(owner.pid) {
+            Some(false) => (),
             // A number that exists is never proof that this run's owner
             // exited, even if it now names another program: xcb cannot
             // tell a reused process number from the owner itself.
-            Ok(()) | Err(rustix::io::Errno::PERM) => {
+            Some(true) => {
                 return Err(Error::guided(
                     format!(
                         "process {}, which started this run, is still running, so xcb keeps the account held. Check it with `ps -p {}`: if it is xcb, let its turn finish or quit that xcb; if it is another program, the number was reused, so restart your computer to prove the run stopped",
@@ -403,7 +394,7 @@ impl RunRecord {
                     format!("xcb recover {} --yes", self.id),
                 ));
             }
-            Err(_) => {
+            None => {
                 return Err(Error::Conflict(
                     "run owner is still present or its stop is unproven",
                 ));
@@ -648,19 +639,17 @@ impl Store {
         crate::process::initialize_host()?;
         let root = private::directory(root)?;
         let lock_path = root.join(".initialize.lock");
-        let initialization = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(
-                (rustix::fs::OFlags::NOFOLLOW
-                    | rustix::fs::OFlags::NONBLOCK
-                    | rustix::fs::OFlags::CLOEXEC)
-                    .bits() as i32,
-            )
-            .open(&lock_path)?;
+        let initialization = crate::os::no_follow(
+            crate::os::owner_only(
+                fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(false),
+            ),
+            true,
+        )
+        .open(&lock_path)?;
         private::check_file(&initialization, 0)?;
         private::lock(&initialization)?;
         let initialization = private::ExclusiveLock::held(initialization);
@@ -3341,6 +3330,7 @@ mod tests {
 
     /// A refusal because a recorded process still exists says which
     /// process and what to check, and releases nothing.
+    #[cfg(unix)]
     #[test]
     fn recovery_refusals_name_the_live_process_and_what_to_check() {
         use std::os::unix::process::CommandExt;

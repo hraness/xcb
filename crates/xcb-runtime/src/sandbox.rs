@@ -250,6 +250,12 @@ impl BwrapPin {
 
 pub const BWRAP_CANDIDATES: &[&str] = &["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
 
+#[cfg(windows)]
+pub fn bwrap_candidate() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(unix)]
 pub fn bwrap_candidate() -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     BWRAP_CANDIDATES
@@ -616,7 +622,7 @@ pub fn available() -> bool {
     cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").is_file()
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{fs, io::Write, os::unix::fs::PermissionsExt};

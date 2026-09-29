@@ -14,10 +14,17 @@
 //! - `O_NOFOLLOW` → `FILE_FLAG_OPEN_REPARSE_POINT` and a check that the
 //!   opened object is not a reparse point (symlink, junction, mount point);
 //! - `(st_dev, st_ino, st_nlink)` → volume serial, file index, link count
-//!   from `GetFileInformationByHandle`.
+//!   from `GetFileInformationByHandle`;
+//! - a process group (`setpgid`, `killpg`) → a kill-on-close Job Object that
+//!   the child joins before its first instruction runs.
 
 #[cfg(windows)]
+mod job;
+#[cfg(windows)]
 mod windows;
+
+#[cfg(windows)]
+pub use job::*;
 
 #[cfg(windows)]
 pub use windows::*;

@@ -7,9 +7,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{
-    collections::BTreeSet, fs::OpenOptions, io::Read, os::unix::fs::OpenOptionsExt, path::Path,
-};
+use std::{collections::BTreeSet, fs::OpenOptions, io::Read, path::Path};
 use tokio::sync::watch;
 
 pub const MAX_DOCUMENTS: usize = 64;
@@ -74,16 +72,9 @@ pub fn read_input(path: &Path, maximum: usize) -> Result<Vec<u8>> {
     if maximum > MAX_RECIPE_BYTES {
         return Err(invalid());
     }
-    let mut file = OpenOptions::new()
-        .read(true)
-        .custom_flags(
-            (rustix::fs::OFlags::NOFOLLOW
-                | rustix::fs::OFlags::NONBLOCK
-                | rustix::fs::OFlags::CLOEXEC)
-                .bits() as i32,
-        )
-        .open(path)?;
+    let mut file = crate::os::no_follow(OpenOptions::new().read(true), true).open(path)?;
     let before = file.metadata()?;
+    let identity = xcb_core::FileIdentity::of_file(&file)?;
     if !before.is_file() || before.len() > maximum as u64 {
         return Err(invalid());
     }
@@ -91,10 +82,9 @@ pub fn read_input(path: &Path, maximum: usize) -> Result<Vec<u8>> {
     (&mut file)
         .take(maximum as u64 + 1)
         .read_to_end(&mut bytes)?;
-    let after = file.metadata()?;
     if bytes.len() > maximum
         || bytes.len() as u64 != before.len()
-        || xcb_core::FileIdentity::of(&before) != xcb_core::FileIdentity::of(&after)
+        || identity != xcb_core::FileIdentity::of_file(&file)?
     {
         return Err(Error::Conflict("context input changed during read"));
     }
@@ -731,6 +721,7 @@ mod tests {
         assert!(recipe.advance(vec![response; 8]).await.is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn input_reader_rejects_fifos_symlinks_directories_and_oversized_files() {
         use std::os::unix::fs::symlink;
@@ -757,6 +748,7 @@ mod tests {
         assert!(recipe.verify().is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn source_capture_refuses_traversal_secrets_symlinks_and_hardlinks() {
         use std::os::unix::fs::symlink;

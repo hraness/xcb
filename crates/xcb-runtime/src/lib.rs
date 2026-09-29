@@ -17,6 +17,10 @@ pub mod context;
 pub mod context_recipe;
 mod coordination;
 pub mod devin;
+#[cfg(unix)]
+pub mod egress;
+#[cfg(windows)]
+#[path = "egress_windows.rs"]
 pub mod egress;
 pub mod exports;
 pub mod habitat_service;
@@ -29,6 +33,7 @@ pub mod managed_program;
 pub(crate) mod managed_relay;
 mod managed_supervisor;
 pub mod offers;
+mod os;
 pub mod panes;
 pub mod private;
 pub mod process;
@@ -111,7 +116,18 @@ pub enum Error {
         next: Option<String>,
     },
 }
+/// Why this build refuses to start or sign in to a provider. Claude Code,
+/// Codex, and Devin run only inside xcb's macOS and Linux sandboxes; Windows
+/// builds keep everything else (accounts, routing answers, the terminal
+/// workspace, relay links) and point provider work at WSL2.
+pub const PROVIDERS_UNSUPPORTED: &str = "xcb can't run or sign in to Claude Code, Codex, or Devin on Windows: their sandbox needs macOS or Linux. Install the Linux build of xcb inside WSL2 and run providers there.";
+
 impl Error {
+    /// The refusal every provider launch and sign-in returns on Windows.
+    pub fn providers_unsupported() -> Self {
+        Self::guided(PROVIDERS_UNSUPPORTED, "wsl --install")
+    }
+
     /// A [`Error::Guided`] error with a next command.
     pub fn guided(message: impl Into<String>, next: impl Into<String>) -> Self {
         Self::Guided {

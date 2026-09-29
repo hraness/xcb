@@ -27,8 +27,9 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CreateDirectoryW, FILE_ATTRIBUTE_DIRECTORY,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-    FILE_READ_ATTRIBUTES, GetFileInformationByHandle, READ_CONTROL, WRITE_DAC,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FileBasicInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, READ_CONTROL, WRITE_DAC,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, GetExitCodeProcess, OpenProcess, OpenProcessToken,
@@ -79,6 +80,11 @@ pub struct Facts {
     /// Only this user, the token owner, SYSTEM, or Administrators have an
     /// allow entry that applies to the object (`mode & 0o077 == 0`).
     pub private: bool,
+    /// Last data write, in 100 ns ticks since 1601 (`st_mtime`).
+    pub written: i64,
+    /// Last data or metadata change, including renames and security
+    /// changes, in 100 ns ticks since 1601 (`st_ctime`).
+    pub changed: i64,
 }
 
 impl Facts {
@@ -317,6 +323,18 @@ fn facts_of(handle: HANDLE) -> io::Result<Facts> {
     } else {
         Kind::File
     };
+    let mut basic = FILE_BASIC_INFO::default();
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileBasicInfo,
+            (&raw mut basic).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
     let (owned, private) = security(handle)?;
     Ok(Facts {
         kind,
@@ -326,6 +344,8 @@ fn facts_of(handle: HANDLE) -> io::Result<Facts> {
         len: (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow),
         owned,
         private,
+        written: basic.LastWriteTime,
+        changed: basic.ChangeTime,
     })
 }
 
