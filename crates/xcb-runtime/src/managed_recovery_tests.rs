@@ -68,6 +68,7 @@ struct DiagnosticProtocol {
     model: ModelChoice,
     result_event: bool,
     stale_catalog: bool,
+    empty_catalog: bool,
 }
 
 impl crate::protocol::Protocol for DiagnosticProtocol {
@@ -77,6 +78,9 @@ impl crate::protocol::Protocol for DiagnosticProtocol {
         _: &str,
     ) -> Result<Vec<ModelChoice>> {
         let mut model = self.model.clone();
+        if self.empty_catalog {
+            return Ok(vec![]);
+        }
         if self.stale_catalog {
             model.id = Id::new("fresh-model").unwrap();
         }
@@ -89,8 +93,8 @@ impl crate::protocol::Protocol for DiagnosticProtocol {
         _: crate::protocol::Prompt,
     ) -> Result<()> {
         assert!(
-            !self.stale_catalog,
-            "stale selection must never reach start"
+            !self.stale_catalog && !self.empty_catalog,
+            "stale or empty catalog must never reach start"
         );
         if self.result_event {
             process.send(&json!({"fixture":true})).await
@@ -129,7 +133,12 @@ impl crate::protocol::Protocol for DiagnosticProtocol {
 
 #[tokio::test]
 async fn runner_diagnostic_survives_restart_and_bounded_managed_message() {
-    for (result_event, stale_catalog) in [(false, false), (true, false), (false, true)] {
+    for (result_event, stale_catalog, empty_catalog) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
         let Fixture {
             _root,
             managed,
@@ -181,9 +190,10 @@ async fn runner_diagnostic_survives_restart_and_bounded_managed_message() {
                 codex_credentials: None,
             },
             DiagnosticProtocol {
-                model: session.model,
+                model: session.model.clone(),
                 result_event,
                 stale_catalog,
+                empty_catalog,
             },
             crate::broker::Workspace::open_with_coordination(
                 Path::new(&task.workspace),
@@ -214,6 +224,11 @@ async fn runner_diagnostic_survives_restart_and_bounded_managed_message() {
                     .contains("not in the fresh provider catalog")
             );
         }
+        if empty_catalog {
+            // An empty startup catalog keeps the stored models.
+            assert_eq!(store.models().unwrap(), vec![session.model.clone()]);
+            assert!(diagnostic.as_str().contains(crate::runner::EMPTY_CATALOG));
+        }
         assert!(
             notices
                 .lock()
@@ -242,12 +257,12 @@ async fn runner_diagnostic_survives_restart_and_bounded_managed_message() {
             managed.verify_task(&task.id).await.unwrap()["verified"],
             true
         );
-        if stale_catalog {
-            // The prompt was never sent: the task picks another route from
-            // the refreshed catalog instead of failing.
+        if stale_catalog || empty_catalog {
+            // The prompt was never sent: the task picks another route
+            // instead of failing.
             assert_eq!(recovered.state, TaskState::Queued);
             assert_eq!(recovered.session, None);
-            assert!(recovered.detail.contains("left the provider's model list"));
+            assert!(recovered.detail.contains("so the prompt was not sent"));
             continue;
         }
         assert_eq!(recovered.state, TaskState::Failed);
