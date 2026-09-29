@@ -4,13 +4,15 @@ import {
   MarketingPillars,
   MarketingQuestionList,
   MarketingSection,
+  PlatformBadges,
   ProductHero,
   ProviderMark,
 } from "@hraness/design-kit/react/server";
+import { PlatformInstall } from "@hraness/design-kit/react";
 import { AskAiAboutThis } from "@hraness/ui";
 import { CodeBlock } from "./code-block";
 import { providerStatus } from "./docs/provider-status";
-import { installCommand } from "./install/commands";
+import { installPlatforms, runsOnPlatforms } from "./install/platforms";
 import { publishedRelease } from "./publication";
 import { releaseStatusLabel } from "./release-state";
 import { SiteHeader } from "./site-header";
@@ -57,7 +59,7 @@ export default function Home() {
       url: "https://xcb.sh/",
       description: metaDescription,
       applicationCategory: "DeveloperApplication",
-      operatingSystem: "macOS, Linux",
+      operatingSystem: "macOS, Linux, Windows",
       installUrl: "https://xcb.sh/install",
       isAccessibleForFree: true,
       offers: { "@type": "Offer", price: 0, priceCurrency: "USD" },
@@ -124,8 +126,16 @@ export default function Home() {
           </MarketingSection>
 
           <MarketingSection id="install" heading="Install xcb" headingId="install-title" summary={publishedRelease === null ? "No release is published yet; build from source with Git and Rust 1.97.1." : "Install the latest release, connect your Claude account, and open your thread."}>
-            <p>Available for macOS with Apple silicon and Linux x86_64. On Linux, Claude is the supported provider and needs the <a href="/docs/providers#claude-on-linux">sandbox setup</a> before your first task.</p>
-            <CodeBlock code={publishedRelease === null ? "git clone https://github.com/hraness/xcb.git && cd xcb\n./scripts/install-native.sh" : `${installCommand}\nxcb setup claude\nxcb`} copyLabel="Copy commands" />
+            {publishedRelease === null
+              ? <CodeBlock code={"git clone https://github.com/hraness/xcb.git && cd xcb\n./scripts/install-native.sh"} copyLabel="Copy commands" />
+              : (
+                <>
+                  <PlatformBadges platforms={runsOnPlatforms(publishedRelease)} />
+                  <PlatformInstall platforms={installPlatforms(publishedRelease)} />
+                  <p>Then connect your Claude account and open your thread. On Linux, Claude needs the <a href="/docs/providers#claude-on-linux">sandbox setup</a> before your first task. On Windows, providers run in WSL2.</p>
+                  <CodeBlock code={"xcb setup claude\nxcb"} copyLabel="Copy commands" />
+                </>
+              )}
             <p className="xcb-install-links"><a className="xcb-text-link" href="/install">Install guide →</a></p>
           </MarketingSection>
 

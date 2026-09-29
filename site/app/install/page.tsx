@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { PlatformBadges, PlatformInstall } from "@hraness/design-kit/react";
 import { AskAiAboutThis } from "@hraness/ui";
 import { CodeBlock } from "../code-block";
 import { supportedBuilds } from "../docs/provider-status";
@@ -7,7 +8,8 @@ import { publishedRelease } from "../publication";
 import { releaseStatusLabel } from "../release-state";
 import { SiteHeader } from "../site-header";
 import { socialImages } from "../social";
-import { agentPrompt, installCommand, pathCommand, windowsInstallCommand } from "./commands";
+import { agentPrompt, pathCommand } from "./commands";
+import { installPlatforms, runsOnPlatforms } from "./platforms";
 
 const title = "Install xcb";
 const description = "Install xcb with one command on macOS, Linux, or Windows, connect a Claude, Codex, or Devin account, and give it a first task.";
@@ -61,11 +63,12 @@ export default function Install() {
           </ul>
         </PageSection>
 
-        {released
+        {publishedRelease !== null
           ? (
             <PageSection id="install" title="1. Install xcb">
-              <p>Paste this into your terminal. It downloads the release for your computer, checks its SHA-256 checksum, and puts <code>xcb</code> in <code>~/.local/bin</code>:</p>
-              <CodeBlock code={installCommand} />
+              <PlatformBadges platforms={runsOnPlatforms(publishedRelease)} />
+              <p>Choose your system and paste the command into your terminal. It downloads the release for your computer, checks its SHA-256 checksum, and puts <code>xcb</code> in <code>~/.local/bin</code> (on Windows, see <a href="#windows">below</a>):</p>
+              <PlatformInstall platforms={installPlatforms(publishedRelease)} />
               <p>When it finishes, <code>xcb --version</code> prints the version. If your shell says it can’t find <code>xcb</code>, add this line to your shell profile (<code>~/.zshrc</code> on a Mac) and open a new terminal:</p>
               <CodeBlock code={pathCommand} />
             </PageSection>
@@ -73,15 +76,9 @@ export default function Install() {
           : null}
 
         <PageSection id="windows" title="On Windows">
-          <p>Claude Code, Codex, and Devin run only in the Linux build of xcb. On Windows, install <a href="https://learn.microsoft.com/windows/wsl/install">WSL2</a> with Ubuntu and run the Linux steps on this page inside it.</p>
+          <p>Providers don’t run in the native Windows build. To use them, install <a href="https://learn.microsoft.com/windows/wsl/install">WSL2</a> with Ubuntu and run the Linux steps on this page inside it. There, as on any Linux machine, Claude is the supported provider.</p>
           {windowsReleased
-            ? (
-              <>
-                <p>A native Windows x86_64 build runs everything else: the thread, doctor, accounts, remote control, and routing, which refuses provider work with the WSL2 steps. Install it from PowerShell:</p>
-                <CodeBlock code={windowsInstallCommand} />
-                <p>It puts <code>xcb.exe</code> in <code>%LOCALAPPDATA%\Programs\xcb\bin</code>. The binary is not code-signed yet, so Windows may show a SmartScreen prompt the first time it runs.</p>
-              </>
-            )
+            ? <p>The native Windows x86_64 build runs everything else: the thread, doctor, accounts, remote control, and routing, which refuses provider work with the WSL2 steps. Install it from PowerShell with the Windows command in <a href="#install">step 1</a>. It puts <code>xcb.exe</code> in <code>%LOCALAPPDATA%\Programs\xcb\bin</code>. The binary is not code-signed yet, so Windows may show a SmartScreen prompt the first time it runs.</p>
             : <p>A native Windows x86_64 build, which runs everything except the providers, ships with the next release.</p>}
         </PageSection>
 
