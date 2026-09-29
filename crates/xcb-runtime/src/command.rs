@@ -55,18 +55,53 @@ fn relative(value: &str) -> bool {
 
 impl CommandRequest {
     pub fn validate(&self) -> Result<()> {
+        // Each refusal names its field so the calling model can correct it.
         if self.argv.is_empty()
             || self.argv.len() > 64
             || self.argv[0].is_empty()
             || self.argv.iter().any(|arg| arg.contains('\0'))
             || self.argv.iter().map(String::len).sum::<usize>() > 32768
-            || !relative(&self.cwd)
-            || self.timeout_ms == 0
-            || self.timeout_ms > 600000
         {
-            return Err(Error::Unavailable("invalid bounded offline command"));
+            return Err(Error::Unavailable(
+                "invalid bounded offline command: argv needs 1 to 64 non-empty arguments",
+            ));
+        }
+        if !relative(&self.cwd) {
+            return Err(Error::Unavailable(
+                "invalid bounded offline command: cwd must be a folder inside the workspace, relative to its root (use \".\" for the root)",
+            ));
+        }
+        if self.timeout_ms == 0 || self.timeout_ms > 600000 {
+            return Err(Error::Unavailable(
+                "invalid bounded offline command: timeoutMs must be 1 to 600000",
+            ));
         }
         Ok(())
+    }
+
+    /// Models often pass their absolute working directory as `cwd`. Rewrite
+    /// a path at or under the workspace root to the relative form; anything
+    /// else is left for `validate` to refuse.
+    pub fn relative_to(mut self, root: &Path) -> Self {
+        let given = Path::new(&self.cwd);
+        if given.is_absolute() {
+            let inside = given
+                .strip_prefix(root)
+                .ok()
+                .map(Path::to_path_buf)
+                .or_else(|| {
+                    let canonical = std::fs::canonicalize(given).ok()?;
+                    canonical.strip_prefix(root).ok().map(Path::to_path_buf)
+                });
+            if let Some(inside) = inside.and_then(|path| path.to_str().map(str::to_owned)) {
+                self.cwd = if inside.is_empty() {
+                    ".".into()
+                } else {
+                    inside
+                };
+            }
+        }
+        self
     }
 }
 
@@ -1296,6 +1331,50 @@ mod tests {
         };
         let custody = backend.prepare(&input, &request).unwrap();
         (input, request, custody)
+    }
+
+    #[test]
+    fn absolute_cwd_inside_workspace_becomes_relative() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        std::fs::create_dir(root.join("src")).unwrap();
+        let request = |cwd: &str| CommandRequest {
+            argv: vec!["true".into()],
+            cwd: cwd.into(),
+            timeout_ms: 1000,
+            network: CommandNetwork::None,
+        };
+        let root_text = root.to_str().unwrap();
+        assert_eq!(request(root_text).relative_to(&root).cwd, ".");
+        assert_eq!(
+            request(&format!("{root_text}/src")).relative_to(&root).cwd,
+            "src"
+        );
+        assert_eq!(request("src").relative_to(&root).cwd, "src");
+        for outside in ["/", "/etc", root.parent().unwrap().to_str().unwrap()] {
+            let request = request(outside).relative_to(&root);
+            assert_eq!(request.cwd, outside);
+            let error = request.validate().unwrap_err().to_string();
+            assert!(
+                error.contains("cwd must be a folder inside the workspace"),
+                "{error}"
+            );
+        }
+        let long = CommandRequest {
+            timeout_ms: 600001,
+            ..request(".")
+        };
+        assert!(
+            long.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("timeoutMs")
+        );
+        let empty = CommandRequest {
+            argv: vec![],
+            ..request(".")
+        };
+        assert!(empty.validate().unwrap_err().to_string().contains("argv"));
     }
 
     #[test]

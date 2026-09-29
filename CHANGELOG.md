@@ -13,6 +13,7 @@ version bump pull request by renaming `## Unreleased` to the version.
 ## Unreleased
 
 - The command runner setup `--refresh` no longer fails with `public-cache-ack ValueError` after the runner VM restarts. Acknowledging a published dependency cache now remounts it read-only and rehashes it, as prepare and recover already do.
+- `workspace_exec` now accepts an absolute `cwd` inside the workspace and runs there. Before, a model that passed its absolute working directory got `invalid bounded offline command` on every call and could not run its own checks. Refusals now name the field that was wrong.
 
 ## 0.11.1 - 2026-09-28
 
