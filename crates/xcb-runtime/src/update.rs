@@ -543,10 +543,18 @@ const SYSTEMD_UNIT: &str = "xcb-update";
 const SYSTEMD_MARKER: &str = "# Written by xcb update enable; xcb update disable removes it.";
 const SYSTEMD: bool = cfg!(target_os = "linux");
 
-/// Whether this platform has the daily update check: a LaunchAgent on
-/// macOS, a systemd user timer on Linux.
+/// Platforms with a built-in daily update check.
+const SCHEDULER_PLATFORM: bool = cfg!(any(target_os = "macos", target_os = "linux"));
+
+/// Whether xcb can install the daily update check here: a LaunchAgent on
+/// macOS, or a systemd user timer on Linux when a systemd user manager
+/// answers (a container or a host without systemd has none).
 pub fn scheduler_supported() -> bool {
-    cfg!(any(target_os = "macos", target_os = "linux"))
+    if SYSTEMD {
+        crate::systemd::user_manager()
+    } else {
+        SCHEDULER_PLATFORM
+    }
 }
 
 /// Where the daily update check lives under `home`: the LaunchAgent plist
@@ -620,7 +628,7 @@ pub fn remove_scheduler_with(home: &Path, unload: impl FnOnce(&Path)) -> Result<
     let Some(first) = found.first() else {
         return Ok(false);
     };
-    if scheduler_supported() {
+    if SCHEDULER_PLATFORM {
         unload(first);
     }
     for file in &found {
@@ -725,7 +733,7 @@ fn install_systemd_scheduler(binary: &Path, home: &Path) -> Result<()> {
 pub fn install_scheduler(binary: &Path) -> Result<()> {
     if !scheduler_supported() {
         return Err(Error::Unavailable(
-            "the daily update check runs on macOS and Linux; elsewhere, run xcb update daemon once a day from your own scheduler",
+            "the daily update check needs macOS or a systemd user manager; otherwise, run xcb update daemon once a day from your own scheduler",
         ));
     }
     let home = std::env::var_os("HOME").ok_or(Error::PrivateState)?;
@@ -876,7 +884,7 @@ mod tests {
         let mut seen = None;
         assert!(remove_scheduler_with(home.path(), |path| seen = Some(path.to_owned())).unwrap());
         assert!(files.iter().all(|file| !file.exists()));
-        assert_eq!(seen.is_some(), scheduler_supported());
+        assert_eq!(seen.is_some(), SCHEDULER_PLATFORM);
         // Something else in its place is refused and left alone.
         let target = home.path().join("elsewhere.plist");
         std::fs::write(&target, "keep").unwrap();

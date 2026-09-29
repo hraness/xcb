@@ -419,6 +419,11 @@ pub fn status(root: &Path, home: &Path) -> Result<Status> {
 
 pub fn install(root: &Path, executable: &Path, home: &Path) -> Result<Status> {
     supported()?;
+    if SYSTEMD && !systemd::user_manager() {
+        return Err(Error::Unavailable(
+            "no systemd user manager answers systemctl --user; run xcb service install from a login session, or run xcb --state <root> managed-daemon from your own service manager",
+        ));
+    }
     let _guard = lock(root, "service.lock")?;
     let requested = Service::plan(root, executable, home)?;
     let service = match load(root, home)? {

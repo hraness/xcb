@@ -98,6 +98,11 @@ pub(crate) fn systemctl(args: &[&str]) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+/// Whether a systemd user manager answers `systemctl --user`.
+pub fn user_manager() -> bool {
+    systemctl(&["show-environment"])
+}
+
 /// Whether systemd keeps this user's services running while they are logged
 /// out (`loginctl enable-linger`). `None` when the user name is unknown.
 /// Without lingering, a supervisor on a headless host stops at logout and
