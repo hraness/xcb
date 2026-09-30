@@ -14,6 +14,8 @@ const markSvg = readFileSync(join(process.cwd(), "public/marks/xcb.svg"));
 export const socialSite = defineSocialImageSite({
   description: "Route coding tasks across the Claude, Codex, and Devin plans you pay for.",
   domain: "xcb.sh",
+  // Product names a card must not break across lines.
+  keepTogether: ["Claude Code Router"],
   icon: { kind: "mark", src: `data:image/svg+xml;base64,${markSvg.toString("base64")}` },
   name: "Excalibur (xcb)",
   theme: {

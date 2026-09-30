@@ -271,6 +271,140 @@ pub async fn login_with_cancel(
     pin: &Pin,
     cancel: watch::Receiver<bool>,
 ) -> Result<()> {
+    login_claude(store, id, pin, cancel, None).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeLoginEvent {
+    AuthorizationUrl(String),
+    CodeRequested,
+}
+
+pub async fn login_with_interaction(
+    store: &Store,
+    id: &Id,
+    pin: &Pin,
+    cancel: watch::Receiver<bool>,
+    events: tokio::sync::mpsc::Sender<ClaudeLoginEvent>,
+    codes: tokio::sync::mpsc::Receiver<Zeroizing<String>>,
+) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (store, id, pin, cancel, events, codes);
+        Err(Error::providers_unsupported())
+    }
+    #[cfg(unix)]
+    {
+        let (stdin, terminal) = crate::process::login_terminal()?;
+        let mut observer = ClaudeLoginObserver::default();
+        let interaction = crate::process::LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(move |bytes| {
+                for event in observer.observe(bytes) {
+                    let _ = events.try_send(event);
+                }
+                if observer.failed {
+                    Err(Error::Unavailable(
+                        "Claude browser sign-in failed; retry sign-in or paste a setup token",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }),
+        };
+        login_claude(store, id, pin, cancel, Some(interaction)).await
+    }
+}
+
+#[cfg(any(unix, test))]
+#[derive(Default)]
+struct ClaudeLoginObserver {
+    bytes: Zeroizing<Vec<u8>>,
+    url_sent: bool,
+    prompt_sent: bool,
+    failed: bool,
+}
+
+#[cfg(any(unix, test))]
+fn oauth_url_has_secret(url: &str) -> bool {
+    let mut decoded = Zeroizing::new(url.as_bytes().to_vec());
+    for _ in 0..3 {
+        if decoded.windows(7).any(|window| window == b"sk-ant-") {
+            return true;
+        }
+        let mut next = Zeroizing::new(Vec::with_capacity(decoded.len()));
+        let mut offset = 0;
+        while offset < decoded.len() {
+            if decoded[offset] == b'%' && offset + 2 < decoded.len() {
+                let hex = |b: u8| (b as char).to_digit(16).map(|n| n as u8);
+                if let (Some(a), Some(b)) = (hex(decoded[offset + 1]), hex(decoded[offset + 2])) {
+                    next.push(a * 16 + b);
+                    offset += 3;
+                    continue;
+                }
+            }
+            next.push(decoded[offset]);
+            offset += 1;
+        }
+        if *next == *decoded {
+            return false;
+        }
+        decoded = next;
+    }
+    decoded.windows(7).any(|window| window == b"sk-ant-")
+}
+
+#[cfg(any(unix, test))]
+impl ClaudeLoginObserver {
+    fn observe(&mut self, bytes: &[u8]) -> Vec<ClaudeLoginEvent> {
+        // Provider output contains the reusable token. It stays private here;
+        // only a known OAuth endpoint and a fixed prompt cross the boundary.
+        if self.bytes.len() + bytes.len() > 128 * 1024 {
+            return Vec::new();
+        }
+        self.bytes.extend_from_slice(bytes);
+        static ANSI: OnceLock<Regex> = OnceLock::new();
+        static URL: OnceLock<Regex> = OnceLock::new();
+        let raw = Zeroizing::new(String::from_utf8_lossy(&self.bytes).into_owned());
+        let text = Zeroizing::new(
+            ANSI.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap())
+                .replace_all(&raw, "")
+                .into_owned(),
+        );
+        self.failed |= text.contains("OAuth error:");
+        let mut events = Vec::new();
+        if !self.url_sent {
+            let urls = URL.get_or_init(|| Regex::new(r"https://(?:claude\.com/cai/oauth/authorize|claude\.ai/oauth/authorize|platform\.claude\.com/oauth/authorize|console\.anthropic\.com/oauth/authorize)\?[A-Za-z0-9_~%=&.+:/-]+[\s]").unwrap());
+            if let Some(url) = urls.find(&text) {
+                let url = url.as_str().trim();
+                if url.len() <= 8192
+                    && !oauth_url_has_secret(url)
+                    && url.contains("client_id=")
+                    && url.contains("state=")
+                    && url.contains("code_challenge=")
+                {
+                    self.url_sent = true;
+                    events.push(ClaudeLoginEvent::AuthorizationUrl(url.into()));
+                }
+            }
+        }
+        if !self.prompt_sent && text.contains("Paste code here if prompted") {
+            self.prompt_sent = true;
+            events.push(ClaudeLoginEvent::CodeRequested);
+        }
+        events
+    }
+}
+
+async fn login_claude(
+    store: &Store,
+    id: &Id,
+    pin: &Pin,
+    cancel: watch::Receiver<bool>,
+    interaction: Option<crate::process::LoginInteraction>,
+) -> Result<()> {
     let account = store.account(id)?;
     if account.provider != pin.provider {
         return Err(Error::Conflict("login provider mismatch"));
@@ -285,6 +419,7 @@ pub async fn login_with_cancel(
     }
     pin.verify()?;
     let run = store.prepare_probe(id, None, crate::now_ms())?;
+    let interactive = interaction.is_some();
     let planned = (|| {
         let publication = claude_token_publication(store, &run)?;
         let artifacts = LaunchArtifacts::create(store.root())?;
@@ -302,7 +437,11 @@ pub async fn login_with_cancel(
             .arg("setup-token")
             .env_clear()
             .envs(env)
+            .env("COLUMNS", "4096")
             .current_dir(&home);
+        if interactive {
+            command.env("BROWSER", "/usr/bin/true");
+        }
         Ok::<_, Error>((command, publication, artifacts))
     })();
     let (command, publication, mut artifacts) = match planned {
@@ -313,14 +452,26 @@ pub async fn login_with_cancel(
         }
     };
     artifacts.retain_before_launch();
-    let outcome = capture_supervised(
-        command,
-        64 * 1024,
-        Duration::from_secs(600),
-        cancel,
-        |pid| store.mark_spawned(&run, pid).map(|_| ()),
-    )
-    .await;
+    let outcome = if let Some(interaction) = interaction {
+        crate::process::capture_supervised_interactive(
+            command,
+            64 * 1024,
+            Duration::from_secs(600),
+            cancel,
+            |pid| store.mark_spawned(&run, pid).map(|_| ()),
+            Some(interaction),
+        )
+        .await
+    } else {
+        capture_supervised(
+            command,
+            64 * 1024,
+            Duration::from_secs(600),
+            cancel,
+            |pid| store.mark_spawned(&run, pid).map(|_| ()),
+        )
+        .await
+    };
     finish_claude_login(store, &run, &publication, &mut artifacts, outcome)
 }
 
@@ -997,6 +1148,56 @@ pub fn prepare_codex_login(
         command,
         credentials,
     })
+}
+
+#[cfg(test)]
+mod claude_login_observer_tests {
+    use super::*;
+    #[test]
+    fn private_provider_errors_fail_without_relaying_details() {
+        let mut observer = ClaudeLoginObserver::default();
+        assert!(
+            observer
+                .observe(b"OAuth error: confidential provider details")
+                .is_empty()
+        );
+        assert!(observer.failed);
+    }
+    #[test]
+    fn only_complete_oauth_links_and_fixed_prompt_leave_capture() {
+        let mut observer = ClaudeLoginObserver::default();
+        assert!(
+            observer
+                .observe(b"secret sk-ant-oat01-neverpublish\nhttps://claude.com/cai/oauth/auth")
+                .is_empty()
+        );
+        let events = observer.observe(
+            b"orize?client_id=test&state=test&code_challenge=test\nPaste code here if prompted > ",
+        );
+        assert_eq!(events, vec![ClaudeLoginEvent::AuthorizationUrl("https://claude.com/cai/oauth/authorize?client_id=test&state=test&code_challenge=test".into()), ClaudeLoginEvent::CodeRequested]);
+        assert!(
+            observer
+                .observe(b"Paste code here if prompted > ")
+                .is_empty()
+        );
+    }
+    #[test]
+    fn untrusted_endpoints_and_missing_pkce_are_not_forwarded() {
+        for text in [
+            "https://claude.com.evil/cai/oauth/authorize?client_id=x&state=x&code_challenge=x\n",
+            "https://claude.com/cai/oauth/authorize/evil?client_id=x&state=x&code_challenge=x\n",
+            "https://claude.com/cai/oauth/authorize?client_id=x&state=x\n",
+            "https://claude.com/cai/oauth/authorize?client_id=x&state=x&code_challenge=x@evil\n",
+            "https://claude.com/cai/oauth/authorize?client_id=x&state=x&code_challenge=sk-ant-oat01-private\n",
+            "https://claude.com/cai/oauth/authorize?client_id=x&state=x&code_challenge=sk%2Dant-oat01-private\n",
+        ] {
+            assert!(
+                ClaudeLoginObserver::default()
+                    .observe(text.as_bytes())
+                    .is_empty()
+            );
+        }
+    }
 }
 
 #[cfg(test)]

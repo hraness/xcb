@@ -1443,6 +1443,33 @@ fn picker_has_bottom_anchor_query_cursor_count_and_no_match_row() {
 }
 
 #[test]
+fn empty_pickers_explain_the_next_action() {
+    for (title, recovery) in [
+        ("Accounts · select an account", "xcb setup codex"),
+        ("Models · fixed, Adaptive, and Fusion", "xcb setup codex"),
+        ("Direct provider sessions", "/new"),
+        ("Control conversations", "/new"),
+        ("Managed tasks", "send a prompt"),
+        ("Other", "Esc closes"),
+    ] {
+        let mut app = app();
+        app.modal = Some(Modal::Picker {
+            title: title.into(),
+            query: String::new(),
+            selected: 0,
+            items: vec![],
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| render::draw(frame, &mut app, 0))
+            .unwrap();
+        let contents = buffer_text(&terminal);
+        assert!(contents.contains(recovery), "{title}: {contents}");
+        assert!(!contents.contains("No matches"), "{title}");
+    }
+}
+
+#[test]
 fn help_scrolls_in_short_terminals_and_uses_the_current_shortcuts() {
     let mut app = app();
     app.modal = Some(Modal::Help { scroll: 0 });

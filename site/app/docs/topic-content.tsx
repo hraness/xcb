@@ -62,7 +62,7 @@ xcb --version`}</Code>
         </>}
       <h2 id="connect">2. Connect Claude</h2>
       <Code>{`xcb setup claude`}</Code>
-      <p><code>xcb setup</code> adds an account, checks your Claude Code build, opens the browser sign-in, and loads the account’s models. It ends with “Claude Code is set up.” xcb keeps this sign-in in its own state folder, so your usual Claude Code login is unaffected.</p>
+      <p><code>xcb setup</code> lets you choose an existing account or add another, checks your Claude Code build, opens browser sign-in, and loads the account’s models. It ends with “Claude Code is set up.” xcb keeps this sign-in in its own state folder, so your usual Claude Code login is unaffected.</p>
       <h2 id="practice-project">3. Make a practice project</h2>
       <Code>{`mkdir -p ~/xcb-tutorial && cd ~/xcb-tutorial
 git init -q
@@ -255,12 +255,12 @@ function Providers() {
         </tbody>
       </table></div>
       <p>For Codex and Devin, xcb checks the executable’s SHA-256 as well as its version. When a provider updates itself to a build xcb hasn’t reviewed, <code>xcb doctor</code> says it is waiting for review and xcb keeps using the build it already checked. Reviewed builds are published in the repository’s <Ext href={`${repository}/blob/main/qualified-builds.json`}>qualified-builds.json</Ext>, and xcb picks them up within an hour without an upgrade.</p>
+      <p>During interactive Codex sign-in, xcb shows the device code and copies it to your clipboard on macOS when available. Press Enter to open the sign-in page, then paste the code. If clipboard access or opening the browser fails, use the displayed code and link. Claude Code opens its own browser sign-in flow.</p>
       <h2 id="more-than-one-account">Use more than one account per provider</h2>
-      <p><code>xcb setup</code> reuses the account it already has for that provider. To add another Claude or Codex account, add it, then sign in with a different login:</p>
+      <p>When you run <code>xcb setup</code> in a terminal, choose an existing account or add another. To connect another Claude or Codex account directly, run:</p>
       <Code>{`xcb accounts add claude
-xcb accounts login <account-id>
-xcb accounts refresh <account-id>
 xcb accounts`}</Code>
+      <p>In a terminal, <code>xcb accounts add claude</code> and <code>xcb accounts add codex</code> start sign-in and load the new account’s models. Choose the new account in your browser. Use <code>xcb setup codex --new</code> to skip the account chooser. With <code>--json</code> or piped input/output, <code>accounts add</code> only creates the account; sign in with <code>xcb accounts login &lt;account-id&gt;</code> afterward.</p>
       <p>For Codex, <code>xcb accounts import-codex</code> without <code>--account</code> also creates a new account from another ChatGPT sign-in, and each <code>xcb accounts import-devin</code> adds one Devin account. <code>xcb accounts</code> lists every account with its known usage and when it resets, and the thread and <code>xcb run</code> pick among them for each task. When every account is at a known limit, xcb reports the limit and a task from your thread waits for the reset; xcb never falls back to an API key. Each provider’s terms decide whether you may use more than one personal account, so check them before you add a second.</p>
       <h2 id="claude" className="xcb-provider-heading"><ProviderMark mark="claudecode" label="Claude Code" size={24} />Claude</h2>
       <Code>{`xcb setup claude`}</Code>

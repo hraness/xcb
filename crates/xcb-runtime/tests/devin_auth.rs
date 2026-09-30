@@ -129,6 +129,31 @@ fn devin_native_hostname_field_imports_without_rewriting_the_source() {
 }
 
 #[test]
+fn devin_import_connects_the_selected_account_without_creating_another() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = xcb_core::canonical(directory.path()).unwrap();
+    let source = private::directory(&base.join("source"))
+        .unwrap()
+        .join("credentials.toml");
+    let bytes = native_credentials("synthetic-selected-only");
+    private::create(&source, &bytes).unwrap();
+    let store = Store::open(&base.join("state")).unwrap();
+    let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
+    let other = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
+    let claude = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+    assert!(auth::import_into_account(&store, &claude.id, &source).is_err());
+    auth::import_into_account(&store, &account.id, &source).unwrap();
+    assert_eq!(store.accounts().unwrap().len(), 3);
+    assert_eq!(
+        &*auth::token(&store, &account.id).unwrap(),
+        "synthetic-selected-only"
+    );
+    assert!(!auth::has_credentials(&store, &other.id).unwrap());
+    assert_eq!(std::fs::read(&source).unwrap(), bytes);
+    assert!(store.unsettled_runs().unwrap().is_empty());
+}
+
+#[test]
 fn devin_import_rejects_unsafe_sources_before_creating_accounts() {
     let directory = tempfile::tempdir().unwrap();
     let base = xcb_core::canonical(directory.path()).unwrap();

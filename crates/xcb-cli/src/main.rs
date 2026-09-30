@@ -1,5 +1,8 @@
 mod application;
+mod claude_sign_in;
 mod context;
+mod device_sign_in;
+mod devin_sign_in;
 mod doctor;
 mod habitat;
 mod health;
@@ -13,7 +16,7 @@ mod workspaces;
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::json;
 use std::{
-    io::{self, IsTerminal, Read},
+    io::{self, IsTerminal, Read, Write},
     path::PathBuf,
     sync::{Arc, mpsc::sync_channel},
 };
@@ -73,6 +76,12 @@ enum Commands {
         /// Plan label for a new account; a display label only.
         #[arg(long, default_value = "Subscription")]
         plan: String,
+        /// Add and sign in to another account.
+        #[arg(long, conflicts_with = "account")]
+        new: bool,
+        /// Set up this existing account by name or id.
+        #[arg(long)]
+        account: Option<String>,
     },
     /// Open your thread; workers continue after detach.
     Chat {
@@ -505,8 +514,8 @@ enum UpdateCommand {
 
 #[derive(Subcommand)]
 enum AccountCommand {
-    /// Add an account. Its name is fixed: the provider account email once
-    /// observed, otherwise `provider/<id>`; there are no custom labels.
+    /// Add and sign in to an account. With --json or outside a terminal,
+    /// create the account only.
     Add {
         /// Provider to add: claude, codex, or devin.
         provider: Provider,
@@ -1071,14 +1080,7 @@ impl PublicAccount<'_> {
             self.provider,
             self.id
         );
-        let next = if matches!(self.provider, Provider::Claude | Provider::Codex) {
-            format!("xcb accounts login {}", self.id)
-        } else {
-            format!(
-                "pipe a Devin token into xcb accounts token {}, or copy an existing sign-in with xcb accounts import-devin --source <path to credentials.toml>",
-                self.id
-            )
-        };
+        let next = format!("xcb accounts login {}", self.id);
         (added, next)
     }
 }
@@ -1236,7 +1238,7 @@ fn require_account_credentials(store: &Store, account: &xcb_runtime::store::Acco
             "connect this Codex account with xcb accounts login <account> or explicitly import auth.json with xcb accounts import-codex --source <path>"
         }
         Provider::Devin => {
-            "connect Devin by explicitly importing credentials.toml with xcb accounts import-devin --source <path>, or pipe a token into xcb accounts token <account>"
+            "connect this Devin account with xcb accounts login <account>, or explicitly import credentials.toml with xcb accounts import-devin --source <path>"
         }
     }))
 }
@@ -1622,113 +1624,115 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             account,
             model,
             images,
-        }) => Box::pin(async move {
-            let prompt = match prompt {
-                Some(prompt) => prompt,
-                None if !io::stdin().is_terminal() => {
-                    String::from_utf8(stdin(xcb_core::MAX_TEXT_BYTES)?)
-                        .map_err(|_| xcb_core::Error::Invalid("UTF-8 prompt"))?
+        }) => {
+            Box::pin(async move {
+                let prompt = match prompt {
+                    Some(prompt) => prompt,
+                    None if !io::stdin().is_terminal() => {
+                        String::from_utf8(stdin(xcb_core::MAX_TEXT_BYTES)?)
+                            .map_err(|_| xcb_core::Error::Invalid("UTF-8 prompt"))?
+                    }
+                    None => {
+                        return Err(Error::Unavailable(
+                            "use xcb run -p <task> or pipe a task on stdin",
+                        ));
+                    }
+                };
+                xcb_core::bounded_text(&prompt, xcb_core::MAX_TEXT_BYTES)?;
+                if images.len() > 8 {
+                    return Err(xcb_core::Error::Limit("images").into());
                 }
-                None => {
-                    return Err(Error::Unavailable(
-                        "use xcb run -p <task> or pipe a task on stdin",
-                    ));
+                let (cancel, cancelled) = watch::channel(false);
+                // Install both handlers before routing, which can start provider
+                // work, and before any provider starts. SIGTERM must use the same
+                // independent join/custody path as interactive Ctrl-C.
+                let mut stop = stop::Stop::install()?;
+                let _interrupt = AbortOnDrop(tokio::spawn(async move {
+                    stop.recv().await;
+                    let _ = cancel.send(true);
+                }));
+                let stopped_early =
+                    || Error::Unavailable("cancelled before the task started; no provider ran");
+                let attachments = images
+                    .iter()
+                    .map(|path| xcb_runtime::attachments::from_path(store.root(), path))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut account = account
+                    .map(|name| store.resolve_account(&name).map(|account| account.id))
+                    .transpose()?;
+                let mut model = model;
+                if model.as_deref().is_none_or(|model| model == "auto") {
+                    let workspace = xcb_core::canonical(&cli.cwd)?;
+                    let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
+                    let (preference, required) =
+                        managed.initial_route_preferences(&workspace, &prompt)?;
+                    let (preferred_provider, required_provider) =
+                        preview_provider_preferences(preference, required, None)?;
+                    let excluded_routes = std::collections::BTreeSet::new();
+                    let excluded_accounts = std::collections::BTreeSet::new();
+                    let decision = xcb_runtime::routing::smart_route(
+                        &store,
+                        &config,
+                        xcb_runtime::routing::RouteRequest {
+                            task: &prompt,
+                            required_provider,
+                            preferred_provider,
+                            required_model: None,
+                            excluded_routes: &excluded_routes,
+                            excluded_accounts: &excluded_accounts,
+                            account: account.as_ref(),
+                        },
+                    )
+                    .await?;
+                    eprintln!("xcb: {}", automatic_route_notice(&decision.reason));
+                    account = Some(decision.account);
+                    model = Some(decision.model.key());
                 }
-            };
-            xcb_core::bounded_text(&prompt, xcb_core::MAX_TEXT_BYTES)?;
-            if images.len() > 8 {
-                return Err(xcb_core::Error::Limit("images").into());
-            }
-            let (cancel, cancelled) = watch::channel(false);
-            // Install both handlers before routing, which can start provider
-            // work, and before any provider starts. SIGTERM must use the same
-            // independent join/custody path as interactive Ctrl-C.
-            let mut stop = stop::Stop::install()?;
-            let _interrupt = AbortOnDrop(tokio::spawn(async move {
-                stop.recv().await;
-                let _ = cancel.send(true);
-            }));
-            let stopped_early =
-                || Error::Unavailable("cancelled before the task started; no provider ran");
-            let attachments = images
-                .iter()
-                .map(|path| xcb_runtime::attachments::from_path(store.root(), path))
-                .collect::<Result<Vec<_>>>()?;
-            let mut account = account
-                .map(|name| store.resolve_account(&name).map(|account| account.id))
-                .transpose()?;
-            let mut model = model;
-            if model.as_deref().is_none_or(|model| model == "auto") {
-                let workspace = xcb_core::canonical(&cli.cwd)?;
-                let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
-                let (preference, required) =
-                    managed.initial_route_preferences(&workspace, &prompt)?;
-                let (preferred_provider, required_provider) =
-                    preview_provider_preferences(preference, required, None)?;
-                let excluded_routes = std::collections::BTreeSet::new();
-                let excluded_accounts = std::collections::BTreeSet::new();
-                let decision = xcb_runtime::routing::smart_route(
+                if *cancelled.borrow() {
+                    return Err(stopped_early());
+                }
+                let session = kernel::new_session(
                     &store,
+                    &xcb_core::canonical(&cli.cwd)?,
                     &config,
-                    xcb_runtime::routing::RouteRequest {
-                        task: &prompt,
-                        required_provider,
-                        preferred_provider,
-                        required_model: None,
-                        excluded_routes: &excluded_routes,
-                        excluded_accounts: &excluded_accounts,
-                        account: account.as_ref(),
-                    },
-                )
-                .await?;
-                eprintln!("xcb: {}", automatic_route_notice(&decision.reason));
-                account = Some(decision.account);
-                model = Some(decision.model.key());
-            }
-            if *cancelled.borrow() {
-                return Err(stopped_early());
-            }
-            let session = kernel::new_session(
-                &store,
-                &xcb_core::canonical(&cli.cwd)?,
-                &config,
-                account.as_ref(),
-                model.as_deref(),
-                None,
-            )?;
-            if *cancelled.borrow() {
-                return Err(stopped_early());
-            }
-            let observer: Observer = Arc::new(|event| {
-                if let Progress::Notice(message) = event {
-                    eprintln!("xcb: {message}");
+                    account.as_ref(),
+                    model.as_deref(),
+                    None,
+                )?;
+                if *cancelled.borrow() {
+                    return Err(stopped_early());
                 }
-            });
-            let result = kernel::execute(
-                store.clone(),
-                session.id.clone(),
-                prompt,
-                attachments,
-                false,
-                cancelled,
-                observer,
-            )
-            .await;
-            let result = result?;
-            if cli.json {
-                print_json(run_output(&session.id, &result))?;
-            } else if xcb_core::policy::no_reply(&result.text, &result.facts) {
-                // Failover can move the session to another provider.
-                let provider = store
-                    .session(&session.id)?
-                    .map_or(session.model.provider, |current| current.model.provider);
-                return Err(no_reply_error(provider, &session.id));
-            } else {
-                println!("{}", result.text);
-            }
-            Ok(run_exit_code(&result))
-        })
-        .await,
+                let observer: Observer = Arc::new(|event| {
+                    if let Progress::Notice(message) = event {
+                        eprintln!("xcb: {message}");
+                    }
+                });
+                let result = kernel::execute(
+                    store.clone(),
+                    session.id.clone(),
+                    prompt,
+                    attachments,
+                    false,
+                    cancelled,
+                    observer,
+                )
+                .await;
+                let result = result?;
+                if cli.json {
+                    print_json(run_output(&session.id, &result))?;
+                } else if xcb_core::policy::no_reply(&result.text, &result.facts) {
+                    // Failover can move the session to another provider.
+                    let provider = store
+                        .session(&session.id)?
+                        .map_or(session.model.provider, |current| current.model.provider);
+                    return Err(no_reply_error(provider, &session.id));
+                } else {
+                    println!("{}", result.text);
+                }
+                Ok(run_exit_code(&result))
+            })
+            .await
+        }
         Some(Commands::Accounts { command }) => {
             match command {
                 None => accounts(&store, &config, cli.json)?,
@@ -1745,41 +1749,91 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     } else {
                         let (added, next) = public.added_message();
                         println!("{} {added}", ux::Style::stdout().symbol(ux::Symbol::Ok));
-                        ux::next(&next);
+                        if interactive_account_add(cli.json, provider, terminal_available()) {
+                            let retry = format!("xcb setup {provider} --account {}", account.id);
+                            finish_account_setup(&store, provider, Some(account))
+                                .await
+                                .map_err(|error| Error::guided(error.to_string(), retry))?;
+                        } else {
+                            ux::next(&next);
+                        }
                     }
                 }
                 Some(AccountCommand::Login { account }) => {
                     let account = store.resolve_account(&account)?;
-                    if account.provider == Provider::Devin {
-                        return Err(Error::Unavailable(
-                            "sign in with devin auth login, then use xcb accounts import-devin --source <absolute credentials.toml path>; to connect this account directly, pipe a token into xcb accounts token <account>",
-                        ));
-                    }
                     let pin = ensure_pin(store.root(), account.provider).await?;
                     match account.provider {
                         Provider::Claude => {
                             eprintln!(
-                                "{} Opening your browser to sign in to Claude for xcb. xcb keeps the token in its own state folder, never in your keychain.",
+                                "{} Starting Claude sign-in. xcb will show its sign-in page and keep the token in its own state folder.",
                                 ux::Style::stderr().symbol(ux::Symbol::Next)
                             );
                             let (cancel, receiver) = tokio::sync::watch::channel(false);
                             let mut stop = stop::Stop::install()?;
-                            let login =
-                                auth::login_with_cancel(&store, &account.id, &pin, receiver);
-                            tokio::pin!(login);
-                            tokio::select! {
-                                result = &mut login => result?,
-                                _ = stop.recv() => { let _ = cancel.send(true); login.await?; },
+                            if terminal_available() && !cli.json {
+                                let (events, prompts) = tokio::sync::mpsc::channel(8);
+                                let (codes, input) = tokio::sync::mpsc::channel(1);
+                                let login = auth::login_with_interaction(
+                                    &store,
+                                    &account.id,
+                                    &pin,
+                                    receiver,
+                                    events,
+                                    input,
+                                );
+                                let assistance = claude_sign_in::serve(prompts, codes);
+                                tokio::pin!(login, assistance);
+                                tokio::select! {
+                                    result = &mut login => result?,
+                                    complete = &mut assistance => {
+                                        if !complete { let _ = cancel.send(true); }
+                                        login.await?;
+                                    },
+                                    _ = stop.recv() => { let _ = cancel.send(true); login.await?; },
+                                }
+                            } else {
+                                return Err(Error::guided(
+                                    "Claude browser sign-in requires a terminal",
+                                    format!("xcb accounts login {}", account.id),
+                                ));
                             }
                         }
                         Provider::Codex => {
-                            eprintln!(
-                                "{} Codex will print a sign-in page and a code. Open the page and enter the code to connect this account to xcb.",
-                                ux::Style::stderr().symbol(ux::Symbol::Next)
-                            );
-                            runner::login_codex(&store, &account.id, &pin).await?
+                            if terminal_available() && !cli.json {
+                                eprintln!(
+                                    "{} Codex will show a sign-in code. Press Enter when you're ready to open its sign-in page.",
+                                    ux::Style::stderr().symbol(ux::Symbol::Next)
+                                );
+                                let (sender, receiver) = tokio::sync::mpsc::channel(1);
+                                let login = runner::login_codex_with_prompt(
+                                    &store,
+                                    &account.id,
+                                    &pin,
+                                    sender,
+                                );
+                                let assistance = device_sign_in::serve(receiver);
+                                tokio::pin!(login, assistance);
+                                tokio::select! {
+                                    result = &mut login => result?,
+                                    _ = &mut assistance => login.await?,
+                                }
+                            } else {
+                                eprintln!(
+                                    "{} Codex will print a sign-in page and a code. Open the page and enter the code to connect this account to xcb.",
+                                    ux::Style::stderr().symbol(ux::Symbol::Next)
+                                );
+                                runner::login_codex(&store, &account.id, &pin).await?;
+                            }
                         }
-                        Provider::Devin => unreachable!("Devin sign-in is gated above"),
+                        Provider::Devin => {
+                            if !terminal_available() || cli.json {
+                                return Err(Error::guided(
+                                    "Devin browser sign-in requires a terminal",
+                                    format!("xcb accounts login {}", account.id),
+                                ));
+                            }
+                            devin_sign_in::login(&store, &account.id, &pin).await?;
+                        }
                     }
                     if cli.json {
                         print_json(json!({"version":1,"account":account.id,"stored":true}))?;
@@ -1894,107 +1948,104 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         // Setup can recursively dispatch login, so it needs a separate frame.
-        Some(Commands::Setup { provider, plan }) => Box::pin(async move {
-            if cli.json {
-                return Err(Error::guided(
-                    "xcb setup is interactive, so it has no --json output",
-                    format!("xcb --json accounts add {provider}"),
-                ));
-            }
-            let ok = ux::Style::stdout().symbol(ux::Symbol::Ok);
-            let name = provider_name(provider);
-            // 1. One account for this provider: reuse a healthy sign-in, then
-            // any enabled one, or add one.
-            let accounts: Vec<_> = store
-                .accounts()?
-                .into_iter()
-                .filter(|account| account.provider == provider)
-                .collect();
-            if !accounts.is_empty() && accounts.iter().all(|account| !account.enabled) {
-                // Routing skips turned-off accounts; setting one up would
-                // still leave plain `xcb` without an account.
-                return Err(Error::guided(
-                    format!(
-                        "Your {name} account {} is turned off",
-                        xcb_core::display_text(&accounts[0].name(), 80)
-                    ),
-                    format!("xcb accounts enable {}", accounts[0].id),
-                ));
-            }
-            let signed_in = |account: &xcb_runtime::store::Account| {
-                !account_needs_sign_in(&store, account).unwrap_or(true)
-            };
-            let existing = accounts
-                .iter()
-                .find(|account| account.enabled && signed_in(account))
-                .or_else(|| accounts.iter().find(|account| account.enabled))
-                .cloned();
-            let account = match existing {
-                Some(account) => {
-                    println!(
-                        "{ok} Using {} ({provider}) · {}",
-                        xcb_core::display_text(&account.name(), 80),
-                        account.id
-                    );
-                    Some(account)
+        Some(Commands::Setup {
+            provider,
+            plan,
+            new,
+            account,
+        }) => {
+            Box::pin(async move {
+                if cli.json {
+                    return Err(Error::guided(
+                        "xcb setup has no --json output",
+                        format!("xcb --json accounts add {provider}"),
+                    ));
                 }
-                // Devin signs in with its own tool, and importing that
-                // sign-in adds the account, so an empty one would only
-                // linger as needing sign-in.
-                None if provider == Provider::Devin => None,
-                None => {
-                    let account = store.add_account(provider, &plan, now_ms(), None)?;
-                    let (mut config, revision) = Config::load(store.root())?;
-                    if config.default_account.is_none() {
-                        config.default_account = Some(account.id.clone());
-                        config.save(store.root(), revision.as_deref())?;
+                let accounts: Vec<_> = store
+                    .accounts()?
+                    .into_iter()
+                    .filter(|account| account.provider == provider)
+                    .collect();
+                let selected = if let Some(selector) = account {
+                    let selected = store.resolve_account(&selector)?;
+                    if selected.provider != provider {
+                        return Err(Error::guided(
+                            "The account uses a different provider",
+                            format!("xcb setup {} --account {}", selected.provider, selected.id),
+                        ));
                     }
-                    println!("{ok} {}", PublicAccount::from(&account).added_message().0);
-                    Some(account)
+                    Some(selected)
+                } else if new {
+                    None
+                } else if !accounts.is_empty() && terminal_available() {
+                    match choose_setup_account(&accounts, provider)? {
+                        SetupChoice::New => None,
+                        SetupChoice::Existing(index) => Some(accounts[index].clone()),
+                        SetupChoice::Cancel => return Ok(0),
+                    }
+                } else {
+                    // Outside a terminal preserve deterministic reuse of a healthy enabled account.
+                    accounts
+                        .iter()
+                        .find(|account| {
+                            account.enabled
+                                && !account_needs_sign_in(&store, account).unwrap_or(true)
+                        })
+                        .or_else(|| accounts.iter().find(|account| account.enabled))
+                        .cloned()
+                };
+                if let Some(account) = &selected {
+                    if !account.enabled {
+                        return Err(Error::guided(
+                            "This account is turned off",
+                            format!("xcb accounts enable {}", account.id),
+                        ));
+                    }
+                    let identity = if terminal_available() {
+                        String::new()
+                    } else {
+                        format!(" · {}", account.id)
+                    };
+                    println!(
+                        "{} Using {} ({provider}){identity}",
+                        ux::Style::stdout().symbol(ux::Symbol::Ok),
+                        xcb_core::display_text(&account.name(), 80)
+                    );
+                } else if !new
+                    && !terminal_available()
+                    && !accounts.is_empty()
+                    && accounts.iter().all(|account| !account.enabled)
+                {
+                    return Err(Error::guided(
+                        format!(
+                            "Your {} account {} is turned off",
+                            provider_name(provider),
+                            xcb_core::display_text(&accounts[0].name(), 80)
+                        ),
+                        format!("xcb accounts enable {}", accounts[0].id),
+                    ));
                 }
-            };
-            // 2. Check the provider build, and that xcb can run it, before
-            // any sign-in starts.
-            let pin = ensure_pin(store.root(), provider).await?;
-            require_supported(store.root(), &pin)?;
-            println!("{ok} {name} {} is installed", pin.version);
-            // 3. A rejected credential must be replaced by sign-in; refreshing
-            // model metadata does not repair authentication.
-            let Some(account) = account else {
-                ux::next(
-                    "sign in with devin auth login, then run xcb accounts import-devin --source <path to credentials.toml>",
-                );
-                return Ok(0);
-            };
-            if account_needs_sign_in(&store, &account)? {
-                if provider == Provider::Devin {
-                    ux::next(&health::sign_in_step(provider, &account.id));
-                    return Ok(0);
-                }
-                let _held = ux::hold_next();
-                Box::pin(dispatch(Cli {
-                    state: Some(store.root().to_path_buf()),
-                    json: false,
-                    cwd: PathBuf::from("."),
-                    command: Some(Commands::Accounts {
-                        command: Some(AccountCommand::Login {
-                            account: account.id.to_string(),
-                        }),
-                    }),
-                }))
-                .await?;
-            }
-            // 4. Load the account's models (what `accounts refresh` does).
-            require_setup_sign_in(&store, &account)?;
-            let models = runner::probe(&store, &pin, Some(&account.id)).await?;
-            require_setup_sign_in(&store, &account)?;
-            store.set_account_models(&account.id, &models)?;
-            println!("{ok} Loaded {} models", models.len());
-            println!("{ok} {name} is set up.");
-            ux::next("xcb");
-            Ok(0)
-        })
-        .await,
+                let selected = match selected {
+                    Some(account) => Some(account),
+                    None if provider == Provider::Devin => {
+                        let pin = ensure_pin(store.root(), provider).await?;
+                        require_supported(store.root(), &pin)?;
+                        Some(add_setup_account(&store, provider, &plan)?)
+                    }
+                    None => Some(add_setup_account(&store, provider, &plan)?),
+                };
+                let retry = selected
+                    .as_ref()
+                    .map(|account| format!("xcb setup {provider} --account {}", account.id));
+                finish_account_setup(&store, provider, selected)
+                    .await
+                    .map_err(|error| match retry {
+                        Some(command) => Error::guided(error.to_string(), command),
+                        None => error,
+                    })
+            })
+            .await
+        }
         Some(Commands::Doctor {
             provider,
             executable,
@@ -2445,23 +2496,56 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     if cli.json {
                         print_json(&report)?;
                     } else {
-                        println!("{} recent conversation(s) in the last {hours} hours.", report.sessions.len());
+                        println!(
+                            "{} recent conversation(s) in the last {hours} hours.",
+                            report.sessions.len()
+                        );
                         for session in &report.sessions {
-                            println!("{}  {}  {}  {} message(s){}\n  {}", session.id, session.provider, human_age(now_ms(), session.last_active_at_ms), session.message_count, if session.truncated { " (partial history)" } else { "" }, table::fit(&session.workspace, 160));
+                            println!(
+                                "{}  {}  {}  {} message(s){}\n  {}",
+                                session.id,
+                                session.provider,
+                                human_age(now_ms(), session.last_active_at_ms),
+                                session.message_count,
+                                if session.truncated {
+                                    " (partial history)"
+                                } else {
+                                    ""
+                                },
+                                table::fit(&session.workspace, 160)
+                            );
                         }
                         if report.skipped_files > 0 || report.truncated {
-                            println!("Skipped {} unreadable, unsupported, or excluded file(s).{}", report.skipped_files, if report.truncated { " Scan limit reached; the newest files were read first." } else { "" });
+                            println!(
+                                "Skipped {} unreadable, unsupported, or excluded file(s).{}",
+                                report.skipped_files,
+                                if report.truncated {
+                                    " Scan limit reached; the newest files were read first."
+                                } else {
+                                    ""
+                                }
+                            );
                         }
-                        println!("Recent activity does not establish whether a provider process is running.");
+                        println!(
+                            "Recent activity does not establish whether a provider process is running."
+                        );
                         ux::next("xcb sessions import --recent");
                     }
                 }
-                Some(SessionCommand::Import { id, recent: _, workspace, hours, provider }) => {
+                Some(SessionCommand::Import {
+                    id,
+                    recent: _,
+                    workspace,
+                    hours,
+                    provider,
+                }) => {
                     let mut report = discover_provider_sessions(provider.as_deref(), hours)?;
                     if let Some(id) = id {
                         report.sessions.retain(|session| session.id == id);
                         if report.sessions.is_empty() {
-                            return Err(Error::Unavailable("session candidate not found; run xcb sessions discover with the same --hours and --provider options"));
+                            return Err(Error::Unavailable(
+                                "session candidate not found; run xcb sessions discover with the same --hours and --provider options",
+                            ));
                         }
                     }
                     let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
@@ -2469,31 +2553,58 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     let mut results = Vec::new();
                     let mut failed = Vec::new();
                     for session in &report.sessions {
-                        match managed.import_session_into(session, workspace.as_deref()).await {
+                        match managed
+                            .import_session_into(session, workspace.as_deref())
+                            .await
+                        {
                             Ok(result) => results.push(result),
-                            Err(error) => failed.push(json!({"id":session.id,"reason":error.to_string()})),
+                            Err(error) => {
+                                failed.push(json!({"id":session.id,"reason":error.to_string()}))
+                            }
                         }
                     }
                     let created = results.iter().filter(|result| result.created).count();
-                    let updated = results.iter().filter(|result| !result.created && result.added_messages > 0).count();
+                    let updated = results
+                        .iter()
+                        .filter(|result| !result.created && result.added_messages > 0)
+                        .count();
                     let unchanged = results.len() - created - updated;
-                    let added_messages: usize = results.iter().map(|result| result.added_messages).sum();
+                    let added_messages: usize =
+                        results.iter().map(|result| result.added_messages).sum();
                     if cli.json {
-                        print_json(json!({"version":1,"created":created,"updated":updated,"unchanged":unchanged,"added_messages":added_messages,"skipped_files":report.skipped_files,"truncated":report.truncated,"source_preserved":true,"tasks_started":0,"results":results,"failed":failed}))?;
+                        print_json(
+                            json!({"version":1,"created":created,"updated":updated,"unchanged":unchanged,"added_messages":added_messages,"skipped_files":report.skipped_files,"truncated":report.truncated,"source_preserved":true,"tasks_started":0,"results":results,"failed":failed}),
+                        )?;
                     } else {
-                        println!("Imported {created} new conversation(s), updated {updated}, unchanged {unchanged}; added {added_messages} message(s).");
+                        println!(
+                            "Imported {created} new conversation(s), updated {updated}, unchanged {unchanged}; added {added_messages} message(s)."
+                        );
                         println!("Original files are unchanged. No tasks were started.");
                         for result in &results {
                             println!("xcb chat --resume {}", result.conversation);
                         }
                         for failure in &failed {
-                            println!("Skipped {}: {}", failure["id"].as_str().unwrap_or("session"), failure["reason"].as_str().unwrap_or("import failed"));
+                            println!(
+                                "Skipped {}: {}",
+                                failure["id"].as_str().unwrap_or("session"),
+                                failure["reason"].as_str().unwrap_or("import failed")
+                            );
                         }
                         if report.skipped_files > 0 || report.truncated {
-                            println!("Discovery skipped {} file(s).{}", report.skipped_files, if report.truncated { " Scan limit reached." } else { "" });
+                            println!(
+                                "Discovery skipped {} file(s).{}",
+                                report.skipped_files,
+                                if report.truncated {
+                                    " Scan limit reached."
+                                } else {
+                                    ""
+                                }
+                            );
                         }
                     }
-                    if !failed.is_empty() { return Ok(1); }
+                    if !failed.is_empty() {
+                        return Ok(1);
+                    }
                 }
                 None => {
                     let sessions = store.sessions(64)?;
@@ -3694,6 +3805,125 @@ fn conversation_rows(
         .collect()
 }
 
+fn terminal_available() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+fn interactive_account_add(json: bool, _provider: Provider, terminal: bool) -> bool {
+    !json && terminal
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SetupChoice {
+    New,
+    Existing(usize),
+    Cancel,
+}
+
+fn parse_setup_choice(input: &str, count: usize) -> Option<SetupChoice> {
+    match input.trim() {
+        "" | "0" | "q" | "cancel" => Some(SetupChoice::Cancel),
+        "1" => Some(SetupChoice::New),
+        value => value.parse::<usize>().ok().and_then(|number| {
+            (number >= 2 && number <= count + 1).then(|| SetupChoice::Existing(number - 2))
+        }),
+    }
+}
+
+fn choose_setup_account(
+    accounts: &[xcb_runtime::store::Account],
+    provider: Provider,
+) -> Result<SetupChoice> {
+    eprintln!("Set up {provider}");
+    eprintln!("  1. Add another account");
+    for (index, account) in accounts.iter().enumerate() {
+        let status = if account.enabled { "" } else { " (turned off)" };
+        eprintln!(
+            "  {}. Use {}{status}",
+            index + 2,
+            xcb_core::display_text(&account.name(), 80)
+        );
+    }
+    eprintln!("  0. Cancel");
+    loop {
+        eprint!("Choose an account: ");
+        io::stderr().flush()?;
+        let mut input = String::new();
+        // EOF cancels before adding accounts or opening sign-in.
+        if io::stdin().read_line(&mut input)? == 0 {
+            return Ok(SetupChoice::Cancel);
+        }
+        if let Some(choice) = parse_setup_choice(&input, accounts.len()) {
+            return Ok(choice);
+        }
+        eprintln!("Enter a number from 0 to {}.", accounts.len() + 1);
+    }
+}
+
+fn add_setup_account(
+    store: &Store,
+    provider: Provider,
+    plan: &str,
+) -> Result<xcb_runtime::store::Account> {
+    let account = store.add_account(provider, plan, now_ms(), None)?;
+    let (mut config, revision) = Config::load(store.root())?;
+    if config.default_account.is_none() {
+        config.default_account = Some(account.id.clone());
+        config.save(store.root(), revision.as_deref())?;
+    }
+    println!(
+        "{} {}",
+        ux::Style::stdout().symbol(ux::Symbol::Ok),
+        PublicAccount::from(&account).added_message().0
+    );
+    Ok(account)
+}
+
+async fn finish_account_setup(
+    store: &Store,
+    provider: Provider,
+    account: Option<xcb_runtime::store::Account>,
+) -> Result<i32> {
+    let ok = ux::Style::stdout().symbol(ux::Symbol::Ok);
+    let name = provider_name(provider);
+    // 2. Check the provider build, and that xcb can run it, before
+    // any sign-in starts.
+    let pin = ensure_pin(store.root(), provider).await?;
+    require_supported(store.root(), &pin)?;
+    println!("{ok} {name} {} is installed", pin.version);
+    // 3. A rejected credential must be replaced by sign-in; refreshing
+    // model metadata does not repair authentication.
+    let Some(account) = account else {
+        ux::next(
+            "sign in with devin auth login, then run xcb accounts import-devin --source <path to credentials.toml>",
+        );
+        return Ok(0);
+    };
+    if account_needs_sign_in(store, &account)? {
+        let _held = ux::hold_next();
+        Box::pin(dispatch(Cli {
+            state: Some(store.root().to_path_buf()),
+            json: false,
+            cwd: PathBuf::from("."),
+            command: Some(Commands::Accounts {
+                command: Some(AccountCommand::Login {
+                    account: account.id.to_string(),
+                }),
+            }),
+        }))
+        .await?;
+    }
+    // 4. Load the account's models (what `accounts refresh` does).
+    require_setup_sign_in(store, &account)?;
+    let models = runner::probe(store, &pin, Some(&account.id)).await?;
+    require_setup_sign_in(store, &account)?;
+    store.set_account_models(&account.id, &models)?;
+    println!("{ok} Loaded {} models", models.len());
+    println!("{ok} {name} is set up.");
+    ux::next("xcb");
+    Ok(0)
+}
+
 async fn managed_chat(
     store: Arc<Store>,
     cwd: PathBuf,
@@ -4513,6 +4743,51 @@ mod recent_session_cli_tests {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn account_setup_parser_accepts_new_and_explicit_existing() {
+        let cli = Cli::try_parse_from(["xcb", "setup", "codex", "--new"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Setup {
+                new: true,
+                account: None,
+                ..
+            })
+        ));
+        let cli =
+            Cli::try_parse_from(["xcb", "setup", "claude", "--account", "a_existing"]).unwrap();
+        assert!(
+            matches!(cli.command, Some(Commands::Setup { new: false, account: Some(account), .. }) if account == "a_existing")
+        );
+        assert!(
+            Cli::try_parse_from(["xcb", "setup", "codex", "--new", "--account", "a_existing"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn account_add_interactive_policy_keeps_automation_create_only() {
+        for provider in [Provider::Claude, Provider::Codex, Provider::Devin] {
+            assert!(super::interactive_account_add(false, provider, true));
+            assert!(!super::interactive_account_add(true, provider, true));
+            assert!(!super::interactive_account_add(false, provider, false));
+        }
+    }
+
+    #[test]
+    fn account_setup_choice_has_explicit_new_existing_and_cancel() {
+        use super::{SetupChoice, parse_setup_choice};
+        assert_eq!(parse_setup_choice("1\n", 2), Some(SetupChoice::New));
+        assert_eq!(parse_setup_choice("2", 2), Some(SetupChoice::Existing(0)));
+        assert_eq!(parse_setup_choice("3", 2), Some(SetupChoice::Existing(1)));
+        for input in ["", "\n", "0", "q", "cancel"] {
+            assert_eq!(parse_setup_choice(input, 2), Some(SetupChoice::Cancel));
+        }
+        for input in ["4", "-1", "abc"] {
+            assert_eq!(parse_setup_choice(input, 2), None);
+        }
+    }
+
+    #[test]
     fn service_status_names_the_log_and_a_denied_folder() {
         use xcb_runtime::habitat_service::{Service, Status};
         let dir = std::env::temp_dir().join(format!("xcb-service-text-{}", std::process::id()));
@@ -4904,10 +5179,8 @@ mod tests {
             enabled: true,
         };
         let message = joined(account.added_message());
-        assert!(message.contains("xcb accounts token a_devin"));
-        assert!(message.contains("xcb accounts import-devin --source"));
-        assert!(!message.contains("metadata only"));
-        assert!(!message.contains("accounts login"));
+        assert!(message.contains("xcb accounts login a_devin"));
+        assert!(!message.contains("<path"));
     }
 
     #[test]

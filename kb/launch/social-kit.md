@@ -6,61 +6,55 @@ Posts go out from the @hraness account. The status is Latest release: v0.12.0. T
 
 ## X thread
 
-Post 1 of 10, 207 characters
+Post 1 of 9, 207 characters
 
 ```text
 Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude, Codex, and Devin. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
 ```
 
-Post 2 of 10, 186 characters
+Post 2 of 9, 186 characters
 
 ```text
 Quota you don't use by the reset is gone. xcb reads each Claude and Codex account's usage, no more than five minutes old, and favors the account whose unused quota is closest to lapsing.
 ```
 
-Post 3 of 10, 201 characters
+Post 3 of 9, 201 characters
 
 ```text
 When a provider says an account hit its usage limit partway through a task, xcb moves the task to another of your accounts, with its original instructions. You don't paste the prompt into a new window.
 ```
 
-Post 4 of 10, 164 characters
+Post 4 of 9, 164 characters
 
 ```text
 Every task runs in the background. xcb tasks lists them across all your projects, and xcb attention collects the questions your agents are waiting on you to answer.
 ```
 
-Post 5 of 10, 208 characters
+Post 5 of 9, 208 characters
 
 ```text
 Link your machines with xcb link. From any of them, xcb fleet shows what each one is doing, and xcb dispatch sends a task to the one at home. Task content is end-to-end encrypted, on a relay you run yourself.
 ```
 
-Post 6 of 10, 203 characters
+Post 6 of 9, 203 characters
 
 ```text
 xcb runs Claude Code, Codex, or the Devin CLI under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
 ```
 
-Post 7 of 10, 189 characters
+Post 7 of 9, 189 characters
 
 ```text
 xcb is for developers juggling more than one coding plan. It works for agents too: another program hands xcb a task as JSON and gets back which account ran it, how it ended, and the answer.
 ```
 
-Post 8 of 10, 183 characters
+Post 8 of 9, 183 characters
 
 ```text
 The idea behind Excalibur: every coding plan you pay for works as one, from whichever machine you're at, and none of your quota expires unused while another account sits at its limit.
 ```
 
-Post 9 of 10, 222 characters
-
-```text
-xcb doesn't raise any usage limit and has no model access of its own. Inside xcb, providers work on your files through xcb's tools, without their own plugins or MCP servers. If one plan covers your work, you don't need it.
-```
-
-Post 10 of 10, 233 characters
+Post 9 of 9, 233 characters
 
 ```text
 xcb is free and MIT licensed. Latest release: v0.12.0. Install it with one command on macOS or Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
@@ -70,61 +64,55 @@ https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 
 ## Bluesky thread
 
-Post 1 of 10, 207 characters
+Post 1 of 9, 207 characters
 
 ```text
 Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude, Codex, and Devin. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
 ```
 
-Post 2 of 10, 186 characters
+Post 2 of 9, 186 characters
 
 ```text
 Quota you don't use by the reset is gone. xcb reads each Claude and Codex account's usage, no more than five minutes old, and favors the account whose unused quota is closest to lapsing.
 ```
 
-Post 3 of 10, 201 characters
+Post 3 of 9, 201 characters
 
 ```text
 When a provider says an account hit its usage limit partway through a task, xcb moves the task to another of your accounts, with its original instructions. You don't paste the prompt into a new window.
 ```
 
-Post 4 of 10, 164 characters
+Post 4 of 9, 164 characters
 
 ```text
 Every task runs in the background. xcb tasks lists them across all your projects, and xcb attention collects the questions your agents are waiting on you to answer.
 ```
 
-Post 5 of 10, 208 characters
+Post 5 of 9, 208 characters
 
 ```text
 Link your machines with xcb link. From any of them, xcb fleet shows what each one is doing, and xcb dispatch sends a task to the one at home. Task content is end-to-end encrypted, on a relay you run yourself.
 ```
 
-Post 6 of 10, 203 characters
+Post 6 of 9, 203 characters
 
 ```text
 xcb runs Claude Code, Codex, or the Devin CLI under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
 ```
 
-Post 7 of 10, 189 characters
+Post 7 of 9, 189 characters
 
 ```text
 xcb is for developers juggling more than one coding plan. It works for agents too: another program hands xcb a task as JSON and gets back which account ran it, how it ended, and the answer.
 ```
 
-Post 8 of 10, 183 characters
+Post 8 of 9, 183 characters
 
 ```text
 The idea behind Excalibur: every coding plan you pay for works as one, from whichever machine you're at, and none of your quota expires unused while another account sits at its limit.
 ```
 
-Post 9 of 10, 222 characters
-
-```text
-xcb doesn't raise any usage limit and has no model access of its own. Inside xcb, providers work on your files through xcb's tools, without their own plugins or MCP servers. If one plan covers your work, you don't need it.
-```
-
-Post 10 of 10, 233 characters
+Post 9 of 9, 233 characters
 
 ```text
 xcb is free and MIT licensed. Latest release: v0.12.0. Install it with one command on macOS or Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
@@ -134,61 +122,55 @@ https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 
 ## Threads thread
 
-Post 1 of 10, 207 characters
+Post 1 of 9, 207 characters
 
 ```text
 Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude, Codex, and Devin. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
 ```
 
-Post 2 of 10, 186 characters
+Post 2 of 9, 186 characters
 
 ```text
 Quota you don't use by the reset is gone. xcb reads each Claude and Codex account's usage, no more than five minutes old, and favors the account whose unused quota is closest to lapsing.
 ```
 
-Post 3 of 10, 201 characters
+Post 3 of 9, 201 characters
 
 ```text
 When a provider says an account hit its usage limit partway through a task, xcb moves the task to another of your accounts, with its original instructions. You don't paste the prompt into a new window.
 ```
 
-Post 4 of 10, 164 characters
+Post 4 of 9, 164 characters
 
 ```text
 Every task runs in the background. xcb tasks lists them across all your projects, and xcb attention collects the questions your agents are waiting on you to answer.
 ```
 
-Post 5 of 10, 208 characters
+Post 5 of 9, 208 characters
 
 ```text
 Link your machines with xcb link. From any of them, xcb fleet shows what each one is doing, and xcb dispatch sends a task to the one at home. Task content is end-to-end encrypted, on a relay you run yourself.
 ```
 
-Post 6 of 10, 203 characters
+Post 6 of 9, 203 characters
 
 ```text
 xcb runs Claude Code, Codex, or the Devin CLI under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
 ```
 
-Post 7 of 10, 189 characters
+Post 7 of 9, 189 characters
 
 ```text
 xcb is for developers juggling more than one coding plan. It works for agents too: another program hands xcb a task as JSON and gets back which account ran it, how it ended, and the answer.
 ```
 
-Post 8 of 10, 183 characters
+Post 8 of 9, 183 characters
 
 ```text
 The idea behind Excalibur: every coding plan you pay for works as one, from whichever machine you're at, and none of your quota expires unused while another account sits at its limit.
 ```
 
-Post 9 of 10, 222 characters
-
-```text
-xcb doesn't raise any usage limit and has no model access of its own. Inside xcb, providers work on your files through xcb's tools, without their own plugins or MCP servers. If one plan covers your work, you don't need it.
-```
-
-Post 10 of 10, 233 characters
+Post 9 of 9, 233 characters
 
 ```text
 xcb is free and MIT licensed. Latest release: v0.12.0. Install it with one command on macOS or Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
@@ -215,8 +197,6 @@ xcb is for developers juggling more than one coding plan. It works for agents to
 
 The idea behind Excalibur: every coding plan you pay for works as one, from whichever machine you're at, and none of your quota expires unused while another account sits at its limit.
 
-xcb doesn't raise any usage limit and has no model access of its own. Inside xcb, providers work on your files through xcb's tools, without their own plugins or MCP servers. If one plan covers your work, you don't need it.
-
 xcb is free and MIT licensed. Latest release: v0.12.0. Install it with one command on macOS or Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
 
 https://xcb.sh/blog/one-agent-for-all-your-ai-plans
@@ -224,19 +204,19 @@ https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 
 ## Product Hunt
 
-Tagline: Keep coding when one subscription hits its limit.
+Tagline: Use your Claude, Codex, and Devin plans from one agent.
 
 Description:
 
 ```text
-xcb routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.
+Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.
 ```
 
 Topics: Developer Tools, Artificial Intelligence, Open Source
 
 ## Show HN and first comment fact sheet
 
-- Keep coding when one subscription hits its limit.
+- Use your Claude, Codex, and Devin plans from one agent.
 - Excalibur (xcb) is a free terminal agent for people who pay for more than one of Claude, Codex, and Devin. Type a task once, and xcb picks which of your accounts runs it. No more switching logins or windows.
 - Quota you don't use by the reset is gone. xcb reads each Claude and Codex account's usage, no more than five minutes old, and favors the account whose unused quota is closest to lapsing.
 - When a provider says an account hit its usage limit partway through a task, xcb moves the task to another of your accounts, with its original instructions. You don't paste the prompt into a new window.
@@ -244,7 +224,6 @@ Topics: Developer Tools, Artificial Intelligence, Open Source
 - Link your machines with xcb link. From any of them, xcb fleet shows what each one is doing, and xcb dispatch sends a task to the one at home. Task content is end-to-end encrypted, on a relay you run yourself.
 - xcb runs Claude Code, Codex, or the Devin CLI under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
 - xcb is for developers juggling more than one coding plan. It works for agents too: another program hands xcb a task as JSON and gets back which account ran it, how it ended, and the answer.
-- xcb doesn't raise any usage limit and has no model access of its own. Inside xcb, providers work on your files through xcb's tools, without their own plugins or MCP servers. If one plan covers your work, you don't need it.
 - xcb is free and MIT licensed. Latest release: v0.12.0. Install it with one command on macOS or Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
 - Latest release: v0.12.0. https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 
