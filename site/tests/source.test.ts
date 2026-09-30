@@ -106,10 +106,13 @@ describe("xcb site source contract", () => {
     expect(route.alt).toBe(socialCardAlt("/"));
     expect(socialSite.name).toBe("Excalibur (xcb)");
     expect(socialSite.domain).toBe("xcb.sh");
-    expect(socialSite.icon?.kind).toBe("mark");
-    expect(socialSite.icon?.src).toBe(`data:image/svg+xml;base64,${Buffer.from(mark).toString("base64")}`);
-    expect(socialSite.theme).toEqual({ accent: "#2e7de9", background: "#e1e2e7", foreground: "#3760bf", muted: "#6172b0", wash: "#E0061C" });
-    expect(socialSite.theme?.wash).toBe("#E0061C");
+    // The card is a crop of the header: its palette, its foil mark, its name.
+    expect(socialSite.brand).toBe("Excalibur (xcb)");
+    expect(socialSite.brandMark).toBe(mark);
+    expect(socialSite.palette).toBe("tokyo-night");
+    expect(socialSite.icon).toBeUndefined();
+    expect(socialSite.mark).toBeUndefined();
+    expect(socialSite.theme).toBeUndefined();
     expect(socialSite.keepTogether).toContain("Claude Code Router");
     const response = route.default();
     expect(response.headers.get("content-type")).toBe("image/png");
