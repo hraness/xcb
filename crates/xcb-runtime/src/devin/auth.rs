@@ -251,8 +251,10 @@ pub fn import_into_account(store: &Store, account: &Id, source: &Path) -> Result
     store_token(store, account, token.as_bytes())
 }
 
-/// Native browser sign-in in an empty, private provider home. No credentials
+/// Native PKCE sign-in code flow in an empty, private provider home. No credentials
 /// from the user's native profile or this account are passed to the child.
+/// The provider's explicit code flow always prints its PKCE sign-in URL; the
+/// default browser flow hides it behind an interactive chooser and spinner.
 #[cfg(unix)]
 pub async fn login(store: &Store, account: &Id, pin: &crate::process::Pin) -> Result<()> {
     use tokio::signal::unix::{SignalKind, signal};
@@ -318,11 +320,15 @@ async fn login_inner(
         let executable = pin.snapshot(directory)?;
         let home = private::directory(&directory.join("home"))?;
         private::directory(&home.join("tmp"))?;
-        let env = crate::process::environment(&home);
+        let mut env = crate::process::environment(&home);
+        env.insert(
+            "TERM".into(),
+            login_terminal(std::env::var("TERM").ok().as_deref()).into(),
+        );
         let source = home.join(".local/share/devin/credentials.toml");
         let mut command = Command::new(executable);
         command
-            .args(["auth", "login"])
+            .args(["auth", "login", "--force-manual-token-flow"])
             .env_clear()
             .envs(env)
             .current_dir(&home)
@@ -425,6 +431,19 @@ async fn login_inner(
     result
 }
 
+#[cfg(unix)]
+fn login_terminal(value: Option<&str>) -> &str {
+    value
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
+        .unwrap_or("xterm-256color")
+}
+
 #[cfg(not(unix))]
 pub async fn login(_store: &Store, _account: &Id, _pin: &crate::process::Pin) -> Result<()> {
     Err(Error::providers_unsupported())
@@ -457,6 +476,22 @@ mod login_tests {
     use super::*;
     use std::{os::unix::fs::PermissionsExt, time::Duration};
 
+    #[test]
+    fn terminal_capability_is_bounded_and_preserved_without_inheriting_environment() {
+        for terminal in ["xterm-256color", "screen", "tmux-256color", "dumb"] {
+            assert_eq!(login_terminal(Some(terminal)), terminal);
+        }
+        for terminal in [
+            None,
+            Some(""),
+            Some("xterm\nSECRET=value"),
+            Some("xterm\u{1b}[2J"),
+        ] {
+            assert_eq!(login_terminal(terminal), "xterm-256color");
+        }
+        assert_eq!(login_terminal(Some(&"x".repeat(65))), "xterm-256color");
+    }
+
     async fn fixture(base: &Path, body: &str) -> crate::process::Pin {
         let fixture_home = private::directory(&base.join("fixture")).unwrap();
         let executable = fixture_home.join("fake-devin");
@@ -467,7 +502,7 @@ mod login_tests {
             .unwrap()
     }
 
-    const WRITE_TOKEN: &str = "test \"$1 $2\" = 'auth login' || exit 8\ntest \"$XDG_DATA_HOME\" = \"$HOME/.local/share\" || exit 9\nmkdir -p \"$XDG_DATA_HOME/devin\"\ncat > \"$XDG_DATA_HOME/devin/credentials.toml\" <<'CREDENTIAL'\nwindsurf_api_key = \"synthetic-native-login\"\napi_server_url = \"https://server.codeium.com\"\ndevin_webapp_host = \"https://app.devin.ai\"\ndevin_api_url = \"https://api.devin.ai\"\nCREDENTIAL";
+    const WRITE_TOKEN: &str = "test \"$1 $2\" = 'auth login' || exit 8\ntest \"$3\" = '--force-manual-token-flow' || exit 10\ntest -n \"$TERM\" || exit 11\ntest \"$XDG_DATA_HOME\" = \"$HOME/.local/share\" || exit 9\nmkdir -p \"$XDG_DATA_HOME/devin\"\ncat > \"$XDG_DATA_HOME/devin/credentials.toml\" <<'CREDENTIAL'\nwindsurf_api_key = \"synthetic-native-login\"\napi_server_url = \"https://server.codeium.com\"\ndevin_webapp_host = \"https://app.devin.ai\"\ndevin_api_url = \"https://api.devin.ai\"\nCREDENTIAL";
 
     #[tokio::test]
     async fn native_login_publishes_only_selected_account_after_join_and_cleans_profile() {
@@ -587,7 +622,7 @@ mod login_tests {
         let base = xcb_core::canonical(directory.path()).unwrap();
         let pin = fixture(
             &base,
-            &format!("{WRITE_TOKEN}\necho synthetic-login-progress"),
+            &format!("{WRITE_TOKEN}\necho 'Visit https://app.devin.ai/auth/cli/continue?state=synthetic-state to sign in, then copy the code and paste it below.'\necho synthetic-login-progress"),
         )
         .await;
         let store = Store::open(&base.join("state")).unwrap();
@@ -614,6 +649,9 @@ mod login_tests {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(String::from_utf8_lossy(&output.stderr).contains("synthetic-login-progress"));
+        let url = "https://app.devin.ai/auth/cli/continue?state=synthetic-state";
+        assert!(String::from_utf8_lossy(&output.stderr).contains(url));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(url));
         assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-login-progress"));
     }
 }
