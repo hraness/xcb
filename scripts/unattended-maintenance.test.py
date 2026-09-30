@@ -250,6 +250,7 @@ class MaintenanceTests(unittest.TestCase):
         state_path = self.root / "state"
         binary = self.root / "synthetic-binary"
         binary.write_bytes(b"synthetic-never-executed")
+        binary.chmod(0o700)
         launcher = self.root / "launcher"
         launcher.symlink_to(binary)
         argv = ["init", "--config", str(config_path), "--state-dir", str(state_path),
@@ -257,7 +258,10 @@ class MaintenanceTests(unittest.TestCase):
         for name in ("xcb", "codex", "scheduler", "skill", "bun"):
             argv += ["--" + name, str(launcher)]
         with contextlib.redirect_stdout(io.StringIO()):
-            m.main(argv)
+            # Hosted Python installations can be group-writable. Exercise the
+            # real pin checks against this fixture's private file instead.
+            with patch.object(m.sys, "executable", str(binary)):
+                m.main(argv)
             m.main(["plan", "--config", str(config_path)])
             m.main(["install", "--config", str(config_path), "--output-dir", str(self.root)])
         config = m.config_read(config_path)
