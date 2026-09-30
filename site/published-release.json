@@ -1,27 +1,27 @@
 {
-  "version": "0.12.0",
-  "verificationRun": "https://github.com/hraness/xcb/actions/runs/36553298255",
-  "archiveUrl": "https://github.com/hraness/xcb/releases/download/v0.12.0/hraness-xcb-0.12.0.tgz",
+  "version": "0.14.3",
+  "verificationRun": "https://github.com/hraness/xcb/actions/runs/36663418965",
+  "archiveUrl": "https://github.com/hraness/xcb/releases/download/v0.14.3/hraness-xcb-0.14.3.tgz",
   "native": [
     {
       "platform": "darwin-aarch64",
-      "url": "https://github.com/hraness/xcb/releases/download/v0.12.0/xcb-0.12.0-darwin-aarch64.tar.gz",
-      "sha256Url": "https://github.com/hraness/xcb/releases/download/v0.12.0/xcb-0.12.0-darwin-aarch64.tar.gz.sha256"
+      "url": "https://github.com/hraness/xcb/releases/download/v0.14.3/xcb-0.14.3-darwin-aarch64.tar.gz",
+      "sha256Url": "https://github.com/hraness/xcb/releases/download/v0.14.3/xcb-0.14.3-darwin-aarch64.tar.gz.sha256"
     },
     {
       "platform": "linux-x86_64",
-      "url": "https://github.com/hraness/xcb/releases/download/v0.12.0/xcb-0.12.0-linux-x86_64.tar.gz",
-      "sha256Url": "https://github.com/hraness/xcb/releases/download/v0.12.0/xcb-0.12.0-linux-x86_64.tar.gz.sha256"
+      "url": "https://github.com/hraness/xcb/releases/download/v0.14.3/xcb-0.14.3-linux-x86_64.tar.gz",
+      "sha256Url": "https://github.com/hraness/xcb/releases/download/v0.14.3/xcb-0.14.3-linux-x86_64.tar.gz.sha256"
     },
     {
       "platform": "linux-aarch64",
-      "url": "https://github.com/hraness/xcb/releases/download/v0.12.0/xcb-0.12.0-linux-aarch64.tar.gz",
-      "sha256Url": "https://github.com/hraness/xcb/releases/download/v0.12.0/xcb-0.12.0-linux-aarch64.tar.gz.sha256"
+      "url": "https://github.com/hraness/xcb/releases/download/v0.14.3/xcb-0.14.3-linux-aarch64.tar.gz",
+      "sha256Url": "https://github.com/hraness/xcb/releases/download/v0.14.3/xcb-0.14.3-linux-aarch64.tar.gz.sha256"
     },
     {
       "platform": "windows-x86_64",
-      "url": "https://github.com/hraness/xcb/releases/download/v0.12.0/xcb-0.12.0-windows-x86_64.zip",
-      "sha256Url": "https://github.com/hraness/xcb/releases/download/v0.12.0/xcb-0.12.0-windows-x86_64.zip.sha256"
+      "url": "https://github.com/hraness/xcb/releases/download/v0.14.3/xcb-0.14.3-windows-x86_64.zip",
+      "sha256Url": "https://github.com/hraness/xcb/releases/download/v0.14.3/xcb-0.14.3-windows-x86_64.zip.sha256"
     }
   ]
 }
