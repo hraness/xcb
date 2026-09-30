@@ -5137,6 +5137,23 @@ struct Supervisor {
     /// the first check so this only matters on long-lived daemons.
     retention_checked: Instant,
     resources: resources::Resources,
+    workspace_refresh: Option<Receiver<Result<()>>>,
+    workspace_checked: Option<Instant>,
+}
+
+fn spawn_workspace_probe(
+    check: impl FnOnce() -> Result<()> + Send + 'static,
+) -> std::io::Result<Receiver<Result<()>>> {
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    // Even regular files can block in filesystem or OS privacy checks.
+    // A detached thread lets the process exit without waiting for Tokio's
+    // blocking pool to drain. Its caller retains this one receiver until done.
+    std::thread::Builder::new()
+        .name("xcb-workspace-identity".into())
+        .spawn(move || {
+            let _ = send.send(check());
+        })?;
+    Ok(receive)
 }
 
 impl Supervisor {
@@ -5157,6 +5174,36 @@ impl Supervisor {
             progress_at: Instant::now(),
             retention_checked: Instant::now(),
             resources: resources::Resources::default(),
+            workspace_refresh: None,
+            workspace_checked: None,
+        }
+    }
+
+    fn refresh_workspace_identity(&mut self) {
+        if let Some(pending) = &self.workspace_refresh {
+            let result = match pending.try_recv() {
+                Ok(result) => result,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => Err(Error::Unavailable(
+                    "project directory upkeep stopped unexpectedly",
+                )),
+            };
+            self.workspace_refresh = None;
+            if let Err(error) = result {
+                self.upkeep_fault("project directory", &error);
+            }
+        }
+        if self
+            .workspace_checked
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(60))
+        {
+            return;
+        }
+        self.workspace_checked = Some(Instant::now());
+        let managed = self.managed.clone();
+        match spawn_workspace_probe(move || managed.tick_workspace_identity(now_ms())) {
+            Ok(receive) => self.workspace_refresh = Some(receive),
+            Err(error) => self.upkeep_fault("project directory", &error.into()),
         }
     }
 
@@ -5406,12 +5453,7 @@ impl Supervisor {
                 self.upkeep_fault("schedule", &error);
             }
         }
-        if let Err(error) = self.managed.tick_workspace_identity(now_ms()) {
-            record_supervisor_fault(
-                self.managed.root(),
-                &format!("project directory upkeep failed: {}", fault_text(&error)),
-            );
-        }
+        self.refresh_workspace_identity();
         let mut tasks = self.managed.active_tasks(128)?;
         tasks.sort_by_key(|task| {
             (

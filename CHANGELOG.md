@@ -10,6 +10,19 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.15.1 - 2026-09-30
+
+Workspace metadata checks no longer pause the supervisor when a filesystem
+open stops responding.
+
+- Check workspace metadata in one background thread at a time, so heartbeat
+  updates, task cancellation, and resource samples can continue during a slow
+  filesystem or operating-system access check.
+- Read Git metadata only from verified regular files. Reject symbolic links,
+  special files, oversized content, and objects replaced during the read.
+- Apply discovered repository names only while the workspace directory and
+  its saved registration still match the original observation.
+
 ## 0.15.0 - 2026-09-30
 
 Unattended hosts can pause new work under resource pressure, recover a stalled
