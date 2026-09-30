@@ -1,5 +1,10 @@
 use super::*;
 
+fn fixture_path(path: &str) -> PathBuf {
+    // Rooted paths need the current drive to be absolute on Windows.
+    std::path::absolute(path).expect("absolute synthetic fixture path")
+}
+
 fn policy() -> ResourcePolicy {
     ResourcePolicy {
         enabled: true,
@@ -9,7 +14,7 @@ fn policy() -> ResourcePolicy {
 
 fn disk(path: &str, free: u64) -> DiskSnapshot {
     DiskSnapshot {
-        path: path.into(),
+        path: fixture_path(path),
         volume_id: Some(1),
         free_bytes: Some(free),
         total_bytes: Some(1024 * GIB),
@@ -21,7 +26,7 @@ fn sample(at_ms: u64, pressure: MemoryPressure, free: u64) -> Snapshot {
     Snapshot {
         schema_version: 1,
         at_ms,
-        state_root: "/state".into(),
+        state_root: fixture_path("/state"),
         memory: MemorySnapshot {
             pressure,
             physical_total_bytes: Some(128 * GIB),
@@ -34,7 +39,7 @@ fn sample(at_ms: u64, pressure: MemoryPressure, free: u64) -> Snapshot {
 
 fn assess(monitor: &mut Monitor, at_ms: u64, pressure: MemoryPressure, free: u64) -> Assessment {
     monitor.observe(sample(at_ms, pressure, free));
-    monitor.assess(&policy(), Path::new("/work"), at_ms)
+    monitor.assess(&policy(), &fixture_path("/work"), at_ms)
 }
 
 #[test]
@@ -42,10 +47,10 @@ fn disabled_policy_does_not_change_existing_admission() {
     let mut monitor = Monitor::new();
     assert!(
         !monitor
-            .assess(&ResourcePolicy::default(), Path::new("/work"), 1)
+            .assess(&ResourcePolicy::default(), &fixture_path("/work"), 1)
             .blocked
     );
-    assert!(monitor.assess(&policy(), Path::new("/work"), 1).blocked);
+    assert!(monitor.assess(&policy(), &fixture_path("/work"), 1).blocked);
 }
 
 #[test]
@@ -74,7 +79,7 @@ fn disk_pauses_immediately_at_boundary_and_recovers_after_three_distinct_samples
     for _ in 0..30 {
         assert!(
             monitor
-                .assess(&policy(), Path::new("/work"), 31_000)
+                .assess(&policy(), &fixture_path("/work"), 31_000)
                 .blocked
         );
         monitor.observe(sample(31_000, MemoryPressure::Normal, 40 * GIB));
@@ -104,10 +109,14 @@ fn both_state_and_selected_workspace_reserves_are_required() {
     observation.disks[0].free_bytes = Some(GIB);
     observation.disks.push(disk("/other", 100 * GIB));
     monitor.observe(observation);
-    assert!(monitor.assess(&policy(), Path::new("/work"), 1_000).blocked);
     assert!(
         monitor
-            .assess(&policy(), Path::new("/other"), 1_000)
+            .assess(&policy(), &fixture_path("/work"), 1_000)
+            .blocked
+    );
+    assert!(
+        monitor
+            .assess(&policy(), &fixture_path("/other"), 1_000)
             .blocked
     );
 }
@@ -118,15 +127,19 @@ fn unrelated_low_workspace_does_not_block_healthy_workspace() {
     let mut observation = sample(1_000, MemoryPressure::Normal, GIB);
     observation.disks.push(disk("/other", 100 * GIB));
     monitor.observe(observation);
-    assert!(monitor.assess(&policy(), Path::new("/work"), 1_000).blocked);
+    assert!(
+        monitor
+            .assess(&policy(), &fixture_path("/work"), 1_000)
+            .blocked
+    );
     assert!(
         !monitor
-            .assess(&policy(), Path::new("/other"), 1_000)
+            .assess(&policy(), &fixture_path("/other"), 1_000)
             .blocked
     );
     assert!(
         monitor
-            .assess(&policy(), Path::new("/missing"), 1_000)
+            .assess(&policy(), &fixture_path("/missing"), 1_000)
             .blocked
     );
 }
@@ -150,10 +163,10 @@ fn failed_sampler_stales_and_never_counts_same_observation_as_sustained_pressure
     assert!(!assess(&mut monitor, 1_000, MemoryPressure::Critical, 100 * GIB).blocked);
     assert!(
         !monitor
-            .assess(&policy(), Path::new("/work"), 91_000)
+            .assess(&policy(), &fixture_path("/work"), 91_000)
             .blocked
     );
-    let stale = monitor.assess(&policy(), Path::new("/work"), 122_000);
+    let stale = monitor.assess(&policy(), &fixture_path("/work"), 122_000);
     assert!(stale.blocked);
     assert!(stale.reasons[0].contains("stale"));
     assert!(!assess(&mut monitor, 151_000, MemoryPressure::Critical, 100 * GIB).blocked);
@@ -167,7 +180,7 @@ fn stale_gap_resets_recovery_samples() {
     assert!(assess(&mut monitor, 61_000, MemoryPressure::Normal, 100 * GIB).blocked);
     assert!(
         monitor
-            .assess(&policy(), Path::new("/work"), 182_000)
+            .assess(&policy(), &fixture_path("/work"), 182_000)
             .blocked
     );
     assert!(assess(&mut monitor, 211_000, MemoryPressure::Normal, 100 * GIB).blocked);
@@ -186,18 +199,22 @@ fn unknown_memory_failed_disk_future_and_invalid_observations_fail_closed() {
     monitor.observe(failed);
     assert!(
         monitor
-            .assess(&policy(), Path::new("/work"), 31_000)
+            .assess(&policy(), &fixture_path("/work"), 31_000)
             .blocked
     );
     monitor.observe(sample(61_000, MemoryPressure::Normal, 100 * GIB));
-    assert!(monitor.assess(&policy(), Path::new("/work"), 1_000).blocked);
+    assert!(
+        monitor
+            .assess(&policy(), &fixture_path("/work"), 1_000)
+            .blocked
+    );
     let mut invalid = sample(91_000, MemoryPressure::Normal, 100 * GIB);
     invalid.schema_version = 99;
     monitor.observe(invalid);
     assert!(monitor.snapshot().is_none());
     assert!(
         monitor
-            .assess(&policy(), Path::new("/work"), 91_000)
+            .assess(&policy(), &fixture_path("/work"), 91_000)
             .blocked
     );
 }
@@ -210,7 +227,7 @@ fn out_of_order_samples_do_not_release_pauses() {
     assert_eq!(monitor.snapshot().unwrap().at_ms, 31_000);
     assert!(
         monitor
-            .assess(&policy(), Path::new("/work"), 31_000)
+            .assess(&policy(), &fixture_path("/work"), 31_000)
             .blocked
     );
 }
@@ -220,11 +237,11 @@ fn rotated_workspace_keeps_conservative_recovery_without_unbounded_path_history(
     let mut monitor = Monitor::new();
     assert!(assess(&mut monitor, 1_000, MemoryPressure::Normal, GIB).blocked);
     let mut other = sample(31_000, MemoryPressure::Normal, 100 * GIB);
-    other.disks[1].path = "/other".into();
+    other.disks[1].path = fixture_path("/other");
     monitor.observe(other);
     assert!(
         !monitor
-            .assess(&policy(), Path::new("/other"), 31_000)
+            .assess(&policy(), &fixture_path("/other"), 31_000)
             .blocked
     );
     assert!(assess(&mut monitor, 61_000, MemoryPressure::Normal, 28 * GIB).blocked);
@@ -239,11 +256,11 @@ fn returning_paused_path_above_resume_still_needs_three_samples() {
     let mut monitor = Monitor::new();
     assert!(assess(&mut monitor, 1_000, MemoryPressure::Normal, GIB).blocked);
     let mut other = sample(31_000, MemoryPressure::Normal, 100 * GIB);
-    other.disks[1].path = "/other".into();
+    other.disks[1].path = fixture_path("/other");
     monitor.observe(other);
     assert!(
         !monitor
-            .assess(&policy(), Path::new("/other"), 31_000)
+            .assess(&policy(), &fixture_path("/other"), 31_000)
             .blocked
     );
     assert!(assess(&mut monitor, 61_000, MemoryPressure::Normal, 100 * GIB).blocked);
@@ -259,11 +276,11 @@ fn stale_workspace_gap_resets_its_own_recovery_even_while_other_samples_are_fres
     assert!(assess(&mut monitor, 61_000, MemoryPressure::Normal, 100 * GIB).blocked);
     for at_ms in [91_000, 121_000, 151_000, 181_000, 211_000] {
         let mut other = sample(at_ms, MemoryPressure::Normal, 100 * GIB);
-        other.disks[1].path = "/other".into();
+        other.disks[1].path = fixture_path("/other");
         monitor.observe(other);
         assert!(
             !monitor
-                .assess(&policy(), Path::new("/other"), at_ms)
+                .assess(&policy(), &fixture_path("/other"), at_ms)
                 .blocked
         );
     }
@@ -277,7 +294,7 @@ fn bounded_history_never_evicts_paused_paths_and_reuses_recovered_slots() {
     let mut monitor = Monitor::new();
     for index in 0..128 {
         let at_ms = (index + 1) * 30_000;
-        let path = PathBuf::from(format!("/work-{index}"));
+        let path = fixture_path(&format!("/work-{index}"));
         let mut observation = sample(at_ms, MemoryPressure::Normal, GIB);
         observation.disks[1].path = path.clone();
         monitor.observe(observation);
@@ -285,30 +302,30 @@ fn bounded_history_never_evicts_paused_paths_and_reuses_recovered_slots() {
     }
     assert_eq!(monitor.disks.len(), MAX_TRACKED_PATHS);
     let mut overflow = sample(3_870_000, MemoryPressure::Normal, 100 * GIB);
-    overflow.disks[1].path = "/overflow".into();
+    overflow.disks[1].path = fixture_path("/overflow");
     monitor.observe(overflow.clone());
     assert!(
         monitor
-            .assess(&policy(), Path::new("/overflow"), 3_870_000)
+            .assess(&policy(), &fixture_path("/overflow"), 3_870_000)
             .blocked
     );
     assert_eq!(monitor.disks.len(), MAX_TRACKED_PATHS);
     for at_ms in [3_900_000, 3_930_000, 3_960_000] {
         let mut recovery = sample(at_ms, MemoryPressure::Normal, 100 * GIB);
-        recovery.disks[1].path = "/work-0".into();
+        recovery.disks[1].path = fixture_path("/work-0");
         monitor.observe(recovery);
-        let assessment = monitor.assess(&policy(), Path::new("/work-0"), at_ms);
+        let assessment = monitor.assess(&policy(), &fixture_path("/work-0"), at_ms);
         assert_eq!(assessment.blocked, at_ms != 3_960_000);
     }
     overflow.at_ms = 3_990_000;
     monitor.observe(overflow);
     assert!(
         !monitor
-            .assess(&policy(), Path::new("/overflow"), 3_990_000)
+            .assess(&policy(), &fixture_path("/overflow"), 3_990_000)
             .blocked
     );
     assert_eq!(monitor.disks.len(), MAX_TRACKED_PATHS);
-    assert!(!monitor.disks.contains_key(Path::new("/work-0")));
+    assert!(!monitor.disks.contains_key(&fixture_path("/work-0")));
 }
 
 #[test]
@@ -319,7 +336,7 @@ fn sampler_failure_discards_old_good_news_and_does_not_clear_latches() {
     monitor.sampling_failed();
     assert!(
         monitor
-            .assess(&policy(), Path::new("/work"), 32_000)
+            .assess(&policy(), &fixture_path("/work"), 32_000)
             .blocked
     );
     assert!(monitor.snapshot().is_none());
@@ -336,7 +353,7 @@ fn swap_growth_is_informational_and_history_is_bounded() {
         let mut observation = sample(at_ms, MemoryPressure::Normal, 100 * GIB);
         observation.memory.swap_used_bytes = Some(if index == 100 { 2 * GIB } else { 0 });
         monitor.observe(observation);
-        let assessment = monitor.assess(&policy(), Path::new("/work"), at_ms);
+        let assessment = monitor.assess(&policy(), &fixture_path("/work"), at_ms);
         assert!(!assessment.blocked);
         if index == 100 {
             assert!(
@@ -370,7 +387,7 @@ fn snapshot_readback_requires_schema_bounded_paths_and_consistent_values() {
     invalid.errors.push("a".repeat(MAX_ERROR_BYTES + 1));
     assert!(invalid.validate().is_err());
     invalid = original.clone();
-    invalid.state_root = "/wrong".into();
+    invalid.state_root = fixture_path("/wrong");
     assert!(invalid.validate().is_err());
     invalid = original;
     invalid.disks[1].path = "relative".into();
