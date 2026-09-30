@@ -130,8 +130,35 @@ pub struct Outcome {
     /// restart has no count, and the settle reflex skips it.
     #[serde(skip)]
     pub tool_calls: Option<u32>,
+    /// `pending_attention` came from the text classifier alone: the turn
+    /// ended with a question or a request to confirm, and no provider
+    /// request was denied. Such a turn may still be read by the settle
+    /// reflex within its safety envelope; a denied request never is. Not
+    /// persisted, so a turn reconciled after a restart reads as a denial.
+    #[serde(skip)]
+    pub text_attention: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<Diagnostic>,
+}
+
+impl Outcome {
+    /// Whether the settle reflex may read this turn: it ended idle, or with
+    /// a question or confirmation request that only the text raised. A
+    /// denied provider request, and a step only the user can take
+    /// ([`State::NeedsAction`]: sign in, run this yourself), stay with them.
+    pub fn askable(&self) -> bool {
+        match self.state {
+            State::Idle => true,
+            State::NeedsAnswer | State::NeedsApproval => self.text_attention,
+            _ => false,
+        }
+    }
+
+    /// A provider request was denied during the turn, so only the user can
+    /// supply new permission; the text alone never sets this.
+    pub fn denied(&self) -> bool {
+        self.facts.pending_attention && !self.text_attention
+    }
 }
 
 pub fn should_idle_export(pane_generation: bool, facts: &TurnFacts, state: State) -> bool {
@@ -2470,9 +2497,11 @@ pub(crate) async fn run_prepared<P: Protocol>(
         failure,
     };
     let state = classify(&final_text, &facts);
+    let text_attention = !facts.pending_attention && state.attention();
     facts.pending_attention |= state.attention();
     let outcome = Outcome {
         tool_calls: Some(tool_calls.load(std::sync::atomic::Ordering::Relaxed)),
+        text_attention,
         text: final_text.clone(),
         facts,
         state,
@@ -2670,6 +2699,7 @@ mod tests {
     fn diagnostic_is_legacy_compatible_and_bounded() {
         let original = Outcome {
             tool_calls: Some(0),
+            text_attention: false,
             text: String::new(),
             facts: TurnFacts {
                 terminal: Terminal::Failed,

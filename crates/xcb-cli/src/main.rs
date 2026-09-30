@@ -5035,6 +5035,7 @@ mod tests {
     fn json_run_output_includes_its_resumable_session_id() {
         let mut result = runner::Outcome {
             tool_calls: Some(0),
+            text_attention: false,
             diagnostic: None,
             text: "Completed response".into(),
             facts: xcb_core::policy::TurnFacts {
@@ -5072,6 +5073,7 @@ mod tests {
         };
         let mut result = runner::Outcome {
             tool_calls: Some(1),
+            text_attention: false,
             diagnostic: None,
             text: " \n".into(),
             facts: TurnFacts {
@@ -5111,6 +5113,7 @@ mod tests {
     fn json_run_output_marks_text_cut_to_the_route_limit() {
         let mut result = runner::Outcome {
             tool_calls: Some(0),
+            text_attention: false,
             diagnostic: None,
             text: "é".repeat(xcb_core::MAX_TEXT_BYTES),
             facts: xcb_core::policy::TurnFacts {
@@ -5177,6 +5180,7 @@ mod tests {
         };
         let mut result = runner::Outcome {
             tool_calls: Some(0),
+            text_attention: false,
             diagnostic: None,
             text: "Provider said done".into(),
             facts: TurnFacts {

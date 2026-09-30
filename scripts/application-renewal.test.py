@@ -175,7 +175,7 @@ class RenewalTests(unittest.TestCase):
         return stack, mock_phase
 
     def test_current_receipt_and_busy_account_launch_nothing(self):
-        for value in ({"expiresAt": r.now_ms() + r.DAY_MS}, r.AccountBusy("busy")):
+        for value in ({"expiresAt": None}, r.AccountBusy("busy")):
             stack, child = self.invoke(qualification=[value])
             with stack:
                 r.run(self.directory)
@@ -233,24 +233,23 @@ class RenewalTests(unittest.TestCase):
         r.write_once(location / "receipt.json", raw)
         self.receipt_digest = r.sha(raw)
 
-    def test_success_requires_new_receipt_and_preserves_native_expiry(self):
+    def test_success_requires_new_receipt_without_expiry(self):
         stamp = r.now_ms()
-        expires = stamp + r.DAY_MS
-        self.receipt(stamp, expires)
-        stack, child = self.invoke(qualification=[None, {"expiresAt": expires, "evidenceDigest": self.receipt_digest}], phase=lambda *_: b"synthetic")
+        self.receipt(stamp, stamp + r.DAY_MS)
+        stack, child = self.invoke(qualification=[None, {"expiresAt": None, "evidenceDigest": self.receipt_digest}], phase=lambda *_: b"synthetic")
         with stack, patch.object(r, "now_ms", return_value=stamp):
             r.run(self.directory)
         self.assertEqual([call.args[2] for call in child.call_args_list], ["refresh", "collect", "qualify"])
         self.assertFalse((self.directory / "pending.json").exists())
         results = list((self.directory / "attempts").glob("*/result.json"))
         self.assertEqual(len(results), 1)
-        self.assertEqual(r.decode(r.read(results[0]))["qualification"]["expiresAt"], expires)
+        self.assertIsNone(r.decode(r.read(results[0]))["qualification"]["expiresAt"])
 
     def test_explicit_renew_now_still_runs_every_fresh_gate(self):
         stamp = r.now_ms()
         expires = stamp + r.DAY_MS
         self.receipt(stamp, expires)
-        stack, child = self.invoke(qualification=[{"expiresAt": expires}, {"expiresAt": expires, "evidenceDigest": self.receipt_digest}], phase=lambda *_: b"synthetic")
+        stack, child = self.invoke(qualification=[{"expiresAt": None}, {"expiresAt": None, "evidenceDigest": self.receipt_digest}], phase=lambda *_: b"synthetic")
         with stack, patch.object(r, "now_ms", return_value=stamp):
             r.run(self.directory, renew_now=True)
         self.assertEqual([call.args[2] for call in child.call_args_list], ["refresh", "collect", "qualify"])
@@ -260,7 +259,7 @@ class RenewalTests(unittest.TestCase):
     def test_old_or_extended_receipt_cannot_claim_renewal(self):
         stamp = r.now_ms()
         self.receipt(stamp - 100, stamp + r.DAY_MS)
-        stack, _ = self.invoke(qualification=[None, {"expiresAt": stamp + r.DAY_MS, "evidenceDigest": self.receipt_digest}], phase=lambda *_: b"synthetic")
+        stack, _ = self.invoke(qualification=[None, {"expiresAt": None, "evidenceDigest": self.receipt_digest}], phase=lambda *_: b"synthetic")
         with stack, patch.object(r, "now_ms", return_value=stamp):
             with self.assertRaises(ValueError):
                 r.run(self.directory)
@@ -306,8 +305,8 @@ class RenewalTests(unittest.TestCase):
         self.assertEqual(child.call_count, 1)
         self.assertEqual(child.call_args.args[3], 90)
 
-    def test_capabilities_require_exact_enabled_idle_model_and_bounded_expiry(self):
-        expiry = r.now_ms() + 5000
+    def test_capabilities_require_exact_enabled_idle_model_and_no_expiry(self):
+        expiry = None
         row = {"id": "a_synthetic", "provider": "claude", "enabled": True, "connected": True,
                "runtimeAdmitted": True, "available": True, "busy": False,
                "models": [{"key": "claude/sonnet/low"}], "qualification": {
@@ -324,7 +323,7 @@ class RenewalTests(unittest.TestCase):
         with query(), self.assertRaises(ValueError):
             r.capabilities(self.binding)
         row["enabled"] = True
-        row["qualification"]["expiresAt"] = r.now_ms() + r.DAY_MS + 10_000
+        row["qualification"]["expiresAt"] = r.now_ms() + r.DAY_MS
         with query(), self.assertRaises(ValueError):
             r.capabilities(self.binding)
 
@@ -335,7 +334,7 @@ class RenewalTests(unittest.TestCase):
                     "runtimeDigest": r.file_hash(self.binary), "evidenceDigest": evidence_digest, "expiresAt": expiry}}
 
     def test_busy_exemption_only_accepts_complete_valid_qualification(self):
-        expiry = r.now_ms() + 5000
+        expiry = None
         row = self.busy_qualified_row(expiry, "7" * 64)
         def query(value):
             return patch.object(r, "command", return_value=(0, r.encoded({"version": 1, "accounts": [value]})))
@@ -359,7 +358,7 @@ class RenewalTests(unittest.TestCase):
         stamp = r.now_ms()
         expires = stamp + r.DAY_MS
         self.receipt(stamp, expires)
-        ready = self.busy_qualified_row(expires, self.receipt_digest)
+        ready = self.busy_qualified_row(None, self.receipt_digest)
         initial = {**ready, "busy": False, "reason": "application_not_qualified", "qualification": None}
         actual_capabilities = r.capabilities
         stack, child = self.invoke(qualification=actual_capabilities, phase=lambda *_: b"synthetic")
@@ -375,7 +374,7 @@ class RenewalTests(unittest.TestCase):
         stamp = r.now_ms()
         expires = stamp + r.DAY_MS
         self.receipt(stamp, expires)
-        stack, _ = self.invoke(qualification=[None, {"expiresAt": expires, "evidenceDigest": "f" * 64}], phase=lambda *_: b"synthetic")
+        stack, _ = self.invoke(qualification=[None, {"expiresAt": None, "evidenceDigest": "f" * 64}], phase=lambda *_: b"synthetic")
         with stack, patch.object(r, "now_ms", return_value=stamp):
             with self.assertRaises(ValueError):
                 r.run(self.directory)

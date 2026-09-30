@@ -209,6 +209,7 @@ fn overview_direct_retains_previous_response_category_during_new_work() {
             text: response.text,
             state: previous_state,
             tool_calls: Some(0),
+            text_attention: false,
             diagnostic: None,
             facts: TurnFacts {
                 terminal: Terminal::Completed,
@@ -253,6 +254,7 @@ fn overview_direct_failed_session_without_response_shows_the_diagnostic() {
         text: String::new(),
         state: State::Failed,
         tool_calls: Some(0),
+        text_attention: false,
         diagnostic: Some(crate::runner::Diagnostic::notice(diagnostic)),
         facts: TurnFacts {
             terminal: Terminal::Failed,

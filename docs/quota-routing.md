@@ -117,7 +117,8 @@ It never qualifies Devin or verifies the user-supplied `--plan` label. Inspect o
 Managed continuation has one owner. Each supervisor attempt executes exactly
 one settled provider turn. Turn/token-limit continuation uses the existing
 bounded deterministic policy; semantic continuation may proceed only after the
-same safety gates and a positive judge result. A settled account/model quota
+same safety gates when a settle head acts, and a configured judge may veto
+it but never start it. A settled account/model quota
 failure can choose another admitted Pareto route, excluding routes already
 tried by that task. Unsettled or uncertain effects are never failed over.
 Direct sessions and the terminal keep their transcript across such a switch

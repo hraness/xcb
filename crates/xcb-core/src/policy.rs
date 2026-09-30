@@ -77,8 +77,8 @@ impl Default for AutoContinue {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_consecutive: 3,
-            max_elapsed_ms: 600_000,
+            max_consecutive: 8,
+            max_elapsed_ms: 3_600_000,
         }
     }
 }

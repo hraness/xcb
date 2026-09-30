@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { blogPosts } from "../app/blog/posts.ts";
+import { markdownBlogPosts } from "../app/blog/posts.ts";
 import { publishedRelease } from "../app/publication.ts";
 import { contentsFor, renderBlogBody } from "./blog-html.ts";
 
@@ -14,7 +14,7 @@ export function releaseLabel(): string {
 if (import.meta.main) {
   const label = releaseLabel();
   const entries: Record<string, { html: string; toc: readonly { href: string; label: string }[] }> = {};
-  for (const entry of blogPosts) {
+  for (const entry of markdownBlogPosts) {
     const markdown = await Bun.file(resolve(siteRoot, "content/blog", `${entry.slug}.md`)).text();
     const hasPlaceholder = markdown.includes("{{release.version}}");
     if (hasPlaceholder !== entry.statusInBody) {

@@ -498,6 +498,7 @@ mod tests {
             text: text.into(),
             facts,
             tool_calls: Some(1),
+            text_attention: false,
             diagnostic: None,
         }
     }

@@ -42,7 +42,7 @@ const MAX_MAILBOX_MESSAGES: i64 = 4096;
 const MAX_TASK_MAILBOX_MESSAGES: i64 = 256;
 const MAX_PREFERENCES: i64 = 256;
 const MAX_ACTIVE: usize = 4;
-const MAX_TASK_ATTEMPTS: u32 = 4;
+const MAX_TASK_ATTEMPTS: u32 = 9;
 const IDLE_EXIT: Duration = Duration::from_secs(30);
 const POLICY: &str = include_str!("../managed-transition.algal.json");
 
@@ -3911,7 +3911,7 @@ impl ManagedStore {
             next.next_prompt = if inbox_continue {
                 inbox::CONTINUATION_PROMPT.into()
             } else {
-                continuation_prompt(acting_head)
+                continuation_prompt(acting_head, settle.as_ref())
             };
         } else if state.terminal() {
             next.next_prompt.clear();
@@ -4332,10 +4332,11 @@ fn settle_subject(task: &Id, revision: u64) -> String {
 /// A `confirm` decision the runtime may answer: the request carries no risk
 /// cue (deletion, spending, credentials, publication) and hands nothing off
 /// to the user. The veto lives here, not in the replaceable program.
-fn confirmable(decision: &reflex::Decision, text: &str) -> bool {
+pub(crate) fn confirmable(decision: &reflex::Decision, text: &str) -> bool {
     decision.value == "confirm"
         && decision.features.get("risk") == Some(&0.0)
         && decision.features.get("user_act") == Some(&0.0)
+        && !xcb_core::reflex::owner_only(&decision.features)
         && !xcb_core::reflex::confirm_vetoed(text)
 }
 
@@ -4347,7 +4348,7 @@ fn answers_confirm(
     decision: &reflex::Decision,
     outcome: &Outcome,
 ) -> bool {
-    outcome.state == State::Idle
+    outcome.askable()
         && outcome.facts.terminal == Terminal::Completed
         && confirmable(decision, &outcome.text)
         && head_acts(
@@ -4360,7 +4361,7 @@ fn answers_confirm(
 
 /// The mode that governs one settle head. `confirm` never answers while
 /// settle is off or only observing.
-fn head_mode(reflexes: &ReflexConfig, head: &str) -> ReflexMode {
+pub(crate) fn head_mode(reflexes: &ReflexConfig, head: &str) -> ReflexMode {
     match (reflexes.settle, head == xcb_core::reflex::SETTLE_CONFIRM) {
         (ReflexMode::Off, _) => ReflexMode::Off,
         (ReflexMode::Observe, true) if reflexes.confirm != ReflexMode::Off => ReflexMode::Observe,
@@ -4372,7 +4373,7 @@ fn head_mode(reflexes: &ReflexConfig, head: &str) -> ReflexMode {
 /// Whether a settle head acts on a turn: always when active; under `auto`
 /// only once the operator's labels certified it and the turn scores at or
 /// above the certified threshold. An unreadable ledger never acts.
-fn head_acts(
+pub(crate) fn head_acts(
     root: &Path,
     reflexes: &ReflexConfig,
     head: &str,
@@ -4395,7 +4396,7 @@ fn held_for_operator(reflexes: &ReflexConfig, head: &str, task: &ManagedTask) ->
     head_mode(reflexes, head) == ReflexMode::Auto && held_turn(head, &task.id, task.revision)
 }
 
-fn held_turn(head: &str, task: &Id, revision: u64) -> bool {
+pub(crate) fn held_turn(head: &str, task: &Id, revision: u64) -> bool {
     u8::from_str_radix(
         &digest(format!(
             "xcb-reflex-explore-v1\0{head}\0{}\0{revision}",
@@ -4435,7 +4436,7 @@ fn continuation_outcome(task: &ManagedTask, outcome: &Outcome) -> Option<(&'stat
 /// Categorizes a settled worker turn with the settle reflex. Returns `None`
 /// when reflexes are off or the reflex cannot run; categorization is
 /// evidence and never blocks settlement.
-async fn settle_decision(
+pub(crate) async fn settle_decision(
     store: &Store,
     config: &Config,
     outcome: &Outcome,
@@ -4448,7 +4449,15 @@ async fn settle_decision(
     // feature, so it is left uncategorized.
     let features =
         xcb_core::reflex::settle_features(&outcome.text, &outcome.facts, outcome.tool_calls?);
-    let evidence = reflex::settle_evidence(outcome.state, &features);
+    // A question only the text raised is scored like an idle turn, so the
+    // heads decide whether it is a routine go-ahead or a stopped-short
+    // report rather than the state deciding for them.
+    let state = if outcome.askable() {
+        State::Idle
+    } else {
+        outcome.state
+    };
+    let evidence = reflex::settle_evidence(state, &features);
     reflex::ReflexStore::open(store.root())
         .ok()?
         .decide(Reflex::Settle, &features, evidence, false)
@@ -4457,18 +4466,10 @@ async fn settle_decision(
 }
 
 /// The prompt for an automatic run, worded for the settle head that
-/// started it, if any.
-fn continuation_prompt(head: Option<&str>) -> String {
-    const SCOPE: &str = "Do not repeat completed effects or expand scope. Stop and ask one specific question if input or approval is required.";
-    match head {
-        Some(xcb_core::reflex::SETTLE_UNFINISHED) => format!(
-            "Your last turn ended before the original task was finished. Carry out the next step you described, then continue until the task is complete. {SCOPE}"
-        ),
-        Some(xcb_core::reflex::SETTLE_CONFIRM) => format!(
-            "Yes, go ahead with the step you proposed, within the original task. If it would delete data, spend money, publish, or use new credentials, stop and ask instead. {SCOPE}"
-        ),
-        _ => format!("Continue the original task from the last confirmed checkpoint. {SCOPE}"),
-    }
+/// started it, if any, and for how the turn ended (see
+/// [`xcb_core::reflex::continuation_prompt`]).
+fn continuation_prompt(head: Option<&str>, settle: Option<&reflex::Decision>) -> String {
+    xcb_core::reflex::continuation_prompt(head, settle.map(|decision| &decision.features))
 }
 
 #[cfg(test)]
@@ -4494,12 +4495,16 @@ async fn task_should_continue_inbox(
 ) -> Result<Option<Option<&'static str>>> {
     let repeated =
         task.last_output.as_deref() == Some(xcb_core::display_text(&outcome.text, 8192).as_str());
+    // A turn that ended with a question only its text raised (see
+    // `Outcome::askable`) may still be read by the settle heads: the confirm
+    // head answers a routine go-ahead, and the unfinished head continues a
+    // report that trails off in a question. A denied request never is.
     if task.cancel_requested
         || task.attempts.saturating_add(1) >= task.max_attempts
-        || outcome.state != State::Idle
+        || !outcome.askable()
         || !outcome.facts.joined
         || outcome.facts.effects == EffectState::Uncertain
-        || outcome.facts.pending_attention
+        || outcome.denied()
         || outcome.facts.failure.is_some()
         || (repeated && !inbox_requested)
     {
@@ -4514,6 +4519,8 @@ async fn task_should_continue_inbox(
         elapsed,
         repeated,
     );
+    // Inbox input answers a text-raised question; the heads decide below.
+    let inbox_requested = inbox_requested && outcome.state == State::Idle;
     let semantic = outcome.facts.terminal == Terminal::Completed
         && config.extensions.auto_continue.enabled
         && task.attempts < config.extensions.auto_continue.max_consecutive
@@ -4530,6 +4537,7 @@ async fn task_should_continue_inbox(
     let unfinished = semantic
         && settle.is_some_and(|decision| {
             decision.value == "stopped_short"
+                && !xcb_core::reflex::owner_only(&decision.features)
                 && head_acts(
                     store.root(),
                     reflexes,
@@ -4568,9 +4576,10 @@ async fn task_should_continue_inbox(
     if !config.extensions.judge.enabled {
         return Ok(decided(verdict));
     }
-    // The judge may only veto after the deterministic gates pass. An absent,
-    // unresolvable, failing or slow judge leaves the deterministic verdict in
-    // force; it never disables continuation on its own.
+    // The judge may only veto after the deterministic gates and the settle
+    // heads have decided. An absent, unresolvable, failing or slow judge
+    // leaves that verdict in force; it never disables continuation on its
+    // own and never starts one.
     let Ok(Some(backend)) = judge::resolve(store.root(), &config.extensions.judge) else {
         return Ok(decided(verdict));
     };
@@ -4616,17 +4625,14 @@ async fn task_should_continue_inbox(
         .get("continue_task")
         .and_then(|answer| answer.noul())
         .is_some_and(|probability| probability >= 0.75);
-    Ok(decided(judged(verdict, veto_only, approved)))
+    Ok(decided(judged(verdict, approved)))
 }
 
-/// Combines the judge's answer with the verdict it reviewed. Where the
-/// judge may only veto, it can stop a continuation but never start one.
-fn judged(verdict: bool, veto_only: bool, approved: bool) -> bool {
-    if veto_only {
-        verdict && approved
-    } else {
-        approved
-    }
+/// Combines the judge's answer with the verdict it reviewed. The judge only
+/// vetoes: it can stop a continuation the deterministic gates and the settle
+/// heads decided, never start one they did not.
+fn judged(verdict: bool, approved: bool) -> bool {
+    verdict && approved
 }
 
 /// Whether an unsettled run holds this workspace or one nested with it.
@@ -7272,6 +7278,7 @@ mod tests {
             let running = managed.transition(&task, running, None).await.unwrap();
             let outcome = Outcome {
                 tool_calls: Some(0),
+                text_attention: false,
                 diagnostic: None,
                 text: text.into(),
                 state: State::Failed,
@@ -8188,6 +8195,7 @@ mod tests {
             .unwrap();
         let outcome = Outcome {
             tool_calls: Some(0),
+            text_attention: false,
             diagnostic: None,
             text: "This route reached its quota.".into(),
             facts: xcb_core::policy::TurnFacts {
@@ -8271,6 +8279,7 @@ mod tests {
             .unwrap();
         let outcome = Outcome {
             tool_calls: Some(0),
+            text_attention: false,
             diagnostic: Some(crate::runner::Diagnostic::from_error(&Error::Unavailable(
                 crate::runner::STALE_MODEL,
             ))),
@@ -8432,6 +8441,7 @@ mod tests {
             .unwrap();
         let limited = Outcome {
             tool_calls: Some(0),
+            text_attention: false,
             diagnostic: None,
             text: "I reached the turn limit after making progress.".into(),
             facts: xcb_core::policy::TurnFacts {
@@ -8451,6 +8461,7 @@ mod tests {
         );
         let completed = Outcome {
             tool_calls: Some(0),
+            text_attention: false,
             diagnostic: None,
             text: "The task is complete.".into(),
             facts: xcb_core::policy::TurnFacts {
@@ -8719,6 +8730,7 @@ mod tests {
     fn idle_outcome(terminal: Terminal, text: &str) -> Outcome {
         Outcome {
             tool_calls: Some(0),
+            text_attention: false,
             diagnostic: None,
             text: text.into(),
             state: State::Idle,
@@ -8737,6 +8749,7 @@ mod tests {
     fn worked_outcome(text: &str, tool_calls: u32) -> Outcome {
         Outcome {
             tool_calls: Some(tool_calls),
+            text_attention: false,
             ..idle_outcome(Terminal::Completed, text)
         }
     }
@@ -9747,15 +9760,14 @@ mod tests {
         );
     }
 
-    /// Where the judge may only veto (a go-ahead xcb may not give, on a turn
-    /// that continues deterministically), it can stop the continuation but
-    /// never start one.
+    /// The judge only vetoes: it can stop a continuation the gates and
+    /// heads decided but never start one they did not.
     #[test]
-    fn a_veto_only_judge_cannot_start_a_continuation() {
-        assert!(!judged(false, true, true));
-        assert!(!judged(true, true, false));
-        assert!(judged(true, true, true));
-        assert!(judged(false, false, true));
+    fn the_judge_cannot_start_a_continuation() {
+        assert!(!judged(false, true));
+        assert!(!judged(true, false));
+        assert!(judged(true, true));
+        assert!(!judged(false, false));
     }
 
     /// In active mode a completed turn categorized as stopped short passes
@@ -9921,6 +9933,7 @@ mod tests {
         let running = mark_running(&managed, &task).await;
         let recovered = Outcome {
             tool_calls: None,
+            text_attention: false,
             ..worked_outcome(ask, 0)
         };
         let held = managed
@@ -9930,6 +9943,110 @@ mod tests {
         assert_eq!(
             (held.state, held.settle.as_deref()),
             (TaskState::Completed, None)
+        );
+    }
+
+    /// A question only the text raised reaches the settle heads: the active
+    /// confirm head answers a routine go-ahead with the recommendation the
+    /// worker gave, and the unfinished head hands back a step the worker's
+    /// own tools perform. A denied provider request, and a step only the
+    /// user can take, stay with them whatever the text says.
+    #[tokio::test]
+    async fn text_only_questions_are_answered_by_the_active_heads() {
+        let state_root = root();
+        let workspace_root = root();
+        let state = private::directory(
+            &xcb_core::canonical(state_root.path())
+                .unwrap()
+                .join("state"),
+        )
+        .unwrap();
+        let workspace = xcb_core::canonical(workspace_root.path()).unwrap();
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let mut config = Config::default();
+        config.extensions.reflexes.settle = ReflexMode::Active;
+        config.extensions.reflexes.confirm = ReflexMode::Active;
+        config.save(&state, None).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let asked = |text: &str, state: State, text_attention: bool| Outcome {
+            state,
+            text_attention,
+            facts: xcb_core::policy::TurnFacts {
+                pending_attention: true,
+                ..worked_outcome(text, 12).facts
+            },
+            ..worked_outcome(text, 12)
+        };
+        // The text classifier alone raised the question: answered.
+        let ask = "Both fixes are on the branch and the tests pass. I recommend option 2, the smaller patch. Should I go with that and open the PR?";
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_text_ask").await;
+        let running = mark_running(&managed, &task).await;
+        let next = managed
+            .finish(&xcb, &running.id, Ok(asked(ask, State::NeedsAnswer, true)))
+            .await
+            .unwrap();
+        assert_eq!(
+            (next.state, next.settle.as_deref()),
+            (TaskState::Queued, Some("confirm"))
+        );
+        assert!(
+            next.next_prompt.starts_with("Go with your recommendation"),
+            "{}",
+            next.next_prompt
+        );
+        // A provider request was denied during the turn: only the user can
+        // supply new permission, whatever the text says.
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_denied").await;
+        let running = mark_running(&managed, &task).await;
+        let held = managed
+            .finish(
+                &xcb,
+                &running.id,
+                Ok(asked(ask, State::NeedsApproval, false)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(held.state, TaskState::NeedsInput);
+        // A step only the user can take stays with them.
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_signin").await;
+        let running = mark_running(&managed, &task).await;
+        let held = managed
+            .finish(
+                &xcb,
+                &running.id,
+                Ok(asked(
+                    "The CLI needs you to sign in with the device code first. Ready when you are?",
+                    State::NeedsAnswer,
+                    true,
+                )),
+            )
+            .await
+            .unwrap();
+        assert_eq!(held.state, TaskState::NeedsInput);
+        // A parked step the worker's own tools perform is handed back.
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_self").await;
+        let running = mark_running(&managed, &task).await;
+        let next = managed
+            .finish(
+                &xcb,
+                &running.id,
+                Ok(worked_outcome(
+                    "The branch is pushed and CI is green. I'm waiting on you to run gh pr merge 42 and then I'll clean up the worktree.",
+                    12,
+                )),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (next.state, next.settle.as_deref()),
+            (TaskState::Queued, Some("stopped_short"))
+        );
+        assert!(
+            next.next_prompt
+                .starts_with("Your last turn waited for the user"),
+            "{}",
+            next.next_prompt
         );
     }
 }
