@@ -318,6 +318,7 @@ pub async fn login_with_interaction(
     }
 }
 
+#[cfg(any(unix, test))]
 #[derive(Default)]
 struct ClaudeLoginObserver {
     bytes: Zeroizing<Vec<u8>>,
@@ -326,6 +327,7 @@ struct ClaudeLoginObserver {
     failed: bool,
 }
 
+#[cfg(any(unix, test))]
 fn oauth_url_has_secret(url: &str) -> bool {
     let mut decoded = Zeroizing::new(url.as_bytes().to_vec());
     for _ in 0..3 {
@@ -354,6 +356,7 @@ fn oauth_url_has_secret(url: &str) -> bool {
     decoded.windows(7).any(|window| window == b"sk-ant-")
 }
 
+#[cfg(any(unix, test))]
 impl ClaudeLoginObserver {
     fn observe(&mut self, bytes: &[u8]) -> Vec<ClaudeLoginEvent> {
         // Provider output contains the reusable token. It stays private here;
