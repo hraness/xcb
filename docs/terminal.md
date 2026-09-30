@@ -47,8 +47,8 @@ worker has stopped and xcb has recorded its result.
 Paste preserves multiple lines without sending them. Drafts accept up to
 256 KiB; a larger paste is refused as a whole. `/attach <path>` adds an image;
 `/detach [number|all]` removes it. With no number, `/detach` removes the last
-attachment. Mouse capture starts off so terminal selection works; `/mouse`
-enables wheel scrolling.
+attachment. Mouse capture starts on for wheel scrolling; `/mouse`
+turns it off for terminal text selection.
 
 ## Work in the thread
 
@@ -138,37 +138,41 @@ limits, and problems. A session that failed without a response shows its
 failure reason in place of the response. A model is shown after routing; thinking is shown only
 when the provider reports it.
 
-The grid uses at most half the terminal height and scrolls when more sessions
-are present. Press F6, then use arrows or PageUp/PageDown to browse. Enter adds
-the selected agent's reference and a response snapshot to your draft. Escape
-returns to chat. With `/mouse` enabled, scroll over the grid to browse agents,
-scroll below it to browse the transcript, or click a card to add its reference.
+The overview starts with sessions active or updated in the last day, plus the
+conversation you have open. Use `/ovw all` to include older sessions. Cards use
+up to three fifths of the terminal height; a tall terminal can show more rows.
+The heading shows how many cards are visible and how to reach the next page.
+Press F6, then use arrows or PageUp/PageDown to browse. You can also type
+`/ovw next` or `/ovw prev`, or scroll the mouse wheel over the cards. Scrolling
+below the cards scrolls the transcript. `/mouse` toggles mouse capture so you
+can use the terminal's own text selection.
 
-References identify the conversation or session and its observed task. Adding
-one sends nothing and keeps your current chat and guidance target. Edit the
-draft to describe what you want to do with that context, then send it from the
-main chat. Existing task, project, and approval controls still apply.
+Each card has a colored number on its bottom border. The number and color
+stay with that session while you filter, sort, or page through this terminal.
+Running borders gently brighten and dim; reduced-motion mode keeps them steady.
+Use `/pick 3` to select pane three. Enter or a click adds a session reference
+to your draft; a project card in the main thread focuses that project.
+Adding a reference sends nothing. Escape returns to chat.
 
-The conversation you have open comes first, then sessions needing attention,
-then active work, then earlier sessions. A question, approval, usage limit, or
-failure that has not changed for a day moves behind active work. Its card shows
-how long it has waited, and the heading counts it separately, as in
-`2 need attention (5 older)`. Cards keep their relative order within each group
-as responses arrive. While you
-focus or scroll the grid, the order stays in place; status updates remain visible.
-Returning to the top and leaving grid focus applies priority changes.
+Type `remove session 3` or `/hide 3` to hide that card in this terminal.
+`show sessions` or `/show` restores hidden cards. These commands keep session
+history and leave running work intact. Hiding lasts until this terminal closes.
 
-In the grid, press `1` for all sessions, `2` for active work and attention from
-the last day, or `3` for all attention, older attention last. Press `/` or Ctrl-F to filter by name,
-model, status, or ID. Enter finishes filtering; Escape clears the filter or
-returns to chat. Filtering keeps your chat draft.
+In the grid, `1` shows all sessions, `2` active work, and `3` attention.
+`/` or Ctrl-F filters by name, model, status, or ID. Enter finishes filtering;
+Escape clears the filter or returns to chat. Your draft stays intact.
+The overview holds up to 128 sessions and 2,048 bytes per response preview.
+Short terminals use a compact strip to leave room for typing.
 
-The same controls are available as `/overview all`, `/overview active`,
-`/overview attention`, `/overview filter <text>`, and `/overview clear`.
-Use `/overview hide` and `/overview show` to control visibility. The overview
-holds up to 128 sessions and 2,048 bytes per response preview. Short terminals
-use a compact strip to leave room for typing. `xcb chat` includes managed and
-direct sessions; the direct-session interface shows direct sessions.
+Common commands have short aliases: `/attn` (attention), `/ovw` (overview),
+`/hist` (history), `/proj` (projects), `/work` (workspace), `/stat` (status),
+`/guid` (steer), `/stop` (cancel), `/ans` (reply), and `/schd` (schedules).
+The full names and existing single-letter shortcuts still work. Type `/` to
+browse commands and see their aliases.
+
+The composer wraps long drafts to fit the window. Arrow keys follow the visible
+rows; wrapping preserves the original text. Use Shift-Enter or Alt-Enter,
+depending on your terminal, to insert a newline.
 
 ## Guide an agent
 
