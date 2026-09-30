@@ -361,27 +361,26 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  macos_sign:
-    name: Sign and notarize exact macOS release bytes
+  macos_submit:
+    name: Sign and submit exact macOS candidate
     needs:
       - verify
       - macos_build
     # This environment permits only release tags and has no reviewers/timers.
-    # Apple credentials exist only here, never in the source/build jobs.
+    # Apple credentials stay in the submit/finalize jobs, never source/build jobs.
     environment: xcb-apple-release
     permissions:
       actions: read
-      attestations: write
       contents: read
-      id-token: write
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 10
     outputs:
-      artifact_id: ${{ steps.signed.outputs.artifact-id }}
-      artifact_digest: ${{ steps.signed.outputs.artifact-digest }}
-      archive_sha256: ${{ steps.signed_bytes.outputs.archive_sha256 }}
-      checksum_sha256: ${{ steps.signed_bytes.outputs.checksum_sha256 }}
+      artifact_id: ${{ steps.candidate.outputs.artifact-id }}
+      artifact_digest: ${{ steps.candidate.outputs.artifact-digest }}
     env:
+      VERIFIED_SHA: ${{ needs.verify.outputs.verified_sha }}
+      UNSIGNED_ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact_id }}
+      UNSIGNED_ARTIFACT_DIGEST: ${{ needs.macos_build.outputs.artifact_digest }}
       VERIFIED_TAG: ${{ needs.verify.outputs.verified_tag }}
     steps:
       - name: Check out verified dependency-free signing and admission code
@@ -412,7 +411,24 @@ jobs:
           ' "$RUNNER_TEMP/xcb-unsigned-metadata.json" > /dev/null
           gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/xcb-unsigned.zip"
           python3 -I scripts/sign-macos-release.py extract-artifact "$RUNNER_TEMP/xcb-unsigned.zip" "$ARTIFACT_DIGEST" "$VERIFIED_TAG" "$RUNNER_TEMP/xcb-unsigned-input"
-      - name: Sign and notarize without executing the binary
+      - name: Refuse another signing or submission attempt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" -le 100 ]] || exit 1
+          for (( attempt=1; attempt<GITHUB_RUN_ATTEMPT; attempt++ )); do
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$attempt/jobs?per_page=100" > "$RUNNER_TEMP/xcb-prior-jobs.json"
+            if ! jq -e '
+              .total_count == (.jobs | length) and .total_count <= 100 and
+              ([.jobs[] | select(.name == "Sign and submit exact macOS candidate")] | length) <= 1 and
+              all(.jobs[]; .name != "Sign and submit exact macOS candidate" or .conclusion == "skipped")
+            ' "$RUNNER_TEMP/xcb-prior-jobs.json" > /dev/null; then
+              echo "::error::A previous submission producer ran or its outcome is unknown. Re-run failed finalization jobs with the original successful producer; do not sign or submit again."
+              exit 1
+            fi
+          done
+      - name: Sign and submit without executing the binary
         env:
           APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
           APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
@@ -420,8 +436,96 @@ jobs:
           APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
         run: |
-          python3 -I scripts/sign-macos-release.py sign "$RUNNER_TEMP/xcb-unsigned-input/xcb-${VERIFIED_TAG#v}-darwin-aarch64.unsigned.tar.gz" "$VERIFIED_TAG" "$GITHUB_WORKSPACE/signed-artifacts" "$RUNNER_TEMP/xcb-apple-signing"
+          python3 -I scripts/sign-macos-release.py submit "$RUNNER_TEMP/xcb-unsigned-input/xcb-${VERIFIED_TAG#v}-darwin-aarch64.unsigned.tar.gz" "$VERIFIED_TAG" "$RUNNER_TEMP/xcb-apple-candidate" "$RUNNER_TEMP/xcb-apple-signing"
       - name: Remove temporary signing credentials even on failure or cancellation
+        if: always()
+        run: python3 -I scripts/sign-macos-release.py cleanup "$RUNNER_TEMP/xcb-apple-signing"
+      - name: Preserve exact secret-free submitted candidate before waiting
+        id: candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          # A pending candidate must never match the final native asset names.
+          name: xcb-apple-candidate-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/xcb-apple-candidate/notarization.zip
+            ${{ runner.temp }}/xcb-apple-candidate/receipt.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve non-secret submission diagnostic
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: xcb-apple-submission-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/xcb-apple-notarization.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  macos_sign:
+    name: Finalize the original macOS notarization
+    needs:
+      - verify
+      - macos_build
+      - macos_submit
+    # This environment permits only release tags and has no reviewers/timers.
+    # Apple credentials stay in the submit/finalize jobs, never source/build jobs.
+    environment: xcb-apple-release
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    runs-on: macos-15
+    timeout-minutes: 30
+    outputs:
+      artifact_id: ${{ steps.signed.outputs.artifact-id }}
+      artifact_digest: ${{ steps.signed.outputs.artifact-digest }}
+      archive_sha256: ${{ steps.signed_bytes.outputs.archive_sha256 }}
+      checksum_sha256: ${{ steps.signed_bytes.outputs.checksum_sha256 }}
+    env:
+      VERIFIED_SHA: ${{ needs.verify.outputs.verified_sha }}
+      UNSIGNED_ARTIFACT_ID: ${{ needs.macos_build.outputs.artifact_id }}
+      UNSIGNED_ARTIFACT_DIGEST: ${{ needs.macos_build.outputs.artifact_digest }}
+      VERIFIED_TAG: ${{ needs.verify.outputs.verified_tag }}
+    steps:
+      - name: Check out verified dependency-free signing and admission code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          fetch-tags: false
+          persist-credentials: false
+          ref: ${{ needs.verify.outputs.verified_sha }}
+      - name: Bind the original submitted candidate by immutable identity
+        id: candidate_input
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.macos_submit.outputs.artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.macos_submit.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ || ! "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Submission producer lacks an immutable candidate identity"
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" > "$RUNNER_TEMP/xcb-candidate-metadata.json"
+          jq -e --arg id "$ARTIFACT_ID" --arg digest "sha256:$ARTIFACT_DIGEST" --arg run "$GITHUB_RUN_ID" --arg sha "$VERIFIED_SHA" --argjson attempt "$GITHUB_RUN_ATTEMPT" '
+            (.id | tostring) == $id and .digest == $digest and .expired == false and
+            (.workflow_run.id | tostring) == $run and .workflow_run.head_sha == $sha and
+            (.name | test("^xcb-apple-candidate-[1-9][0-9]*$")) and
+            (.name | split("-") | last | tonumber) <= $attempt and
+            .size_in_bytes > 0 and .size_in_bytes <= 134217728
+          ' "$RUNNER_TEMP/xcb-candidate-metadata.json" > /dev/null
+          printf 'producer_attempt=%s\n' "$(jq -r '.name | split("-") | last' "$RUNNER_TEMP/xcb-candidate-metadata.json")" >> "$GITHUB_OUTPUT"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$RUNNER_TEMP/xcb-candidate.zip"
+      - name: Resume the original submission without signing or executing its bytes
+        env:
+          CANDIDATE_PRODUCER_ATTEMPT: ${{ steps.candidate_input.outputs.producer_attempt }}
+          ARTIFACT_DIGEST: ${{ needs.macos_submit.outputs.artifact_digest }}
+          APPLE_NOTARY_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          python3 -I scripts/sign-macos-release.py finalize "$RUNNER_TEMP/xcb-candidate.zip" "$ARTIFACT_DIGEST" "$VERIFIED_TAG" "$GITHUB_WORKSPACE/signed-artifacts" "$RUNNER_TEMP/xcb-apple-signing"
+      - name: Remove temporary notary credentials even on failure or cancellation
         if: always()
         run: python3 -I scripts/sign-macos-release.py cleanup "$RUNNER_TEMP/xcb-apple-signing"
       - name: Bind the final signed bytes before executing the archive smoke
