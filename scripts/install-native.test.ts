@@ -492,3 +492,30 @@ test("bootstrap leaves an inconclusive archive probe to the installer", () => {
     expect(installer).toBe("0.4.0\n");
   }
 });
+
+
+test("release install records bind the binary, helper and explicit version pin", () => {
+  const f = fixture();
+  f.release();
+  for (const pinned of ["true", "false"]) {
+    const result = f.run(true, { XCB_INSTALL_PINNED: pinned });
+    expect(result.status, result.stderr).toBe(0);
+    const record = JSON.parse(readFileSync(join(f.prefix, "share/xcb/install.json"), "utf8"));
+    expect(record.version).toBe(2);
+    expect(record.installMethod).toBe("release");
+    expect(record.sourceRoot).toBe("");
+    expect(record.versionPinned).toBe(pinned === "true");
+    expect(record.binarySha256).toBe(hash(readFileSync(f.destination)));
+    expect(record.helperSha256).toBe(hash(readFileSync(record.helperPath)));
+    expect(statSync(join(f.prefix, "share/xcb/update-use.lock")).mode & 0o777).toBe(0o600);
+  }
+});
+
+test("a foreign release repository is rejected before replacing anything", () => {
+  const f = fixture();
+  f.release();
+  const result = f.run(true, { XCB_GITHUB: "foreign/xcb" });
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain("release repository must be hraness/xcb");
+  f.unchanged();
+});

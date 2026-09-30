@@ -32,7 +32,13 @@
 
   # xcb.sh renders this from site/published-release.json; never type it.
   $defaultVersion = '@XCB_RELEASE_VERSION@'
-  $repository = if ($env:XCB_GITHUB) { $env:XCB_GITHUB } else { 'hraness/xcb' }
+  $repository = 'hraness/xcb'
+  if ($env:XCB_GITHUB -and $env:XCB_GITHUB -ne $repository) { Fail 'release repository must be hraness/xcb' }
+  $pinned = [bool] $env:XCB_VERSION
+  if ($env:XCB_INSTALL_PINNED) {
+    if ($env:XCB_INSTALL_PINNED -notin @('true', 'false')) { Fail 'XCB_INSTALL_PINNED must be true or false' }
+    $pinned = $env:XCB_INSTALL_PINNED -eq 'true'
+  }
   $guide = 'https://xcb.sh/install'
 
   $version = if ($env:XCB_VERSION) { $env:XCB_VERSION } else { $defaultVersion }
@@ -191,7 +197,7 @@
     Move-Item -LiteralPath $stagedHelper -Destination $helper -Force
 
     $manifest = [ordered]@{
-      version        = 1
+      version        = 2
       installMethod  = 'release'
       channel        = 'stable'
       versionString  = $version
@@ -199,10 +205,20 @@
       helperPath     = $helper
       sourceRoot     = ''
       binaryPath     = $destination
+      binarySha256   = $candidateDigest
+      helperSha256   = Get-Sha256 $helper
+      versionPinned  = $pinned
     } | ConvertTo-Json -Compress
     $stagedManifest = Join-Path $stage 'install.json'
     [System.IO.File]::WriteAllText($stagedManifest, $manifest + "`n", (New-Object System.Text.UTF8Encoding $false))
     Move-Item -LiteralPath $stagedManifest -Destination (Join-Path $shareDir 'install.json') -Force
+
+    $usageLock = Join-Path $shareDir 'update-use.lock'
+    if (-not (Test-Real $usageLock)) { Fail 'update use lock is unsafe' }
+    if (-not (Test-Path -LiteralPath $usageLock)) {
+      $usageFile = [System.IO.File]::Open($usageLock, 'CreateNew', 'Write', 'None')
+      $usageFile.Dispose()
+    }
 
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $entries = @()

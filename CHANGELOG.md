@@ -10,6 +10,23 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+Verified release installs keep xcb current before interactive commands, with an
+opt-out and checks that protect pinned tools and running work.
+
+- Default to automatic updates only for unpinned release installs whose saved
+  paths, version, and executable and installer checksums still match. Preserve
+  saved notification-only and disabled preferences.
+- Check at most once a day before interactive commands and start the updated
+  binary before running the requested command. CI, JSON, noninteractive uses,
+  and `HRANESS_NO_UPDATE=1` skip automatic checks.
+- Wait for other xcb commands, supervisors, and services to exit before
+  replacing the binary. Updates do not stop work or restart services.
+- Refuse source builds, package-manager installations, mismatched install
+  records, mutable releases, and implicit downgrades. Exact-version installs
+  remain pinned; existing manual update commands remain available.
+
 ## 0.15.1 - 2026-09-30
 
 Workspace metadata checks no longer pause the supervisor when a filesystem

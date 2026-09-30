@@ -444,11 +444,13 @@ function UpgradeAndUninstall() {
       <Code>{`xcb update check        # is a newer release available?
 xcb upgrade             # install the latest verified release
 xcb upgrade <version>   # install a specific release`}</Code>
-      <p><code>xcb upgrade</code> reruns the installer that <code>install-native.sh</code> recorded, so it needs an install made with that script. If you built from source, update the checkout and run <code>./scripts/install-native.sh</code> again. The binary being replaced is kept as <code>~/.local/bin/xcb.previous.&lt;sha256&gt;</code>.</p>
-      <h2 id="automatic-checks">Automatic checks</h2>
-      <p>xcb can check once a day, with a login item on macOS or a systemd user timer on Linux:</p>
-      <Code>{`xcb update enable --policy notify   # record a newer release (the default policy)
-xcb update enable --policy auto     # also install it
+      <p><code>xcb upgrade</code> reruns the recorded release installer. It checks the installed binary and helper against their saved paths, version, and SHA-256 before replacing anything. Older installs without those records need one reinstall from <a href="/install">the release installer</a>. If you built from source, update the checkout and run <code>./scripts/install-native.sh</code> again. The binary being replaced is kept as <code>~/.local/bin/xcb.previous.&lt;sha256&gt;</code>.</p>
+      <h2 id="automatic-checks">Automatic updates</h2>
+      <p>New, unpinned release installs check and update automatically before an interactive <code>xcb</code>, <code>chat</code>, <code>resume</code>, <code>run</code>, or <code>doctor</code> command, at most once a day. The update runs before your command starts and then starts the new binary with the same arguments. Another running xcb command, supervisor, or service postpones the update. Nothing is stopped or restarted for it.</p>
+      <p>Saved <code>notify</code> and <code>disable</code> preferences remain in force. Set <code>HRANESS_NO_UPDATE=1</code> to skip incidental updates for one invocation. CI, JSON output, and noninteractive commands also skip them; agents and scripts can use <code>xcb update check</code> and <code>xcb upgrade</code> explicitly. Source builds, package-manager installs, and exact-version pins never update automatically.</p>
+      <p>You can also add a daily login item on macOS or a systemd user timer on Linux:</p>
+      <Code>{`xcb update enable                   # automatic updates for a supported release install
+xcb update enable --policy notify   # record a newer release without installing it
 xcb update status                   # the policy, the last check, and any newer release
 xcb update disable`}</Code>
       <h2 id="after-upgrade">After an upgrade</h2>
@@ -459,7 +461,7 @@ xcb update disable`}</Code>
         <li>If you use the command runner, <a href="/docs/workspace#refresh">refresh it</a> from the matching source version.</li>
       </ol>
       <p>If you’re upgrading from an 0.8 release, the first newer build to open your state moves project grants and Wordcell bindings from conversations to folders. Follow the <Ext href={`${repositoryDocs}/project-agents.md#upgrading-from-an-08-release`}>upgrade steps</Ext> first.</p>
-      <p>To go back to an earlier release, run <code>xcb upgrade &lt;version&gt; --allow-downgrade</code>. An older build may refuse state written by a newer one, so keep your state folder and read the <Ext href={`${repository}/blob/main/CHANGELOG.md`}>changelog</Ext> first.</p>
+      <p><code>xcb upgrade &lt;version&gt;</code> pins that exact version. Run <code>xcb upgrade</code> without a version to return to the latest stable release. To go back to an earlier release, run <code>xcb upgrade &lt;version&gt; --allow-downgrade</code>. An older build may refuse state written by a newer one, so keep your state folder and read the <Ext href={`${repository}/blob/main/CHANGELOG.md`}>changelog</Ext> first.</p>
       <h2 id="uninstall">Uninstall</h2>
       <p>Let running tasks finish or cancel them, then remove the login items and the binary:</p>
       <Code>{`xcb service uninstall   # stop starting the supervisor at login

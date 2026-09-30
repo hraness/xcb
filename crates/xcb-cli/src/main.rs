@@ -495,11 +495,11 @@ enum UpdateCommand {
     Check,
     /// Show the local update policy and the last cached result.
     Status,
-    /// Set the update policy (default notify); on macOS also add the daily
+    /// Set the update policy (default auto for verified release installs); also add a daily
     /// check. --policy disable turns checks off like `xcb update disable`.
     Enable {
         /// Update policy: notify, auto, or disable.
-        #[arg(long, default_value = "notify", value_parser = parse_update_policy)]
+        #[arg(long, default_value = "auto", value_parser = parse_update_policy)]
         policy: xcb_runtime::update::Policy,
     },
     /// Turn off update checks and scheduled upgrades, and remove the daily
@@ -1428,6 +1428,125 @@ fn parse_expected_generation(value: &str) -> std::result::Result<String, &'stati
         .map_err(|_| "expected generation must be 64 lowercase hexadecimal characters")
 }
 
+fn update_reentry_exit_code(status: std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return 128 + signal;
+        }
+    }
+    1
+}
+
+fn dispatch_update(root: &std::path::Path, command: Commands, as_json: bool) -> Result<i32> {
+    match command {
+        Commands::Update { command } => {
+            match command.unwrap_or(UpdateCommand::Check) {
+                UpdateCommand::Check => {
+                    let result =
+                        xcb_runtime::update::check(root, env!("CARGO_PKG_VERSION"), as_json);
+                    if as_json {
+                        print_json(result?)?;
+                    } else {
+                        result?;
+                    }
+                }
+                UpdateCommand::Status => {
+                    let state = xcb_runtime::update::load(root)?;
+                    if as_json {
+                        print_json(
+                            json!({"version":1,"policy":state.policy,"lastCheckMs":state.last_check_ms,"availableVersion":state.available_version,"automaticInstallSupported":xcb_runtime::update::automatic_install_supported(root)}),
+                        )?;
+                    } else {
+                        let available = match state.available_version.as_deref() {
+                            Some(version) => format!("available {version}"),
+                            None if state.last_check_ms == 0 => "not checked yet".into(),
+                            None => "no newer release recorded".into(),
+                        };
+                        println!(
+                            "update policy: {} · last check {} · {}",
+                            state.policy,
+                            human_age(now_ms(), state.last_check_ms),
+                            available
+                        );
+                    }
+                }
+                UpdateCommand::Enable { policy } => {
+                    set_update_policy(root, policy, as_json)?;
+                }
+                UpdateCommand::Disable => {
+                    set_update_policy(root, xcb_runtime::update::Policy::Disable, as_json)?;
+                }
+                UpdateCommand::Install {
+                    version,
+                    allow_downgrade,
+                    quiet,
+                } => {
+                    let result = xcb_runtime::update::upgrade(
+                        root,
+                        env!("CARGO_PKG_VERSION"),
+                        version.as_deref(),
+                        quiet || as_json,
+                        allow_downgrade,
+                    )?;
+                    if as_json {
+                        print_json(result)?;
+                    }
+                }
+                UpdateCommand::Daemon { quiet } => {
+                    let checked = xcb_runtime::update::should_check(root)?;
+                    let mut upgrade = None;
+                    if checked {
+                        let result = xcb_runtime::update::check(
+                            root,
+                            env!("CARGO_PKG_VERSION"),
+                            quiet || as_json,
+                        )?;
+                        if xcb_runtime::update::load(root)?.policy
+                            == xcb_runtime::update::Policy::Auto
+                            && result.release_available
+                        {
+                            upgrade = Some(xcb_runtime::update::upgrade(
+                                root,
+                                env!("CARGO_PKG_VERSION"),
+                                None,
+                                quiet || as_json,
+                                false,
+                            )?);
+                        }
+                    }
+                    if as_json {
+                        print_json(json!({"version":1,"checked":checked,"upgrade":upgrade}))?;
+                    }
+                }
+            }
+            Ok(0)
+        }
+        Commands::Upgrade {
+            version,
+            allow_downgrade,
+            quiet,
+        } => {
+            let result = xcb_runtime::update::upgrade(
+                root,
+                env!("CARGO_PKG_VERSION"),
+                version.as_deref(),
+                quiet || as_json,
+                allow_downgrade,
+            )?;
+            if as_json {
+                print_json(result)?;
+            }
+            Ok(0)
+        }
+        _ => unreachable!("only updater commands reach dispatch_update"),
+    }
+}
+
 fn dispatch(cli: Cli) -> impl std::future::Future<Output = Result<i32>> {
     // Allocate the command state once. Embedding it in each caller's async
     // frame can overflow a normal 2 MiB stack before any command runs.
@@ -1435,10 +1554,15 @@ fn dispatch(cli: Cli) -> impl std::future::Future<Output = Result<i32>> {
 }
 
 async fn dispatch_inner(cli: Cli) -> Result<i32> {
+    let updater_command = matches!(
+        &cli.command,
+        Some(Commands::Update { .. } | Commands::Upgrade { .. })
+    );
     process::initialize_host()?;
     // The provider's MCP helper must not open application state or emit any
     // ordinary CLI output on its protocol-only standard streams.
     if matches!(&cli.command, Some(Commands::BrokerStdio)) {
+        let _installation = xcb_runtime::update::hold_installation(std::path::Path::new("/"))?;
         return broker_stdio().await;
     }
     // The hidden in-namespace forwarder must not touch CLI state: inside the
@@ -1454,6 +1578,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         child,
     }) = &cli.command
     {
+        let _installation = xcb_runtime::update::hold_installation(std::path::Path::new("/"))?;
         return egress_forward(socket, *port, lo_up, env_file, *target_port, child).await;
     }
     // The sandbox test's confined half runs inside bwrap with no state root
@@ -1467,7 +1592,46 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             return Err(Error::Unavailable("the sandbox test runs on Linux only"));
         }
     }
+    // Update before opening any task state. A successful replacement re-enters
+    // once with the original arguments; completed product work is never replayed.
+    let update_root = cli
+        .state
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(private::default_root)?;
+    let interactive_command = matches!(
+        &cli.command,
+        None | Some(
+            Commands::Chat { .. }
+                | Commands::Resume { .. }
+                | Commands::Run { .. }
+                | Commands::Doctor { .. }
+        )
+    );
+    let update_executable = std::env::current_exe()?;
+    if interactive_command
+        && xcb_runtime::update::automatic_allowed(
+            io::stdin().is_terminal() && io::stderr().is_terminal(),
+            cli.json,
+        )
+        && xcb_runtime::update::automatic(&update_root, env!("CARGO_PKG_VERSION"))?
+            .is_some_and(|result| result.changed)
+    {
+        let status = std::process::Command::new(&update_executable)
+            .args(std::env::args_os().skip(1))
+            .env("XCB_UPDATE_REENTRY", "1")
+            .status()?;
+        return Ok(update_reentry_exit_code(status));
+    }
+    let _installation = if updater_command {
+        None
+    } else {
+        xcb_runtime::update::hold_installation(&update_root)?
+    };
     let root = cli.state.unwrap_or(private::default_root()?);
+    if updater_command {
+        return dispatch_update(&root, cli.command.expect("an updater command"), cli.json);
+    }
     if matches!(&cli.command, Some(Commands::ManagedDaemon)) {
         return xcb_runtime::managed::daemon(root).await;
     }
@@ -3261,111 +3425,8 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
-        Some(Commands::Update { command }) => {
-            match command.unwrap_or(UpdateCommand::Check) {
-                UpdateCommand::Check => {
-                    let result = xcb_runtime::update::check(
-                        store.root(),
-                        env!("CARGO_PKG_VERSION"),
-                        cli.json,
-                    );
-                    if cli.json {
-                        print_json(result?)?;
-                    } else {
-                        result?;
-                    }
-                }
-                UpdateCommand::Status => {
-                    let state = xcb_runtime::update::load(store.root())?;
-                    if cli.json {
-                        print_json(
-                            json!({"version":1,"policy":state.policy,"lastCheckMs":state.last_check_ms,"availableVersion":state.available_version}),
-                        )?;
-                    } else {
-                        let available = match state.available_version.as_deref() {
-                            Some(version) => format!("available {version}"),
-                            None if state.last_check_ms == 0 => "not checked yet".into(),
-                            None => "no newer release recorded".into(),
-                        };
-                        println!(
-                            "update policy: {} · last check {} · {}",
-                            state.policy,
-                            human_age(now_ms(), state.last_check_ms),
-                            available
-                        );
-                    }
-                }
-                UpdateCommand::Enable { policy } => {
-                    set_update_policy(store.root(), policy, cli.json)?;
-                }
-                UpdateCommand::Disable => {
-                    set_update_policy(
-                        store.root(),
-                        xcb_runtime::update::Policy::Disable,
-                        cli.json,
-                    )?;
-                }
-                UpdateCommand::Install {
-                    version,
-                    allow_downgrade,
-                    quiet,
-                } => {
-                    let result = xcb_runtime::update::upgrade(
-                        store.root(),
-                        env!("CARGO_PKG_VERSION"),
-                        version.as_deref(),
-                        quiet || cli.json,
-                        allow_downgrade,
-                    )?;
-                    if cli.json {
-                        print_json(result)?;
-                    }
-                }
-                UpdateCommand::Daemon { quiet } => {
-                    let checked = xcb_runtime::update::should_check(store.root())?;
-                    let mut upgrade = None;
-                    if checked {
-                        let result = xcb_runtime::update::check(
-                            store.root(),
-                            env!("CARGO_PKG_VERSION"),
-                            quiet || cli.json,
-                        )?;
-                        if xcb_runtime::update::load(store.root())?.policy
-                            == xcb_runtime::update::Policy::Auto
-                            && result.release_available
-                        {
-                            upgrade = Some(xcb_runtime::update::upgrade(
-                                store.root(),
-                                env!("CARGO_PKG_VERSION"),
-                                None,
-                                quiet || cli.json,
-                                false,
-                            )?);
-                        }
-                    }
-                    if cli.json {
-                        print_json(json!({"version":1,"checked":checked,"upgrade":upgrade}))?;
-                    }
-                }
-            }
-            Ok(0)
-        }
-        Some(Commands::Upgrade {
-            version,
-            allow_downgrade,
-            quiet,
-        }) => {
-            let result = xcb_runtime::update::upgrade(
-                store.root(),
-                env!("CARGO_PKG_VERSION"),
-                version.as_deref(),
-                quiet || cli.json,
-                allow_downgrade,
-            )?;
-            if cli.json {
-                print_json(result)?;
-            }
-            Ok(0)
+        Some(Commands::Update { .. } | Commands::Upgrade { .. }) => {
+            unreachable!("updater dispatched before application state")
         }
         Some(Commands::Config) => {
             print_json(config)?;
@@ -5634,6 +5695,28 @@ mod tests {
             assert!(!output.contains("private-custody-pool"));
             assert!(!output.contains("987654321\n"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn update_reentry_preserves_command_status_and_signal_exit_codes() {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            update_reentry_exit_code(std::process::ExitStatus::from_raw(0)),
+            0
+        );
+        assert_eq!(
+            update_reentry_exit_code(std::process::ExitStatus::from_raw(7 << 8)),
+            7
+        );
+        assert_eq!(
+            update_reentry_exit_code(std::process::ExitStatus::from_raw(2)),
+            130
+        );
+        assert_eq!(
+            update_reentry_exit_code(std::process::ExitStatus::from_raw(15)),
+            143
+        );
     }
 
     #[test]

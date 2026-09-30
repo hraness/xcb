@@ -265,3 +265,25 @@ published state in tests without claiming a release. Regenerate the README with
 `cd site && bun run sync:readme`, then run `bun run check` before deploying.
 A compatibility archive does not prove native artifacts exist, and a native
 entry for one platform does not prove another platform's asset exists.
+
+
+## Native update ownership
+
+New installers write an `install.json` version 2 record next to the installed
+helper. It binds the release method, stable channel, exact version, prefix,
+executable path, executable SHA-256, helper SHA-256, and whether the version was
+explicitly pinned. Automatic updates require all fields to match the running
+executable. A state-root override cannot redirect installation authority.
+
+The installer also creates `update-use.lock` once in its share directory.
+Ordinary installed xcb commands hold a shared lock until they exit; update
+commands hold it exclusively through verification and replacement. Existing
+supervisor and service locks also postpone updates. The updater checks only
+immutable stable releases from `hraness/xcb`; the recorded helper retains the
+archive checksum, exact-member, candidate-version, backup, and atomic-swap
+checks. An update never changes provider pins or restarts product services.
+
+A missing policy defaults to automatic only for supported unpinned installs.
+Saved notification-only or disabled policies retain their meaning. Older
+manifest versions need a release-installer rerun before becoming supported;
+source and package-manager installations retain their original update path.

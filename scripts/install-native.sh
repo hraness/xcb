@@ -6,6 +6,7 @@ set -eu
 : "${CARGO:=cargo}"
 : "${XCB_VERSION:=}"
 : "${XCB_GITHUB:=hraness/xcb}"
+: "${XCB_INSTALL_PINNED:=true}"
 
 script_path="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
 source_root=
@@ -33,6 +34,8 @@ shell_quote() {
   printf "'"
 }
 
+[ "$XCB_GITHUB" = hraness/xcb ] || fail "release repository must be hraness/xcb"
+case "$XCB_INSTALL_PINNED" in true|false) ;; *) fail "XCB_INSTALL_PINNED must be true or false" ;; esac
 bin_dir="$XCB_INSTALL_PREFIX/bin"
 mkdir -p "$bin_dir"
 bin_dir=$(cd "$bin_dir" && pwd -P)
@@ -242,13 +245,20 @@ manifest_prefix=$(json_escape "$install_prefix")
 manifest_helper=$(json_escape "$share_dir/install-native.sh")
 manifest_source=$(json_escape "$source_root")
 manifest_binary=$(json_escape "$destination")
-printf '{"version":1,"installMethod":"%s","channel":"stable","versionString":"%s","prefix":"%s","helperPath":"%s","sourceRoot":"%s","binaryPath":"%s"}\n' \
-  "$install_method" "$expected_version" "$manifest_prefix" "$manifest_helper" "$manifest_source" "$manifest_binary" > "$stage/install.json"
+helper_digest=$(sha256 "$share_dir/install-native.sh")
+printf '{"version":2,"installMethod":"%s","channel":"stable","versionString":"%s","prefix":"%s","helperPath":"%s","sourceRoot":"%s","binaryPath":"%s","binarySha256":"%s","helperSha256":"%s","versionPinned":%s}\n' \
+  "$install_method" "$expected_version" "$manifest_prefix" "$manifest_helper" "$manifest_source" "$manifest_binary" "$candidate_digest" "$helper_digest" "$XCB_INSTALL_PINNED" > "$stage/install.json"
 chmod 0600 "$stage/install.json"
 if [ -e "$share_dir/install.json" ] || [ -L "$share_dir/install.json" ]; then
   regular_file "$share_dir/install.json" || fail "existing install manifest is unsafe"
 fi
 mv -f "$stage/install.json" "$share_dir/install.json"
+usage_lock="$share_dir/update-use.lock"
+if [ -e "$usage_lock" ] || [ -L "$usage_lock" ]; then
+  regular_file "$usage_lock" || fail "update use lock is unsafe"
+else
+  (umask 077; set -C; : > "$usage_lock") || fail "could not create update use lock"
+fi
 
 # Another `xcb` earlier on PATH (a Homebrew or cargo install, an old copy)
 # would be picked over the one just installed. Warn, never modify it.
