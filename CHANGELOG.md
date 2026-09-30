@@ -10,6 +10,21 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.16.1 - 2026-09-30
+
+Mac releases preserve the submitted binary when Apple notarization takes longer
+than the CI wait, so failed-job retries can finish the original submission.
+
+- Save the signed candidate and its submission record before waiting for Apple,
+  after removing temporary signing credentials.
+- Resume finalization with the original artifact and submission ID. Verify the
+  release identity and hashes before requiring Apple's acceptance and checking
+  its online notarization ticket.
+- Refuse repeated signing or submission when an earlier attempt ran. Keep
+  pending candidates separate from publishable release assets.
+- Document initial notarization delays, the failed-job retry procedure, and
+  recovery limits when submitted bytes are unavailable.
+
 ## 0.16.0 - 2026-09-30
 
 Tasks that need an existing signed-in browser stay with Codex and prefer
