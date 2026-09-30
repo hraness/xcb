@@ -1,6 +1,6 @@
 import { MarketingProofFrame, SyntaxCode } from "@hraness/design-kit/react/server";
 import type { SyntaxLanguage } from "@hraness/design-kit/syntax-highlighting";
-import { CopyButton } from "@hraness/ui";
+import { AnalyticsCopyButton as CopyButton } from "./analytics-copy";
 
 /** Shell prompts are shown for reading and dropped when copying. */
 function copyText(code: string, language: SyntaxLanguage): string {
