@@ -141,6 +141,9 @@ enum Commands {
         /// Require access to the user’s existing signed-in browser (Codex only).
         #[arg(long)]
         signed_in_browser: bool,
+        /// Require native desktop application control (Codex only).
+        #[arg(long)]
+        desktop: bool,
         /// Task text; piped stdin is used when omitted.
         #[arg(short = 'p', long)]
         prompt: Option<String>,
@@ -1693,6 +1696,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         // poll frames, which must fit the default thread stack.
         Some(Commands::Run {
             signed_in_browser,
+            desktop,
             prompt,
             account,
             model,
@@ -1738,7 +1742,11 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     account: account.clone(),
                     model: model.clone().filter(|model| model != "auto"),
                 };
-                let mut requirements = xcb_core::session::TaskRequirements { signed_in_browser };
+                let mut requirements = xcb_core::session::TaskRequirements {
+                    signed_in_browser,
+                    desktop,
+                    ..Default::default()
+                };
                 let workspace = xcb_core::canonical(&cli.cwd)?;
                 let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
                 let (preference, required) =

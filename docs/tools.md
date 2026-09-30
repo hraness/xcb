@@ -22,7 +22,9 @@ must be connected again. Your browser profiles and account sign-ins stay in
 their existing locations.
 
 This connector is available to Codex. Claude and Devin can use shared MCP
-servers and can hand a task to Codex when it needs your signed-in browser.
+servers and can hand a task to Codex when it needs your signed-in browser or
+native desktop application control. Codex then finishes that task; this is
+not a nested desktop-tool session inside Claude or Devin.
 An approval denial does not grant permission to try the same action through
 another provider.
 
@@ -74,12 +76,14 @@ Native provider shells and unrelated plugins remain separate from the
 shared tool bridge. See [provider permissions](provider-permissions.md) and
 the [command runner](command-runner.md).
 
-## Route signed-in browser work
+## Route browser and desktop work
 
-Use an explicit requirement when the task needs an existing signed-in page:
+Use an explicit requirement when the task needs an existing signed-in page
+or native desktop application control:
 
 ```sh
 xcb run --signed-in-browser -p 'Read the open account dashboard and summarize its status'
+xcb run --desktop -p 'Inspect the open document in the desktop app and summarize it'
 ```
 
 xcb requires Codex for this work and prefers Astra among available Codex
@@ -89,12 +93,26 @@ conflict instead of silently changing the pin. If no suitable Codex account
 is available, the task waits or reports the unavailable route.
 
 The configured routing judge also checks whether the task requires an
-existing signed-in browser. An uncertain or unavailable judgment does not
-invent a browser requirement. A provider that discovers the need during
-work can declare it through `xcb_require_capability`; xcb finishes and stops
-the current turn before handing off to Codex. An explicit one-turn route
+existing signed-in browser or native desktop control, independently of its
+coding difficulty. An uncertain or unavailable judgment does not invent
+either requirement. A provider that discovers the need during
+work can declare `signed_in_browser` or `desktop` through
+`xcb_require_capability`; xcb settles and joins the current provider before
+handing the same conversation and workspace to Codex. Denials, outstanding
+approvals, cancellation, or uncertain effects prevent this handoff. An explicit one-turn route
 still returns after that turn.
 
 Ordinary Playwright checks in a fresh browser, public-page research, and
 work on login or OAuth code use normal routing. They do not require the
 signed-in-browser flag.
+
+Desktop work requires the native connector's explicit `computer` surface.
+Shared Chrome controls and a browser-only native connector do not satisfy
+that requirement. Missing desktop support is reported before native effects.
+Setup and configuration readiness do not replace operating-system permission
+or live qualification of a particular desktop app.
+
+Using native Codex tools also preserves a Codex route for subsequent turns
+and managed retries, without assuming the operation involved a signed-in
+website or desktop app. This host-recorded route requirement is separate
+from the two declared task capabilities.

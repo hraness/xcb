@@ -701,7 +701,7 @@ done
             args: vec![],
             bundles: vec![],
             env: vec![],
-            environment: BTreeMap::new(),
+            environment: BTreeMap::from([("CUA_REPL_ENABLED_SURFACES".into(), "computer".into())]),
             tools: Some(vec!["js".into(), "turn_ended".into()]),
             shutdown_tool: Some("turn_ended".into()),
             features: vec![CapabilityFeature::Computer],

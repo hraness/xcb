@@ -91,7 +91,14 @@ pub struct RouteRequest<'a> {
     pub account: Option<&'a Id>,
 }
 
-/// One route a usage-limited turn could move to, in the router's order.
+/// Ranked quota replacements and requirements discovered while judging them.
+/// Persist requirements even if no replacement is available.
+#[derive(Debug, Clone)]
+pub struct FailoverRoutes {
+    pub requirements: xcb_core::session::TaskRequirements,
+    pub routes: Vec<FailoverRoute>,
+}
+
 #[derive(Debug, Clone)]
 pub struct FailoverRoute {
     pub account: Id,
@@ -148,6 +155,8 @@ impl Candidate {
 /// Everything the router knows after ranking: the ordered shortlist and the
 /// evidence a reason or a warning is written from.
 struct Ranking {
+    requirements: xcb_core::session::TaskRequirements,
+    unavailable_reason: &'static str,
     candidates: Vec<Candidate>,
     classification: task_classifier::Classification,
     reflex: Option<reflex::Decision>,
@@ -574,7 +583,7 @@ fn validate_requirement_pins(
         })
         .transpose()?
         .unwrap_or(false);
-    if requirements.signed_in_browser {
+    if requirements.requires_codex() {
         let pinned_provider = match account {
             Some(id) => match store.account(id) {
                 Ok(metadata) => Some(metadata.provider),
@@ -589,7 +598,7 @@ fn validate_requirement_pins(
             || pinned_provider.is_some_and(|provider| !requirements.allows(provider))
         {
             return Err(Error::Conflict(
-                "signed-in browser tasks require Codex; remove the incompatible provider, account, or model pin",
+                "this task requires Codex; remove the incompatible provider, account, or model pin",
             ));
         }
     }
@@ -617,13 +626,13 @@ pub async fn smart_route(
 /// the work: the same model on another account first (quality preserved),
 /// then the same provider's other models, then other providers. A pinned
 /// provider or model is a hard constraint and never widens. An empty list
-/// means nothing can take the task now; the caller explains why from the
+/// `routes` means nothing can take the task now; the caller explains why from the
 /// account view.
 pub async fn failover_routes(
     store: &Store,
     config: &Config,
     request: FailoverRequest<'_>,
-) -> Result<Vec<FailoverRoute>> {
+) -> Result<FailoverRoutes> {
     let admitted = admitted_providers(store);
     failover_routes_with_admitted(store, config, request, &admitted).await
 }
@@ -633,7 +642,7 @@ async fn failover_routes_with_admitted(
     config: &Config,
     request: FailoverRequest<'_>,
     admitted: &BTreeSet<Provider>,
-) -> Result<Vec<FailoverRoute>> {
+) -> Result<FailoverRoutes> {
     let FailoverRequest {
         requirements,
         task,
@@ -647,7 +656,10 @@ async fn failover_routes_with_admitted(
         required_account,
     } = request;
     if required_provider.is_some_and(|provider| provider != model.provider) {
-        return Ok(vec![]);
+        return Ok(FailoverRoutes {
+            requirements,
+            routes: vec![],
+        });
     }
     // The kernel records tried routes as `<account>/<model key>`; the router
     // excludes `<model key> · <account>`. Account ids never contain `/`.
@@ -679,9 +691,18 @@ async fn failover_routes_with_admitted(
     .await
     {
         Ok(ranking) => ranking,
-        Err(Error::Unavailable(_)) => return Ok(vec![]),
+        Err(Error::Unavailable(_)) => {
+            return Ok(FailoverRoutes {
+                requirements,
+                routes: vec![],
+            });
+        }
         Err(error) => return Err(error),
     };
+    Ok(failover_ranking(ranking, model))
+}
+
+fn failover_ranking(ranking: Ranking, model: &ModelChoice) -> FailoverRoutes {
     let mut candidates = ranking.candidates;
     // Stable: within each group the router's order (utility, Pareto layer,
     // least recently used account) is kept.
@@ -693,13 +714,16 @@ async fn failover_routes_with_admitted(
             candidate.model.key() != current_key,
         )
     });
-    Ok(candidates
-        .into_iter()
-        .map(|candidate| FailoverRoute {
-            account: candidate.account,
-            model: candidate.model,
-        })
-        .collect())
+    FailoverRoutes {
+        requirements: ranking.requirements,
+        routes: candidates
+            .into_iter()
+            .map(|candidate| FailoverRoute {
+                account: candidate.account,
+                model: candidate.model,
+            })
+            .collect(),
+    }
 }
 
 async fn route_with_admitted(
@@ -708,11 +732,12 @@ async fn route_with_admitted(
     request: RouteRequest<'_>,
     admitted: &BTreeSet<Provider>,
 ) -> Result<RouteDecision> {
-    let mut requirements = request.requirements;
     let required_model = request.required_model;
     let excluded_routes = request.excluded_routes;
     let excluded_accounts = request.excluded_accounts;
     let Ranking {
+        requirements,
+        unavailable_reason,
         candidates,
         classification,
         reflex,
@@ -724,11 +749,10 @@ async fn route_with_admitted(
         offers,
         now,
     } = rank_with_admitted(store, config, request, admitted).await?;
-    requirements.signed_in_browser |= classification.signed_in_browser == Some(true);
     let candidate = candidates
         .into_iter()
         .next()
-        .ok_or(Error::Unavailable("no eligible route"))?;
+        .ok_or(Error::Unavailable(unavailable_reason))?;
     let warning = quota_degradation_warning(
         &models,
         &catalog,
@@ -764,8 +788,14 @@ async fn route_with_admitted(
         format_args!(
             "{}{}",
             classification.reason(),
-            if requirements.signed_in_browser {
-                " · signed-in browser requires Codex"
+            if requirements.requires_codex() {
+                if requirements.desktop {
+                    " · desktop access requires Codex"
+                } else if requirements.signed_in_browser {
+                    " · signed-in browser requires Codex"
+                } else {
+                    " · native computer tools require Codex"
+                }
             } else {
                 ""
             }
@@ -839,13 +869,30 @@ pub(crate) fn assign_tier(
     }
 }
 
-/// Ranks every eligible route for the request. The result is never empty:
-/// an empty shortlist is the `Unavailable` error whose reason names why.
+/// Rank eligible routes and retain discovered requirements even when none
+/// remain. Callers must preserve those requirements before a later retry.
 async fn rank_with_admitted(
     store: &Store,
     config: &Config,
     request: RouteRequest<'_>,
     admitted: &BTreeSet<Provider>,
+) -> Result<Ranking> {
+    let backend = if config.extensions.judge.enabled && !request.requirements.requires_codex() {
+        judge::resolve(store.root(), &config.extensions.judge)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+    rank_with_judge(store, config, request, admitted, backend.as_deref()).await
+}
+
+async fn rank_with_judge(
+    store: &Store,
+    config: &Config,
+    request: RouteRequest<'_>,
+    admitted: &BTreeSet<Provider>,
+    backend: Option<&dyn judge::Judge>,
 ) -> Result<Ranking> {
     let RouteRequest {
         mut requirements,
@@ -930,21 +977,15 @@ async fn rank_with_admitted(
         })
         .collect::<Result<_>>()?;
     let class = classify_task(task);
-    let backend = if config.extensions.judge.enabled && !requirements.signed_in_browser {
-        judge::resolve(store.root(), &config.extensions.judge)
-            .ok()
-            .flatten()
-    } else {
-        None
-    };
     let mut classification = task_classifier::classify(
         task,
-        backend.as_deref(),
+        backend,
         class == TaskClass::Complex,
         class == TaskClass::Routine,
     )
     .await;
     requirements.signed_in_browser |= classification.signed_in_browser == Some(true);
+    requirements.desktop |= classification.desktop == Some(true);
     validate_requirement_pins(
         store,
         requirements,
@@ -968,7 +1009,7 @@ async fn rank_with_admitted(
         &offers,
         now,
         task,
-        classification.frontier && !requirements.signed_in_browser,
+        classification.frontier && !requirements.requires_codex(),
         |model| {
             requirements.allows(model.provider)
                 && required_model.is_none_or(|key| model.key() == key)
@@ -1014,9 +1055,9 @@ async fn rank_with_admitted(
             });
         }
     }
-    // Signed-in browser operations prefer Astra independently of coding-task
+    // Browser and desktop operations prefer Astra independently of coding-task
     // tier preferences, but never widen eligibility or override exact pins.
-    if requirements.signed_in_browser
+    if requirements.requires_codex()
         && candidates
             .iter()
             .any(|candidate| candidate.model.id.as_str().contains("-astra"))
@@ -1040,7 +1081,7 @@ async fn rank_with_admitted(
         .partition(|candidate| candidate.stack.is_some());
     retain_quality_tier(
         &mut unmatched,
-        classification.frontier && !requirements.signed_in_browser,
+        classification.frontier && !requirements.requires_codex(),
     );
     let mut candidates = matched;
     candidates.extend(unmatched);
@@ -1074,10 +1115,10 @@ async fn rank_with_admitted(
         }
     });
     candidates.truncate(8);
-    if candidates.is_empty() {
-        return Err(Error::Unavailable(unavailable_reason()));
-    }
+    let unavailable_reason = unavailable_reason();
     Ok(Ranking {
+        requirements,
+        unavailable_reason,
         candidates,
         classification,
         reflex,
@@ -1256,6 +1297,7 @@ mod tests {
             .unwrap();
         let requirements = xcb_core::session::TaskRequirements {
             signed_in_browser: true,
+            ..Default::default()
         };
         assert!(
             validate_requirement_pins(&store, requirements, None, None, Some(&selected.id)).is_ok()
@@ -1292,137 +1334,269 @@ mod tests {
         );
     }
 
+    struct DesktopFailoverJudge;
+    impl judge::Judge for DesktopFailoverJudge {
+        fn ask<'a>(
+            &'a self,
+            _: &'a serde_json::Value,
+            _: &'a judge::JudgeQuestions,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<judge::JudgeAnswers>> + Send + 'a>,
+        > {
+            Box::pin(async {
+                Ok(judge::JudgeAnswers {
+                    model: None,
+                    answers: BTreeMap::from([(
+                        "desktop".into(),
+                        judge::JudgeAnswer::Choice {
+                            choice: "required".into(),
+                            confidence: 1.0,
+                            probabilities: BTreeMap::from([("required".into(), 1.0)]),
+                        },
+                    )]),
+                })
+            })
+        }
+    }
+
     #[tokio::test]
-    async fn signed_in_browser_requirement_filters_prefers_and_survives_model_fallback() {
+    async fn desktop_discovered_during_failover_persists_even_without_a_candidate() {
         use crate::authentication_tests::account;
         let root = tempfile::tempdir().unwrap();
         let root_path = xcb_core::canonical(root.path()).unwrap();
         let store = Store::open(&root_path.join("state")).unwrap();
+        let workspace = root_path.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
         let codex = account(&store, Provider::Codex);
-        account(&store, Provider::Claude);
-        let astra = model(Provider::Codex, "gpt-6-astra", None, Some("ultra"));
-        let sol = model(Provider::Codex, "gpt-6-sol", None, Some("high"));
+        let claude = account(&store, Provider::Claude);
+        let codex_model = model(Provider::Codex, "gpt-6-astra", None, Some("ultra"));
+        let claude_model = model(Provider::Claude, "claude-opus-4-8", None, None);
+        store.set_models(Provider::Codex, &[codex_model]).unwrap();
         store
-            .set_models(Provider::Codex, &[astra.clone(), sol.clone()])
+            .set_models(Provider::Claude, std::slice::from_ref(&claude_model))
             .unwrap();
-        store
-            .set_models(
-                Provider::Claude,
-                &[model(Provider::Claude, "claude-opus-4-8", None, None)],
-            )
-            .unwrap();
+        let mut config = Config::default();
+        config.extensions.judge.enabled = false;
+        let admitted = Provider::ALL.into_iter().collect();
         let routes = BTreeSet::new();
         let accounts = BTreeSet::new();
-        let admitted = Provider::ALL.into_iter().collect();
-        let request = || RouteRequest {
-            requirements: xcb_core::session::TaskRequirements {
-                signed_in_browser: true,
-            },
-            task: "read this dashboard",
-            required_provider: None,
-            preferred_provider: Some(Provider::Claude),
-            required_model: None,
-            excluded_routes: &routes,
-            excluded_accounts: &accounts,
-            account: None,
-        };
-        let first = route_with_admitted(&store, &Config::default(), request(), &admitted)
+        for unavailable in [false, true] {
+            let excluded = if unavailable {
+                BTreeSet::from([codex.clone()])
+            } else {
+                BTreeSet::new()
+            };
+            let session = store
+                .create_session(&claude, claude_model.clone(), &workspace, now_ms())
+                .unwrap();
+            assert_eq!(session.requirements, Default::default());
+            let ranking = rank_with_judge(
+                &store,
+                &config,
+                RouteRequest {
+                    requirements: session.requirements,
+                    task: "inspect the current application",
+                    required_provider: None,
+                    preferred_provider: None,
+                    required_model: None,
+                    excluded_routes: &routes,
+                    excluded_accounts: &excluded,
+                    account: None,
+                },
+                &admitted,
+                Some(&DesktopFailoverJudge),
+            )
             .await
             .unwrap();
-        assert_eq!(first.account, codex);
-        assert_eq!(first.model.key(), astra.key());
-        assert!(first.requirements.signed_in_browser);
-        let excluded = [format!("{} · {}", astra.key(), codex)].into();
-        let fallback = route_with_admitted(
-            &store,
-            &Config::default(),
-            RouteRequest {
-                excluded_routes: &excluded,
-                ..request()
+            let ranked = failover_ranking(ranking, &claude_model);
+            assert_eq!(ranked.routes.is_empty(), unavailable);
+            assert!(
+                ranked
+                    .routes
+                    .iter()
+                    .all(|route| route.model.provider == Provider::Codex)
+            );
+            store
+                .require_session_capabilities(&session.id, ranked.requirements)
+                .unwrap();
+            let saved = store.session(&session.id).unwrap().unwrap().requirements;
+            assert!(saved.desktop && !saved.signed_in_browser && !saved.codex_native);
+            let resumed = route_with_admitted(
+                &store,
+                &config,
+                RouteRequest {
+                    requirements: saved,
+                    task: "continue",
+                    required_provider: None,
+                    preferred_provider: Some(Provider::Claude),
+                    required_model: None,
+                    excluded_routes: &routes,
+                    excluded_accounts: &accounts,
+                    account: None,
+                },
+                &admitted,
+            )
+            .await
+            .unwrap();
+            assert_eq!(resumed.model.provider, Provider::Codex);
+            assert!(resumed.requirements.desktop);
+        }
+    }
+
+    #[tokio::test]
+    async fn computer_requirements_requirement_filters_prefers_and_survives_model_fallback() {
+        for requirements in [
+            xcb_core::session::TaskRequirements {
+                signed_in_browser: true,
+                ..Default::default()
             },
-            &admitted,
-        )
-        .await
-        .unwrap();
-        assert_eq!(fallback.model.key(), sol.key());
-        assert!(fallback.requirements.signed_in_browser);
-        assert!(
-            route_with_admitted(
+            xcb_core::session::TaskRequirements {
+                desktop: true,
+                ..Default::default()
+            },
+            xcb_core::session::TaskRequirements {
+                codex_native: true,
+                ..Default::default()
+            },
+        ] {
+            use crate::authentication_tests::account;
+            let root = tempfile::tempdir().unwrap();
+            let root_path = xcb_core::canonical(root.path()).unwrap();
+            let store = Store::open(&root_path.join("state")).unwrap();
+            let codex = account(&store, Provider::Codex);
+            account(&store, Provider::Claude);
+            let astra = model(Provider::Codex, "gpt-6-astra", None, Some("ultra"));
+            let sol = model(Provider::Codex, "gpt-6-sol", None, Some("high"));
+            store
+                .set_models(Provider::Codex, &[astra.clone(), sol.clone()])
+                .unwrap();
+            store
+                .set_models(
+                    Provider::Claude,
+                    &[model(Provider::Claude, "claude-opus-4-8", None, None)],
+                )
+                .unwrap();
+            let routes = BTreeSet::new();
+            let accounts = BTreeSet::new();
+            let admitted = Provider::ALL.into_iter().collect();
+            let request = || RouteRequest {
+                requirements,
+                task: "read this dashboard",
+                required_provider: None,
+                preferred_provider: Some(Provider::Claude),
+                required_model: None,
+                excluded_routes: &routes,
+                excluded_accounts: &accounts,
+                account: None,
+            };
+            let first = route_with_admitted(&store, &Config::default(), request(), &admitted)
+                .await
+                .unwrap();
+            assert_eq!(first.account, codex);
+            assert_eq!(first.model.key(), astra.key());
+            assert_eq!(first.requirements, requirements);
+            let excluded = [format!("{} · {}", astra.key(), codex)].into();
+            let fallback = route_with_admitted(
                 &store,
                 &Config::default(),
                 RouteRequest {
-                    required_provider: Some(Provider::Claude),
+                    excluded_routes: &excluded,
                     ..request()
                 },
-                &admitted
+                &admitted,
             )
             .await
-            .is_err()
-        );
-        let empty = Store::open(&root_path.join("empty")).unwrap();
-        account(&empty, Provider::Claude);
-        empty
-            .set_models(
-                Provider::Claude,
-                &[model(Provider::Claude, "claude-opus-4-8", None, None)],
-            )
             .unwrap();
-        assert!(
-            route_with_admitted(&empty, &Config::default(), request(), &admitted)
+            assert_eq!(fallback.model.key(), sol.key());
+            assert_eq!(fallback.requirements, requirements);
+            assert!(
+                route_with_admitted(
+                    &store,
+                    &Config::default(),
+                    RouteRequest {
+                        required_provider: Some(Provider::Claude),
+                        ..request()
+                    },
+                    &admitted
+                )
                 .await
                 .is_err()
-        );
+            );
+            let empty = Store::open(&root_path.join("empty")).unwrap();
+            account(&empty, Provider::Claude);
+            empty
+                .set_models(
+                    Provider::Claude,
+                    &[model(Provider::Claude, "claude-opus-4-8", None, None)],
+                )
+                .unwrap();
+            assert!(
+                route_with_admitted(&empty, &Config::default(), request(), &admitted)
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     #[test]
-    fn signed_in_browser_metadata_is_monotonic_backwards_compatible_and_guards_rebind() {
-        use crate::authentication_tests::{account, model};
-        let root = tempfile::tempdir().unwrap();
-        let root_path = xcb_core::canonical(root.path()).unwrap();
-        let workspace = root_path.join("workspace");
-        std::fs::create_dir(&workspace).unwrap();
-        let store = Store::open(&root_path.join("state")).unwrap();
-        let codex = account(&store, Provider::Codex);
-        let claude = account(&store, Provider::Claude);
-        let session = store
-            .create_session(&codex, model(Provider::Codex), &workspace, now_ms())
-            .unwrap();
-        let mut old = serde_json::to_value(&session).unwrap();
-        old.as_object_mut().unwrap().remove("requirements");
-        old.as_object_mut().unwrap().remove("route_pins");
-        assert!(
-            !serde_json::from_value::<xcb_core::session::Session>(old)
-                .unwrap()
-                .requirements
-                .signed_in_browser
-        );
-        let required = store
-            .require_session_capabilities(
-                &session.id,
-                xcb_core::session::TaskRequirements {
-                    signed_in_browser: true,
-                },
-            )
-            .unwrap();
-        assert_eq!(required.revision, session.revision);
-        assert!(
-            store
-                .require_session_capabilities(&session.id, Default::default())
-                .unwrap()
-                .requirements
-                .signed_in_browser
-        );
-        assert!(
-            store
-                .rebind(
-                    &session.id,
-                    required.revision,
-                    &claude,
-                    model(Provider::Claude)
-                )
-                .is_err()
-        );
-        assert_eq!(store.session(&session.id).unwrap().unwrap().account, codex);
+    fn computer_requirements_metadata_is_monotonic_backwards_compatible_and_guards_rebind() {
+        for requirements in [
+            xcb_core::session::TaskRequirements {
+                signed_in_browser: true,
+                ..Default::default()
+            },
+            xcb_core::session::TaskRequirements {
+                desktop: true,
+                ..Default::default()
+            },
+            xcb_core::session::TaskRequirements {
+                codex_native: true,
+                ..Default::default()
+            },
+        ] {
+            use crate::authentication_tests::{account, model};
+            let root = tempfile::tempdir().unwrap();
+            let root_path = xcb_core::canonical(root.path()).unwrap();
+            let workspace = root_path.join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let store = Store::open(&root_path.join("state")).unwrap();
+            let codex = account(&store, Provider::Codex);
+            let claude = account(&store, Provider::Claude);
+            let session = store
+                .create_session(&codex, model(Provider::Codex), &workspace, now_ms())
+                .unwrap();
+            let mut old = serde_json::to_value(&session).unwrap();
+            old.as_object_mut().unwrap().remove("requirements");
+            old.as_object_mut().unwrap().remove("route_pins");
+            assert!(
+                serde_json::from_value::<xcb_core::session::Session>(old)
+                    .unwrap()
+                    .requirements
+                    .is_empty()
+            );
+            let required = store
+                .require_session_capabilities(&session.id, requirements)
+                .unwrap();
+            assert_eq!(required.revision, session.revision);
+            assert!(
+                store
+                    .require_session_capabilities(&session.id, Default::default())
+                    .unwrap()
+                    .requirements
+                    == requirements
+            );
+            assert!(
+                store
+                    .rebind(
+                        &session.id,
+                        required.revision,
+                        &claude,
+                        model(Provider::Claude)
+                    )
+                    .is_err()
+            );
+            assert_eq!(store.session(&session.id).unwrap().unwrap().account, codex);
+        }
     }
 
     #[tokio::test]
@@ -1944,13 +2118,15 @@ mod tests {
         model_pin.required_model = Some(&opus_key);
         let pinned = failover_routes_with_admitted(&store, &config, model_pin, &admitted)
             .await
-            .unwrap();
+            .unwrap()
+            .routes;
         assert_eq!(keys(&pinned), vec![format!("{second}/{opus_key}")]);
         let mut account_pin = request(Failure::ModelQuota, &none, None);
         account_pin.required_account = Some(&first);
         let pinned = failover_routes_with_admitted(&store, &config, account_pin, &admitted)
             .await
-            .unwrap();
+            .unwrap()
+            .routes;
         assert!(!pinned.is_empty());
         assert!(pinned.iter().all(|route| route.account == first));
         let mut exact_pin = request(Failure::AccountQuota, &none, None);
@@ -1960,6 +2136,7 @@ mod tests {
             failover_routes_with_admitted(&store, &config, exact_pin, &admitted)
                 .await
                 .unwrap()
+                .routes
                 .is_empty()
         );
         let account_limit = failover_routes_with_admitted(
@@ -1969,7 +2146,8 @@ mod tests {
             &admitted,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .routes;
         assert_eq!(
             keys(&account_limit),
             [
@@ -1985,7 +2163,8 @@ mod tests {
             &admitted,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .routes;
         let listed = keys(&model_limit);
         assert_eq!(listed[0], format!("{second}/{}", opus.key()));
         assert_eq!(listed.len(), 4, "{listed:?}");
@@ -2002,7 +2181,8 @@ mod tests {
             &admitted,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .routes;
         assert_eq!(
             keys(&after_tried),
             [
@@ -2018,7 +2198,8 @@ mod tests {
             &admitted,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .routes;
         assert!(
             pinned
                 .iter()
@@ -2037,7 +2218,8 @@ mod tests {
             &admitted,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .routes;
         assert!(exhausted.is_empty(), "{:?}", keys(&exhausted));
         let mismatched = failover_routes_with_admitted(
             &store,
@@ -2046,7 +2228,8 @@ mod tests {
             &admitted,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .routes;
         assert!(mismatched.is_empty(), "{:?}", keys(&mismatched));
     }
 
@@ -2111,7 +2294,8 @@ mod tests {
         let routes =
             failover_routes_with_admitted(&store, &config, request(&no_accounts), &admitted)
                 .await
-                .unwrap();
+                .unwrap()
+                .routes;
         let listed: Vec<_> = routes
             .iter()
             .map(|route| format!("{}/{}", route.account, route.model.key()))
@@ -2127,7 +2311,8 @@ mod tests {
         let routes =
             failover_routes_with_admitted(&store, &config, request(&seen_limited), &admitted)
                 .await
-                .unwrap();
+                .unwrap()
+                .routes;
         assert_eq!(routes.len(), 1, "{routes:?}");
         assert_eq!(routes[0].account, devin);
     }
@@ -2912,6 +3097,7 @@ mod tests {
     async fn tiers_follow_the_documented_table() {
         let judged = |frontier, kind: &str, difficulty, scope| task_classifier::Classification {
             signed_in_browser: None,
+            desktop: None,
             frontier,
             source: "test",
             score_milli: None,
@@ -3169,7 +3355,8 @@ mod tests {
             &admitted,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .routes;
         let keys: Vec<_> = routes
             .iter()
             .map(|route| format!("{}/{}", route.account, route.model.key()))
@@ -3274,7 +3461,8 @@ mod tests {
             &admitted,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .routes;
         assert!(
             failover
                 .iter()
