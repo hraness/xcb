@@ -354,4 +354,158 @@ mod tests {
         assert!(error.contains("readable host resource configuration"));
         supervisor.resources.collection.take().unwrap().abort();
     }
+
+    #[tokio::test]
+    async fn pending_workspace_probe_preserves_cancellation_and_resource_refresh() {
+        let (_temp, mut supervisor, task) = fixture().await;
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        supervisor.workspace_refresh = Some(receive);
+        supervisor.workspace_checked = Some(Instant::now() - Duration::from_secs(120));
+        let snapshot = sample(
+            &supervisor,
+            &task,
+            100 * 1024_u64.pow(3),
+            100 * 1024_u64.pow(3),
+        );
+        supervisor.resources.collection = Some(tokio::spawn(async move { snapshot }));
+        while !supervisor
+            .resources
+            .collection
+            .as_ref()
+            .unwrap()
+            .is_finished()
+        {
+            tokio::task::yield_now().await;
+        }
+        supervisor
+            .managed
+            .cancel_task(&task.id, task.revision)
+            .await
+            .unwrap();
+        supervisor.tick(false).await.unwrap();
+        supervisor.tick(false).await.unwrap();
+        assert_eq!(
+            supervisor.managed.task(&task.id).unwrap().unwrap().state,
+            TaskState::Cancelled
+        );
+        let saved: Snapshot = serde_json::from_slice(
+            &private::read(
+                &supervisor.managed.root().join(SNAPSHOT_FILE),
+                host_resources::MAX_SNAPSHOT_BYTES,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            saved
+                .disks
+                .iter()
+                .any(|disk| disk.path == Path::new(&task.workspace))
+        );
+        // The original receiver still owns the only in-flight probe after
+        // multiple ticks, even though another probe would otherwise be due.
+        assert!(send.try_send(Ok(())).is_ok());
+        supervisor.workspace_checked = Some(Instant::now());
+        supervisor.refresh_workspace_identity();
+        assert!(supervisor.workspace_refresh.is_none());
+        assert!(supervisor.active.is_empty());
+    }
+
+    #[test]
+    fn blocked_workspace_probe_does_not_hold_runtime_shutdown() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (started, observed) = std::sync::mpsc::sync_channel(1);
+        let (release, blocked) = std::sync::mpsc::sync_channel(1);
+        let result = runtime.block_on(async {
+            spawn_workspace_probe(move || {
+                started.send(()).unwrap();
+                blocked.recv().unwrap();
+                Ok(())
+            })
+            .unwrap()
+        });
+        observed.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (finished, stopped) = std::sync::mpsc::sync_channel(1);
+        let shutdown = std::thread::spawn(move || {
+            drop(runtime);
+            finished.send(()).unwrap();
+        });
+        let stopped_while_probe_pending = stopped.recv_timeout(Duration::from_secs(2)).is_ok();
+        // Always release and join the fixture, including a regression that
+        // accidentally moves the worker into Tokio's blocking pool.
+        release.send(()).unwrap();
+        shutdown.join().unwrap();
+        assert!(result.recv_timeout(Duration::from_secs(2)).unwrap().is_ok());
+        assert!(stopped_while_probe_pending);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn special_metadata_does_not_block_healthy_workspace_or_resources() {
+        let (temp, mut supervisor, task) = fixture().await;
+        let poison = temp.path().join("poison");
+        fs::create_dir(&poison).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(poison.join(".git"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        supervisor
+            .managed
+            .admit_workspace(&poison, "command", None)
+            .unwrap();
+        let healthy = Path::new(&task.workspace);
+        fs::create_dir(healthy.join(".git")).unwrap();
+        fs::write(
+            healthy.join(".git/config"),
+            "[remote \"origin\"]\n url = https://github.com/fixture/healthy.git\n",
+        )
+        .unwrap();
+        let snapshot = sample(
+            &supervisor,
+            &task,
+            100 * 1024_u64.pow(3),
+            100 * 1024_u64.pow(3),
+        );
+        supervisor.resources.collection = Some(tokio::spawn(async move { snapshot }));
+        while !supervisor
+            .resources
+            .collection
+            .as_ref()
+            .unwrap()
+            .is_finished()
+        {
+            tokio::task::yield_now().await;
+        }
+        supervisor
+            .managed
+            .cancel_task(&task.id, task.revision)
+            .await
+            .unwrap();
+        supervisor.tick(false).await.unwrap();
+        let started = Instant::now();
+        while supervisor.workspace_refresh.is_some() && started.elapsed() < Duration::from_secs(2) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            supervisor.refresh_workspace_identity();
+        }
+        assert!(supervisor.workspace_refresh.is_none());
+        let repo: Option<String> = supervisor
+            .managed
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT repo FROM workspaces WHERE path=?1",
+                [&task.workspace],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(repo.as_deref(), Some("fixture/healthy"));
+        assert!(supervisor.managed.root().join(SNAPSHOT_FILE).is_file());
+        assert_eq!(
+            supervisor.managed.task(&task.id).unwrap().unwrap().state,
+            TaskState::Cancelled
+        );
+    }
 }
