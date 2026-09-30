@@ -109,6 +109,7 @@ describe("xcb site source contract", () => {
     expect(socialSite.icon?.kind).toBe("mark");
     expect(socialSite.icon?.src).toBe(`data:image/svg+xml;base64,${Buffer.from(mark).toString("base64")}`);
     expect(socialSite.theme).toEqual({ accent: "#2e7de9", background: "#e1e2e7", foreground: "#3760bf", muted: "#6172b0" });
+    expect(socialSite.keepTogether).toContain("Claude Code Router");
     const response = route.default();
     expect(response.headers.get("content-type")).toBe("image/png");
   });
@@ -127,7 +128,7 @@ describe("xcb site source contract", () => {
     for (const dir of pages) expect(await read(`${dir}page.tsx`)).not.toContain("socialImages");
   });
 
-  test("fits every share card's copy as written, with no cut, shrink, or strip", async () => {
+  test("fits every share card's copy as written, with no finding from the template", async () => {
     const [{ socialImageFit, socialImageSiteDetails }, { socialSite }, { socialCards }, { docsTopics }, { comparisons }, { blogPosts }] = await Promise.all([
       import("@hraness/web-discovery/social-image/card"),
       import("../app/social"),
@@ -139,7 +140,10 @@ describe("xcb site source contract", () => {
     expect(socialCards.size).toBe(6 + docsTopics.length + comparisons.length + blogPosts.length);
     for (const [path, page] of socialCards) {
       const fit = socialImageFit(socialImageSiteDetails(socialSite, page));
-      expect({ path, issues: fit.issues }).toEqual({ path, issues: [] });
+      // Findings include v0.12's review codes (reduced description, missing
+      // or repeated eyebrow, trailing ellipsis, tagline reuse) as well as the
+      // cut, shrink, and strip issues that strict rendering rejects.
+      expect({ path, findings: fit.findings }).toEqual({ path, findings: [] });
       if (path !== "/") {
         expect(fit.layout).toBe("page");
         expect(page.description).not.toBe(socialSite.description);
