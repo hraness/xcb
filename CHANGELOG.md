@@ -10,6 +10,25 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.15.0 - 2026-09-30
+
+Unattended hosts can pause new work under resource pressure, recover a stalled
+supervisor, and report a small heartbeat to an external status page.
+
+- Added `xcb resources` and an opt-in guard for sustained memory pressure,
+  low state or workspace disk reserves, and failed or stale measurements.
+  Existing work can still finish or be cancelled while launches wait.
+- Added a login-service watchdog that verifies the supervisor it starts,
+  detects stalled progress, and limits diagnostic logs to 6 MiB. Service
+  status distinguishes installation from a running, watched supervisor.
+- Added a host maintenance runner with independent sampling, optional
+  recurring Codex reviews, pinned tools, and retained uncertain outcomes.
+  Cleanup and task cancellation retain the host's permission and ownership
+  checks.
+- Added optional five-minute heartbeats with separate credentials, replay
+  protection, bounded retries, and only two latest anonymous status records.
+  The status endpoint reports receipt age without exposing task or account data.
+
 ## 0.14.5 - 2026-09-30
 
 Claude and Devin sign-in show the browser link in the terminal so you can

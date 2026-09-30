@@ -136,6 +136,43 @@ exec sleep 3"#,
     assert!(started.elapsed() < Duration::from_secs(1));
 }
 
+#[test]
+fn ensure_daemon_honors_the_exact_installed_watchdog_declaration() {
+    let f = fixture();
+    let binary = fake_daemon(
+        &f,
+        r#"printf '%s' "$3" > "$state/observed-command"
+printf '%s' "$XCB_SERVICE_INSTANCE" > "$state/observed-instance"
+exit 0"#,
+    );
+    let home = private::directory(&f.base.join("home")).unwrap();
+    let service = crate::habitat_service::Service::plan(&f.state, &binary, &home).unwrap();
+    private::directory(service.manifest.parent().unwrap()).unwrap();
+    private::create(
+        &f.state.join("habitat-service.json"),
+        &serde_json::to_vec(&service).unwrap(),
+    )
+    .unwrap();
+    private::create(&service.manifest, service.render().unwrap().as_bytes()).unwrap();
+    spawn_retrying(|| ensure_daemon(&f.state, &binary)).unwrap();
+    assert_eq!(
+        fs::read_to_string(f.state.join("observed-command")).unwrap(),
+        "service-run"
+    );
+    assert!(
+        uuid::Uuid::parse_str(&fs::read_to_string(f.state.join("observed-instance")).unwrap())
+            .is_ok()
+    );
+    // Preserve an edited declaration and refuse to bypass it by launching an
+    // unmonitored daemon through this client.
+    fs::write(&service.manifest, b"foreign service declaration").unwrap();
+    assert!(ensure_daemon(&f.state, &binary).is_err());
+    assert_eq!(
+        fs::read(&service.manifest).unwrap(),
+        b"foreign service declaration"
+    );
+}
+
 #[tokio::test]
 async fn a_bad_schedule_row_or_daemon_store_never_stops_dispatch() {
     let f = fixture();

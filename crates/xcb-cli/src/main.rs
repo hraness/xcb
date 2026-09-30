@@ -7,6 +7,7 @@ mod doctor;
 mod habitat;
 mod health;
 mod remote;
+mod resources;
 mod route;
 mod stop;
 mod table;
@@ -350,6 +351,14 @@ enum Commands {
         #[command(subcommand)]
         command: Option<ServiceCommand>,
     },
+    /// Show memory pressure and disk headroom, or enable managed launch limits.
+    Resources {
+        /// Also inspect the volume containing this project directory.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[command(subcommand)]
+        command: Option<resources::ResourceCommand>,
+    },
     /// Bind, search and explicitly promote notes to a project's local Wordcell vault.
     Memory {
         #[command(subcommand)]
@@ -442,6 +451,9 @@ enum Commands {
     /// Internal: run the managed supervisor (spawned by xcb, not for users).
     #[command(name = "managed-daemon", hide = true)]
     ManagedDaemon,
+    /// Supervise one owned background process and bound its diagnostic logs.
+    #[command(hide = true)]
+    ServiceRun,
     /// Internal: stdio bridge used by a provider's MCP helper.
     #[command(name = "broker-stdio", hide = true)]
     BrokerStdio,
@@ -1112,12 +1124,29 @@ fn service_text(status: &xcb_runtime::habitat_service::Status, style: ux::Style)
         ),
         (false, _) => format!("{} Doesn't start at login", style.symbol(ux::Symbol::Off)),
     };
-    let supervisor = if status.supervisor_running {
-        format!("{} supervisor running", style.symbol(ux::Symbol::On))
-    } else {
-        format!("{} supervisor idle", style.symbol(ux::Symbol::Off))
+    use xcb_runtime::habitat_service::HealthState;
+    let supervisor = match status.supervisor_health.state {
+        HealthState::Fresh => format!("{} supervisor running", style.symbol(ux::Symbol::On)),
+        HealthState::Stale => format!(
+            "{} supervisor heartbeat stalled",
+            style.symbol(ux::Symbol::Warn)
+        ),
+        HealthState::Missing => format!(
+            "{} supervisor health unknown",
+            style.symbol(ux::Symbol::Warn)
+        ),
+        HealthState::Stopped => format!("{} supervisor idle", style.symbol(ux::Symbol::Off)),
     };
     out.push_str(&format!("{login} · {supervisor}\n"));
+    if status.watchdog_enabled {
+        if status.supervisor_running && !status.supervisor_watched {
+            out.push_str(
+                "Watchdog: installed; current supervisor started separately and is not watched\n",
+            );
+        } else {
+            out.push_str("Watchdog: enabled · diagnostic logs limited to 6 MiB\n");
+        }
+    }
     if let Some(fault) = &status.relay_fault {
         out.push_str(&format!("Remote relay: {fault}\n"));
     }
@@ -1442,6 +1471,12 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
     if matches!(&cli.command, Some(Commands::ManagedDaemon)) {
         return xcb_runtime::managed::daemon(root).await;
     }
+    if matches!(&cli.command, Some(Commands::ServiceRun)) {
+        return xcb_runtime::service_watchdog::run(root).await;
+    }
+    if let Some(Commands::Resources { workspace, command }) = cli.command {
+        return resources::dispatch(&root, workspace, command, cli.json).await;
+    }
     if let Some(Commands::Generate { capabilities }) = &cli.command {
         return application::dispatch(&root, *capabilities, cli.json).await;
     }
@@ -1589,6 +1624,8 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             | Commands::ApplicationDiagnostic { .. }
             | Commands::QualifyApplication { .. }
             | Commands::ManagedDaemon
+            | Commands::ServiceRun
+            | Commands::Resources { .. }
             | Commands::Link { .. }
             | Commands::Fleet
             | Commands::Dispatch { .. }
@@ -4034,6 +4071,7 @@ async fn main() {
         cli.command,
         Some(
             Commands::ManagedDaemon
+                | Commands::ServiceRun
                 | Commands::BrokerStdio
                 | Commands::EgressForward { .. }
                 | Commands::SandboxProbe { .. }
@@ -4814,6 +4852,12 @@ mod tests {
                 installed: true,
                 registered: true,
                 supervisor_running: false,
+                supervisor_health: xcb_runtime::habitat_service::SupervisorHealth {
+                    state: xcb_runtime::habitat_service::HealthState::Stopped,
+                    heartbeat_age_seconds: None,
+                },
+                watchdog_enabled: false,
+                supervisor_watched: false,
                 service: Some(service),
                 log: Some(log.clone()),
                 relay_fault: None,
@@ -4837,6 +4881,12 @@ mod tests {
                 installed: true,
                 registered: false,
                 supervisor_running: true,
+                supervisor_health: xcb_runtime::habitat_service::SupervisorHealth {
+                    state: xcb_runtime::habitat_service::HealthState::Fresh,
+                    heartbeat_age_seconds: Some(1),
+                },
+                watchdog_enabled: false,
+                supervisor_watched: false,
                 service: None,
                 log: None,
                 relay_fault: None,
@@ -4860,6 +4910,12 @@ mod tests {
                 installed: false,
                 registered: false,
                 supervisor_running: false,
+                supervisor_health: xcb_runtime::habitat_service::SupervisorHealth {
+                    state: xcb_runtime::habitat_service::HealthState::Stopped,
+                    heartbeat_age_seconds: None,
+                },
+                watchdog_enabled: false,
+                supervisor_watched: false,
                 service: None,
                 log: None,
                 relay_fault: None,
@@ -4871,6 +4927,12 @@ mod tests {
             installed: true,
             registered: true,
             supervisor_running: true,
+            supervisor_health: xcb_runtime::habitat_service::SupervisorHealth {
+                state: xcb_runtime::habitat_service::HealthState::Fresh,
+                heartbeat_age_seconds: Some(1),
+            },
+            watchdog_enabled: false,
+            supervisor_watched: false,
             service: None,
             log: None,
             relay_fault: Some("relay projection failed: relay invalid-argument: scope".into()),
