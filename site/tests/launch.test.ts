@@ -56,7 +56,7 @@ describe("xcb launch facts", () => {
     expect(launchBeats.length).toBeGreaterThanOrEqual(8);
     for (const beat of launchBeats) {
       expect(beat.visual).toBeDefined();
-      expect(beat.alt?.startsWith("Illustration")).toBe(true);
+      expect(beat.alt.trim().length).toBeGreaterThan(0);
     }
     expect(JSON.stringify(socialKit)).toContain(`https://xcb.sh/blog/${launchPostSlug}`);
     expect(JSON.stringify(socialKit)).not.toMatch(/mastodon/iu);

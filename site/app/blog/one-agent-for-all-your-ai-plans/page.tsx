@@ -68,7 +68,7 @@ export default function IntroducingExcalibur() {
           {launchFilm === null ? (
             <div className="xcb-launch-showcase"><RouterShowcase /></div>
           ) : (
-            <ArticleVideo caption={launchFilm.caption} video={launchFilm.video} width="wide" />
+            <ArticleVideo video={launchFilm.video} width="wide" />
           )}
 
           <LaunchBeats beats={launchBeats} renderVisual={(beat) => <BeatVisual beat={beat} />} />

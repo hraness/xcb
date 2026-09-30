@@ -90,7 +90,7 @@ test("the install page offers one command, copyable highlighted code, and a prom
   const text = textOf(html);
   expect(text).toContain(installCommand);
   expect(html).toContain("syntax-code");
-  expect(html).toContain("Copy prompt");
+  expect(html).toContain('aria-label="Copy setup prompt"');
   expect(html.match(/xcb-code-copy/gu)?.length ?? 0).toBeGreaterThanOrEqual(6);
   expect(text).toContain(agentPrompt);
   expect(text).toContain("npm install @hraness/xcb");
@@ -100,6 +100,11 @@ test("the install page offers one command, copyable highlighted code, and a prom
   expect(agentPrompt).toContain(installCommand);
   expect(agentPrompt).toContain(windowsInstallCommand);
   expect(agentPrompt).toContain("WSL2");
+  const targets: string[] = [];
+  new HTMLRewriter().on('#agent a[data-agent-target]', {
+    element(element) { targets.push(element.getAttribute('data-agent-target') ?? ''); },
+  }).transform(html);
+  expect(targets).toEqual(['dot', 'grok-bot', 'muse', 'cursor', 'codex-app', 'devin']);
 });
 
 test("the shared header keeps a named home link and exact-artwork foil fallback", () => {
