@@ -1,0 +1,2297 @@
+{
+  "approvalPolicy": "on-request",
+  "approvalsReviewer": "auto_review",
+  "authentication": "none; isolated empty profiles; no existing credentials accessed",
+  "inventoryFixture": "production Seatbelt narrowed to one owned loopback port, synthetic Responses requests",
+  "matrixHarnessSha256": "2acefd75898da1c11f060621c43a1a9bbc19e1c39a8b39aba2fbe9ce3c234323",
+  "nativeDelegationEnabled": false,
+  "nativeFixture": "production Seatbelt, synthetic host RPC canaries, no model turns",
+  "observedDate": "2026-09-29",
+  "passed": true,
+  "productionQualified": false,
+  "realProviderInference": false,
+  "results": [
+    {
+      "autoReviewConfigReadbackVerified": true,
+      "binarySha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+      "completedEvidenceReused": true,
+      "configReadbackSha256": "7a718d22bde76c7175f354a2b6050bf6379f20ca75ce2a3ef8e590fbcd5440b7",
+      "inventory": {
+        "authentication": "none; fresh empty CODEX_HOME",
+        "bakedBinarySha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+        "bakedVersion": "0.159.0",
+        "binarySha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+        "candidate": false,
+        "cases": [
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "c5a18c6aba5f2072c14c759fcda5092cf3482c01133aefff8aba2d87680265f0",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "low",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "low"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "f74d14c265a298ac79fdce54eb5840127d0320840e1ce6f0c2d7b47155bc0092",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "medium",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "medium"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "6b405bf710c95e8c6f398ff503f258df6449c3bf8725182153840f2845892b46",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "high",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "high"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "0cba4465f47ee58153c92ec64b2cda82858b252d390076d2476e2f161668dfc0",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "xhigh",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "278d84b385aa062f2790a74263f581545d114d5bf7c027d6a0d27bce6df94514",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "max",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "5f24c448c1373498a8d144a35552ddced349ff0480460f1fd6dabd83c0abd9f6",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "ultra",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "8958f7a49c7c79a073f592588134ebf165197697f16cd4ad9e6a825afef7d57f",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "low",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "low"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "a22d92cbeb65e115827b046c7d68417f93840def4dca77d8d34a5a68411885c5",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "medium",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "medium"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "426b34444af7b24aa27c92790906f863437bd3b1381a78a49d27c3822fe011cc",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "high",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "high"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "ad622b6f0fe7cf2227d17e18869520d44a490d82ae530e28e00d677e934d3207",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "xhigh",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "964354ebd37f5b7fb9fcf47ae140cb6453f0ab6ef14050b6920cd69d2b2cb142",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "max",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "3c6f45ee1a7bc380f8e08e53a57307040626b69424303999a58b82be0731e5a9",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "ultra",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "ce583d54a88b5453acfb6ec075659f7dd710d3a85abe9ace7d7a627e21d83cf1",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "low",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "low"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "0c817bc4d5076254c9c26823b062e3ace5f3e34a8875008568d8a81cd58635c9",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "medium",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "medium"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "0d8e4646584186a020e2303bce7afbe18180a2c737aeaf2b2acea872a11dbefd",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "high",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "high"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "d996d513e36977a902ac2b7c390f47737a99bb3e93dbb36f9945465c8f08579e",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "xhigh",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "ccb65e4dfe7b5fed5a93793858696041c26c8c7e2cb2891ce543bb53ad4eb420",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "max",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "c784e05d671611dfced258aed431d9d94652e90a3fb5cce7169c7e38491fea16",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "ultra",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          }
+        ],
+        "catalogControls": {
+          "apply_patch_tool_type": null,
+          "experimental_supported_tools": [],
+          "multi_agent_version": "disabled",
+          "node_repl_disabled": true,
+          "shell_type": "disabled",
+          "supports_experimental_context": false,
+          "supports_search_tool": false,
+          "tool_mode": "direct"
+        },
+        "catalogSource": "exact checked executable embedded ModelsResponse JSON",
+        "egress": "owned loopback TCP port only; OS denies external network and process forks",
+        "forgedBuiltins": [
+          "exec_command",
+          "write_stdin",
+          "apply_patch",
+          "view_image",
+          "update_plan",
+          "request_user_input",
+          "spawn_agent",
+          "context",
+          "request_permissions"
+        ],
+        "harnessSha256": "4426b25573241f6c732a460e68c2e9a8a020ae9f2125bdd6d7aebeec05db58b8",
+        "limitations": [
+          "No real credentials or existing sessions were accessed.",
+          "This fixture does not establish provider authentication, refresh persistence, TLS egress, or complete filesystem confinement.",
+          "Untested Codex builds and model slugs remain disabled."
+        ],
+        "models": [
+          "gpt-6-astra",
+          "gpt-6-sol",
+          "gpt-5.6-sol"
+        ],
+        "observedDate": "2026-09-29",
+        "platform": "macos-arm64",
+        "productionQualified": false,
+        "qualificationOverrides": {
+          "features.enable_request_compression": false,
+          "model_provider": "qualification",
+          "requires_openai_auth": false,
+          "supports_websockets": false
+        },
+        "readWriteConfinementQualified": false,
+        "realProviderInference": false,
+        "schema": "xcb.codex-scripted-inventory.v1",
+        "schemaCommand": "codex app-server generate-json-schema --experimental --out DIR",
+        "schemaDigestAlgorithm": "sha256(sorted relative schema path + NUL + raw generated JSON bytes + NUL)",
+        "schemaSha256": "ca6bdd8786588a11b8b0713d697a211a703f688e20776d2d1cb5054dc749f139",
+        "scope": "exact native tool manifest serialization and callback rejection, not authenticated provider egress",
+        "version": "0.159.0",
+        "wire": "Responses Lite additional_tools prefix"
+      },
+      "inventoryExitCode": null,
+      "inventoryVerdict": {
+        "binarySha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+        "cases": 18,
+        "failures": [],
+        "inventory": "inventory.json",
+        "inventorySha256": "10fe741d018a5fcaaffc263543e897bd72fcf4e46866d15ba7321c334d704233",
+        "outcome": "passed",
+        "schema": "xcb.codex-inventory-verdict.v1",
+        "schemaSha256": "ca6bdd8786588a11b8b0713d697a211a703f688e20776d2d1cb5054dc749f139",
+        "version": "0.159.0"
+      },
+      "nativeChecks": [
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "scratch read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "scratch write",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "profile refresh write",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "peer account read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "peer account write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "ambient config read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "ambient config write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer symlink read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "config read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "catalog read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "config symlink read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "catalog symlink read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "public CA read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "public CA symlink read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config copy-over denied",
+          "matched": true,
+          "method": "fs/copy"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config unlink denied",
+          "matched": true,
+          "method": "fs/remove"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog copy-over denied",
+          "matched": true,
+          "method": "fs/copy"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog unlink denied",
+          "matched": true,
+          "method": "fs/remove"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA copy-over denied",
+          "matched": true,
+          "method": "fs/copy"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA unlink denied",
+          "matched": true,
+          "method": "fs/remove"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "helper execution denied",
+          "matched": true,
+          "method": "process/spawn"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "self execution denied",
+          "matched": true,
+          "method": "process/spawn"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "profile recursive removal denied",
+          "matched": true,
+          "method": "fs/remove"
+        }
+      ],
+      "nativeCustody": {
+        "binaryUnchanged": true,
+        "processGroupAbsent": true,
+        "rootExitCode": 0,
+        "sourceFunctionUnchanged": true,
+        "stdioJoined": true
+      },
+      "nativeExitCode": null,
+      "nativeReceiptSha256": "cfa9dbc473a3321a5de6b0df292d72ca51f107535ced7134f17b65d13dc8b256",
+      "passed": true,
+      "protectedFilesUnchanged": true,
+      "protectedMetadataUnchanged": true,
+      "version": "0.159.0"
+    },
+    {
+      "autoReviewConfigReadbackVerified": true,
+      "binarySha256": "788a818fbb9596869c7a487554507cb8bdca17584b8671112b23f9e225ba35c8",
+      "completedEvidenceReused": false,
+      "configReadbackSha256": "27ee7c3a37bf6ec3aa0de63f3ad323437429205f4b1f887176e694753ae1e194",
+      "inventory": {
+        "authentication": "none; fresh empty CODEX_HOME",
+        "bakedBinarySha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+        "bakedVersion": "0.159.0",
+        "binarySha256": "788a818fbb9596869c7a487554507cb8bdca17584b8671112b23f9e225ba35c8",
+        "candidate": true,
+        "cases": [
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "0b9fe67ba199fa8deb3959cb1ed1d1f4933147f717747d6c9f716636c5025429",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "low",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "low"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "a4a635d6bfb56cf674a64cf17dbec21c3d8a9d09d9cefeaf78771830d0115ed0",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "medium",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "medium"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "ed186eaf3134bf54eb14bd13dcbf057b20a807df35b3d0a7df4e6fab17f0785f",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "high",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "high"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "e6fb45cc5820a48160ef984d61f98b658c98b058c05dd6496d6a3ac69bdeb195",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "xhigh",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "2458656b622cfa05d19026ca9726c39c5e675a4dd2a22a4aaa04219cb736b14f",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "max",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "cb7781ca8fc226e0a7346d938fb6880852405ad6dd5a95e49efa943c28415f3c",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "ultra",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "ff32029fb1e0f96f02e2629b7583c455642e39341d66cc710263a712e479e517",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "low",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "low"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "8a9a6b2e5161a45c6e09a10a73d0e5884c261e7e85b2a88b05b0631fc6002c83",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "medium",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "medium"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "9b034d988bfd3d01547040b1b5fb13f06beb28cd9f31e28fe84945c275a0de83",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "high",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "high"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "e22d52036eba59adef904fb89b2aaaa042573e069025a2884e76a2b972497441",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "xhigh",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "2007224b3c03b6dea609421641c5aa9638e7b6cb0b5898331012349bb7dce221",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "max",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "3154992ebb6396652b812f1a762b2d9d5b2a89e5c199faf50eb96e249da50c9c",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "ultra",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "9fdddee8e21b4c66afb3f674b5803bed24921e15dc6882ef2885c667f7c45992",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "low",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "low"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "e65fe1048849b76d71585523c874d9e5e0445b6fb126e4f21e4a503589a0f526",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "medium",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "medium"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "ec51f4def3fad8e16bfb5d63b58b28e42d54bfe1ead9034124038f9fd74929c6",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "high",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "high"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "4c0b065555d935a3f1e4fce39e67adddd83e552de7e3b27dd3e1c30457b1d6e1",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "xhigh",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "0d1da3f2790debfe91730ae10b20b6dbe6520155707eedb4d45b02c575c710e2",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "max",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "a9832d73fb480b7f52cb22a2ebf8e62d22c01dec0b61257ed06dbb59f3d532a3",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "ultra",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          }
+        ],
+        "catalogControls": {
+          "apply_patch_tool_type": null,
+          "experimental_supported_tools": [],
+          "multi_agent_version": "disabled",
+          "node_repl_disabled": true,
+          "shell_type": "disabled",
+          "supports_experimental_context": false,
+          "supports_search_tool": false,
+          "tool_mode": "direct"
+        },
+        "catalogSource": "exact checked executable embedded ModelsResponse JSON",
+        "egress": "owned loopback TCP port only; OS denies external network and process forks",
+        "forgedBuiltins": [
+          "exec_command",
+          "write_stdin",
+          "apply_patch",
+          "view_image",
+          "update_plan",
+          "request_user_input",
+          "spawn_agent",
+          "context",
+          "request_permissions"
+        ],
+        "harnessSha256": "4426b25573241f6c732a460e68c2e9a8a020ae9f2125bdd6d7aebeec05db58b8",
+        "limitations": [
+          "No real credentials or existing sessions were accessed.",
+          "This fixture does not establish provider authentication, refresh persistence, TLS egress, or complete filesystem confinement.",
+          "Untested Codex builds and model slugs remain disabled."
+        ],
+        "models": [
+          "gpt-6-astra",
+          "gpt-6-sol",
+          "gpt-5.6-sol"
+        ],
+        "observedDate": "2026-09-29",
+        "platform": "macos-arm64",
+        "productionQualified": false,
+        "qualificationOverrides": {
+          "features.enable_request_compression": false,
+          "model_provider": "qualification",
+          "requires_openai_auth": false,
+          "supports_websockets": false
+        },
+        "readWriteConfinementQualified": false,
+        "realProviderInference": false,
+        "schema": "xcb.codex-scripted-inventory.v1",
+        "schemaCommand": "codex app-server generate-json-schema --experimental --out DIR",
+        "schemaDigestAlgorithm": "sha256(sorted relative schema path + NUL + raw generated JSON bytes + NUL)",
+        "schemaSha256": "b245d4b027cf8d1624c0c6733e6918c042bc278886251e7f2d90a3f29abfac2d",
+        "scope": "exact native tool manifest serialization and callback rejection, not authenticated provider egress",
+        "version": "0.158.0",
+        "wire": "Responses Lite additional_tools prefix"
+      },
+      "inventoryExitCode": 0,
+      "inventoryVerdict": {
+        "binarySha256": "788a818fbb9596869c7a487554507cb8bdca17584b8671112b23f9e225ba35c8",
+        "cases": 18,
+        "failures": [],
+        "inventory": "inventory.json",
+        "inventorySha256": "1d7c17702d4da250e7b93dbc63fe8038cca1932c55f832a5d8d12ff3a0a178ec",
+        "outcome": "passed",
+        "schema": "xcb.codex-inventory-verdict.v1",
+        "schemaSha256": "b245d4b027cf8d1624c0c6733e6918c042bc278886251e7f2d90a3f29abfac2d",
+        "version": "0.158.0"
+      },
+      "nativeChecks": [
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "scratch read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "scratch write",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "profile refresh write",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "peer account read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "peer account write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "ambient config read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "ambient config write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer symlink read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "config read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "catalog read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "config symlink read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "catalog symlink read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "public CA read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "public CA symlink read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config copy-over denied",
+          "matched": true,
+          "method": "fs/copy"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config unlink denied",
+          "matched": true,
+          "method": "fs/remove"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog copy-over denied",
+          "matched": true,
+          "method": "fs/copy"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog unlink denied",
+          "matched": true,
+          "method": "fs/remove"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA copy-over denied",
+          "matched": true,
+          "method": "fs/copy"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA unlink denied",
+          "matched": true,
+          "method": "fs/remove"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "helper execution denied",
+          "matched": true,
+          "method": "process/spawn"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "self execution denied",
+          "matched": true,
+          "method": "process/spawn"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "profile recursive removal denied",
+          "matched": true,
+          "method": "fs/remove"
+        }
+      ],
+      "nativeCustody": {
+        "binaryUnchanged": true,
+        "processGroupAbsent": true,
+        "rootExitCode": 0,
+        "sourceFunctionUnchanged": true,
+        "stdioJoined": true
+      },
+      "nativeExitCode": 0,
+      "nativeReceiptSha256": "ba239fbabaf087f2b80ac5a9d9d8c25733fcbdd2a797efdb8b5a26e93496db6c",
+      "passed": true,
+      "protectedFilesUnchanged": true,
+      "protectedMetadataUnchanged": true,
+      "version": "0.158.0"
+    },
+    {
+      "autoReviewConfigReadbackVerified": true,
+      "binarySha256": "27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+      "completedEvidenceReused": false,
+      "configReadbackSha256": "2368e59c36cae2b3e6a38996126b3dfb53aec7c7e822d590af410a1ed55e3f48",
+      "inventory": {
+        "authentication": "none; fresh empty CODEX_HOME",
+        "bakedBinarySha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+        "bakedVersion": "0.159.0",
+        "binarySha256": "27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+        "candidate": true,
+        "cases": [
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "78cdb679b7f1aa056168bcd91b05f9de6489dd8135987172f128bb8b0d36ab7f",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "low",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "low"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "21c3e541b96e10dc0e0757b17127ba5de893129429df9a53a3be97679e9a5c69",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "medium",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "medium"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "d1b49c2b42f1e09a4152c35393a43ab9e4f0ff5ace9300829965512e0b9cd994",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "high",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "high"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "42db84309a7f575fda5669e279cc535501369834f5f33c6089a58058821beb68",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "xhigh",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "3ba73112226f236aa3ed2cd77126c60a03053f3a70d1de801267a062ad5ddbce",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "max",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "88e9a8819849d87cf3cf32d57434766f223cfe115a316bc434672c3daab2e2fa",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "ultra",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "1c115353ff0aa59f91cb20d8aa6cd22483eecc258d10ee3468742edac8b0e48a",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "low",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "low"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "d5a315c1b9888349952109e03d4555891df0a2cb59fc1e9cf9250889923d08bc",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "medium",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "medium"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "8139cc9a076b7697f89f2fcdc40118783ce1349207aec571ffd4ef9a6ae9f644",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "high",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "high"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "0191d19f998f27411ce9d3a6a22a193fbd52edbdfd96cfe57e11ab8121f0b610",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "xhigh",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "001cf72a2303dfe804ceff877c4b274843a21bdd15ed330ee2f3c5b691f93c31",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "max",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "f4330526e4d09a133781f70eb553c1bd98a8fdc9d27a8f62ac3e99d337fc9237",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "ultra",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "fb3e44bb867ec6fc1d2dffc83139e912fa9de276d5673caebec883bc2fec4d4f",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "low",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "low"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "0f5ea54e2606c7232d91ad203bc6337b249094ab31fe6ff4d1dc4cd7b8223518",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "medium",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "medium"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "2fe63a3588b42aeed8ed77a9b84e3c01f004c26bbc4bf3d95034d5d3ba9bfd1d",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "high",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "high"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "bbeba4c30624a70b01356466644b45b0822a591f1f7daf9da2737d4c756e909e",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "xhigh",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "5f9813096f4915dd4ed365839440cbc4bf2b2bad6398b55b3cf5d0544199f05d",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "max",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "979ea40bf15dbe7c6e166ef38e0471799cb8a79da717f0dc6d67a35d4b8e1c60",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "ultra",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          }
+        ],
+        "catalogControls": {
+          "apply_patch_tool_type": null,
+          "experimental_supported_tools": [],
+          "multi_agent_version": "disabled",
+          "node_repl_disabled": true,
+          "shell_type": "disabled",
+          "supports_experimental_context": false,
+          "supports_search_tool": false,
+          "tool_mode": "direct"
+        },
+        "catalogSource": "exact checked executable embedded ModelsResponse JSON",
+        "egress": "owned loopback TCP port only; OS denies external network and process forks",
+        "forgedBuiltins": [
+          "exec_command",
+          "write_stdin",
+          "apply_patch",
+          "view_image",
+          "update_plan",
+          "request_user_input",
+          "spawn_agent",
+          "context",
+          "request_permissions"
+        ],
+        "harnessSha256": "4426b25573241f6c732a460e68c2e9a8a020ae9f2125bdd6d7aebeec05db58b8",
+        "limitations": [
+          "No real credentials or existing sessions were accessed.",
+          "This fixture does not establish provider authentication, refresh persistence, TLS egress, or complete filesystem confinement.",
+          "Untested Codex builds and model slugs remain disabled."
+        ],
+        "models": [
+          "gpt-6-astra",
+          "gpt-6-sol",
+          "gpt-5.6-sol"
+        ],
+        "observedDate": "2026-09-29",
+        "platform": "macos-arm64",
+        "productionQualified": false,
+        "qualificationOverrides": {
+          "features.enable_request_compression": false,
+          "model_provider": "qualification",
+          "requires_openai_auth": false,
+          "supports_websockets": false
+        },
+        "readWriteConfinementQualified": false,
+        "realProviderInference": false,
+        "schema": "xcb.codex-scripted-inventory.v1",
+        "schemaCommand": "codex app-server generate-json-schema --experimental --out DIR",
+        "schemaDigestAlgorithm": "sha256(sorted relative schema path + NUL + raw generated JSON bytes + NUL)",
+        "schemaSha256": "4da87cc14ef44c732db3404c0704a5eb902bb3a271151762052a785fdb2be056",
+        "scope": "exact native tool manifest serialization and callback rejection, not authenticated provider egress",
+        "version": "0.157.1",
+        "wire": "Responses Lite additional_tools prefix"
+      },
+      "inventoryExitCode": 0,
+      "inventoryVerdict": {
+        "binarySha256": "27ceb5f9b957b43a519efe4eaa3816a0bffb0a531a2c89af18840c0a3c016a7d",
+        "cases": 18,
+        "failures": [],
+        "inventory": "inventory.json",
+        "inventorySha256": "e144c331820129e9ec65ba5055ddda472e51b3d2e073089abeb62bce9fd447a1",
+        "outcome": "passed",
+        "schema": "xcb.codex-inventory-verdict.v1",
+        "schemaSha256": "4da87cc14ef44c732db3404c0704a5eb902bb3a271151762052a785fdb2be056",
+        "version": "0.157.1"
+      },
+      "nativeChecks": [
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "scratch read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "scratch write",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "profile refresh write",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "peer account read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "peer account write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "ambient config read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "ambient config write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer symlink read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "config read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "catalog read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "config symlink read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "catalog symlink read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "public CA read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "public CA symlink read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config copy-over denied",
+          "matched": true,
+          "method": "fs/copy"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config unlink denied",
+          "matched": true,
+          "method": "fs/remove"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog copy-over denied",
+          "matched": true,
+          "method": "fs/copy"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog unlink denied",
+          "matched": true,
+          "method": "fs/remove"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA copy-over denied",
+          "matched": true,
+          "method": "fs/copy"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA unlink denied",
+          "matched": true,
+          "method": "fs/remove"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "helper execution denied",
+          "matched": true,
+          "method": "process/spawn"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "self execution denied",
+          "matched": true,
+          "method": "process/spawn"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "profile recursive removal denied",
+          "matched": true,
+          "method": "fs/remove"
+        }
+      ],
+      "nativeCustody": {
+        "binaryUnchanged": true,
+        "processGroupAbsent": true,
+        "rootExitCode": 0,
+        "sourceFunctionUnchanged": true,
+        "stdioJoined": true
+      },
+      "nativeExitCode": 0,
+      "nativeReceiptSha256": "cad2a6816b88ba24c4c835c39754e5adb642d1be1063d41ba94586d9a51c7230",
+      "passed": true,
+      "protectedFilesUnchanged": true,
+      "protectedMetadataUnchanged": true,
+      "version": "0.157.1"
+    },
+    {
+      "autoReviewConfigReadbackVerified": true,
+      "binarySha256": "0196e89fe5a7598f816ee54232c3d7c26d75e502ab5cfe2c9240e81d90f7255a",
+      "completedEvidenceReused": false,
+      "configReadbackSha256": "16fc385db75d142d44002521a3c0a15d29327fad57ed08129cd228478cc167b4",
+      "inventory": {
+        "authentication": "none; fresh empty CODEX_HOME",
+        "bakedBinarySha256": "e89718aa1969bfc4a471277bdc4679a3a3529293de0a309909822dfd67ddb77a",
+        "bakedVersion": "0.159.0",
+        "binarySha256": "0196e89fe5a7598f816ee54232c3d7c26d75e502ab5cfe2c9240e81d90f7255a",
+        "candidate": true,
+        "cases": [
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "8d2ccf475adb80176b319d45ed413498b1693637f7458e9996630ee809f25c14",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "low",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "low"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "4fea930b0bec9f9f1c18cc5db7a660500316b3ce6dcc964bc91b6e3e95abac01",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "medium",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "medium"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "ad9f60fa320aa28ac0d806d3bd814a61fe7bf27b836fd7c8d81dfec07f324e5d",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "high",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "high"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "e5eaed20cb4debe871929eb433bb1f913fc8af617d15a41b1578505bb097d54c",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "xhigh",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "b4e771d8d2e03bc795f4bf133711f0adffc3b1f233efa04292c56aca5fd8560d",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "max",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "d0d8f606d5667b1d031abc73ccce6e6fa3deff2372c5c7dc73e62827c37e6b47",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-astra",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "ultra",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "3d4476d2990c2f5895dc398e7e084f850d38f6f24c22267265b6753c9d2fb22b",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "low",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "low"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "cf8fd3901f93298b68be65b9f01597ffdac9fcd8c34630af699e373de392167a",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "medium",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "medium"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "7f5b2386fbbee6a7e6b3bd8f4db0194f50ffb49a2651bfa635231695219b8857",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "high",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "high"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "24c0bf8613264be8862ebd2b8e6c064be6be68e28bcf928818b5b0ebedc1b25a",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "xhigh",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "093ee961b033b4153ef1d9fa2e6914fa08a450049a1e2b1698b1e352d71f843a",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "max",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "829053b289a74ced3e702939cf61c8f1b434bd94cf5e1734a29981f8ef2e797e",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "ultra",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "3f78a17319001bf5d965a81952492ec6c1c1047dc360dc8a339d791e96d6c105",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "low",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "low"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "3050147ae568f5eb116baaffa6b7858bee69b9185a4ef5823db56671a0e8f239",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "medium",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "medium"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "6625b279cc85a3142bb3168a753ea695929ed709cbf23a2c64748e517909acba",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "high",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "high"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "95a8143b9772e21543c71423017f8defb8a62769db0a37b35535bcac5b976f03",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "xhigh",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "xhigh"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "8fbf2ce69c58787f7db17f55322d3d6d7350afebb0344697e2b2173b9648fa72",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "max",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          },
+          {
+            "emptyManifestVerified": true,
+            "evidenceSha256": "67eef82231c19c4dd346264ea9d8a3ccfe6719d8e2581d6496879a1dd2f161cc",
+            "exactDynamicManifestVerified": true,
+            "forgedBuiltinRejections": 9,
+            "listenerJoined": true,
+            "model": "gpt-5.6-sol",
+            "permittedCallbackVerified": true,
+            "reasoningEffort": "ultra",
+            "requests": 12,
+            "rootExitCode": 0,
+            "stdioJoined": true,
+            "wireReasoningEffort": "max"
+          }
+        ],
+        "catalogControls": {
+          "apply_patch_tool_type": null,
+          "experimental_supported_tools": [],
+          "multi_agent_version": "disabled",
+          "node_repl_disabled": true,
+          "shell_type": "disabled",
+          "supports_experimental_context": false,
+          "supports_search_tool": false,
+          "tool_mode": "direct"
+        },
+        "catalogSource": "exact checked executable embedded ModelsResponse JSON",
+        "egress": "owned loopback TCP port only; OS denies external network and process forks",
+        "forgedBuiltins": [
+          "exec_command",
+          "write_stdin",
+          "apply_patch",
+          "view_image",
+          "update_plan",
+          "request_user_input",
+          "spawn_agent",
+          "context",
+          "request_permissions"
+        ],
+        "harnessSha256": "4426b25573241f6c732a460e68c2e9a8a020ae9f2125bdd6d7aebeec05db58b8",
+        "limitations": [
+          "No real credentials or existing sessions were accessed.",
+          "This fixture does not establish provider authentication, refresh persistence, TLS egress, or complete filesystem confinement.",
+          "Untested Codex builds and model slugs remain disabled."
+        ],
+        "models": [
+          "gpt-6-astra",
+          "gpt-6-sol",
+          "gpt-5.6-sol"
+        ],
+        "observedDate": "2026-09-29",
+        "platform": "macos-arm64",
+        "productionQualified": false,
+        "qualificationOverrides": {
+          "features.enable_request_compression": false,
+          "model_provider": "qualification",
+          "requires_openai_auth": false,
+          "supports_websockets": false
+        },
+        "readWriteConfinementQualified": false,
+        "realProviderInference": false,
+        "schema": "xcb.codex-scripted-inventory.v1",
+        "schemaCommand": "codex app-server generate-json-schema --experimental --out DIR",
+        "schemaDigestAlgorithm": "sha256(sorted relative schema path + NUL + raw generated JSON bytes + NUL)",
+        "schemaSha256": "0f15f18e41d59367b3655adac23fe1525be483dc38f6fd56d07fc627eb802129",
+        "scope": "exact native tool manifest serialization and callback rejection, not authenticated provider egress",
+        "version": "0.156.1",
+        "wire": "Responses Lite additional_tools prefix"
+      },
+      "inventoryExitCode": 0,
+      "inventoryVerdict": {
+        "binarySha256": "0196e89fe5a7598f816ee54232c3d7c26d75e502ab5cfe2c9240e81d90f7255a",
+        "cases": 18,
+        "failures": [],
+        "inventory": "inventory.json",
+        "inventorySha256": "1f5cfbd9c5162b54f4396084ea193da78ca901da80d1b9592f1483f505ff6998",
+        "outcome": "passed",
+        "schema": "xcb.codex-inventory-verdict.v1",
+        "schemaSha256": "0f15f18e41d59367b3655adac23fe1525be483dc38f6fd56d07fc627eb802129",
+        "version": "0.156.1"
+      },
+      "nativeChecks": [
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "scratch read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "scratch write",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "profile refresh write",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "peer account read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "peer account write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "ambient config read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "ambient config write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer symlink read denied",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "consumer symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "config read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "catalog read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "config symlink read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "catalog symlink read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "public CA read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": true,
+          "expectedAllowed": true,
+          "label": "public CA symlink read",
+          "matched": true,
+          "method": "fs/readFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA symlink write denied",
+          "matched": true,
+          "method": "fs/writeFile"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config copy-over denied",
+          "matched": true,
+          "method": "fs/copy"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "config unlink denied",
+          "matched": true,
+          "method": "fs/remove"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog copy-over denied",
+          "matched": true,
+          "method": "fs/copy"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "catalog unlink denied",
+          "matched": true,
+          "method": "fs/remove"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA copy-over denied",
+          "matched": true,
+          "method": "fs/copy"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "public CA unlink denied",
+          "matched": true,
+          "method": "fs/remove"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "helper execution denied",
+          "matched": true,
+          "method": "process/spawn"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "self execution denied",
+          "matched": true,
+          "method": "process/spawn"
+        },
+        {
+          "allowed": false,
+          "expectedAllowed": false,
+          "label": "profile recursive removal denied",
+          "matched": true,
+          "method": "fs/remove"
+        }
+      ],
+      "nativeCustody": {
+        "binaryUnchanged": true,
+        "processGroupAbsent": true,
+        "rootExitCode": 0,
+        "sourceFunctionUnchanged": true,
+        "stdioJoined": true
+      },
+      "nativeExitCode": 0,
+      "nativeReceiptSha256": "7811ca66978b89cdca85804d9522e6973e10b7abd4d5f7799fe0d54f38061d24",
+      "passed": true,
+      "protectedFilesUnchanged": true,
+      "protectedMetadataUnchanged": true,
+      "version": "0.156.1"
+    }
+  ],
+  "runtimeConfigSourceSha256": "f1cd6f41628f9b6c59998fc37d213f3dc28b65d643c78d56e3a0353b6d42900d",
+  "schema": "xcb.codex-auto-review-compatibility.v1"
+}

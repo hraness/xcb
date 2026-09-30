@@ -1,0 +1,32 @@
+{
+  "source": "Pinned Claude Code 2.1.285; credential-free loopback fixture; the synthetic endpoint does not implement classifier replies. Observed fields retained; UUIDs, session identifiers, timing and unrelated accounting fields omitted.",
+  "frames": [
+    {
+      "type": "system",
+      "subtype": "permission_denied",
+      "tool_name": "Agent",
+      "tool_use_id": "toolu_child",
+      "decision_reason_type": "classifier",
+      "decision_reason": "Classifier unavailable",
+      "message": "claude-opus-5[1m] is temporarily unavailable, so auto mode cannot determine the safety of Agent right now. Wait a moment and then try this action again. If it keeps failing, continue with other tasks that don't require this action and come back to it later. Note: reading files, searching code, and other read-only operations do not require the classifier and can still be used."
+    },
+    {
+      "type": "result",
+      "subtype": "success",
+      "is_error": false,
+      "stop_reason": "end_turn",
+      "result": "FIXTURE_DONE",
+      "permission_denials": [
+        {
+          "tool_name": "Task",
+          "tool_use_id": "toolu_child",
+          "tool_input": {
+            "description": "Synthetic child",
+            "prompt": "XCB_CHILD_PROBE",
+            "subagent_type": "xcb-worker"
+          }
+        }
+      ]
+    }
+  ]
+}

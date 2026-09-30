@@ -57,6 +57,7 @@ struct Call {
     name: String,
     arguments: Value,
     approved: bool,
+    denied: bool,
     bridged: bool,
     replied: bool,
     finished: bool,
@@ -96,6 +97,16 @@ pub(crate) struct DevinProtocol {
     /// native fixture can show which answer Devin continued after.
     #[cfg(test)]
     permission_observations: Vec<Value>,
+    #[cfg(test)]
+    mode_observations: Vec<Value>,
+    #[cfg(test)]
+    tool_sequence: Vec<Value>,
+    /// Bypass has not passed native qualification. Only the credential-free
+    /// test fixture may request it; production always selects accept-edits.
+    #[cfg(test)]
+    candidate_bypass: bool,
+    mode: &'static str,
+    mode_confirmed: bool,
     output_tokens: u64,
     /// A tool call ran since the last answer text, so the next answer text
     /// starts a new paragraph instead of running into the previous one.
@@ -287,10 +298,26 @@ impl DevinProtocol {
             compaction_observations: Vec::new(),
             #[cfg(test)]
             permission_observations: Vec::new(),
+            #[cfg(test)]
+            mode_observations: Vec::new(),
+            #[cfg(test)]
+            tool_sequence: Vec::new(),
+            #[cfg(test)]
+            candidate_bypass: false,
+            mode: "accept-edits",
+            mode_confirmed: false,
             output_tokens: 0,
             text_break: false,
             init_deadline: INIT_DEADLINE,
         })
+    }
+
+    fn target_mode(&self) -> &'static str {
+        #[cfg(test)]
+        if self.candidate_bypass {
+            return "bypass";
+        }
+        "accept-edits"
     }
     fn prompt_wire(&self, prompt: Prompt, id: u64) -> Result<Value> {
         if prompt.text.len() > MAX_PROMPT_BYTES {
@@ -339,6 +366,31 @@ impl DevinProtocol {
             "Devin frame bound",
         )?;
         let value: Value = serde_json::from_slice(bytes)?;
+        #[cfg(test)]
+        if let Some(options) = value
+            .pointer("/result/configOptions")
+            .and_then(Value::as_array)
+            && self.mode_observations.len() < 32
+        {
+            for option in options.iter().filter(|o| o["id"] == "mode") {
+                self.mode_observations.push(json!({
+                    "current": option["currentValue"],
+                    "choices": option["options"].as_array().map(|choices| choices.iter().map(|choice| choice["value"].clone()).collect::<Vec<_>>()),
+                    "current_mode_id": value.pointer("/result/modes/currentModeId"),
+                }));
+            }
+        }
+        #[cfg(test)]
+        if value
+            .pointer("/params/update/sessionUpdate")
+            .and_then(Value::as_str)
+            == Some("current_mode_update")
+            && self.mode_observations.len() < 32
+        {
+            self.mode_observations.push(
+                json!({"current_mode_update": value.pointer("/params/update/currentModeId")}),
+            );
+        }
         closed(
             &value,
             &["jsonrpc", "id", "method", "params", "result", "error"],
@@ -436,10 +488,7 @@ impl DevinProtocol {
                     model = true;
                 }
                 "mode" => {
-                    require(
-                        option["currentValue"] == "accept-edits",
-                        "Devin mode changed",
-                    )?;
+                    require(option["currentValue"] == self.mode, "Devin mode changed")?;
                     mode = true;
                 }
                 _ => (),
@@ -455,8 +504,8 @@ impl DevinProtocol {
     /// cancelled prompt turn; it is sent only when no one-time reject is
     /// offered. `reject_always` is never chosen, because it asks Devin to
     /// remember a rule in configuration that xcb keeps immutable. A reject
-    /// grants nothing: broker calls still run only after this approval, and
-    /// native tools have no workspace access.
+    /// grants nothing: a rejected declaration stays ineligible, and native
+    /// tools have no workspace access.
     fn permission(&mut self, p: &Value) -> Result<(bool, Value)> {
         self.session_scope(p)?;
         require(
@@ -464,6 +513,10 @@ impl DevinProtocol {
             "Devin permission outside turn",
         )?;
         let id = identity(&p["toolCall"]["toolCallId"])?;
+        require(
+            self.calls.contains_key(&id),
+            "Devin permission before declaration",
+        )?;
         let options = p["options"]
             .as_array()
             .filter(|v| v.len() <= 32)
@@ -487,11 +540,17 @@ impl DevinProtocol {
             && self.options.tools
             && self.broker_names.contains(&call.name)
             && !call.approved
+            && !call.denied
             && !call.finished
             && allow
         {
             call.approved = true;
             return Ok((true, json!({"outcome":"selected","optionId":"allow_once"})));
+        }
+        if let Some(call) = self.calls.get_mut(&id)
+            && !call.approved
+        {
+            call.denied = true;
         }
         Ok((
             false,
@@ -713,12 +772,16 @@ impl DevinProtocol {
                     };
                     let arguments = u.get("rawInput").cloned().unwrap_or_else(|| json!({}));
                     require(arguments.is_object(), "Devin tool argument object")?;
+                    #[cfg(test)]
+                    self.tool_sequence
+                        .push(json!({"event":"declare","id":id,"name":name}));
                     self.calls.insert(
                         id,
                         Call {
                             name,
                             arguments,
                             approved: false,
+                            denied: false,
                             bridged: false,
                             replied: false,
                             finished: false,
@@ -768,7 +831,8 @@ impl DevinProtocol {
                 Some("config_option_update") if self.ready => self.validate_options(u)?,
                 Some("config_option_update") => (),
                 Some("current_mode_update") => {
-                    require(u["currentModeId"] == "accept-edits", "Devin mode drift")?
+                    require(u["currentModeId"] == self.mode, "Devin mode drift")?;
+                    self.mode_confirmed = true;
                 }
                 Some("usage_update") => {
                     if let Some(output) = u.get("outputTokens").filter(|v| !v.is_null()) {
@@ -860,7 +924,7 @@ impl DevinProtocol {
                 // MCP does not require tools/list before tools/call, and Devin
                 // lists lazily: a model that already knows a tool from the
                 // prompt's guide calls it directly. Authority still comes only
-                // from the approved declaration matched below.
+                // from one exact, approved and unconsumed declaration below.
                 require(
                     self.ready && !self.completed && self.mcp_initialized,
                     "Devin MCP call before admission",
@@ -884,11 +948,16 @@ impl DevinProtocol {
                     self.broker_names.contains(&name) && arguments.is_object(),
                     "Devin MCP tool authority",
                 )?;
+                #[cfg(not(test))]
+                let bypass_fixture = false;
+                #[cfg(test)]
+                let bypass_fixture =
+                    self.candidate_bypass && self.mode == "bypass" && self.mode_confirmed;
                 let matches: Vec<_> = self
                     .calls
                     .iter()
                     .filter(|(_, c)| {
-                        c.approved
+                        (c.approved || bypass_fixture && !c.denied)
                             && !c.bridged
                             && !c.finished
                             && c.name == name
@@ -896,9 +965,15 @@ impl DevinProtocol {
                     })
                     .map(|(id, _)| id.clone())
                     .collect();
+                #[cfg(test)]
+                self.tool_sequence.push(
+                    json!({"event":"bridge","name":name,"eligible_declarations":matches.len()}),
+                );
                 require(matches.len() == 1, "Devin MCP approval correlation")?;
                 let call_id = matches[0].clone();
-                self.calls.get_mut(&call_id).expect("matched call").bridged = true;
+                let call = self.calls.get_mut(&call_id).expect("matched call");
+                call.approved = true;
+                call.bridged = true;
                 self.pending.insert(
                     call_id.clone(),
                     Pending {
@@ -971,19 +1046,32 @@ impl Protocol for DevinProtocol {
         };
         // Setting the model must echo the complete current mode/model metadata.
         self.validate_options(&selected)?;
+        // A setter may acknowledge an unchanged mode without another update.
+        // The complete metadata above already confirms accept-edits. A
+        // candidate transition to bypass still requires a fresh mode update.
+        self.mode_confirmed = self.mode == self.target_mode();
+        self.mode = self.target_mode();
         let mode = self
             .request(
                 process,
                 "session/set_mode",
-                json!({"sessionId":self.session,"modeId":"accept-edits"}),
+                json!({"sessionId":self.session,"modeId":self.mode}),
             )
             .await?;
-        require(mode.is_object(), "Devin mode acknowledgment")?;
+        require(
+            mode.is_object() && self.mode_confirmed,
+            "Devin mode acknowledgment",
+        )?;
         Ok(models)
     }
     async fn start(&mut self, process: &mut StreamProcess, prompt: Prompt) -> Result<()> {
         require(
-            !self.ready && !self.completed && self.session.is_some() && !self.options.metadata_only,
+            !self.ready
+                && !self.completed
+                && self.session.is_some()
+                && !self.options.metadata_only
+                && self.mode == self.target_mode()
+                && self.mode_confirmed,
             "Devin turn start",
         )?;
         let wire = self.prompt_wire(prompt, self.next_id + 1)?;

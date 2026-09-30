@@ -8,14 +8,16 @@ import { dirname, isAbsolute, join } from 'node:path';
 const argv = process.argv.slice(2);
 const options = new Map<string, string>();
 for (let i = 0; i < argv.length; i += 2) {
-  if (!['--runtime', '--helper', '--test-binary', '--output', '--candidate-inventory'].includes(argv[i]!) || !argv[i + 1] || options.has(argv[i]!)) throw Error('Expected unique --runtime, --helper, --test-binary, --output paths and optional --candidate-inventory');
+  if (!['--runtime', '--helper', '--test-binary', '--output', '--candidate-inventory', '--candidate-bypass-inventory'].includes(argv[i]!) || !argv[i + 1] || options.has(argv[i]!)) throw Error('Expected unique --runtime, --helper, --test-binary, --output paths and optional candidate inventory');
   options.set(argv[i]!, argv[i + 1]!);
 }
 if (!['--runtime', '--helper', '--test-binary', '--output'].every(key => options.has(key)) || [...options.values()].some(p => !isAbsolute(p))) throw Error('All four required paths and any candidate inventory must be absolute');
 const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 const harnessDigest = hash(await readFile(import.meta.path));
-const candidate = options.has('--candidate-inventory');
-const inventoryPath = options.get('--candidate-inventory') ?? new URL('./devin-3000.11.3-inventory.json', import.meta.url);
+if (options.has('--candidate-inventory') && options.has('--candidate-bypass-inventory')) throw Error('Choose only one candidate inventory');
+const candidateBypass = options.has('--candidate-bypass-inventory');
+const candidate = options.has('--candidate-inventory') || candidateBypass;
+const inventoryPath = options.get('--candidate-bypass-inventory') ?? options.get('--candidate-inventory') ?? new URL('./devin-3000.11.3-inventory.json', import.meta.url);
 if ((await stat(inventoryPath)).size > 1024 * 1024) throw Error('Inventory exceeds bound');
 const inventoryBytes = await readFile(inventoryPath);
 const expected = JSON.parse(inventoryBytes.toString('utf8'));
@@ -64,29 +66,44 @@ function inventory(bytes: Uint8Array) {
     return { name: row.get(1), inputSchema: JSON.parse(row.get(3)!) };
   }).sort((a, b) => a.name!.localeCompare(b.name!));
 }
-type Scenario = 'broker' | 'compaction' | 'exec' | 'write' | 'config_write' | 'webfetch';
+type Scenario = 'broker' | 'compaction' | 'exec' | 'write' | 'config_write' | 'webfetch'
+  | 'edit' | 'find_file_by_name' | 'get_output' | 'grep' | 'kill_shell'
+  | 'mcp_read_resource' | 'notebook_edit' | 'request_scope' | 'skill' | 'todo_write' | 'write_to_process';
 async function fixture(scenario: Scenario, index: number) {
   const run = join(directory, `r${index}`);
   await mkdir(run, { mode: 0o700 });
   let step = 0, overflow = false, canaryLeak = false, unexpectedFetch = false, toolFreeRequests = 0;
   const requests: { method: string; bytes: number; sha256: string }[] = [];
   const inventoryHashes = new Set<string>();
-  const negative = {
+  const negative: Record<Exclude<Scenario, 'broker' | 'compaction'>, { name: string; args: Record<string, unknown> }> = {
     exec: { name: 'exec', args: { command: `touch '${join(run, 'scratch/home/exec-result.txt')}'` } },
     write: { name: 'write', args: { file_path: join(run, 'consumer/native-write.txt'), content: 'FORBIDDEN' } },
     config_write: { name: 'write', args: { file_path: join(run, 'scratch/home/.config/devin/config.json'), content: '{}' } },
     webfetch: { name: 'webfetch', args: { url: '' } },
+    edit: { name: 'edit', args: { file_path: join(run, 'consumer/secret.ipynb'), old_string: 'SYNTHETIC_WORKSPACE_CANARY', new_string: 'FORBIDDEN' } },
+    find_file_by_name: { name: 'find_file_by_name', args: { pattern: '**/*', path: join(run, 'consumer') } },
+    get_output: { name: 'get_output', args: { shell_id: 'synthetic-shell' } },
+    grep: { name: 'grep', args: { pattern: 'SYNTHETIC', path: join(run, 'consumer') } },
+    kill_shell: { name: 'kill_shell', args: { shell_id: 'synthetic-shell' } },
+    mcp_read_resource: { name: 'mcp_read_resource', args: { server_name: 'xcb', resource_uri: `file://${join(run, 'consumer/secret.ipynb')}` } },
+    notebook_edit: { name: 'notebook_edit', args: { notebook_path: join(run, 'consumer/secret.ipynb'), cell_number: 0, new_source: 'FORBIDDEN' } },
+    request_scope: { name: 'request_scope', args: { scope: 'write', path: join(run, 'consumer') } },
+    skill: { name: 'skill', args: { command: 'list', path: join(run, 'consumer') } },
+    todo_write: { name: 'todo_write', args: { todos: [{ content: 'FORBIDDEN', status: 'pending' }] } },
+    write_to_process: { name: 'write_to_process', args: { shell_id: 'synthetic-shell', text_input: 'FORBIDDEN' } },
   };
-  const calls: { name: string; args: Record<string, unknown> }[] = (scenario === 'broker' || scenario === 'compaction') ? [
+  const brokerCalls: { name: string; args: Record<string, unknown> }[] = [
+    { name: 'mcp_list_tools', args: { server_name: 'xcb' } },
+    { name: 'mcp_call_tool', args: { server_name: 'xcb', tool_name: 'workspace_write', arguments: { path: 'fixture.txt', text: 'SYNTHETIC_BROKER_WRITE', expectedRevision: null } } },
+    { name: 'mcp_call_tool', args: { server_name: 'xcb', tool_name: 'workspace_read', arguments: { path: 'fixture.txt' } } },
+  ];
+  const calls: { name: string; args: Record<string, unknown> }[] = (scenario === 'broker' || scenario === 'compaction') ? [...(candidateBypass ? [] : [
     { name: 'notebook_read', args: { notebook_path: join(run, 'persistent-auth/secret.ipynb') } },
     { name: 'notebook_read', args: { notebook_path: join(run, 'consumer/secret.ipynb') } },
     { name: 'notebook_read', args: { notebook_path: join(run, 'scratch/home/workspace-link.ipynb') } },
     { name: 'notebook_read', args: { notebook_path: join(run, 'scratch/home/stdin-link.ipynb') } },
     { name: 'read', args: { file_path: join(run, 'consumer/secret.ipynb') } },
-    { name: 'mcp_list_tools', args: { server_name: 'xcb' } },
-    { name: 'mcp_call_tool', args: { server_name: 'xcb', tool_name: 'workspace_write', arguments: { path: 'fixture.txt', text: 'SYNTHETIC_BROKER_WRITE', expectedRevision: null } } },
-    { name: 'mcp_call_tool', args: { server_name: 'xcb', tool_name: 'workspace_read', arguments: { path: 'fixture.txt' } } },
-  ] : [negative[scenario]];
+  ]), ...brokerCalls] : [negative[scenario]];
   let captureError: string | undefined;
   const response = (bytes: Uint8Array) => new Response(concat(frame(bytes), frame(Buffer.from('{}'), 2)), { headers: { 'content-type': 'application/connect+proto' } });
   const server = Bun.serve({ hostname: '127.0.0.1', port: 0, maxRequestBodySize: 16 * 1024 * 1024, async fetch(request) {
@@ -130,7 +147,8 @@ async function fixture(scenario: Scenario, index: number) {
     } catch (error) { captureError = error instanceof Error ? error.message : 'capture failed'; return new Response(null, { status: 500 }); }
   } });
   negative.webfetch.args.url = `http://127.0.0.1:${server.port}/should-not-fetch`;
-  const spec = { directory: run, provider: provider.path, helper: helper.path, helper_sha256: helper.digest, port: server.port, scenario, ...(candidate ? { candidate_sha256: expected.provider_sha256 } : {}) };
+  const standardScenario = ['broker', 'compaction', 'exec', 'write', 'config_write', 'webfetch'].includes(scenario);
+  const spec = { directory: run, provider: provider.path, helper: helper.path, helper_sha256: helper.digest, port: server.port, scenario: standardScenario ? scenario : 'native', ...(!standardScenario ? { native_call: calls[0] } : {}), ...(candidate ? { candidate_sha256: expected.provider_sha256 } : {}), candidate_bypass: candidateBypass };
   const specPath = join(run, 'spec.json');
   await writeFile(specPath, JSON.stringify(spec), { mode: 0o600 });
   const child = spawn(test.path, ['--ignored', '--exact', 'devin::wire::tests::native_fixture::installed_runtime_uses_native_broker_under_production_profile', '--nocapture'], { env: { PATH: '/usr/bin:/bin', XCB_DEVIN_FIXTURE_SPEC: specPath }, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -155,13 +173,16 @@ async function fixture(scenario: Scenario, index: number) {
   return receipt;
 }
 const scenarios = [];
-for (const [index, scenario] of (['broker', 'exec', 'write', 'config_write', 'webfetch', 'compaction'] as const).entries()) {
+const scenarioNames: Scenario[] = candidateBypass
+  ? ['broker', 'exec', 'write', 'config_write', 'webfetch', 'edit', 'find_file_by_name', 'get_output', 'grep', 'kill_shell', 'mcp_read_resource', 'notebook_edit', 'request_scope', 'skill', 'todo_write', 'write_to_process', 'compaction']
+  : ['broker', 'exec', 'write', 'config_write', 'webfetch', 'compaction'];
+for (const [index, scenario] of scenarioNames.entries()) {
   const result = await fixture(scenario, index);
   scenarios.push(result);
-  if (!result.process_joined || !result.bridge_joined) break;
+  if (!result.process_joined || !result.bridge_joined || result.checks.capture_error) break;
 }
-const passed = scenarios.length === 6 && scenarios.every(s => s.passed) && harnessDigest === hash(await readFile(import.meta.path)) && hash(inventoryBytes) === hash(await readFile(inventoryPath));
-const receipt = { schema: 2, passed, observed_at: new Date().toISOString(), host: { platform: process.platform, arch: arch(), release: release() }, credential_free: true, live_provider_qualification: false, candidate, runtime_version: expected.version, provider_sha256: provider.digest, inventory_sha256: hash(inventoryBytes), helper_sha256: helper.digest, fixture_binary_sha256: test.digest, harness_sha256: harnessDigest, scenarios };
+const passed = scenarios.length === scenarioNames.length && scenarios.every(s => s.passed) && harnessDigest === hash(await readFile(import.meta.path)) && hash(inventoryBytes) === hash(await readFile(inventoryPath));
+const receipt = { schema: 2, passed, observed_at: new Date().toISOString(), host: { platform: process.platform, arch: arch(), release: release() }, credential_free: true, live_provider_qualification: false, candidate, cli_permission_mode: candidateBypass ? 'dangerous' : 'auto', acp_permission_mode: candidateBypass ? 'bypass' : 'accept-edits', runtime_version: expected.version, provider_sha256: provider.digest, inventory_sha256: hash(inventoryBytes), helper_sha256: helper.digest, fixture_binary_sha256: test.digest, harness_sha256: harnessDigest, scenarios };
 await mkdir(dirname(options.get('--output')!), { recursive: true, mode: 0o700 });
 await writeFile(options.get('--output')!, JSON.stringify(receipt, null, 2) + '\n', { mode: 0o600 });
 console.log(JSON.stringify({ passed, provider_sha256: provider.digest, helper_sha256: helper.digest, scenarios: scenarios.map(s => ({ scenario: s.scenario, passed: s.passed, calls: s.calls?.length, steps: s.checks.steps })) }));

@@ -198,6 +198,11 @@ fn transform_catalog(source: Value, selected: Option<&str>) -> Result<StaticCata
             .as_object()
             .cloned()
             .ok_or(Error::Protocol("Codex model metadata"))?;
+        // Exact 0.159.0's native children cannot use this broker lane:
+        // fork_turns=none drops dynamic tools, while fork_turns=all requires
+        // a persisted rollout that the ephemeral root deliberately lacks.
+        // Keep delegation disabled until an exact-build probe demonstrates
+        // inherited broker tools without changing that storage boundary.
         for (key, value) in [
             ("tool_mode", json!("direct")),
             ("shell_type", json!("disabled")),
@@ -347,6 +352,8 @@ pub(crate) fn fixture_catalog_source() -> Value {
 }
 
 /// The host protects both this file and the catalog against provider writes.
+/// Automatic review selects the reviewer; it does not widen the read-only
+/// sandbox or admit native callbacks outside the host broker.
 pub fn configuration(catalog_path: &Path) -> Result<String> {
     let path = catalog_path
         .to_str()
@@ -364,7 +371,8 @@ pub fn configuration(catalog_path: &Path) -> Result<String> {
             "forced_login_method = \"chatgpt\"",
             "cli_auth_credentials_store = \"file\"",
             "mcp_oauth_credentials_store = \"file\"",
-            "approval_policy = \"never\"",
+            "approval_policy = \"on-request\"",
+            "approvals_reviewer = \"auto_review\"",
             "sandbox_mode = \"read-only\"",
             "web_search = \"disabled\"",
             "project_doc_max_bytes = 0",
@@ -422,7 +430,7 @@ pub fn thread_configuration(effort: Option<&str>) -> Value {
         .chain(EXTRA_FEATURES)
         .map(|name| (name.to_string(), json!(false)))
         .collect();
-    let mut config = json!({"features":features,"tools":{"experimental_request_user_input":{"enabled":false},"update_plan":{"enabled":false}},"agents":{"enabled":false}});
+    let mut config = json!({"features":features,"tools":{"experimental_request_user_input":{"enabled":false},"update_plan":{"enabled":false}},"agents":{"enabled":false},"approvals_reviewer":"auto_review"});
     if let Some(effort) = effort {
         config["model_reasoning_effort"] = json!(effort);
     }
@@ -439,7 +447,8 @@ pub(crate) fn validate_config(value: &Value, catalog_path: &Path) -> Result<()> 
         ("forced_login_method", json!("chatgpt")),
         ("cli_auth_credentials_store", json!("file")),
         ("mcp_oauth_credentials_store", json!("file")),
-        ("approval_policy", json!("never")),
+        ("approval_policy", json!("on-request")),
+        ("approvals_reviewer", json!("auto_review")),
         ("sandbox_mode", json!("read-only")),
         ("web_search", json!("disabled")),
         ("project_doc_max_bytes", json!(0)),

@@ -1,0 +1,33 @@
+{
+  "schema": "xcb.claude-auto-denial-observation.v1",
+  "observedDate": "2026-09-30",
+  "version": "2.1.285",
+  "binarySha256": "51f09bd1e021d9fa8a1864c179799bd37cb39962a937935c5cf6823398e86db4",
+  "runnerSourceSha256": "9f85008d953e5b3e12a7b03f983bd16c4850bebe4d6972b351612ae04c670b4e",
+  "policySourceSha256": "6f46eb3b41a84b28151f1596cf2e0e40ee06698a21ef3f28b6262b15fbdf197a",
+  "harnessSha256": "b590a6eb5186ad5ade4a9b6665f6754c17b4d577711fd68625dcf6feb33aa6a4",
+  "rawObservationSha256": "e9302d4b2e29e8b451219f0813ed78f6c18c5e5374b2fd6ad7afa54caf38cadd",
+  "realCredentialsUsed": false,
+  "realProviderInference": false,
+  "realClassifierDecisionObserved": false,
+  "egress": "Production Seatbelt narrowed to one owned loopback endpoint; synthetic API key and empty profile.",
+  "permissionMode": "auto",
+  "observedToolManifest": [
+    "Agent",
+    "mcp__xcb__synthetic_echo"
+  ],
+  "advisoryDenialObserved": true,
+  "successResultWithPermissionDenialsObserved": true,
+  "requestedChildren": 1,
+  "startedChildren": 0,
+  "brokerCallbacks": 0,
+  "canaryUnchanged": true,
+  "canaryLeaked": false,
+  "providerExitCode": 143,
+  "providerWaitCompleted": true,
+  "productionQualificationIssued": false,
+  "nativeDelegationEnabled": false,
+  "delegationVerdict": "inconclusive: the synthetic endpoint does not implement Auto classifier replies, so the CLI reports Classifier unavailable and no child starts.",
+  "scope": "Evidence for effective Auto mode and denial wire shapes only. Does not qualify delegation, model availability, or real approval classifier behavior.",
+  "wireFixture": "crates/xcb-runtime/src/claude-permission-denial-frames.json"
+}

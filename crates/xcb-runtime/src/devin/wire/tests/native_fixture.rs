@@ -17,8 +17,19 @@ struct Spec {
     /// remains unchanged until reviewed synthetic evidence passes.
     #[serde(default)]
     candidate_sha256: Option<String>,
+    #[serde(default)]
+    candidate_bypass: bool,
     port: u16,
     scenario: Scenario,
+    #[serde(default)]
+    native_call: Option<ExpectedCall>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExpectedCall {
+    name: String,
+    args: Value,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -30,6 +41,7 @@ enum Scenario {
     Write,
     ConfigWrite,
     Webfetch,
+    Native,
 }
 
 #[tokio::test]
@@ -44,6 +56,10 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
     let spec: Spec =
         serde_json::from_slice(&private::read(Path::new(&spec_path), 8192).unwrap()).unwrap();
     assert_ne!(spec.port, 0);
+    assert!(
+        !spec.candidate_bypass || spec.candidate_sha256.is_some(),
+        "bypass requires an explicit candidate binding"
+    );
     let expected_provider = spec
         .candidate_sha256
         .as_deref()
@@ -85,9 +101,14 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         broker::Workspace::open_with_coordination(&workspace_dir, &coordination).unwrap();
     let socket = directory.join("mcp.sock");
     let bridge = DevinBridge::bind(&socket).unwrap();
+    let configuration = if spec.candidate_bypass {
+        super::super::super::config::bypass_candidate_configuration()
+    } else {
+        super::super::super::config::configuration()
+    };
     private::create(
         &config_dir.join("config.json"),
-        &serde_json::to_vec(&super::super::super::config::configuration()).unwrap(),
+        &serde_json::to_vec(&configuration).unwrap(),
     )
     .unwrap();
     private::create(
@@ -122,7 +143,15 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         .arg(&spec.provider)
         .arg("--config")
         .arg(config_dir.join("config.json"))
-        .args(["--permission-mode", "auto", "acp"])
+        .args([
+            "--permission-mode",
+            if spec.candidate_bypass {
+                "dangerous"
+            } else {
+                "auto"
+            },
+            "acp",
+        ])
         .env_clear()
         .envs(crate::process::environment(&home))
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
@@ -151,6 +180,7 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         Some(bridge),
     )
     .unwrap();
+    codec.candidate_bypass = spec.candidate_bypass;
     let mut process = StreamProcess::spawn(command).unwrap();
     let mut recorded = Vec::new();
     let mut denials = 0usize;
@@ -194,7 +224,7 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
         .filter(|call| !codec.broker_names.contains(&call.name))
         .map(|call| json!({"name":call.name,"finished":call.finished,"approved":call.approved}))
         .collect();
-    let evidence = json!({"status":status,"process_joined":joined,"bridge_joined":bridge_joined,"provider_sha256":expected_provider,"helper_sha256":spec.helper_sha256,"production_policy_sha256":crate::digest(&production),"fixture_policy_sha256":crate::digest(&policy),"calls":recorded,"native_calls":native_calls,"denials":denials,"image_prompt":true,"mcp_proposed_version":codec.mcp_proposed_version,"mcp_metadata_seen":codec.mcp_metadata_seen,"unexpected_notification":codec.unexpected_notification,"compaction_observations":codec.compaction_observations,"permission_observations":codec.permission_observations});
+    let evidence = json!({"status":status,"process_joined":joined,"bridge_joined":bridge_joined,"provider_sha256":expected_provider,"helper_sha256":spec.helper_sha256,"production_policy_sha256":crate::digest(&production),"fixture_policy_sha256":crate::digest(&policy),"calls":recorded,"native_calls":native_calls,"denials":denials,"image_prompt":true,"mcp_proposed_version":codec.mcp_proposed_version,"mcp_metadata_seen":codec.mcp_metadata_seen,"unexpected_notification":codec.unexpected_notification,"compaction_observations":codec.compaction_observations,"permission_observations":codec.permission_observations,"mode_observations":codec.mode_observations,"tool_sequence":codec.tool_sequence,"candidate_bypass":spec.candidate_bypass,"effective_mode":codec.mode,"mode_confirmed":codec.mode_confirmed});
     private::create(
         &directory.join("native-evidence.json"),
         &serde_json::to_vec_pretty(&evidence).unwrap(),
@@ -247,8 +277,8 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
             "SYNTHETIC_BROKER_WRITE"
         );
         assert_eq!(recorded.len(), 2);
-        assert_eq!(codec.calls.len(), 8);
-        for (index, (name, arguments)) in [
+        assert_eq!(codec.calls.len(), if spec.candidate_bypass { 3 } else { 8 });
+        let native_probes = [
             (
                 "notebook_read",
                 json!({"notebook_path":protected.join("secret.ipynb")}),
@@ -270,9 +300,11 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
                 json!({"file_path":workspace_dir.join("secret.ipynb")}),
             ),
             ("mcp_list_tools", json!({"server_name":"xcb"})),
-        ]
-        .into_iter()
-        .enumerate()
+        ];
+        for (index, (name, arguments)) in native_probes
+            .into_iter()
+            .enumerate()
+            .filter(|_| !spec.candidate_bypass)
         {
             let call = codec
                 .calls
@@ -309,6 +341,14 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
                 "webfetch",
                 json!({"url":format!("http://127.0.0.1:{}/should-not-fetch",spec.port)}),
             ),
+            Scenario::Native => {
+                let call = spec
+                    .native_call
+                    .as_ref()
+                    .expect("explicit synthetic native call");
+                assert!(NATIVE_TOOLS.contains(&call.name.as_str()));
+                (call.name.as_str(), call.args.clone())
+            }
             Scenario::Broker | Scenario::Compaction => unreachable!(),
         };
         assert_eq!(codec.calls.len(), 1);
@@ -321,7 +361,7 @@ async fn installed_runtime_uses_native_broker_under_production_profile() {
     assert!(!home.join("exec-result.txt").exists());
     assert_eq!(
         private::read(&config_dir.join("config.json"), 8192).unwrap(),
-        serde_json::to_vec(&super::super::super::config::configuration()).unwrap()
+        serde_json::to_vec(&configuration).unwrap()
     );
     assert_eq!(
         std::fs::metadata(config_dir.join("config.json"))

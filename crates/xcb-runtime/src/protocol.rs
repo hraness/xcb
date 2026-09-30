@@ -60,12 +60,6 @@ pub(crate) enum Event {
         text: String,
         models: Vec<(String, Counters)>,
     },
-    Subagent {
-        id: String,
-        status: String,
-        label: String,
-        model: Option<String>,
-    },
 }
 
 pub(crate) struct Batch {

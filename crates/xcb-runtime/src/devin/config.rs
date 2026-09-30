@@ -73,9 +73,58 @@ pub fn configuration() -> Value {
     })
 }
 
+/// Candidate-only configuration: the installed build still exposes `skill`
+/// and `mcp_read_resource`, so this has no production activation path.
+#[cfg(test)]
+pub(super) fn bypass_candidate_configuration() -> Value {
+    let disabled: Vec<_> = NATIVE_TOOLS
+        .iter()
+        .copied()
+        .filter(|name| !["mcp_call_tool", "mcp_list_tools", "mcp_list_servers"].contains(name))
+        .chain(["glob"])
+        .collect();
+    json!({
+        "auto_update":false,"subagents_enabled":false,"notify":"never",
+        "disabled_tools":disabled,
+        "read_config_from":{"claude":false,"cursor":false,"windsurf":false,
+            "agents_standard":false,"opencode":false,"zed":false,"copilot":false},
+        "permissions":{"allow":[],"ask":[],"deny":disabled}
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bypass_candidate_requests_native_tools_be_disabled() {
+        let config = bypass_candidate_configuration();
+        for name in NATIVE_TOOLS.iter().copied().chain(["glob"]) {
+            let disabled = !["mcp_call_tool", "mcp_list_tools", "mcp_list_servers"].contains(&name);
+            for key in ["/disabled_tools", "/permissions/deny"] {
+                assert_eq!(
+                    config
+                        .pointer(key)
+                        .unwrap()
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(name)),
+                    disabled,
+                    "{key}: {name}"
+                );
+            }
+        }
+        assert_eq!(config["permissions"]["allow"], json!([]));
+        assert_eq!(config["permissions"]["ask"], json!([]));
+        assert_eq!(config["subagents_enabled"], false);
+        assert!(
+            config["read_config_from"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|enabled| enabled == false)
+        );
+    }
 
     #[test]
     fn admission_requires_reviewed_pairs_and_preserves_prior_builds() {
