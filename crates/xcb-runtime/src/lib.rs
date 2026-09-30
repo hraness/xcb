@@ -5,7 +5,10 @@ mod application_qualification;
 pub mod attachments;
 pub mod auth;
 pub mod broker;
+pub mod capabilities;
+pub(crate) mod capability_bundle;
 pub mod catalog;
+pub mod chrome_connector;
 pub mod claude;
 mod claude_protocol;
 pub mod cloud;
@@ -15,6 +18,7 @@ pub mod command_tool;
 pub mod config;
 pub mod context;
 pub mod context_recipe;
+pub mod cua_connector;
 pub mod device_login;
 // Only the workspace tools, which Windows builds refuse, take this lock.
 #[cfg_attr(windows, allow(dead_code))]
@@ -36,6 +40,8 @@ pub mod managed;
 pub mod managed_program;
 pub(crate) mod managed_relay;
 mod managed_supervisor;
+#[cfg(unix)]
+pub mod native_mcp;
 pub mod offers;
 mod os;
 pub mod panes;
@@ -56,6 +62,7 @@ pub mod store;
 pub mod summary;
 pub mod systemd;
 mod task_classifier;
+mod tool_output;
 mod transcript;
 pub mod update;
 mod wire_helpers;
@@ -92,6 +99,8 @@ pub enum Error {
     Unavailable(&'static str),
     #[error("provider protocol error: {0}")]
     Protocol(&'static str),
+    #[error("Codex unadmitted notification (method SHA-256 {method_sha256})")]
+    CodexNotification { method_sha256: String },
     #[error("Codex {method} failed (RPC {code}): {category}")]
     CodexRpc {
         method: &'static str,

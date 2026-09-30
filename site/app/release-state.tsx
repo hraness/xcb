@@ -1,4 +1,5 @@
 import type { PublishedRelease } from "./publication";
+import sourcePackage from "../../package.json";
 
 const releasesUrl = "https://github.com/hraness/xcb/releases";
 
@@ -21,5 +22,5 @@ export function ReleaseSummary({ release }: Readonly<{ release: PublishedRelease
   if (release === null) {
     return <p className="xcb-release-summary">No native release is published yet; install from source. <a href={releasesUrl}>Check release assets</a> for the first verified archive.</p>;
   }
-  return <p className="xcb-release-summary">Latest verified release: <strong>v{release.version}</strong> · <a href={release.verificationRun}>public verification run</a> · <a href={`${releasesUrl}/tag/v${release.version}`}>release notes</a>.</p>;
+  return <p className="xcb-release-summary">Latest verified release: <strong>v{release.version}</strong> · <a href={release.verificationRun}>public verification run</a> · <a href={`${releasesUrl}/tag/v${release.version}`}>release notes</a>.{release.version !== sourcePackage.version && <> Documentation follows source v{sourcePackage.version}; unreleased commands require a source build.</>}</p>;
 }

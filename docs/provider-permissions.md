@@ -13,7 +13,12 @@ approval or unrestricted execution.
 
 Codex's automatic reviewer handles requests that would otherwise need a
 person, as described in the [official Auto-review documentation](https://learn.chatgpt.com/docs/sandboxing/auto-review).
-Requests to execute a native tool outside xcb's workspace tools remain denied.
+Registered host tools are available through the
+[shared tool bridge](tools.md). The installed desktop computer-use connector
+uses Codex's native MCP connection so its approval requests reach the
+automatic reviewer. A request for additional human approval stops automatic
+work; xcb does not approve it on the person's behalf. Unregistered native
+tools remain unavailable.
 Provider account or organization restrictions can make an approval mode
 unavailable; xcb cannot grant access the provider has withheld.
 

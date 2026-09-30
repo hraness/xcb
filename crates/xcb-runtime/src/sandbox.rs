@@ -84,6 +84,23 @@ pub fn codex_seatbelt(
     catalog: &Path,
     ca_bundle: &Path,
 ) -> Result<String> {
+    codex_seatbelt_with_native(
+        executable, scratch, profile, config, catalog, ca_bundle, None,
+    )
+}
+
+/// The only additional executable is xcb's byte relay, confined to one private
+/// authenticated socket. Browser processes remain owned by the host connector.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn codex_seatbelt_with_native(
+    executable: &Path,
+    scratch: &Path,
+    profile: &Path,
+    config: &Path,
+    catalog: &Path,
+    ca_bundle: &Path,
+    native: Option<(&Path, &Path)>,
+) -> Result<String> {
     if executable.starts_with(scratch)
         || !profile.starts_with(scratch)
         || config.parent() != Some(profile)
@@ -98,10 +115,21 @@ pub fn codex_seatbelt(
     let config = quoted(config)?;
     let catalog = quoted(catalog)?;
     let ca_bundle = quoted(ca_bundle)?;
+    let native_rules = match native {
+        Some((helper, socket)) => {
+            let helper = quoted(helper)?;
+            let socket = quoted(socket)?;
+            format!(
+                "(allow process-fork)\n(allow process-exec (literal {helper}))\n(allow file-read* file-map-executable (literal {helper}))\n(allow file-read-metadata (path-ancestors {helper}) (path-ancestors {socket}) (literal {socket}))\n(allow network-outbound (literal {socket}))\n"
+            )
+        }
+        None => String::new(),
+    };
     Ok(format!(
         r#"(version 1)
 (deny default)
 (allow process-exec (literal {exe}))
+{native_rules}
 (allow process-info* (target self))
 (allow signal (target self))
 (allow sysctl-read)

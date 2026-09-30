@@ -336,6 +336,29 @@ fn snapshot_executable(source: &File, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Snapshot an owner-configured host tool server without giving it a provider
+/// identity. The opened source and launch copy must both match the explicit
+/// executable pin; later package-manager updates cannot replace active bytes.
+pub(crate) fn snapshot_pinned_executable(
+    source: &Path,
+    expected: &str,
+    directory: &Path,
+) -> Result<PathBuf> {
+    if xcb_core::canonical(source)? != source || executable_digest(source)? != expected {
+        return Err(Error::Unavailable("tool server changed; register it again"));
+    }
+    let path = directory.join(if cfg!(windows) {
+        "tool-server.exe"
+    } else {
+        "tool-server"
+    });
+    snapshot_executable(&executable_file(source)?, &path)?;
+    if executable_digest(&path)? != expected {
+        return Err(Error::Unavailable("tool server snapshot changed"));
+    }
+    Ok(path)
+}
+
 #[cfg(unix)]
 fn snapshot_executable(source: &File, path: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]

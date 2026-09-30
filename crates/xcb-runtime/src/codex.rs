@@ -1,6 +1,9 @@
 //! Exact-build Codex app-server codec. The host owns process custody, native
 //! credential storage, OS confinement, broker effects and final qualification.
 mod config;
+pub(crate) use config::configuration_with_native;
+#[cfg(target_os = "macos")]
+pub(crate) use config::static_catalog_with_native;
 pub use config::{
     ARGS, Admission, BINARY_SHA256, QUALIFIED_MODELS, SCHEMA_SHA256, StaticCatalog, VERSION,
     configuration, runtime_admitted, static_catalog, thread_configuration, version_admitted,
@@ -23,7 +26,7 @@ use std::{
 use xcb_core::{
     Id, MAX_JSON_BYTES, MAX_TEXT_BYTES, Provider,
     models::{Mode, ModelChoice},
-    policy::{Failure, Terminal},
+    policy::{EffectState, Failure, Terminal},
     usage::{Counters, QuotaPoint},
 };
 
@@ -51,6 +54,7 @@ pub(crate) struct CodexOptions {
     pub tools: bool,
     pub metadata_only: bool,
     pub admission: Admission,
+    pub native_mcp: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -64,6 +68,19 @@ struct Call {
     arguments: Value,
     rpc_id: Option<Value>,
     response: Option<Value>,
+    completed: bool,
+}
+
+struct NativeCall {
+    tool: String,
+    arguments: Value,
+    completed: bool,
+}
+
+struct NativeReview {
+    target: String,
+    action: Value,
+    started: u64,
     completed: bool,
 }
 
@@ -96,6 +113,15 @@ pub(crate) struct CodexProtocol {
     /// Provider-reported account identity observed during `account/read`.
     observed_email: Option<String>,
     observed_plan: Option<String>,
+    native_calls: BTreeMap<String, NativeCall>,
+    native_reviews: BTreeMap<String, NativeReview>,
+    native_review_attention: bool,
+    #[cfg(unix)]
+    native_proxy: Option<crate::native_mcp::NativeMcpProxy>,
+    native_effects: EffectState,
+    native_startup_thread: Option<String>,
+    native_ready: bool,
+    pub(crate) unhandled_startup_notice_sha256: Option<String>,
 }
 
 // Provider errors can contain account identifiers, request headers or URLs.
@@ -476,7 +502,292 @@ impl CodexProtocol {
             settings_count: 0,
             observed_email: None,
             observed_plan: None,
+            native_calls: BTreeMap::new(),
+            native_reviews: BTreeMap::new(),
+            native_review_attention: false,
+            #[cfg(unix)]
+            native_proxy: None,
+            native_effects: EffectState::None,
+            native_startup_thread: None,
+            native_ready: false,
+            unhandled_startup_notice_sha256: None,
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn attach_native_proxy(&mut self, proxy: crate::native_mcp::NativeMcpProxy) {
+        self.native_proxy = Some(proxy);
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn native_diagnostic(&self) -> Option<crate::native_mcp::NativeDiagnostic> {
+        self.native_proxy.as_ref().map(|proxy| proxy.diagnostic())
+    }
+
+    fn native_inventory(&self, value: &Value) -> Result<()> {
+        closed(value, &["data", "nextCursor"])?;
+        let rows = value["data"]
+            .as_array()
+            .ok_or(Error::Protocol("Codex native inventory shape"))?;
+        require(
+            rows.len() == 1 && value["nextCursor"].is_null(),
+            "Codex computer-use connector is absent",
+        )?;
+        let row = &rows[0];
+        require(
+            row["name"] == "cua_repl"
+                && row["runtimeStatus"] == "connected"
+                && row["toolsError"].is_null()
+                && row["httpOrigin"].is_null()
+                && row["pluginId"].is_null(),
+            "Codex computer-use connector is not ready",
+        )?;
+        let tools = row["tools"]
+            .as_object()
+            .ok_or(Error::Protocol("Codex native tools shape"))?;
+        let expected = self
+            .options
+            .native_mcp
+            .as_ref()
+            .and_then(|config| config["enabled_tools"].as_array())
+            .ok_or(Error::Protocol("Codex native inventory is not configured"))?;
+        require(
+            tools.len() == expected.len()
+                && expected.iter().all(|name| {
+                    name.as_str().is_some_and(|name| {
+                        tools
+                            .values()
+                            .any(|tool| tool["name"] == name && tool["inputSchema"].is_object())
+                    })
+                }),
+            "Codex declared computer-use tools are missing",
+        )
+    }
+
+    fn native_review(&mut self, params: &Value, completed: bool) -> Result<bool> {
+        self.scope(params)?;
+        require(
+            self.options.tools && !self.options.metadata_only && self.options.native_mcp.is_some(),
+            "Codex native review not configured",
+        )?;
+        closed(
+            params,
+            &[
+                "threadId",
+                "turnId",
+                "reviewId",
+                "targetItemId",
+                "action",
+                "review",
+                "startedAtMs",
+                "completedAtMs",
+                "decisionSource",
+            ],
+        )?;
+        let id = identity(&params["reviewId"])?;
+        let target = identity(&params["targetItemId"])?;
+        let action = &params["action"];
+        closed(
+            action,
+            &[
+                "type",
+                "server",
+                "toolName",
+                "connectorId",
+                "connectorName",
+                "toolTitle",
+            ],
+        )?;
+        let tool = identity(&action["toolName"])?;
+        // The installed CUA service requests strict automatic review under
+        // its Node REPL connector identity. This is still the same admitted
+        // CUA tool and provider-owned review, not an additional connector.
+        let connector = (action["connectorId"].is_null() && action["connectorName"].is_null())
+            || (tool == "js"
+                && action["connectorId"] == "node_repl"
+                && action["connectorName"] == "Node REPL");
+        require(
+            action["type"] == "mcpToolCall"
+                && action["server"] == "cua_repl"
+                && ["js", "js_reset", "turn_ended"].contains(&tool.as_str())
+                && self
+                    .options
+                    .native_mcp
+                    .as_ref()
+                    .and_then(|config| config["enabled_tools"].as_array())
+                    .is_some_and(|tools| tools.contains(&json!(tool)))
+                && connector
+                && self
+                    .native_calls
+                    .get(&target)
+                    .is_none_or(|call| call.tool == tool && !call.completed),
+            "Codex unadmitted native review",
+        )?;
+        if !action["toolTitle"].is_null() {
+            text(&action["toolTitle"], 1024)?;
+        }
+        let review = &params["review"];
+        closed(
+            review,
+            &["status", "riskLevel", "userAuthorization", "rationale"],
+        )?;
+        for (key, allowed) in [
+            ("riskLevel", &["low", "medium", "high", "critical"][..]),
+            (
+                "userAuthorization",
+                &["unknown", "low", "medium", "high"][..],
+            ),
+        ] {
+            require(
+                review[key].is_null()
+                    || review[key]
+                        .as_str()
+                        .is_some_and(|value| allowed.contains(&value)),
+                "Codex native review classification",
+            )?;
+        }
+        require(
+            review["rationale"].is_null()
+                || review["rationale"]
+                    .as_str()
+                    .is_some_and(|value| value.len() <= MAX_TEXT_BYTES),
+            "Codex native review rationale",
+        )?;
+        let started = params["startedAtMs"]
+            .as_u64()
+            .ok_or(Error::Protocol("Codex native review timestamp"))?;
+        // These are observations from the provider's configured automatic
+        // reviewer, never requests or approval authority. In particular, an
+        // approved status does not change tool admission or relay review.
+        if completed {
+            require(
+                ["approved", "denied", "timedOut", "aborted"]
+                    .iter()
+                    .any(|status| review["status"] == *status)
+                    && params["decisionSource"] == "agent"
+                    && params["completedAtMs"]
+                        .as_u64()
+                        .is_some_and(|end| end >= started),
+                "Codex native review completion",
+            )?;
+            let previous = self
+                .native_reviews
+                .get_mut(&id)
+                .ok_or(Error::Protocol("Codex orphan native review completion"))?;
+            require(
+                !previous.completed
+                    && previous.target == target
+                    && previous.action == *action
+                    && previous.started == started,
+                "Codex native review changed",
+            )?;
+            previous.completed = true;
+        } else {
+            require(
+                review["status"] == "inProgress"
+                    && params["completedAtMs"].is_null()
+                    && params["decisionSource"].is_null()
+                    && self.native_reviews.len() < MAX_CALLS
+                    && !self.native_reviews.contains_key(&id),
+                "Codex native review start",
+            )?;
+            self.native_reviews.insert(
+                id,
+                NativeReview {
+                    target,
+                    action: action.clone(),
+                    started,
+                    completed: false,
+                },
+            );
+        }
+        let attention = completed && review["status"] != "approved";
+        self.native_review_attention |= attention;
+        Ok(attention)
+    }
+
+    fn native_item(&mut self, item: &Value, completed: bool) -> Result<()> {
+        require(
+            self.options.tools && !self.options.metadata_only && self.options.native_mcp.is_some(),
+            "Codex native tool not configured",
+        )?;
+        closed(
+            item,
+            &[
+                "id",
+                "type",
+                "server",
+                "tool",
+                "arguments",
+                "status",
+                "result",
+                "error",
+                "durationMs",
+                "appContext",
+                "pluginId",
+                "readOnlyHint",
+                "mcpAppResourceUri",
+                "mcpAppUi",
+            ],
+        )?;
+        let id = identity(&item["id"])?;
+        let tool = identity(&item["tool"])?;
+        require(
+            self.native_reviews
+                .values()
+                .filter(|review| review.target == id)
+                .all(|review| review.action["toolName"] == tool),
+            "Codex reviewed native tool changed",
+        )?;
+        require(
+            item["server"] == "cua_repl"
+                && ["js", "js_reset", "turn_ended"].contains(&tool.as_str())
+                && self
+                    .options
+                    .native_mcp
+                    .as_ref()
+                    .and_then(|config| config["enabled_tools"].as_array())
+                    .is_some_and(|tools| tools.contains(&json!(tool)))
+                && item["arguments"].is_object()
+                && serde_json::to_vec(&item["arguments"])?.len() <= MAX_JSON_BYTES
+                && item["appContext"].is_null()
+                && item["pluginId"].is_null()
+                && item["mcpAppResourceUri"].is_null()
+                && item["mcpAppUi"].is_null(),
+            "Codex unadmitted native tool",
+        )?;
+        if completed {
+            let call = self
+                .native_calls
+                .get_mut(&id)
+                .ok_or(Error::Protocol("Codex orphan native completion"))?;
+            require(
+                !call.completed
+                    && call.tool == tool
+                    && call.arguments == item["arguments"]
+                    && ["completed", "failed"].contains(&item["status"].as_str().unwrap_or("")),
+                "Codex native completion changed",
+            )?;
+            call.completed = true;
+        } else {
+            require(
+                self.final_text.is_none()
+                    && !self.native_calls.contains_key(&id)
+                    && self.native_calls.len() < MAX_CALLS
+                    && item["status"] == "inProgress",
+                "Codex native tool start",
+            )?;
+            self.last_text = None;
+            self.native_calls.insert(
+                id,
+                NativeCall {
+                    tool,
+                    arguments: item["arguments"].clone(),
+                    completed: false,
+                },
+            );
+        }
+        Ok(())
     }
     fn envelope(&mut self, bytes: &[u8]) -> Result<Value> {
         self.frames += 1;
@@ -532,6 +843,46 @@ impl CodexProtocol {
             "Codex server request during initialization",
         )?;
         match value["method"].as_str() {
+            Some("deprecationNotice") => {
+                let params = &value["params"];
+                closed(params, &["summary", "details"])?;
+                text(&params["summary"], 4096)?;
+                if !params["details"].is_null() {
+                    require(
+                        params["details"]
+                            .as_str()
+                            .is_some_and(|details| details.len() <= 8192),
+                        "Codex deprecation notice details",
+                    )?;
+                }
+                // Informational text is untrusted; never interpret it as a
+                // config update or authority. Exact readbacks remain required.
+                Ok(())
+            }
+            Some("mcpServer/startupStatus/updated") => {
+                let p = &value["params"];
+                closed(p, &["name", "status", "threadId", "error", "failureReason"])?;
+                require(
+                    self.options.native_mcp.is_some() && p["name"] == "cua_repl",
+                    "Codex unadmitted native server startup",
+                )?;
+                if !p["threadId"].is_null() {
+                    let thread = identity(&p["threadId"])?;
+                    require(
+                        self.thread_id.as_ref().is_none_or(|id| id == &thread)
+                            && self
+                                .native_startup_thread
+                                .as_ref()
+                                .is_none_or(|id| id == &thread),
+                        "Codex native server thread changed",
+                    )?;
+                    self.native_startup_thread = Some(thread);
+                }
+                require(
+                    matches!(p["status"].as_str(), Some("starting" | "ready")),
+                    "Codex computer-use connector failed to start",
+                )
+            }
             Some("remoteControl/status/changed") => {
                 let p = &value["params"];
                 closed(
@@ -554,6 +905,16 @@ impl CodexProtocol {
                     == value.pointer("/params/thread/id").and_then(Value::as_str),
                 "Codex thread start identity",
             ),
+            Some("thread/status/changed") if self.options.native_mcp.is_some() => {
+                let p = &value["params"];
+                self.thread_scope(p)?;
+                closed(p, &["threadId", "status"])?;
+                closed(&p["status"], &["type"])?;
+                require(
+                    matches!(p["status"]["type"].as_str(), Some("idle" | "notLoaded")),
+                    "Codex thread is not idle before native inventory",
+                )
+            }
             // Signed-in accounts push these during `account/read` and other
             // init-phase RPCs. They are informational here: `account/read`'s
             // result and the explicit `account/rateLimits/read` stay
@@ -568,9 +929,14 @@ impl CodexProtocol {
                     "Codex rate limit shape",
                 )
             }
-            _ => Err(Error::Protocol(
-                "Codex unexpected initialization notification",
-            )),
+            _ => {
+                self.unhandled_startup_notice_sha256 = value["method"]
+                    .as_str()
+                    .map(|method| crate::digest(method.as_bytes()));
+                Err(Error::Protocol(
+                    "Codex unexpected initialization notification",
+                ))
+            }
         }
     }
     async fn rpc(
@@ -653,7 +1019,14 @@ impl CodexProtocol {
                 && t["forkedFromId"].is_null(),
             "Codex thread identity controls",
         )?;
-        identity(&t["id"])
+        let id = identity(&t["id"])?;
+        require(
+            self.native_startup_thread
+                .as_ref()
+                .is_none_or(|thread| thread == &id),
+            "Codex native server startup thread changed",
+        )?;
+        Ok(id)
     }
     fn scope(&self, params: &Value) -> Result<()> {
         require(
@@ -830,6 +1203,17 @@ impl CodexProtocol {
                 "Codex early turn identity changed",
             )?;
             self.turn_id = Some(turn);
+            #[cfg(unix)]
+            if let Some(proxy) = self.native_proxy.as_ref() {
+                proxy.set_turn_context(
+                    self.thread_id
+                        .as_deref()
+                        .ok_or(Error::Protocol("Codex native thread missing"))?,
+                    self.turn_id
+                        .as_deref()
+                        .ok_or(Error::Protocol("Codex native turn missing"))?,
+                )?;
+            }
             self.turn_rpc = None;
             self.ready = true;
             events.push(Event::Ready);
@@ -843,6 +1227,20 @@ impl CodexProtocol {
                 self.server_ids.len() < MAX_CALLS && self.server_ids.insert(rpc),
                 "Codex duplicate server RPC id",
             )?;
+            if method == "mcpServer/elicitation/request" {
+                self.thread_scope(p)?;
+                require(
+                    self.options.native_mcp.is_some()
+                        && p["serverName"] == "cua_repl"
+                        && (p["turnId"].is_null()
+                            || self.turn_id.as_deref() == p["turnId"].as_str()),
+                    "Codex unadmitted native elicitation",
+                )?;
+                outgoing.push(json!({"id":value["id"],"result":{"action":"decline","content":null,"_meta":null}}));
+                events.push(Event::Attention);
+                events.push(Event::Diagnostic(crate::runner::Diagnostic::notice("Computer use requires additional approval from its host; xcb did not approve the request.")));
+                return Ok((events, outgoing));
+            }
             self.scope(p)?;
             if [
                 "item/commandExecution/requestApproval",
@@ -892,7 +1290,28 @@ impl CodexProtocol {
             return Ok((events, outgoing));
         }
         match method {
-            "remoteControl/status/changed" | "thread/started" => self.startup_notice(&value)?,
+            "remoteControl/status/changed"
+            | "thread/started"
+            | "mcpServer/startupStatus/updated" => self.startup_notice(&value)?,
+            "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
+                if self.native_review(p, method.ends_with("/completed"))? {
+                    self.completed = true;
+                    events.push(Event::Diagnostic(crate::runner::Diagnostic::notice("Automatic approval review did not approve computer use; xcb stopped the turn.")));
+                    events.push(Event::Attention);
+                }
+            }
+            "item/mcpToolCall/progress" => {
+                self.scope(p)?;
+                closed(p, &["threadId", "turnId", "itemId", "message"])?;
+                let id = identity(&p["itemId"])?;
+                require(
+                    self.native_calls
+                        .get(&id)
+                        .is_some_and(|call| !call.completed),
+                    "Codex orphan native progress",
+                )?;
+                text(&p["message"], MAX_TEXT_BYTES)?;
+            }
             "turn/started" => {
                 self.thread_scope(p)?;
                 let id = identity(&p["turn"]["id"])?;
@@ -965,6 +1384,7 @@ impl CodexProtocol {
                 }
                 match kind.as_str() {
                     "dynamicToolCall" => self.tool_item(item, completed)?,
+                    "mcpToolCall" => self.native_item(item, completed)?,
                     "userMessage" => require(
                         self.prompt.as_ref() == Some(&item["content"]),
                         "Codex input changed",
@@ -1010,7 +1430,6 @@ impl CodexProtocol {
                     // rather than failing a turn whose tools already ran.
                     "commandExecution"
                     | "fileChange"
-                    | "mcpToolCall"
                     | "webSearch"
                     | "collabAgentToolCall"
                     | "subAgentActivity"
@@ -1118,6 +1537,12 @@ impl CodexProtocol {
                     self.ready && !self.completed && self.turn_id.as_deref() == turn["id"].as_str(),
                     "Codex terminal scope",
                 )?;
+                if self.native_reviews.values().any(|review| !review.completed) {
+                    self.completed = true;
+                    events.push(Event::Diagnostic(crate::runner::Diagnostic::notice("Computer-use automatic approval review did not finish; xcb stopped the turn.")));
+                    events.push(Event::Attention);
+                    return Ok((events, outgoing));
+                }
                 // Only a successful turn must have resolved every tool call. A
                 // failed or interrupted turn abandons the rest: the host has
                 // already settled every call it executed, and hiding the
@@ -1206,12 +1631,14 @@ impl CodexProtocol {
             // cannot request anything, so it is reported as drift instead of
             // failing a turn whose tools may already have run.
             _ => {
-                require(
-                    !["model/", "account/", "item/", "turn/"]
-                        .iter()
-                        .any(|prefix| method.starts_with(prefix)),
-                    "Codex unadmitted notification",
-                )?;
+                if ["model/", "account/", "item/", "turn/"]
+                    .iter()
+                    .any(|prefix| method.starts_with(prefix))
+                {
+                    return Err(Error::CodexNotification {
+                        method_sha256: crate::digest(method.as_bytes()),
+                    });
+                }
                 events.push(Event::Diagnostic(crate::runner::Diagnostic::notice(
                     "Codex sent an unrecognized notification; it was ignored",
                 )));
@@ -1235,7 +1662,19 @@ impl CodexProtocol {
         let text = serde_json::to_string(&result)?;
         require(text.len() <= MAX_JSON_BYTES, "Codex tool result bound")?;
         let success = result.get("isError") != Some(&json!(true)) && result.get("error").is_none();
-        let response = json!({"success":success,"contentItems":[{"type":"inputText","text":text}]});
+        let content_items = match result.get("content").and_then(Value::as_array) {
+            Some(content) => content.iter().map(|item| match item["type"].as_str() {
+                Some("text") => Ok(json!({"type":"inputText","text":item["text"].as_str().ok_or(Error::Protocol("Codex tool text"))?})),
+                Some("image") => {
+                    let media = item["mimeType"].as_str().filter(|media| ["image/png", "image/jpeg", "image/webp"].contains(media)).ok_or(Error::Protocol("Codex tool image type"))?;
+                    let data = item["data"].as_str().ok_or(Error::Protocol("Codex tool image data"))?;
+                    Ok(json!({"type":"inputImage","imageUrl":format!("data:{media};base64,{data}")}))
+                }
+                _ => Err(Error::Protocol("Codex unsupported tool content")),
+            }).collect::<Result<Vec<_>>>()?,
+            None => vec![json!({"type":"inputText","text":text})],
+        };
+        let response = json!({"success":success,"contentItems":content_items});
         Ok((json!({"id":rpc_id,"result":response}), response))
     }
     fn turn_request(&mut self, prompt: Prompt) -> Result<Value> {
@@ -1270,6 +1709,30 @@ impl CodexProtocol {
 }
 
 impl Protocol for CodexProtocol {
+    async fn shutdown(&mut self) -> bool {
+        self.native_review_attention |=
+            self.native_reviews.values().any(|review| !review.completed);
+        #[cfg(unix)]
+        if let Some(proxy) = self.native_proxy.as_mut() {
+            let receipt = proxy.shutdown().await;
+            self.native_effects = receipt.effects;
+            return receipt.joined;
+        }
+        true
+    }
+    fn host_effects(&self) -> EffectState {
+        self.native_effects
+    }
+    fn host_pending_attention(&self) -> bool {
+        if self.native_review_attention {
+            return true;
+        }
+        #[cfg(unix)]
+        if let Some(proxy) = self.native_proxy.as_ref() {
+            return proxy.pending_attention();
+        }
+        false
+    }
     fn refreshes_catalog(&self) -> bool {
         self.options.metadata_only
     }
@@ -1315,7 +1778,12 @@ impl Protocol for CodexProtocol {
         let config =
             crate::private::read(&self.options.account_home.join("config.toml"), 64 * 1024)?;
         require(
-            config == configuration(&self.options.catalog_path)?.as_bytes(),
+            config
+                == configuration_with_native(
+                    &self.options.catalog_path,
+                    self.options.native_mcp.as_ref(),
+                )?
+                .as_bytes(),
             "Codex launch configuration changed",
         )?;
         let initialized = self.rpc(process, "initialize", initialize_params()).await?;
@@ -1366,7 +1834,11 @@ impl Protocol for CodexProtocol {
                 json!({"cwd":self.options.cwd,"includeLayers":false}),
             )
             .await?;
-        config::validate_config(&config, &self.options.catalog_path)?;
+        config::validate_config_with_native(
+            &config,
+            &self.options.catalog_path,
+            self.options.native_mcp.as_ref(),
+        )?;
         let mut models = Vec::new();
         let mut cursor = Value::Null;
         let mut cursors = BTreeSet::new();
@@ -1414,13 +1886,44 @@ impl Protocol for CodexProtocol {
         let params = self.thread_request(instructions);
         let response = self.rpc(process, "thread/start", params).await?;
         self.thread_id = Some(self.thread_readback(&response)?);
+        if self.options.native_mcp.is_some() {
+            // A configured server is not evidence that its tools reached the
+            // thread. Discover through this exact thread's connection before
+            // admitting any inference or prompt submission.
+            let inventory = self.rpc(process, "mcpServerStatus/list", json!({
+                "threadId":self.thread_id, "serverName":"cua_repl", "detail":"toolsAndAuthOnly", "limit":1
+            })).await?;
+            self.native_inventory(&inventory)?;
+            #[cfg(unix)]
+            require(
+                self.native_proxy.as_ref().is_some_and(|proxy| {
+                    let diagnostic = proxy.diagnostic();
+                    diagnostic.startup == crate::native_mcp::NativeStartup::Ready
+                        && !diagnostic.failed
+                }),
+                "Codex computer-use relay is not ready",
+            )?;
+            self.native_ready = true;
+        }
         Ok(models)
     }
     async fn start(&mut self, process: &mut StreamProcess, prompt: Prompt) -> Result<()> {
+        #[cfg(unix)]
+        if self.options.native_mcp.is_some() {
+            require(
+                self.native_proxy.as_ref().is_some_and(|proxy| {
+                    let diagnostic = proxy.diagnostic();
+                    diagnostic.startup == crate::native_mcp::NativeStartup::Ready
+                        && !diagnostic.failed
+                }),
+                "Codex computer-use relay is not ready",
+            )?;
+        }
         require(
             self.initialized
                 && !self.options.metadata_only
                 && self.thread_id.is_some()
+                && (self.options.native_mcp.is_none() || self.native_ready)
                 && self.turn_rpc.is_none()
                 && self.turn_id.is_none(),
             "Codex invalid turn start",

@@ -466,6 +466,8 @@ fn alt_backspace_edits_words_without_removing_attachments() {
 fn view_for(session: &str) -> xcb_core::ui::View {
     xcb_core::ui::View {
         session: Some(xcb_core::session::Session {
+            route_pins: Default::default(),
+            requirements: Default::default(),
             id: xcb_core::Id::new(session).unwrap(),
             account: xcb_core::Id::new("personal").unwrap(),
             model: xcb_core::models::ModelChoice {

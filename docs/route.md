@@ -48,6 +48,10 @@ field except `version`, `workspace`, and `task` is optional.
   answers only after the provider has stopped; the code is `deadline`.
 - `dryRun: true` reports the route without creating a session, holding an
   account, or starting a provider.
+- `requirements: {"signed_in_browser": true}` requires Codex for an existing
+  signed-in browser. The requirement persists with the saved session, and a
+  conflicting provider, account, or model pin is rejected. See
+  [browser and shared tools](tools.md) for setup and handoff behavior.
 
 Pins limit the choice; xcb never falls back outside them. With no pins, xcb
 considers accounts with a supported provider build that are signed in,

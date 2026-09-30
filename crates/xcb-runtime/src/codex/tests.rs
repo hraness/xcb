@@ -11,6 +11,7 @@ fn codec() -> CodexProtocol {
         observed_at_ms: 1,
     };
     CodexProtocol::new(CodexOptions {
+        native_mcp: None,
         cwd: "/synthetic/work".into(),
         account_home: "/synthetic/profile".into(),
         catalog_path: "/synthetic/catalog.json".into(),
@@ -43,6 +44,298 @@ fn call_item() -> Value {
 }
 fn callback() -> Value {
     json!({"id":80,"method":"item/tool/call","params":{"threadId":"thread1","turnId":"turn1","callId":"call1","tool":"workspace_read","namespace":null,"arguments":{"path":"note.txt"}}})
+}
+
+fn native_definition() -> Value {
+    json!({"command":"/synthetic/helper","args":["native-mcp-stdio"],"enabled":true,
+        "enabled_tools":["js","js_reset"],
+        "env":{"XCB_MCP_SOCKET":"/synthetic/mcp.sock","XCB_MCP_TOKEN":"a".repeat(64)}})
+}
+
+fn native_review_notice(completed: bool, status: &str) -> Value {
+    let mut params = json!({"threadId":"thread1","turnId":"turn1","reviewId":"review1","targetItemId":"native1",
+        "action":{"type":"mcpToolCall","server":"cua_repl","toolName":"js","connectorId":null,"connectorName":null,"toolTitle":null},
+        "review":{"status":status,"riskLevel":"low","userAuthorization":"high","rationale":"SYNTHETIC_PRIVATE_REASON"},"startedAtMs":100});
+    if completed {
+        params["completedAtMs"] = json!(101);
+        params["decisionSource"] = json!("agent");
+    }
+    json!({"method": if completed { "item/autoApprovalReview/completed" } else { "item/autoApprovalReview/started" }, "params":params})
+}
+
+#[test]
+fn native_automatic_review_observations_never_manufacture_approval() {
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    let begin = native_review_notice(false, "inProgress");
+    let (events, replies) = c.accept(begin.clone()).unwrap();
+    assert!(events.is_empty() && replies.is_empty() && c.native_calls.is_empty());
+    assert!(c.accept(begin).is_err());
+    let done = native_review_notice(true, "approved");
+    let (events, replies) = c.accept(done.clone()).unwrap();
+    assert!(events.is_empty() && replies.is_empty() && c.native_calls.is_empty());
+    assert!(c.accept(done).is_err());
+    assert!(!c.completed);
+}
+
+#[test]
+fn native_node_repl_strict_review_keeps_exact_connector_and_review_identity() {
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    let strict = |completed, status| {
+        let mut notice = native_review_notice(completed, status);
+        notice["params"]["action"]["connectorId"] = json!("node_repl");
+        notice["params"]["action"]["connectorName"] = json!("Node REPL");
+        notice["params"]["action"]["toolTitle"] = json!("Run JavaScript");
+        notice
+    };
+    c.accept(strict(false, "inProgress")).unwrap();
+    let (events, replies) = c.accept(strict(true, "approved")).unwrap();
+    assert!(events.is_empty() && replies.is_empty() && c.native_calls.is_empty());
+    for (key, value) in [
+        ("connectorId", json!("other")),
+        ("connectorName", json!("other")),
+        ("toolName", json!("js_reset")),
+        ("server", json!("other")),
+    ] {
+        let mut c = started();
+        c.options.native_mcp = Some(native_definition());
+        let mut changed = strict(false, "inProgress");
+        changed["params"]["action"][key] = value;
+        assert!(c.accept(changed).is_err());
+    }
+}
+
+#[test]
+fn native_automatic_review_denial_is_terminal_attention_without_fallback() {
+    for status in ["denied", "aborted", "timedOut"] {
+        let mut c = started();
+        c.options.native_mcp = Some(native_definition());
+        c.accept(native_review_notice(false, "inProgress")).unwrap();
+        let (events, replies) = c.accept(native_review_notice(true, status)).unwrap();
+        assert!(replies.is_empty());
+        assert!(matches!(events.last(), Some(Event::Attention)));
+        assert!(c.completed && c.native_calls.is_empty());
+        assert!(c.host_pending_attention());
+        assert!(c.accept(notice("item/started", call_item())).is_err());
+    }
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    c.accept(native_review_notice(false, "inProgress")).unwrap();
+    let (events, replies) = c.accept(json!({"method":"turn/completed","params":{"threadId":"thread1","turn":{"id":"turn1","status":"completed"}}})).unwrap();
+    assert!(replies.is_empty() && matches!(events.last(), Some(Event::Attention)) && c.completed);
+}
+
+#[tokio::test]
+async fn native_automatic_review_interruption_retains_attention_after_shutdown() {
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    c.accept(native_review_notice(false, "inProgress")).unwrap();
+    // Let the configured reviewer finish while the turn is healthy. If the
+    // process fails, cancellation arrives, or the wire closes first, the
+    // unfinished review prevents retry under another provider.
+    assert!(!c.host_pending_attention());
+    assert!(c.shutdown().await);
+    assert!(c.host_pending_attention());
+}
+
+#[test]
+fn native_automatic_review_rejects_other_authority_or_changed_identity() {
+    assert!(
+        started()
+            .accept(native_review_notice(false, "inProgress"))
+            .is_err()
+    );
+    for (pointer, value) in [
+        ("/params/threadId", json!("foreign")),
+        ("/params/turnId", json!("foreign")),
+        ("/params/action/type", json!("command")),
+        ("/params/action/server", json!("other")),
+        ("/params/action/toolName", json!("shell")),
+        ("/params/action/connectorId", json!("ambient")),
+        ("/params/review/status", json!("approved")),
+    ] {
+        let mut c = started();
+        c.options.native_mcp = Some(native_definition());
+        let mut notice = native_review_notice(false, "inProgress");
+        *notice.pointer_mut(pointer).unwrap() = value;
+        assert!(c.accept(notice).is_err());
+    }
+    for (pointer, value) in [
+        ("/params/reviewId", json!("foreign")),
+        ("/params/targetItemId", json!("foreign")),
+        ("/params/startedAtMs", json!(99)),
+        ("/params/completedAtMs", json!(99)),
+        ("/params/decisionSource", json!("human")),
+        ("/params/action/toolName", json!("js_reset")),
+    ] {
+        let mut c = started();
+        c.options.native_mcp = Some(native_definition());
+        c.accept(native_review_notice(false, "inProgress")).unwrap();
+        let mut notice = native_review_notice(true, "approved");
+        *notice.pointer_mut(pointer).unwrap() = value;
+        assert!(c.accept(notice).is_err());
+    }
+}
+
+#[test]
+fn native_computer_tools_require_exact_config_and_bound_item_lifecycle() {
+    let item = json!({"id":"native1","type":"mcpToolCall","server":"cua_repl","tool":"js",
+        "arguments":{"code":"await cua.getState();"},"status":"inProgress"});
+    assert!(
+        started()
+            .accept(notice("item/started", item.clone()))
+            .is_err()
+    );
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    for (key, value) in [
+        ("server", json!("other")),
+        ("tool", json!("exec")),
+        ("pluginId", json!("ambient")),
+    ] {
+        let mut changed = item.clone();
+        changed[key] = value;
+        assert!(c.native_item(&changed, false).is_err());
+    }
+    c.accept(notice("item/started", item.clone())).unwrap();
+    c.accept(json!({"method":"item/mcpToolCall/progress","params":{"threadId":"thread1","turnId":"turn1","itemId":"native1","message":"working"}})).unwrap();
+    let mut done = item;
+    done["status"] = json!("completed");
+    done["result"] = json!({"content":[{"type":"text","text":"bounded observation"}]});
+    let mut changed = done.clone();
+    changed["arguments"] = json!({"code":"changed"});
+    assert!(c.native_item(&changed, true).is_err());
+    c.accept(notice("item/completed", done.clone())).unwrap();
+    assert!(c.accept(notice("item/completed", done)).is_err());
+}
+
+#[test]
+fn native_configuration_readback_rejects_extra_authority() {
+    let definition = native_definition();
+    let catalog = std::path::Path::new("/synthetic/catalog.json");
+    let text = config::configuration_with_native(catalog, Some(&definition)).unwrap();
+    assert!(text.contains("[mcp_servers.cua_repl]"));
+    assert!(text.contains("approvals_reviewer = \"auto_review\""));
+    let mut readback: Value = serde_json::from_str(include_str!("config-readback.json")).unwrap();
+    let mut normalized = definition.clone();
+    normalized["environment_id"] = json!("local");
+    normalized["tool_timeout_sec"] = Value::Null;
+    readback["config"]["mcp_servers"] = json!({"cua_repl":normalized});
+    config::validate_config_with_native(&readback, catalog, Some(&definition)).unwrap();
+    readback["config"]["mcp_servers"]["cua_repl"]["env_vars"] = json!(["HOME"]);
+    assert!(config::validate_config_with_native(&readback, catalog, Some(&definition)).is_err());
+}
+
+#[test]
+fn native_inventory_requires_connected_declared_tools_before_inference() {
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    let inventory = json!({"data":[{"name":"cua_repl","runtimeStatus":"connected","tools":{
+        "mcp__cua_repl__js":{"name":"js","inputSchema":{"type":"object"}},
+        "mcp__cua_repl__js_reset":{"name":"js_reset","inputSchema":{"type":"object"}}
+    }}],"nextCursor":null});
+    c.native_inventory(&inventory).unwrap();
+    assert!(!c.native_ready);
+    for status in [
+        "notStarted",
+        "starting",
+        "failed",
+        "cancelled",
+        "disabled",
+        "authenticationRequired",
+    ] {
+        let mut invalid = inventory.clone();
+        invalid["data"][0]["runtimeStatus"] = json!(status);
+        assert!(c.native_inventory(&invalid).is_err());
+    }
+    for invalid in [
+        json!({"data":[],"nextCursor":null}),
+        json!({"data":[{"name":"cua_repl","runtimeStatus":"connected","tools":{}}]}),
+    ] {
+        assert!(c.native_inventory(&invalid).is_err());
+    }
+    let mut invalid = inventory.clone();
+    invalid["data"][0]["toolsError"] = json!("private upstream error");
+    assert!(c.native_inventory(&invalid).is_err());
+    let mut invalid = inventory;
+    invalid["data"][0]["tools"]["extra"] = json!({"name":"shell","inputSchema":{}});
+    assert!(c.native_inventory(&invalid).is_err());
+}
+
+#[test]
+fn native_startup_status_is_thread_bound_and_never_authorizes_active_work() {
+    let mut codec = codec();
+    codec.thread_id = Some("thread1".into());
+    codec.options.native_mcp = Some(serde_json::json!({"enabled":true}));
+    for state in ["idle", "notLoaded"] {
+        assert!(codec.startup_notice(&json!({"method":"thread/status/changed","params":{"threadId":"thread1","status":{"type":state}}})).is_ok());
+    }
+    for (thread, status) in [
+        ("foreign", json!({"type":"idle"})),
+        ("thread1", json!({"type":"active","activeFlags":[]})),
+        ("thread1", json!({"type":"systemError"})),
+    ] {
+        assert!(codec.startup_notice(&json!({"method":"thread/status/changed","params":{"threadId":thread,"status":status}})).is_err());
+    }
+}
+
+#[tokio::test]
+async fn native_unready_relay_never_sends_a_model_turn() {
+    let mut codec = codec();
+    codec.initialized = true;
+    codec.thread_id = Some("thread1".into());
+    codec.options.native_mcp = Some(json!({"enabled":true}));
+    let mut process = StreamProcess::spawn(tokio::process::Command::new("/bin/cat")).unwrap();
+    let result = codec
+        .start(
+            &mut process,
+            Prompt {
+                text: "do not submit".into(),
+                images: vec![],
+            },
+        )
+        .await;
+    drop(process.stdin.take());
+    let output = tokio::time::timeout(Duration::from_secs(2), process.frame()).await;
+    assert!(process.join().await);
+    assert!(result.is_err());
+    assert!(output.unwrap().unwrap().is_none());
+}
+
+#[test]
+fn startup_deprecation_notice_is_bounded_information_not_authority() {
+    let mut codec = codec();
+    for details in [Value::Null, json!("Synthetic migration guidance")] {
+        assert!(codec.startup_notice(&json!({"method":"deprecationNotice","params":{"summary":"Synthetic deprecation", "details":details}})).is_ok());
+    }
+    for params in [
+        json!({"summary":false}),
+        json!({"summary":"valid","details":{}}),
+        json!({"summary":"valid","details":"x".repeat(8193)}),
+        json!({"summary":"valid","approvalPolicy":"never"}),
+    ] {
+        assert!(
+            codec
+                .startup_notice(&json!({"method":"deprecationNotice","params":params}))
+                .is_err()
+        );
+    }
+    assert!(!codec.initialized);
+    assert!(!codec.native_ready);
+    assert!(codec.turn_id.is_none());
+}
+
+#[test]
+fn native_additional_approval_is_declined_and_requires_attention() {
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    let (events,replies) = c.accept(json!({"id":"approval1","method":"mcpServer/elicitation/request","params":{
+        "threadId":"thread1","turnId":"turn1","serverName":"cua_repl","mode":"form","message":"permission","requestedSchema":{}
+    }})).unwrap();
+    assert!(events.iter().any(|event| matches!(event, Event::Attention)));
+    assert_eq!(replies[0]["result"]["action"], "decline");
+    assert!(replies[0]["result"]["content"].is_null());
 }
 
 #[test]
@@ -145,6 +438,31 @@ fn unqualified_descendants_cannot_claim_the_root_broker_or_lifecycle() {
     assert!(c.accept(forged).is_err());
     assert!(c.calls["call1"].rpc_id.is_none());
     assert!(!c.completed);
+}
+
+#[test]
+fn unknown_mutating_notice_diagnostic_only_contains_method_fingerprint() {
+    let method = "item/SYNTHETIC_PRIVATE_METHOD";
+    let mut diagnostics = vec![];
+    for secret in [
+        "SYNTHETIC_PRIVATE_PAYLOAD_ONE",
+        "SYNTHETIC_PRIVATE_PAYLOAD_TWO",
+    ] {
+        let error = started()
+            .accept(json!({"method":method,"params":{"private":secret}}))
+            .unwrap_err();
+        assert!(matches!(error, Error::CodexNotification { .. }));
+        assert_eq!(error.failure(), xcb_core::policy::Failure::Unknown);
+        let diagnostic = crate::runner::Diagnostic::from_error(&error);
+        assert!(!diagnostic.as_str().contains("PRIVATE"));
+        assert!(
+            diagnostic
+                .as_str()
+                .ends_with(&format!("{})", crate::digest(method.as_bytes())))
+        );
+        diagnostics.push(diagnostic.as_str().to_owned());
+    }
+    assert_eq!(diagnostics[0], diagnostics[1]);
 }
 
 #[test]
@@ -936,6 +1254,10 @@ fn broker_guidance_keeps_native_sandbox_read_only_and_zero_tool_launches_empty()
                 names,
                 [
                     "workspace_exec",
+                    "xcb_tools_list",
+                    "xcb_tools_call",
+                    "xcb_tools_image",
+                    "xcb_require_capability",
                     "xcb_swarm_status",
                     "xcb_message_list",
                     "xcb_message_send",

@@ -11,6 +11,7 @@ mod resources;
 mod route;
 mod stop;
 mod table;
+mod tools;
 mod ux;
 mod workspaces;
 
@@ -64,6 +65,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Configure host tools shared by Codex, Claude and Devin.
+    Tools {
+        #[command(subcommand)]
+        command: tools::Commands,
+    },
     /// Inspect large source snapshots with resumable ALGAL programs.
     Context {
         #[command(subcommand)]
@@ -132,6 +138,9 @@ enum Commands {
     },
     /// Run one headless task in the current workspace and print the result.
     Run {
+        /// Require access to the user’s existing signed-in browser (Codex only).
+        #[arg(long)]
+        signed_in_browser: bool,
         /// Task text; piped stdin is used when omitted.
         #[arg(short = 'p', long)]
         prompt: Option<String>,
@@ -457,6 +466,9 @@ enum Commands {
     /// Internal: stdio bridge used by a provider's MCP helper.
     #[command(name = "broker-stdio", hide = true)]
     BrokerStdio,
+    /// Internal: reviewed native computer-use transport.
+    #[command(name = "native-mcp-stdio", hide = true)]
+    NativeMcpStdio,
     /// Internal: the confined half of the Linux sandbox test.
     #[command(name = "sandbox-probe", hide = true)]
     SandboxProbe {
@@ -1057,6 +1069,26 @@ async fn broker_stdio() -> Result<i32> {
     Ok(0)
 }
 
+async fn native_mcp_stdio() -> Result<i32> {
+    #[cfg(unix)]
+    {
+        let socket = std::env::var_os("XCB_MCP_SOCKET")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or(Error::Unavailable("native MCP socket is unavailable"))?;
+        let token = zeroize::Zeroizing::new(
+            std::env::var("XCB_MCP_TOKEN")
+                .map_err(|_| Error::Unavailable("native MCP authority is unavailable"))?,
+        );
+        xcb_runtime::native_mcp::run_native_mcp_stdio(&socket, &token).await?;
+        Ok(0)
+    }
+    #[cfg(not(unix))]
+    Err(Error::Unavailable(
+        "native computer use is unavailable on this platform",
+    ))
+}
+
 /// The CLI account contract deliberately excludes storage/custody fields.
 /// Never serialize the runtime record itself: adding an internal field must
 /// not silently extend public command output.
@@ -1441,6 +1473,9 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
     if matches!(&cli.command, Some(Commands::BrokerStdio)) {
         return broker_stdio().await;
     }
+    if matches!(&cli.command, Some(Commands::NativeMcpStdio)) {
+        return native_mcp_stdio().await;
+    }
     // The hidden in-namespace forwarder must not touch CLI state: inside the
     // bwrap plan the environment is --clearenv (no HOME/XCB_STATE) and the
     // host state root is unbound, so Store/Config init would fail before the
@@ -1657,6 +1692,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         // Keep routing and execution temporaries out of unrelated commands'
         // poll frames, which must fit the default thread stack.
         Some(Commands::Run {
+            signed_in_browser,
             prompt,
             account,
             model,
@@ -1697,45 +1733,66 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 let mut account = account
                     .map(|name| store.resolve_account(&name).map(|account| account.id))
                     .transpose()?;
-                let mut model = model;
-                if model.as_deref().is_none_or(|model| model == "auto") {
-                    let workspace = xcb_core::canonical(&cli.cwd)?;
-                    let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
-                    let (preference, required) =
-                        managed.initial_route_preferences(&workspace, &prompt)?;
-                    let (preferred_provider, required_provider) =
-                        preview_provider_preferences(preference, required, None)?;
+                let mut route_pins = xcb_core::session::RoutePins {
+                    provider: None,
+                    account: account.clone(),
+                    model: model.clone().filter(|model| model != "auto"),
+                };
+                let mut requirements = xcb_core::session::TaskRequirements { signed_in_browser };
+                let workspace = xcb_core::canonical(&cli.cwd)?;
+                let managed = xcb_runtime::managed::ManagedStore::open(store.root())?;
+                let (preference, required) =
+                    managed.initial_route_preferences(&workspace, &prompt)?;
+                let (preferred_provider, required_provider) =
+                    preview_provider_preferences(preference, required, None)?;
+                route_pins.provider = required_provider;
+                // Explicit models retain their alias resolution, judge bypass,
+                // and provider qualification path. Automatic routes use the judge.
+                let model = if route_pins.model.is_some() {
+                    model
+                } else {
                     let excluded_routes = std::collections::BTreeSet::new();
                     let excluded_accounts = std::collections::BTreeSet::new();
                     let decision = xcb_runtime::routing::smart_route(
                         &store,
                         &config,
                         xcb_runtime::routing::RouteRequest {
+                            requirements,
                             task: &prompt,
                             required_provider,
                             preferred_provider,
-                            required_model: None,
+                            required_model: route_pins.model.as_deref(),
                             excluded_routes: &excluded_routes,
                             excluded_accounts: &excluded_accounts,
                             account: account.as_ref(),
                         },
                     )
                     .await?;
+                    requirements = requirements.merge(decision.requirements);
                     eprintln!("xcb: {}", automatic_route_notice(&decision.reason));
                     account = Some(decision.account);
-                    model = Some(decision.model.key());
-                }
+                    Some(decision.model.key())
+                };
                 if *cancelled.borrow() {
                     return Err(stopped_early());
                 }
-                let session = kernel::new_session(
+                let session = kernel::new_session_with_policy(
                     &store,
                     &xcb_core::canonical(&cli.cwd)?,
                     &config,
                     account.as_ref(),
                     model.as_deref(),
                     None,
+                    kernel::SessionRoutePolicy {
+                        requirements,
+                        required_provider,
+                    },
                 )?;
+                if route_pins.model.is_some() {
+                    route_pins.model = Some(session.model.key());
+                }
+                store.require_session_capabilities(&session.id, requirements)?;
+                store.set_session_route_pins(&session.id, route_pins)?;
                 if *cancelled.borrow() {
                     return Err(stopped_early());
                 }
@@ -2130,6 +2187,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                         &store,
                         &Config::load(store.root())?.0,
                         xcb_runtime::routing::RouteRequest {
+                            requirements: Default::default(),
                             task: &task,
                             required_provider,
                             preferred_provider,
@@ -3132,6 +3190,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             }
             Ok(0)
         }
+        Some(Commands::Tools { command }) => tools::execute(&store, command, cli.json).await,
         Some(Commands::Judge { command }) => {
             match command {
                 Some(JudgeCommand::Token) => {
@@ -3666,6 +3725,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             child,
         }) => egress_forward(&socket, port, &lo_up, &env_file, target_port, &child).await,
         Some(Commands::BrokerStdio) => broker_stdio().await,
+        Some(Commands::NativeMcpStdio) => native_mcp_stdio().await,
         // Dispatched before any state opens.
         Some(Commands::SandboxProbe { .. }) => Ok(2),
         Some(Commands::Completions { shell }) => {
@@ -4073,6 +4133,7 @@ async fn main() {
             Commands::ManagedDaemon
                 | Commands::ServiceRun
                 | Commands::BrokerStdio
+                | Commands::NativeMcpStdio
                 | Commands::EgressForward { .. }
                 | Commands::SandboxProbe { .. }
         )

@@ -392,6 +392,10 @@ pub struct RunRecord {
     /// Present fields make older strict readers fail closed until reconciliation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_custody: Option<crate::command::CommandCustody>,
+    /// Host tool servers are independent process groups. The launch intent is
+    /// durable before spawning; older strict readers cannot release this run.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub capability_processes: BTreeMap<String, Option<u32>>,
 }
 
 impl RunRecord {
@@ -441,7 +445,14 @@ impl RunRecord {
                 format!("xcb recover {} --yes", self.id),
             )),
             proof => proof,
+        }?;
+        for pid in self.capability_processes.values() {
+            let pid = pid.ok_or(Error::Conflict(
+                "tool server launch has no recorded process group; stop cannot be proven",
+            ))?;
+            crate::process::prove_process_group_absent(pid)?;
         }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -453,6 +464,20 @@ impl RunRecord {
                 return Err(xcb_core::Error::Invalid("command run custody").into());
             }
             validate_command_custody(&self.id, custody)?;
+        }
+        if !self.capability_processes.is_empty() {
+            if self.custody_version != 1
+                || !matches!(self.phase.as_str(), "prepared" | "running")
+                || self.capability_processes.len() > 32
+            {
+                return Err(xcb_core::Error::Invalid("tool server custody").into());
+            }
+            for (server, pid) in &self.capability_processes {
+                Id::new(server.clone())?;
+                if pid.is_some_and(|pid| pid <= 1 || i32::try_from(pid).is_err()) {
+                    return Err(xcb_core::Error::Invalid("tool server process group").into());
+                }
+            }
         }
         if let Some(model) = &self.model {
             model.validate()?;
@@ -1062,6 +1087,8 @@ impl Store {
             return Err(Error::Conflict("account or workspace unavailable"));
         }
         let session = Session {
+            route_pins: Default::default(),
+            requirements: Default::default(),
             id: new_id("s"),
             account: account_id.clone(),
             model,
@@ -1255,6 +1282,42 @@ impl Store {
         tx.commit()?;
         Ok(session)
     }
+    pub fn set_session_route_pins(
+        &self,
+        id: &Id,
+        mut pins: xcb_core::session::RoutePins,
+    ) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = session_from(&tx, id)?.ok_or(Error::Unavailable("session not found"))?;
+        if pins
+            .model
+            .as_deref()
+            .is_some_and(|model| model == session.model.id.as_str() || model == session.model.label)
+        {
+            pins.model = Some(session.model.key());
+        }
+        session.route_pins = pins;
+        update_session(&tx, &session, session.revision)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Monotonic metadata update; preserves transcript revision and run custody.
+    pub fn require_session_capabilities(
+        &self,
+        id: &Id,
+        requirements: xcb_core::session::TaskRequirements,
+    ) -> Result<Session> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = session_from(&tx, id)?.ok_or(Error::Unavailable("session not found"))?;
+        session.requirements = session.requirements.merge(requirements);
+        update_session(&tx, &session, session.revision)?;
+        tx.commit()?;
+        Ok(session)
+    }
+
     pub fn authentication_required(&self, account: &Id) -> Result<bool> {
         let db = self.db()?;
         authentication_required_from(&db, account)
@@ -1352,6 +1415,7 @@ impl Store {
             model: Some(session.model.clone()),
             owner: Some(self.owner()),
             command_custody: None,
+            capability_processes: BTreeMap::new(),
         };
         tx.execute(
             "INSERT INTO runs VALUES(?1,?2,?3,?4,?5)",
@@ -1409,6 +1473,7 @@ impl Store {
             model,
             owner: Some(self.owner()),
             command_custody: None,
+            capability_processes: BTreeMap::new(),
         };
         tx.execute(
             "INSERT INTO runs VALUES(?1,NULL,?2,'prepared',?3)",
@@ -1486,6 +1551,64 @@ impl Store {
     pub(crate) fn verify_owned_run(&self, run: &RunRecord) -> Result<()> {
         let db = self.db()?;
         self.owned_run_from(&db, run).map(|_| ())
+    }
+
+    fn update_capability_custody(
+        &self,
+        run: &RunRecord,
+        server: &str,
+        update: impl FnOnce(&mut BTreeMap<String, Option<u32>>) -> Result<()>,
+    ) -> Result<()> {
+        Id::new(server)?;
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (mut current, payload) = self.owned_run_from(&tx, run)?;
+        update(&mut current.capability_processes)?;
+        current.validate()?;
+        if tx.execute(
+            "UPDATE runs SET payload=?1 WHERE id=?2 AND payload=?3",
+            params![serde_json::to_string(&current)?, run.id.as_str(), payload],
+        )? != 1
+        {
+            return Err(Error::Conflict("run authority changed"));
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn mark_capability_starting(&self, run: &RunRecord, server: &str) -> Result<()> {
+        self.update_capability_custody(run, server, |servers| {
+            if servers.contains_key(server) {
+                return Err(Error::Conflict("tool server already has custody"));
+            }
+            servers.insert(server.to_owned(), None);
+            Ok(())
+        })
+    }
+
+    pub(crate) fn mark_capability_spawned(
+        &self,
+        run: &RunRecord,
+        server: &str,
+        pid: u32,
+    ) -> Result<()> {
+        self.update_capability_custody(run, server, |servers| {
+            if servers.get(server) != Some(&None) {
+                return Err(Error::Conflict("tool server launch intent changed"));
+            }
+            servers.insert(server.to_owned(), Some(pid));
+            Ok(())
+        })
+    }
+
+    /// Only the owning manager calls this after its independent group join.
+    pub(crate) fn clear_capability_custody(&self, run: &RunRecord, server: &str) -> Result<()> {
+        self.update_capability_custody(run, server, |servers| {
+            if servers.remove(server).is_none() {
+                return Err(Error::Conflict("tool server custody is absent"));
+            }
+            Ok(())
+        })
     }
 
     /// Persist before launching any guest command. A second pending command,
@@ -1643,6 +1766,11 @@ impl Store {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let (current, payload) = self.owned_run_from(&tx, run)?;
+        if !current.capability_processes.is_empty() {
+            return Err(Error::Conflict(
+                "tool server stop is unproven; account custody retained",
+            ));
+        }
         if current.command_custody.is_some() {
             return Err(Error::Conflict(
                 "command guest stop is unproven; reconcile command custody before settling",
@@ -1747,6 +1875,27 @@ impl Store {
         Ok(self
             .settled_record(session_id, message_count_before)?
             .map(|record| record.outcome))
+    }
+
+    /// Reuse only the current, identity-checked terminal receipt. A later
+    /// message, rebind, unfinished run, or revision invalidates this proof.
+    pub(crate) fn latest_settled_outcome(
+        &self,
+        session_id: &Id,
+    ) -> Result<Option<crate::runner::Outcome>> {
+        let sequence: Option<i64> = self.db()?.query_row(
+            "SELECT max(input_sequence) FROM run_outcomes WHERE session=?1",
+            [session_id.as_str()],
+            |row| row.get(0),
+        )?;
+        let Some(sequence) = sequence else {
+            return Ok(None);
+        };
+        let before = sequence
+            .checked_sub(1)
+            .and_then(|before| usize::try_from(before).ok())
+            .ok_or(Error::Protocol("terminal outcome sequence"))?;
+        self.settled_outcome(session_id, before)
     }
 
     /// Prompt submission is proven only by an exact current terminal receipt.
@@ -1956,6 +2105,7 @@ impl Store {
         }
         let settled = RunRecord {
             phase: "settled".into(),
+            capability_processes: BTreeMap::new(),
             ..run.clone()
         };
         if tx.execute(
@@ -2543,6 +2693,11 @@ impl Store {
         if held || session.revision != expected {
             return Err(Error::Conflict("session is busy or changed"));
         }
+        if !session.requirements.allows(model.provider) {
+            return Err(Error::Conflict(
+                "signed-in browser tasks require Codex; this session cannot move to another provider",
+            ));
+        }
         session.account = account.clone();
         session.model = model;
         session.revision = expected
@@ -2784,6 +2939,42 @@ mod tests {
         // snapshot exactly as an interrupted interactive sign-in would.
     }
 
+    #[test]
+    fn ordinary_sessions_keep_legacy_json_until_a_route_requirement_is_set() {
+        let dir = root();
+        let base = xcb_core::canonical(dir.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Claude, "Max", 1, None).unwrap();
+        let session = store
+            .create_session(&account.id, choice(), &base.join("work"), 2)
+            .unwrap();
+        let legacy = serde_json::to_value(&session).unwrap();
+        assert!(legacy.get("requirements").is_none());
+        assert!(legacy.get("route_pins").is_none());
+        store
+            .require_session_capabilities(
+                &session.id,
+                xcb_core::session::TaskRequirements {
+                    signed_in_browser: true,
+                },
+            )
+            .unwrap();
+        store
+            .set_session_route_pins(
+                &session.id,
+                xcb_core::session::RoutePins {
+                    provider: Some(Provider::Claude),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let updated = store.session(&session.id).unwrap().unwrap();
+        let encoded = serde_json::to_value(&updated).unwrap();
+        assert_eq!(encoded["requirements"]["signed_in_browser"], true);
+        assert_eq!(encoded["route_pins"]["provider"], "claude");
+        assert_eq!(updated.revision, session.revision);
+    }
+
     // Codex sign-in recovery; provider sign-in is refused on Windows.
 
     #[cfg(unix)]
@@ -2915,6 +3106,14 @@ mod tests {
         let reader = Store::open_read_only(&state).unwrap();
         let recovered = reader.settled_outcome(&session.id, 0).unwrap().unwrap();
         assert_eq!(
+            reader
+                .latest_settled_outcome(&session.id)
+                .unwrap()
+                .unwrap()
+                .text,
+            recovered.text
+        );
+        assert_eq!(
             reader.settled_input_submission(&session.id, 0).unwrap(),
             None
         );
@@ -2938,6 +3137,7 @@ mod tests {
             store.settled_outcome(&session.id, 0).unwrap().is_none(),
             "a newer turn invalidates the old dispatch boundary"
         );
+        assert!(store.latest_settled_outcome(&session.id).unwrap().is_none());
         let run = store.prepare_run(&session.id, current.revision, 8).unwrap();
         store.settle(&run, State::Idle, 9).unwrap();
         assert!(
@@ -4135,6 +4335,57 @@ mod tests {
         model: Option<ModelChoice>,
         #[serde(default)]
         owner: Option<RunOwner>,
+    }
+
+    #[test]
+    fn capability_processes_block_settlement_and_preserve_exact_owner() {
+        let dir = root();
+        let path = xcb_core::canonical(dir.path()).unwrap().join("state");
+        let store = Store::open(&path).unwrap();
+        let sibling = Store::open(&path).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        assert!(sibling.mark_capability_starting(&run, "browser").is_err());
+        store.mark_capability_starting(&run, "browser").unwrap();
+        assert!(store.mark_capability_starting(&run, "browser").is_err());
+        assert!(store.mark_capability_spawned(&run, "browser", 0).is_err());
+        assert!(store.settle(&run, State::Idle, 3).is_err());
+        let marked = store.run(&run.id).unwrap().unwrap();
+        assert!(
+            serde_json::from_value::<CommandlessRunRecord>(serde_json::to_value(&marked).unwrap())
+                .is_err()
+        );
+        store
+            .mark_capability_spawned(&run, "browser", i32::MAX as u32)
+            .unwrap();
+        let started = store.mark_spawned(&run, i32::MAX as u32).unwrap();
+        assert_eq!(
+            started.capability_processes.get("browser"),
+            Some(&Some(i32::MAX as u32))
+        );
+        assert!(sibling.clear_capability_custody(&run, "browser").is_err());
+        store.clear_capability_custody(&run, "browser").unwrap();
+        assert!(store.clear_capability_custody(&run, "browser").is_err());
+        store.settle(&run, State::Idle, 4).unwrap();
+    }
+
+    #[test]
+    fn capability_recovery_requires_each_process_group_to_have_exited() {
+        let dir = root();
+        let store = Store::open(&xcb_core::canonical(dir.path()).unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        store.mark_capability_starting(&run, "browser").unwrap();
+        let running = store.mark_spawned(&run, i32::MAX as u32).unwrap();
+        let mut dead = orphaned(&store, &running);
+        assert!(dead.verify_recovery_stop().is_err());
+        dead.capability_processes
+            .insert("browser".into(), Some(i32::MAX as u32));
+        dead.verify_recovery_stop().unwrap();
     }
 
     #[test]

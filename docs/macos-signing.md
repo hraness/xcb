@@ -47,7 +47,12 @@ workflow artifact name cannot be selected for publication. The signing job
 waits for source verification, downloads the same run's identified artifact,
 and checks its digest before extracting the single executable.
 
-The signing job imports the certificate into a temporary Keychain, signs the
+The signing job imports the certificate into a temporary Keychain on its isolated
+runner and temporarily includes that Keychain in the user search list. Cleanup
+uses Apple’s supported deletion command to remove its Keychain and search-list
+entry, preserving other entries and additions made during signing. The initial
+search-list update is not atomic, so the job must not share its runner with
+another search-list writer. It signs the
 executable with hardened runtime and a secure timestamp, and checks its Apple
 certificate chain, Team ID, and application identifier. It submits the signed
 executable to Apple's notary service and requires an `Accepted` result and a

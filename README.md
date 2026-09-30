@@ -11,6 +11,9 @@ terminal, or hand it one task at a time from another agent or your own code.
 **Status:** [Latest release](https://github.com/hraness/xcb/releases/latest)
 for macOS ARM64, Linux x86_64 and ARM64, and Windows x86_64; other hosts build from source. MIT licensed.
 
+This guide follows the current source build. Unreleased commands require a
+source build until they appear in the [release notes](https://github.com/hraness/xcb/releases/latest).
+
 [Site](https://xcb.sh) · [Docs](https://xcb.sh/docs) ·
 [Getting started](https://xcb.sh/docs/getting-started) ·
 [Route contract](docs/route.md) · [TypeScript SDK](docs/sdk.md) ·
@@ -166,6 +169,14 @@ exact SHA-256, before it runs anything. `xcb doctor` shows what it found.
 
 [How routing works](https://xcb.sh/docs/how-routing-works) covers each step.
 
+Tasks that require an existing signed-in browser stay with Codex and prefer
+Astra, including after a retry or handoff. Use `xcb run --signed-in-browser`
+to make that requirement explicit. `xcb tools setup-computer` connects the
+installed desktop computer-use plugin on macOS; shared MCP servers can be
+connected for every provider. `xcb tools setup-browser` connects Claude's
+Chrome extension for Codex, Claude, and Devin. See
+[browser and shared tools](docs/tools.md).
+
 ## Everyday commands
 
 ```sh
@@ -187,7 +198,7 @@ command, setting, and exit code.
 
 ## Limits
 
-- **Tools:** providers work through xcb's file tools, without their own shells or plugins, so a task can do less than in the provider's own CLI.
+- **Tools:** providers use xcb's workspace tools and registered host MCP servers. Native shells and unrelated provider plugins remain unavailable; see [browser and shared tools](docs/tools.md).
 - **Tests and builds:** the [command runner](docs/command-runner.md) is an offline Linux VM on macOS ARM64; Git is read-only there, and native macOS builds can't run.
 - **Concurrency:** each account runs one provider turn at a time, and tasks in the same project folder take turns.
 - **Remote devices:** `xcb link` needs a relay deployed from this repository's `convex/` folder ([remote operations](docs/remote-operations.md)).
@@ -195,7 +206,7 @@ command, setting, and exit code.
 
 ## Compared with
 
-- **Claude Code, Codex, or the Devin CLI alone:** enough when one subscription covers your work, and you keep all of the tool's built-in tools, MCP servers, and plugins. In an xcb run, xcb's sandboxed file tools, and on macOS its offline command runner, replace them.
+- **Claude Code, Codex, or the Devin CLI alone:** enough when one subscription covers your work, and you keep all of the tool's built-in tools, MCP servers, and plugins. xcb supplies workspace tools, its offline command runner on macOS, and registered host tool servers across providers.
 - **Account switchers such as [claude-swap](https://github.com/realiti4/claude-swap):** change which login Claude Code uses. xcb picks an account for each task across Claude, Codex, and Devin, and sandboxes each run.
 - **[Claude Code Router](https://xcb.sh/compare/claude-code-router) and [OpenRouter](https://xcb.sh/compare/openrouter):** send each API request to a provider or model you choose, usually paid per token. xcb never touches API traffic; it routes whole tasks to subscriptions you already pay for.
 - **[Conductor](https://xcb.sh/compare/conductor) and Claude Squad:** give each agent a Git worktree and a merge flow. xcb has no worktree or pull request flow.

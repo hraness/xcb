@@ -148,9 +148,48 @@ impl Message {
     }
 }
 
+/// Explicit user route restrictions; automatic choices are not pins.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoutePins {
+    pub provider: Option<crate::Provider>,
+    pub account: Option<Id>,
+    pub model: Option<String>,
+}
+impl RoutePins {
+    pub fn is_empty(&self) -> bool {
+        self.provider.is_none() && self.model.is_none() && self.account.is_none()
+    }
+}
+
+/// Hard execution capabilities; once required they survive turns and reroutes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskRequirements {
+    #[serde(default)]
+    pub signed_in_browser: bool,
+}
+impl TaskRequirements {
+    pub fn is_empty(&self) -> bool {
+        !self.signed_in_browser
+    }
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            signed_in_browser: self.signed_in_browser || other.signed_in_browser,
+        }
+    }
+    pub fn allows(self, provider: crate::Provider) -> bool {
+        !self.signed_in_browser || provider == crate::Provider::Codex
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
+    #[serde(default, skip_serializing_if = "RoutePins::is_empty")]
+    pub route_pins: RoutePins,
+    #[serde(default, skip_serializing_if = "TaskRequirements::is_empty")]
+    pub requirements: TaskRequirements,
     pub id: Id,
     pub account: Id,
     pub model: ModelChoice,
