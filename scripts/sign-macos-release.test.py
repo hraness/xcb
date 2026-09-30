@@ -10,6 +10,7 @@ from pathlib import Path
 import stat
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -35,6 +36,8 @@ class SigningTests(unittest.TestCase):
         self.binary = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0) + b"not executable"
         self.native_archive()
         self.calls = []
+        self.original_search_list = [str(self.root / "existing user.keychain-db")]
+        self.search_list = self.original_search_list.copy()
         self.status = "Accepted"
         self.wait_id = UUID
         self.metadata = ("Identifier=dev.hraness.xcb\nTeamIdentifier=" + TEAM + "\n"
@@ -79,7 +82,17 @@ class SigningTests(unittest.TestCase):
             for path in (self.work / "credentials").iterdir():
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         if "find-identity" in args:
+            self.assertIn(args[-1], self.search_list)
             return f'  1) {"A" * 40} "Developer ID Application: Example ({self.identity_team})"\n'
+        if "list-keychains" in args:
+            if "-s" in args:
+                self.search_list = args[args.index("-s") + 1:]
+            return "\n".join(json.dumps(path) for path in self.search_list)
+        if "delete-keychain" in args:
+            self.search_list = [path for path in self.search_list if path != args[-1]]
+        for option in ("--requirements", "--test-requirement"):
+            if option in args:
+                self.assertTrue(args[args.index(option) + 1].startswith("="))
         if "--display" in args:
             return self.metadata
         if "notarytool" in args:
@@ -114,6 +127,7 @@ class SigningTests(unittest.TestCase):
         removed = next(i for i, args in enumerate(self.calls) if "delete-keychain" in args)
         self.assertLess(notarized, removed)
         self.assertFalse(self.work.exists())
+        self.assertEqual(self.search_list, self.original_search_list)
         self.assertTrue(all(args[0] in ("/usr/bin/security", "/usr/bin/codesign", "/usr/bin/xcrun") for args in self.calls))
         receipt = json.loads((self.root / "xcb-apple-notarization.json").read_text())
         self.assertEqual(receipt["submissionId"], UUID)
@@ -127,6 +141,7 @@ class SigningTests(unittest.TestCase):
             self.sign()
         self.assertFalse(self.output.exists())
         self.assertFalse(self.work.exists())
+        self.assertEqual(self.search_list, self.original_search_list)
         self.assertTrue(any("delete-keychain" in args for args in self.calls))
         receipt = json.loads((self.root / "xcb-apple-notarization.json").read_text())
         self.assertEqual(receipt["submissionId"], UUID)
@@ -361,6 +376,40 @@ class ToolBoundaryTests(unittest.TestCase):
         with patch.object(signing.subprocess, "run", return_value=result):
             with self.assertRaisesRegex(signing.SigningError, "^Apple tool failed: security$"):
                 signing.run(["/usr/bin/security", "-p", "private"])
+
+
+@unittest.skipUnless(sys.platform == "darwin", "requires Apple's actual requirement parser")
+class NativeRequirementTests(unittest.TestCase):
+    def test_literal_source_is_parsed_and_wrong_publisher_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="xcb-native-requirement-") as directory:
+            root = Path(directory)
+            source = root / "fixture.c"
+            binary = root / "fixture"
+            source.write_text("int main(void) { return 0; }\n")
+            subprocess.run(["/usr/bin/xcrun", "clang", str(source), "-o", str(binary)],
+                           check=True, capture_output=True, timeout=30)
+            requirement = 'identifier "dev.hraness.xcb"'
+            signed = subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-",
+                                     "--identifier", "dev.hraness.xcb", "--requirements",
+                                     "=designated => " + requirement, str(binary)],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(signed.returncode, 0, signed.stderr)
+            for predicate, expected in ((requirement, 0), (signing.apple_requirement(), 1)):
+                verified = subprocess.run(["/usr/bin/codesign", "--verify", "--strict",
+                                           "--test-requirement", "=" + predicate, str(binary)],
+                                          capture_output=True, text=True, timeout=30)
+                if expected == 0:
+                    self.assertEqual(verified.returncode, 0, verified.stderr)
+                else:
+                    self.assertNotEqual(verified.returncode, 0)
+                    self.assertIn("failed to satisfy specified code requirement", verified.stderr.lower())
+                self.assertNotIn("No such file", verified.stderr)
+            # Without '=', codesign treats source as a filename. This is the
+            # native failure that the mocked verifier used to conceal.
+            filename = subprocess.run(["/usr/bin/codesign", "--verify", "--test-requirement",
+                                       requirement, str(binary)], capture_output=True,
+                                      text=True, timeout=30)
+            self.assertNotEqual(filename.returncode, 0)
 
 
 if __name__ == "__main__":

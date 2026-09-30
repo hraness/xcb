@@ -29,7 +29,7 @@ verify_macos_release_signature() {
   # downloaded bytes; notarization is checked by the release pipeline so an
   # install does not depend on Apple's network availability.
   requirement="anchor apple generic and identifier \"$apple_identifier\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$apple_team_id\""
-  /usr/bin/codesign --verify --strict --all-architectures --test-requirement "$requirement" "$1" \
+  /usr/bin/codesign --verify --strict --all-architectures --test-requirement "=$requirement" "$1" \
     || fail "release does not have the required Apple Developer ID signature"
 }
 sha256() {
