@@ -37,9 +37,18 @@ and installs `~/.local/bin/xcb`:
 curl -fsSL https://xcb.sh/install.sh | sh
 ```
 
-`xcb upgrade` installs later releases the same way. `XCB_VERSION` installs one
-exact version, `XCB_INSTALL_PREFIX` replaces `~/.local`, and `XCB_ADD_PATH=yes`
-adds the `bin` folder to your shell profile.
+New release installs update automatically before an interactive `xcb`, `chat`,
+`resume`, `run`, or `doctor` command, at most once a day and only when no other
+xcb command or service is using the installation. Run `xcb update disable` to
+turn this off, or `xcb update enable --policy notify` for notices only. Existing
+saved preferences stay in force. `HRANESS_NO_UPDATE=1`, CI, JSON output, and
+noninteractive commands skip automatic updates.
+
+`xcb upgrade` installs the latest release manually. `XCB_VERSION` installs and
+pins one exact version, `XCB_INSTALL_PREFIX` replaces `~/.local`, and
+`XCB_ADD_PATH=yes` adds the `bin` folder to your shell profile. Source,
+package-manager, and older installs without a checksum-bound install record do
+not self-update; rerun the release installer to create a supported install.
 
 ### Windows
 
@@ -218,5 +227,7 @@ command, setting, and exit code.
 The name xcb is short for Excalibur. xcb was formerly AgentMixer: `xcb accounts import-agentmixer --source <path>`
 copies one Claude credential ([migrating](docs/compatibility.md#migrating-from-agentmixer)).
 The [compatibility reference](docs/compatibility.md) covers the TypeScript
-package and its `xcb-compat` CLI. [Contributing](CONTRIBUTING.md) ·
+package and its `xcb-compat` CLI. Supported Unix Bun/npm global copies update
+before interactive work; `xcb-compat update disable` turns that off. SDK imports
+never update. [Contributing](CONTRIBUTING.md) ·
 [Security](SECURITY.md) · [MIT license](LICENSE)

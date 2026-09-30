@@ -9,6 +9,8 @@ use crate::{Error, Result, now_ms, private};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    fs::OpenOptions,
+    io::Read,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -71,6 +73,22 @@ struct Release {
 
 #[derive(Debug, Deserialize)]
 struct InstallManifest {
+    #[serde(default)]
+    version: u32,
+    #[serde(rename = "installMethod", default)]
+    method: String,
+    #[serde(default)]
+    channel: String,
+    #[serde(rename = "sourceRoot", default)]
+    source_root: String,
+    #[serde(rename = "versionString", default)]
+    version_string: String,
+    #[serde(rename = "binarySha256", default)]
+    binary_digest: String,
+    #[serde(rename = "helperSha256", default)]
+    helper_digest: String,
+    #[serde(rename = "versionPinned", default)]
+    pinned: Option<bool>,
     #[serde(rename = "helperPath")]
     helper_path: PathBuf,
     #[serde(rename = "prefix")]
@@ -98,12 +116,23 @@ fn state_path(root: &Path) -> PathBuf {
 }
 
 pub fn load(root: &Path) -> Result<State> {
+    load_with(root, || {
+        verified_install(root, env!("CARGO_PKG_VERSION"), false).is_ok()
+    })
+}
+
+fn load_with(root: &Path, eligible: impl FnOnce() -> bool) -> Result<State> {
     match private::read(&state_path(root), 16 * 1024) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|_| Error::Unavailable("update state is incompatible with this xcb build")),
-        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(State::default())
-        }
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(State {
+            policy: if eligible() {
+                Policy::Auto
+            } else {
+                Policy::Notify
+            },
+            ..State::default()
+        }),
         Err(error) => Err(error),
     }
 }
@@ -121,13 +150,15 @@ fn save(root: &Path, state: &State) -> Result<()> {
 }
 
 fn version_tuple(version: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = version.strip_prefix('v').unwrap_or(version).split('.');
+    let version = version.strip_prefix('v').unwrap_or(version);
+    let mut parts = version.split('.');
     let tuple = (
         parts.next()?.parse().ok()?,
         parts.next()?.parse().ok()?,
         parts.next()?.parse().ok()?,
     );
-    parts.next().is_none().then_some(tuple)
+    (parts.next().is_none() && format!("{}.{}.{}", tuple.0, tuple.1, tuple.2) == version)
+        .then_some(tuple)
 }
 
 /// The release archive's extension: a zip on Windows, a gzipped tar elsewhere.
@@ -212,6 +243,9 @@ fn no_platform_build(version: Option<&str>) -> Error {
 }
 
 fn release_from_value(value: &Value) -> Option<Release> {
+    if !value.get("immutable")?.as_bool()? {
+        return None;
+    }
     let version = stable_version(value)?;
     let asset = platform_asset(&version);
     value
@@ -226,11 +260,10 @@ fn release_from_value(value: &Value) -> Option<Release> {
 }
 
 fn fetch_release_metadata(url: &str) -> Result<Value> {
-    let output = Command::new("curl")
+    let mut child = Command::new("curl")
         .args([
             "--fail",
             "--silent",
-            "--show-error",
             "--location",
             "--max-time",
             "8",
@@ -238,28 +271,43 @@ fn fetch_release_metadata(url: &str) -> Result<Value> {
             "3",
             "--proto",
             "=https",
+            "--proto-redir",
+            "=https",
             "--user-agent",
             concat!("xcb-update/", env!("CARGO_PKG_VERSION")),
             url,
         ])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|error| {
             Error::Io(std::io::Error::new(
                 error.kind(),
                 "xcb update needs curl on PATH",
             ))
         })?;
-    if !output.status.success() {
-        return Err(Error::Io(std::io::Error::other(
-            "GitHub release lookup failed; retry xcb update check later",
-        )));
-    }
-    if output.stdout.len() > MAX_RESPONSE {
-        return Err(Error::Io(std::io::Error::other(
+    let mut bytes = Vec::new();
+    let read = child
+        .stdout
+        .take()
+        .ok_or(Error::PrivateState)?
+        .take(MAX_RESPONSE as u64 + 1)
+        .read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() > MAX_RESPONSE {
+        let _ = child.kill();
+        let _ = child.wait();
+        read?;
+        return Err(Error::Unavailable(
             "GitHub release response exceeded the xcb update limit",
-        )));
+        ));
     }
-    serde_json::from_slice(&output.stdout).map_err(|_| {
+    if !child.wait()?.success() {
+        return Err(Error::Unavailable(
+            "GitHub release lookup failed; retry xcb update check later",
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|_| {
         Error::Io(std::io::Error::other(
             "GitHub returned invalid release metadata",
         ))
@@ -345,6 +393,7 @@ pub fn check(root: &Path, current: &str, quiet: bool) -> Result<Status> {
     let latest_version = latest.as_ref().map(|release| release.version.clone());
     state.last_check_ms = now_ms();
     state.available_version = latest_version.clone();
+    private::directory(root)?;
     save(root, &state)?;
     let release_available = latest
         .as_ref()
@@ -379,13 +428,22 @@ pub fn check(root: &Path, current: &str, quiet: bool) -> Result<Status> {
 }
 
 pub fn set_policy(root: &Path, policy: Policy) -> Result<State> {
+    if policy == Policy::Auto {
+        verified_install(root, env!("CARGO_PKG_VERSION"), false)?;
+    }
     let mut state = load(root)?;
     state.policy = policy;
+    private::directory(root)?;
     save(root, &state)?;
     Ok(state)
 }
 
 pub fn should_check(root: &Path) -> Result<bool> {
+    if !automatic_allowed(true, false)
+        || verified_install(root, env!("CARGO_PKG_VERSION"), false).is_err()
+    {
+        return Ok(false);
+    }
     let state = load(root)?;
     Ok(state.policy != Policy::Disable
         && now_ms().saturating_sub(state.last_check_ms) >= CHECK_INTERVAL_MS)
@@ -416,13 +474,270 @@ fn find_manifest(root: &Path) -> Result<Option<(PathBuf, InstallManifest)>> {
     Ok(None)
 }
 
-fn manifest(root: &Path) -> Result<InstallManifest> {
-    find_manifest(root)?
-        .map(|(_, manifest)| manifest)
-        .ok_or(Error::Unavailable(reinstall!(
-            "global install metadata is missing",
-            " to enable xcb upgrade"
-        )))
+/// Upgrade authority comes only from the record next to this executable.
+/// A state override must never make one xcb binary replace another installation.
+fn verified_install(root: &Path, current: &str, allow_pin: bool) -> Result<InstallManifest> {
+    verified_install_at(root, current, allow_pin, &std::env::current_exe()?)
+}
+
+fn verified_install_at(
+    _root: &Path,
+    current: &str,
+    allow_pin: bool,
+    executable: &Path,
+) -> Result<InstallManifest> {
+    let prefix = executable
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(Error::PrivateState)?;
+    let record = prefix.join("share/xcb/install.json");
+    let bytes = private::read(&record, 16 * 1024).map_err(|_| {
+        Error::Unavailable(reinstall!(
+            "this executable has no verified release install record"
+        ))
+    })?;
+    let install: InstallManifest =
+        serde_json::from_slice(&bytes).map_err(|_| Error::PrivateState)?;
+    let (binary, helper) = install_layout(&install.prefix);
+    if install.version != 2
+        || install.method != "release"
+        || !install.source_root.is_empty()
+        || install.channel != "stable"
+        || install.version_string != current
+        || install.pinned.is_none()
+        || (!allow_pin && install.pinned != Some(false))
+        || install.binary_path.as_ref() != Some(&binary)
+        || executable != binary
+        || install.helper_path != helper
+        || install.prefix != prefix
+        || xcb_core::canonical(prefix)? != prefix
+        || xcb_core::canonical(&binary)? != binary
+        || xcb_core::canonical(&helper)? != helper
+        || prefix.components().any(|part| {
+            matches!(
+                part.as_os_str().to_str(),
+                Some(".cargo" | "Cellar" | "Homebrew" | "target" | "node_modules" | "providers")
+            )
+        })
+    {
+        return Err(Error::Unavailable(reinstall!(
+            "this is a source, pinned, package-managed, or mismatched installation"
+        )));
+    }
+    for (path, expected) in [
+        (&binary, &install.binary_digest),
+        (&helper, &install.helper_digest),
+    ] {
+        let facts = crate::os::lstat(path)?;
+        if !facts.file
+            || !facts.owned
+            || !facts.unshared_write
+            || facts.links != 1
+            || expected.len() != 64
+            || !expected
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            || crate::process::executable_digest(path)? != *expected
+        {
+            return Err(Error::Unavailable(reinstall!(
+                "installed executable or helper changed"
+            )));
+        }
+    }
+    Ok(install)
+}
+
+fn usage_lock(install: &InstallManifest, exclusive: bool) -> Result<private::ExclusiveLock> {
+    // The installer creates this file once; commands never replace its inode.
+    let path = install.prefix.join("share/xcb/update-use.lock");
+    let file = crate::os::no_follow(OpenOptions::new().read(true).write(true), true).open(path)?;
+    private::check_file(&file, 4096)?;
+    let result = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    match result {
+        Ok(()) => Ok(private::ExclusiveLock::held(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Error::Conflict(
+            "another xcb command or service is using this install; retry after it exits",
+        )),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+/// Hold the running installation throughout ordinary commands, including
+/// supervisors and protocol helpers. Source/package-managed copies do not enroll.
+pub fn hold_installation(root: &Path) -> Result<Option<private::ExclusiveLock>> {
+    hold_installation_at(root, env!("CARGO_PKG_VERSION"), &std::env::current_exe()?)
+}
+
+fn hold_installation_at(
+    root: &Path,
+    current: &str,
+    executable: &Path,
+) -> Result<Option<private::ExclusiveLock>> {
+    let prefix = executable
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(Error::PrivateState)?;
+    let bytes = match private::read(&prefix.join("share/xcb/install.json"), 16 * 1024) {
+        Ok(bytes) => bytes,
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let record: InstallManifest =
+        serde_json::from_slice(&bytes).map_err(|_| Error::PrivateState)?;
+    if record.method != "release" || record.version < 2 {
+        return Ok(None);
+    }
+    // Bind the stable lock location before validating the changing binary and
+    // manifest pair. A replacement in progress must never become an opt-out.
+    if record.prefix != prefix || install_layout(prefix).0 != executable {
+        return Err(Error::Unavailable(
+            "the release install record names another installation",
+        ));
+    }
+    let held = usage_lock(&record, false)?;
+    if update_guard_present(&record)? {
+        return Err(Error::Unavailable(reinstall!(
+            "an xcb update is unfinished; wait for its installer to finish"
+        )));
+    }
+    verified_install_at(root, current, true, executable)?;
+    Ok(Some(held))
+}
+
+fn update_guard_path(install: &InstallManifest) -> PathBuf {
+    install.prefix.join("share/xcb/update-in-progress")
+}
+
+fn update_guard_present(install: &InstallManifest) -> Result<bool> {
+    match private::read(&update_guard_path(install), 128) {
+        Ok(_) => Ok(true),
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn clear_update_guard(install: &InstallManifest, token: &str) -> Result<()> {
+    let path = update_guard_path(install);
+    match private::read(&path, 128) {
+        Ok(bytes) if bytes == format!("{token}\n").as_bytes() => {
+            std::fs::remove_file(path)?;
+            private::sync_directory(&install.prefix.join("share/xcb"))
+        }
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(Error::Conflict("the update-in-progress record changed")),
+        Err(error) => Err(error),
+    }
+}
+
+fn idle_runtime(root: &Path) -> Result<Vec<private::ExclusiveLock>> {
+    let mut locks = Vec::new();
+    // These locks also cover supervisors installed before update-use.lock existed.
+    for name in ["supervisor.lock", "service-watchdog.lock"] {
+        let path = root.join("managed").join(name);
+        let file = match crate::os::no_follow(OpenOptions::new().read(true).write(true), true)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        private::check_file(&file, 4096)?;
+        match file.try_lock() {
+            Ok(()) => locks.push(private::ExclusiveLock::held(file)),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(Error::Conflict(
+                    "xcb still has an active supervisor or service; let it finish before updating",
+                ));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
+    Ok(locks)
+}
+
+pub fn automatic_allowed(interactive: bool, as_json: bool) -> bool {
+    automatic_allowed_with(interactive, as_json, |key| std::env::var(key).ok())
+}
+
+fn automatic_allowed_with(
+    interactive: bool,
+    as_json: bool,
+    env: impl Fn(&str) -> Option<String>,
+) -> bool {
+    let enabled = |key| {
+        env(key)
+            .is_some_and(|value| !matches!(value.to_ascii_lowercase().as_str(), "" | "0" | "false"))
+    };
+    interactive
+        && !as_json
+        && ![
+            "HRANESS_NO_UPDATE",
+            "XCB_NO_UPDATE",
+            "CI",
+            "XCB_UPDATE_REENTRY",
+        ]
+        .iter()
+        .any(|key| enabled(key))
+        && env("XCB_VERSION").is_none()
+        && !env("HRANESS_AUDIENCE").is_some_and(|value| value != "human")
+}
+
+pub fn automatic_install_supported(root: &Path) -> bool {
+    verified_install(root, env!("CARGO_PKG_VERSION"), false).is_ok()
+}
+
+/// Run before application work, under the same exclusive install lock as a
+/// manual upgrade. Metadata failure is harmless; a changed image is re-entered.
+pub fn automatic(root: &Path, current: &str) -> Result<Option<UpgradeResult>> {
+    let Ok(install) = verified_install(root, current, false) else {
+        return Ok(None);
+    };
+    let state = match load(root) {
+        Ok(state) => state,
+        Err(_) => return Ok(None),
+    };
+    if state.policy == Policy::Disable
+        || now_ms().saturating_sub(state.last_check_ms) < CHECK_INTERVAL_MS
+    {
+        return Ok(None);
+    }
+    let Ok(_using) = usage_lock(&install, true) else {
+        return Ok(None);
+    };
+    let Ok(_idle) = idle_runtime(root) else {
+        return Ok(None);
+    };
+    private::directory(root)?;
+    let checked = match check(root, current, false) {
+        Ok(checked) => checked,
+        Err(error) => {
+            eprintln!("xcb: automatic update check skipped: {error}");
+            return Ok(None);
+        }
+    };
+    if state.policy != Policy::Auto || !checked.release_available {
+        return Ok(None);
+    }
+    // The locks stay held through the second identity check and atomic swap.
+    match upgrade_locked(
+        root,
+        current,
+        checked.latest.as_deref(),
+        false,
+        false,
+        false,
+    ) {
+        Ok(result) => Ok(Some(result)),
+        Err(error) if verified_install(root, current, false).is_ok() => {
+            eprintln!("xcb: automatic update skipped; installed files are unchanged: {error}");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// The install `install-native.sh` recorded, if any. Paths must be the
@@ -483,6 +798,31 @@ pub fn upgrade(
     if let Some(requested) = requested {
         check_downgrade(current, requested, allow_downgrade)?;
     }
+    let install = verified_install(root, current, true)?;
+    let _using = usage_lock(&install, true)?;
+    let _idle = idle_runtime(root)?;
+    upgrade_locked(
+        root,
+        current,
+        requested,
+        quiet,
+        allow_downgrade,
+        requested.is_some(),
+    )
+}
+
+fn upgrade_locked(
+    root: &Path,
+    current: &str,
+    requested: Option<&str>,
+    quiet: bool,
+    allow_downgrade: bool,
+    pin: bool,
+) -> Result<UpgradeResult> {
+    let install = verified_install(root, current, true)?;
+    if let Some(requested) = requested {
+        check_downgrade(current, requested, allow_downgrade)?;
+    }
     let release = match requested {
         Some(requested) => {
             requested_release_with(requested, fetch_release_metadata)?.ok_or_else(|| {
@@ -504,7 +844,11 @@ pub fn upgrade(
             }
         }
     };
-    if requested.is_none() && version_tuple(&release.version) <= version_tuple(current) {
+    check_downgrade(current, &release.version, allow_downgrade)?;
+    if requested.is_none()
+        && version_tuple(&release.version) <= version_tuple(current)
+        && install.pinned != Some(true)
+    {
         if !quiet {
             eprintln!("xcb: current {current} is already up to date.");
         }
@@ -515,7 +859,6 @@ pub fn upgrade(
             changed: false,
         });
     }
-    let install = manifest(root)?;
     let metadata = std::fs::symlink_metadata(&install.helper_path)
         .map_err(|_| Error::Unavailable(reinstall!("the recorded xcb installer is missing")))?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -556,18 +899,46 @@ pub fn upgrade(
     command
         .env("XCB_VERSION", &release.version)
         .env("XCB_INSTALL_PREFIX", &install.prefix)
-        .env("XCB_ADD_PATH", "no");
+        .env("XCB_ADD_PATH", "no")
+        .env("XCB_GITHUB", "hraness/xcb")
+        .env("XCB_INSTALL_PINNED", if pin { "true" } else { "false" })
+        .env("HRANESS_NO_UPDATE", "1")
+        .env_remove("XCB_RELEASE_BASE_URL");
     // JSON callers own stdout. Keep installer diagnostics on stderr without
     // buffering an unbounded download/build log in memory.
     if quiet {
         command.stdout(Stdio::from(std::io::stderr()));
     }
-    let status = command.status()?;
-    if !status.success() {
-        return Err(Error::Io(std::io::Error::other(format!(
-            "xcb installer exited with {status}"
-        ))));
+    // This marker outlives an abruptly killed updater parent. The installer
+    // removes its matching token only after publishing the complete install.
+    // Until then ordinary commands refuse even if the parent's OS lock is gone.
+    let token = format!("xcb-update-v1:{}", uuid::Uuid::new_v4().simple());
+    private::create(
+        &update_guard_path(&install),
+        format!("{token}\n").as_bytes(),
+    )?;
+    command.env("XCB_UPDATE_GUARD", &token);
+    let status = command.status();
+    if !matches!(&status, Ok(status) if status.success()) {
+        if verified_install(root, current, true).is_ok() {
+            clear_update_guard(&install, &token)?;
+        }
+        return Err(match status {
+            Ok(status) => Error::Io(std::io::Error::other(format!(
+                "xcb installer exited with {status}"
+            ))),
+            Err(error) => error.into(),
+        });
     }
+    let binary = install.binary_path.as_deref().ok_or(Error::PrivateState)?;
+    let installed = verified_install_at(root, &release.version, true, binary)?;
+    verify_installed_version(binary, &release.version)?;
+    if crate::process::executable_digest(binary)? != installed.binary_digest {
+        return Err(Error::Unavailable(
+            "installed xcb changed during version verification",
+        ));
+    }
+    clear_update_guard(&install, &token)?;
     if !quiet {
         eprintln!(
             "xcb: upgraded to {}; restart open terminals and run xcb doctor.",
@@ -580,6 +951,35 @@ pub fn upgrade(
         current: release.version,
         changed: true,
     })
+}
+
+fn verify_installed_version(binary: &Path, expected: &str) -> Result<()> {
+    let binary = binary.to_owned();
+    // Reuse the runtime's bounded process capture without nesting its async
+    // executor in the CLI's existing executor. No product state is opened.
+    let bytes = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let mut command = tokio::process::Command::new(binary);
+        command
+            .arg("--version")
+            .env("HRANESS_NO_UPDATE", "1")
+            .stdin(Stdio::null());
+        runtime.block_on(crate::process::capture(
+            command,
+            256,
+            std::time::Duration::from_secs(8),
+        ))
+    })
+    .join()
+    .map_err(|_| Error::Unavailable("installed xcb version verification failed"))??;
+    if std::str::from_utf8(&bytes).ok().map(str::trim) != Some(format!("xcb {expected}").as_str()) {
+        return Err(Error::Unavailable(
+            "installed executable does not report the requested xcb version",
+        ));
+    }
+    Ok(())
 }
 
 fn xml_escape(value: &str) -> String {
@@ -855,12 +1255,235 @@ pub fn install_scheduler(binary: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn owned_install() -> (tempfile::TempDir, PathBuf, serde_json::Value) {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let prefix = xcb_core::canonical(temp.path()).unwrap();
+        let share = private::directory(&prefix.join("share/xcb")).unwrap();
+        std::fs::create_dir_all(prefix.join("bin")).unwrap();
+        let (binary, helper) = install_layout(&prefix);
+        for path in [&binary, &helper] {
+            std::fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        private::create(&share.join("update-use.lock"), b"").unwrap();
+        let record = serde_json::json!({
+            "version": 2, "installMethod": "release", "channel": "stable",
+            "versionString": "0.15.1", "sourceRoot": "", "versionPinned": false,
+            "prefix": prefix, "binaryPath": binary, "helperPath": helper,
+            "binarySha256": crate::process::executable_digest(&binary).unwrap(),
+            "helperSha256": crate::process::executable_digest(&helper).unwrap(),
+        });
+        write_manifest(&share, record.clone());
+        (temp, binary, record)
+    }
+
+    #[test]
+    fn automatic_checks_respect_scripts_ci_pins_and_opt_outs() {
+        let empty = |_: &str| None;
+        assert!(automatic_allowed_with(true, false, empty));
+        assert!(!automatic_allowed_with(false, false, empty));
+        assert!(!automatic_allowed_with(true, true, empty));
+        for (name, value) in [
+            ("CI", "true"),
+            ("HRANESS_NO_UPDATE", "1"),
+            ("XCB_NO_UPDATE", "1"),
+            ("XCB_UPDATE_REENTRY", "1"),
+            ("XCB_VERSION", "0.15.1"),
+            ("HRANESS_AUDIENCE", "agent"),
+        ] {
+            assert!(
+                !automatic_allowed_with(true, false, |key| (key == name).then(|| value.to_owned())),
+                "{name}"
+            );
+        }
+        assert!(automatic_allowed_with(true, false, |key| (key == "CI").then(|| "false".into())));
+    }
+
+    #[test]
+    fn auto_default_never_overwrites_saved_notify_or_disabled_preferences() {
+        let root = tempfile::tempdir().unwrap();
+        let root =
+            private::directory(&xcb_core::canonical(root.path()).unwrap().join("state")).unwrap();
+        assert_eq!(load_with(&root, || true).unwrap().policy, Policy::Auto);
+        assert_eq!(load_with(&root, || false).unwrap().policy, Policy::Notify);
+        assert!(
+            !root.join("update.json").exists(),
+            "reading the default writes nothing"
+        );
+        for policy in [Policy::Notify, Policy::Disable, Policy::Auto] {
+            save(
+                &root,
+                &State {
+                    policy,
+                    ..State::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                load_with(&root, || panic!("saved choice wins"))
+                    .unwrap()
+                    .policy,
+                policy
+            );
+        }
+        private::replace(
+            &root.join("update.json"),
+            b"{}",
+            &crate::digest(private::read(&root.join("update.json"), 16384).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            load_with(&root, || true).unwrap().policy,
+            Policy::Notify,
+            "legacy state stays notify"
+        );
+    }
+
+    #[test]
+    fn upgrade_identity_binds_method_version_paths_and_both_digests() {
+        let (_temp, binary, record) = owned_install();
+        let root = binary.parent().unwrap().parent().unwrap().join("share/xcb");
+        assert!(verified_install_at(&root, "0.15.1", false, &binary).is_ok());
+        for (key, value) in [
+            ("installMethod", serde_json::json!("source")),
+            ("installMethod", serde_json::json!("cargo")),
+            ("installMethod", serde_json::json!("homebrew")),
+            ("sourceRoot", serde_json::json!("/source/xcb")),
+            ("channel", serde_json::json!("preview")),
+            ("version", serde_json::json!(1)),
+            ("versionString", serde_json::json!("0.15.0")),
+            ("helperPath", serde_json::json!("/bin/sh")),
+            ("prefix", serde_json::json!("/tmp/foreign")),
+            ("binaryPath", serde_json::json!("/bin/xcb")),
+            ("binarySha256", serde_json::json!("0".repeat(64))),
+            ("helperSha256", serde_json::json!("0".repeat(64))),
+            ("versionPinned", serde_json::json!(true)),
+        ] {
+            let mut changed = record.clone();
+            changed[key] = value;
+            write_manifest(&root, changed);
+            assert!(
+                verified_install_at(&root, "0.15.1", false, &binary).is_err(),
+                "{key}"
+            );
+        }
+        write_manifest(&root, record.clone());
+        let other = private::directory(&root.join("foreign-state")).unwrap();
+        write_manifest(
+            &other,
+            serde_json::json!({"prefix":"/foreign", "helperPath":"/bin/sh"}),
+        );
+        assert!(
+            verified_install_at(&other, "0.15.1", false, &binary).is_ok(),
+            "state override cannot redirect install authority"
+        );
+        let mut pinned = record;
+        pinned["versionPinned"] = serde_json::json!(true);
+        write_manifest(&root, pinned);
+        assert!(
+            verified_install_at(&root, "0.15.1", true, &binary).is_ok(),
+            "manual exact-version updates still work"
+        );
+    }
+
+    #[test]
+    fn changed_or_symlinked_install_files_never_become_update_authority() {
+        let (_temp, binary, record) = owned_install();
+        let root = binary.parent().unwrap().parent().unwrap().join("share/xcb");
+        std::fs::write(&binary, "changed executable").unwrap();
+        assert!(verified_install_at(&root, "0.15.1", false, &binary).is_err());
+        std::fs::remove_file(&binary).unwrap();
+        std::os::unix::fs::symlink(record["helperPath"].as_str().unwrap(), &binary).unwrap();
+        assert!(verified_install_at(&root, "0.15.1", false, &binary).is_err());
+    }
+
+    #[test]
+    fn replacement_in_progress_cannot_skip_the_installation_lease() {
+        let (_temp, binary, mut record) = owned_install();
+        let root = binary.parent().unwrap().parent().unwrap().join("share/xcb");
+        let install = verified_install_at(&root, "0.15.1", false, &binary).unwrap();
+        let updating = usage_lock(&install, true).unwrap();
+        record["versionString"] = serde_json::json!("0.15.2");
+        write_manifest(&root, record);
+        assert!(
+            matches!(
+                hold_installation_at(&root, "0.15.1", &binary),
+                Err(Error::Conflict(_))
+            ),
+            "a temporarily mismatched record still respects the exclusive lock"
+        );
+        drop(updating);
+        assert!(
+            hold_installation_at(&root, "0.15.1", &binary).is_err(),
+            "an inconsistent release install never proceeds unprotected"
+        );
+    }
+
+    #[test]
+    fn unfinished_helper_stays_protected_after_its_parent_lock_is_released() {
+        let (_temp, binary, _) = owned_install();
+        let root = binary.parent().unwrap().parent().unwrap().join("share/xcb");
+        let install = verified_install_at(&root, "0.15.1", false, &binary).unwrap();
+        let updating = usage_lock(&install, true).unwrap();
+        let token = "xcb-update-v1:0123456789abcdef0123456789abcdef";
+        private::create(
+            &update_guard_path(&install),
+            format!("{token}\n").as_bytes(),
+        )
+        .unwrap();
+        drop(updating);
+        assert!(hold_installation_at(&root, "0.15.1", &binary).is_err());
+        assert!(clear_update_guard(&install, "another updater").is_err());
+        clear_update_guard(&install, token).unwrap();
+        assert!(
+            hold_installation_at(&root, "0.15.1", &binary)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn installed_version_is_checked_independently_of_the_manifest() {
+        let (_temp, binary, _) = owned_install();
+        std::fs::write(&binary, "#!/bin/sh\nprintf 'xcb 0.15.1\\n'\n").unwrap();
+        assert!(verify_installed_version(&binary, "0.15.1").is_ok());
+        assert!(verify_installed_version(&binary, "99.0.1").is_err());
+    }
+
+    #[test]
+    fn update_lock_excludes_active_commands_and_services() {
+        let (_temp, binary, _) = owned_install();
+        let root = binary.parent().unwrap().parent().unwrap().join("share/xcb");
+        let install = verified_install_at(&root, "0.15.1", false, &binary).unwrap();
+        let active = usage_lock(&install, false).unwrap();
+        assert!(usage_lock(&install, true).is_err());
+        drop(active);
+        let updating = usage_lock(&install, true).unwrap();
+        assert!(usage_lock(&install, false).is_err());
+        drop(updating);
+        assert!(usage_lock(&install, true).is_ok());
+        let managed = private::directory(&root.join("managed")).unwrap();
+        for name in ["supervisor.lock", "service-watchdog.lock"] {
+            private::create(&managed.join(name), b"").unwrap();
+            let active = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(managed.join(name))
+                .unwrap();
+            active.try_lock().unwrap();
+            assert!(idle_runtime(&root).is_err(), "{name}");
+            active.unlock().unwrap();
+            assert!(idle_runtime(&root).is_ok());
+        }
+    }
+
     #[test]
     fn explicit_versions_use_the_exact_tag_and_validate_its_assets() {
         let version = "0.4.0";
         let binary = platform_asset(version);
         let value = serde_json::json!({
-            "tag_name": "v0.4.0", "draft": false, "prerelease": false,
+            "tag_name": "v0.4.0", "draft": false, "prerelease": false, "immutable": true,
             "assets": [{"name": binary}, {"name": format!("{binary}.sha256")}]
         });
         let selected = requested_release_with("v0.4.0", |url| {
@@ -1056,7 +1679,7 @@ mod tests {
         let version = "0.5.0";
         let binary = platform_asset(version);
         let value = serde_json::json!({
-            "tag_name": "v0.5.0", "draft": false, "prerelease": false,
+            "tag_name": "v0.5.0", "draft": false, "prerelease": false, "immutable": true,
             "assets": [{"name": binary}, {"name": format!("{binary}.sha256")}]
         });
         assert_eq!(release_from_value(&value).unwrap().version, version);
@@ -1085,7 +1708,7 @@ mod tests {
     fn latest_tells_a_missing_platform_build_from_no_release() {
         let entry = |tag: &str, assets: &[String]| {
             serde_json::json!({
-                "tag_name": tag, "draft": false, "prerelease": false,
+                "tag_name": tag, "draft": false, "prerelease": false, "immutable": true,
                 "assets": assets.iter().map(|name| serde_json::json!({"name": name})).collect::<Vec<_>>(),
             })
         };
@@ -1125,9 +1748,25 @@ mod tests {
     }
 
     #[test]
+    fn mutable_releases_never_become_install_candidates() {
+        let version = "0.15.2";
+        let binary = platform_asset(version);
+        let mut value = serde_json::json!({
+            "tag_name": "v0.15.2", "draft": false, "prerelease": false,
+            "immutable": false,
+            "assets": [{"name": binary}, {"name": format!("{binary}.sha256")}]
+        });
+        assert!(release_from_value(&value).is_none());
+        value["immutable"] = serde_json::json!(true);
+        assert!(release_from_value(&value).is_some());
+    }
+
+    #[test]
     fn versions_are_strict_stable_semver() {
         assert_eq!(version_tuple("v1.2.3"), Some((1, 2, 3)));
         assert!(version_tuple("1.2").is_none());
         assert!(version_tuple("1.2.3-beta").is_none());
+        assert!(version_tuple("01.2.3").is_none());
+        assert!(version_tuple("1.+2.3").is_none());
     }
 }

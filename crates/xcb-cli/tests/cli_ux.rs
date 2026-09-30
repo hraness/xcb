@@ -848,7 +848,10 @@ fn update_policy_changes_without_installing_anything_to_turn_off() {
     // enable records the policy and names the timer to add instead of
     // failing.
     if cfg!(target_os = "linux") {
-        let output = sandbox.run(&["update", "enable"], &[("HRANESS_AUDIENCE", "human")]);
+        let output = sandbox.run(
+            &["update", "enable", "--policy", "notify"],
+            &[("HRANESS_AUDIENCE", "human")],
+        );
         assert_eq!(output.status.code(), Some(0), "{output:?}");
         assert_eq!(text(&output.stdout), "xcb updates: notify\n");
         assert!(
@@ -857,8 +860,16 @@ fn update_policy_changes_without_installing_anything_to_turn_off() {
         );
         let json = sandbox.run(&["--json", "update", "enable", "--policy", "auto"], &[]);
         let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-        assert_eq!(value["policy"], "auto");
-        assert_eq!(value["scheduled"], false);
+        assert!(
+            !json.status.success(),
+            "a source test executable cannot enable automatic installation"
+        );
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("verified release install record")
+        );
     }
 }
 
@@ -885,21 +896,29 @@ fn upgrading_to_an_older_release_needs_an_explicit_flag() {
 #[test]
 fn json_upgrade_reports_the_installed_release_without_installer_output_on_stdout() {
     let sandbox = Sandbox::new("upgrade-json");
-    let state = xcb_runtime::private::directory(&sandbox.state()).unwrap();
-    let installer = sandbox.root.join("install-fixture.sh");
+    let share = xcb_runtime::private::directory(&sandbox.root.join("share/xcb")).unwrap();
+    let installer = share.join("install-native.sh");
+    let binary = sandbox.root.join("bin/xcb");
+    std::fs::copy(env!("CARGO_BIN_EXE_xcb"), &binary).unwrap();
+    let replacement = "#!/bin/sh\nprintf 'xcb 99.0.1\\n'\n";
+    std::fs::write(sandbox.root.join("next-binary"), replacement).unwrap();
     sandbox.script(
         &installer,
-        "#!/bin/sh\n[ \"$XCB_VERSION\" = '99.0.1' ] || exit 42\n[ \"$XCB_ADD_PATH\" = no ] || exit 43\nprintf '%s\\n' \"$XCB_VERSION\" > \"$XCB_INSTALL_PREFIX/installed-version\"\nprintf 'installer fixture output\\n'\n",
+        "#!/bin/sh\n[ \"$XCB_VERSION\" = '99.0.1' ] || exit 42\n[ \"$XCB_ADD_PATH\" = no ] || exit 43\n[ \"$XCB_GITHUB\" = hraness/xcb ] || exit 45\nprintf '%s\\n' \"$XCB_VERSION\" > \"$XCB_INSTALL_PREFIX/installed-version\"\n/bin/cp \"$XCB_INSTALL_PREFIX/next-binary\" \"$XCB_INSTALL_PREFIX/bin/xcb-next\"\n/bin/chmod 755 \"$XCB_INSTALL_PREFIX/bin/xcb-next\"\n/bin/mv -f \"$XCB_INSTALL_PREFIX/bin/xcb-next\" \"$XCB_INSTALL_PREFIX/bin/xcb\"\n/bin/cp \"$XCB_INSTALL_PREFIX/next-record\" \"$XCB_INSTALL_PREFIX/share/xcb/install.json\"\nprintf 'installer fixture output\\n'\n",
     );
-    xcb_runtime::private::create(
-        &state.join("install.json"),
-        &serde_json::to_vec(&serde_json::json!({
-            "helperPath": installer,
-            "prefix": sandbox.root,
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    let record = serde_json::json!({
+        "version":2,"installMethod":"release","channel":"stable","sourceRoot":"",
+        "versionString":env!("CARGO_PKG_VERSION"),"versionPinned":false,
+        "prefix":sandbox.root,"helperPath":installer,"binaryPath":binary,
+        "binarySha256":xcb_runtime::process::executable_digest(&binary).unwrap(),
+        "helperSha256":xcb_runtime::process::executable_digest(&installer).unwrap(),
+    });
+    let mut next_record = record.clone();
+    next_record["versionString"] = serde_json::json!("99.0.1");
+    next_record["binarySha256"] = serde_json::json!(xcb_runtime::digest(replacement));
+    next_record["versionPinned"] = serde_json::json!(true);
+    std::fs::write(sandbox.root.join("next-record"), next_record.to_string()).unwrap();
+    xcb_runtime::private::create(&share.join("update-use.lock"), b"").unwrap();
     let os = if cfg!(target_os = "macos") {
         "darwin"
     } else {
@@ -907,7 +926,7 @@ fn json_upgrade_reports_the_installed_release_without_installer_output_on_stdout
     };
     let asset = format!("xcb-99.0.1-{os}-{}.tar.gz", std::env::consts::ARCH);
     let release = serde_json::json!({
-        "tag_name": "v99.0.1", "draft": false, "prerelease": false,
+        "tag_name": "v99.0.1", "draft": false, "prerelease": false, "immutable": true,
         "assets": [{"name": asset}, {"name": format!("{asset}.sha256")}],
     });
     sandbox.script(
@@ -916,11 +935,65 @@ fn json_upgrade_reports_the_installed_release_without_installer_output_on_stdout
             "#!/bin/sh\nfor arg do url=\"$arg\"; done\n[ \"$url\" = 'https://api.github.com/repos/hraness/xcb/releases/tags/v99.0.1' ] || exit 44\nprintf '%s\\n' '{release}'\n"
         ),
     );
+    // Clearing an exact-version pin must not silently downgrade to an older latest.
+    let mut pinned = record.clone();
+    pinned["versionPinned"] = serde_json::json!(true);
+    let manifest = share.join("install.json");
+    std::fs::write(&manifest, pinned.to_string()).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let old_asset = format!("xcb-0.0.1-{os}-{}.tar.gz", std::env::consts::ARCH);
+    let old_release = serde_json::json!([{
+        "tag_name":"v0.0.1","draft":false,"prerelease":false,"immutable":true,
+        "assets":[{"name":old_asset},{"name":format!("{old_asset}.sha256")}]
+    }]);
+    let curl = sandbox.root.join("bin/curl");
+    let original_curl = std::fs::read_to_string(&curl).unwrap();
+    sandbox.script(
+        &curl,
+        &format!("#!/bin/sh\nprintf '%s\\n' '{old_release}'\n"),
+    );
+    let output = Command::new(&binary)
+        .env_clear()
+        .env("HOME", sandbox.root.join("home"))
+        .env("PATH", sandbox.root.join("bin"))
+        .arg("--state")
+        .arg(sandbox.state())
+        .args(["--json", "upgrade"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "a pinned install must not downgrade: {output:?}"
+    );
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        error["error"]["next"]
+            .as_str()
+            .unwrap()
+            .contains("--allow-downgrade"),
+        "{error}"
+    );
+    assert!(!sandbox.root.join("installed-version").exists());
+    sandbox.script(&curl, &original_curl);
     for args in [
         &["--json", "upgrade", "99.0.1"][..],
         &["--json", "update", "install", "v99.0.1"],
     ] {
-        let output = sandbox.run(args, &[]);
+        std::fs::copy(env!("CARGO_BIN_EXE_xcb"), &binary).unwrap();
+        let path = share.join("install.json");
+        std::fs::write(&path, record.to_string()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let output = Command::new(&binary)
+            .env_clear()
+            .env("HOME", sandbox.root.join("home"))
+            .env("PATH", sandbox.root.join("bin"))
+            .env("XCB_GITHUB", "foreign/blocked")
+            .arg("--state")
+            .arg(sandbox.state())
+            .args(args)
+            .output()
+            .unwrap();
         assert!(output.status.success(), "{args:?}: {output:?}");
         let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(
@@ -936,6 +1009,206 @@ fn json_upgrade_reports_the_installed_release_without_installer_output_on_stdout
             "99.0.1\n"
         );
     }
+    // A helper cannot claim success by changing only its install record.
+    std::fs::copy(env!("CARGO_BIN_EXE_xcb"), &binary).unwrap();
+    sandbox.script(&installer, "#!/bin/sh\n/bin/cp \"$XCB_INSTALL_PREFIX/lying-record\" \"$XCB_INSTALL_PREFIX/share/xcb/install.json\"\n");
+    let mut original = record.clone();
+    original["helperSha256"] =
+        serde_json::json!(xcb_runtime::process::executable_digest(&installer).unwrap());
+    std::fs::write(share.join("install.json"), original.to_string()).unwrap();
+    let mut lying = original;
+    lying["versionString"] = serde_json::json!("99.0.1");
+    std::fs::write(sandbox.root.join("lying-record"), lying.to_string()).unwrap();
+    let output = Command::new(&binary)
+        .env_clear()
+        .env("HOME", sandbox.root.join("home"))
+        .env("PATH", sandbox.root.join("bin"))
+        .arg("--state")
+        .arg(sandbox.state())
+        .args(["--json", "upgrade", "99.0.1"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "a no-op installer must fail: {output:?}"
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not report the requested xcb version"),
+        "{result}"
+    );
+}
+
+#[test]
+fn protocol_helpers_refuse_an_unfinished_update_before_opening_product_state() {
+    let sandbox = Sandbox::new("protocol-update-guard");
+    let share = xcb_runtime::private::directory(&sandbox.root.join("share/xcb")).unwrap();
+    let installer = share.join("install-native.sh");
+    let binary = sandbox.root.join("bin/xcb");
+    std::fs::copy(env!("CARGO_BIN_EXE_xcb"), &binary).unwrap();
+    sandbox.script(&installer, "#!/bin/sh\nexit 0\n");
+    let record = serde_json::json!({
+        "version":2,"installMethod":"release","channel":"stable","sourceRoot":"",
+        "versionString":env!("CARGO_PKG_VERSION"),"versionPinned":false,
+        "prefix":sandbox.root,"helperPath":installer,"binaryPath":binary,
+        "binarySha256":xcb_runtime::process::executable_digest(&binary).unwrap(),
+        "helperSha256":xcb_runtime::process::executable_digest(&installer).unwrap(),
+    });
+    xcb_runtime::private::create(&share.join("install.json"), record.to_string().as_bytes())
+        .unwrap();
+    xcb_runtime::private::create(&share.join("update-use.lock"), b"").unwrap();
+    xcb_runtime::private::create(&share.join("update-in-progress"), b"fixture").unwrap();
+    for command in ["broker-stdio", "native-mcp-stdio"] {
+        let output = Command::new(&binary)
+            .env_clear()
+            .env("HOME", sandbox.root.join("home"))
+            .env("PATH", sandbox.root.join("bin"))
+            .arg("--state")
+            .arg(sandbox.state())
+            .args(["--json", command])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{command}: {output:?}");
+        assert!(output.stdout.is_empty(), "{command}: {output:?}");
+        assert!(
+            text(&output.stderr).contains("update is unfinished"),
+            "{command}: {output:?}"
+        );
+        assert!(!sandbox.state().exists(), "{command} opened product state");
+    }
+}
+
+#[test]
+fn killed_updater_parent_cannot_admit_work_while_its_helper_is_live() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    struct UpdaterParent {
+        child: Option<std::process::Child>,
+        release: PathBuf,
+    }
+
+    impl UpdaterParent {
+        fn cleanup(&mut self) -> std::io::Result<Option<Output>> {
+            let Some(mut child) = self.child.take() else {
+                return Ok(None);
+            };
+            let released = std::fs::write(&self.release, b"");
+            let _ = child.kill();
+            // The helper inherits stderr. Draining that pipe also waits for
+            // the released helper to close it, including on assertion unwind.
+            let output = child.wait_with_output();
+            released?;
+            output.map(Some)
+        }
+    }
+
+    impl Drop for UpdaterParent {
+        fn drop(&mut self) {
+            let _ = self.cleanup();
+        }
+    }
+
+    let sandbox = Sandbox::new("update-parent-death");
+    let share = xcb_runtime::private::directory(&sandbox.root.join("share/xcb")).unwrap();
+    let installer = share.join("install-native.sh");
+    let binary = sandbox.root.join("bin/xcb");
+    std::fs::copy(env!("CARGO_BIN_EXE_xcb"), &binary).unwrap();
+    sandbox.script(&installer, "#!/bin/sh\nprintf ready > \"$XCB_INSTALL_PREFIX/helper-started\"\ni=0\nwhile [ ! -f \"$XCB_INSTALL_PREFIX/helper-release\" ]; do i=$((i+1)); [ \"$i\" -lt 100 ] || exit 77; /bin/sleep 0.05; done\n/bin/rm \"$XCB_INSTALL_PREFIX/share/xcb/update-in-progress\"\nprintf done > \"$XCB_INSTALL_PREFIX/helper-finished\"\n");
+    let record = serde_json::json!({
+        "version":2,"installMethod":"release","channel":"stable","sourceRoot":"",
+        "versionString":env!("CARGO_PKG_VERSION"),"versionPinned":false,
+        "prefix":sandbox.root,"helperPath":installer,"binaryPath":binary,
+        "binarySha256":xcb_runtime::process::executable_digest(&binary).unwrap(),
+        "helperSha256":xcb_runtime::process::executable_digest(&installer).unwrap(),
+    });
+    std::fs::write(share.join("install.json"), record.to_string()).unwrap();
+    std::fs::set_permissions(
+        share.join("install.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    xcb_runtime::private::create(&share.join("update-use.lock"), b"").unwrap();
+    let asset = format!("xcb-99.0.1-{}.tar.gz", xcb_runtime::update::platform());
+    let release = serde_json::json!({"tag_name":"v99.0.1","draft":false,"prerelease":false,"immutable":true,
+        "assets":[{"name":asset},{"name":format!("{asset}.sha256")}]});
+    sandbox.script(
+        &sandbox.root.join("bin/curl"),
+        &format!("#!/bin/sh\nprintf '%s\\n' '{release}'\n"),
+    );
+    let child = Command::new(&binary)
+        .env_clear()
+        .env("HOME", sandbox.root.join("home"))
+        .env("PATH", sandbox.root.join("bin"))
+        .arg("--state")
+        .arg(sandbox.state())
+        .args(["--json", "upgrade", "99.0.1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut parent = UpdaterParent {
+        child: Some(child),
+        release: sandbox.root.join("helper-release"),
+    };
+    // This deadline detects a hung fixture, not a startup performance limit:
+    // verifying the debug executable can contend with the other CLI tests.
+    let started = Instant::now();
+    while !sandbox.root.join("helper-started").exists() {
+        let status = parent.child.as_mut().unwrap().try_wait().unwrap();
+        if status.is_some() || started.elapsed() >= Duration::from_secs(10) {
+            let elapsed = started.elapsed();
+            let guarded = share.join("update-in-progress").exists();
+            let output = parent.cleanup().unwrap().unwrap();
+            panic!(
+                "helper did not start after {elapsed:?}; parent status: {status:?}; \
+                 update guard present: {guarded}; stdout: {}; stderr: {}",
+                text(&output.stdout),
+                text(&output.stderr),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    eprintln!("updater helper ready after {:?}", started.elapsed());
+    parent.child.as_mut().unwrap().kill().unwrap();
+    parent.child.as_mut().unwrap().wait().unwrap();
+    let output = Command::new(&binary)
+        .env_clear()
+        .env("HOME", sandbox.root.join("home"))
+        .env("PATH", sandbox.root.join("bin"))
+        .arg("--state")
+        .arg(sandbox.state())
+        .args(["--json", "accounts"])
+        .output()
+        .unwrap();
+    // Release the owned fixture child before making assertions that can panic.
+    let updater_output = parent.cleanup().unwrap().unwrap();
+    assert!(
+        sandbox.root.join("helper-finished").exists(),
+        "helper did not finish: {updater_output:?}"
+    );
+    assert!(
+        !output.status.success(),
+        "work was admitted during interrupted replacement: {output:?}"
+    );
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("update is unfinished"),
+        "{error}"
+    );
+    assert!(
+        !sandbox.state().exists(),
+        "the refused command must not open product state"
+    );
+    assert!(!share.join("update-in-progress").exists());
 }
 
 #[test]

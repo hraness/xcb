@@ -12,6 +12,7 @@
       },
       "devDependencies": {
         "@convex-dev/auth": "0.0.95",
+        "@hraness/cli-update": "https://github.com/hraness/cli-update/releases/download/v0.1.0/hraness-cli-update-0.1.0.tgz",
         "@hraness/relay": "github:hraness/relay#5ef01b0613ac49c4da0fcb8d2ee81e667c592992",
         "@types/bun": "1.4.2",
         "@types/node": "26.6.2",
@@ -104,6 +105,8 @@
     "@gar/promise-retry": ["@gar/promise-retry@1.0.3", "", {}, "sha512-GmzA9ckNokPypTg10pgpeHNQe7ph+iIKKmhKu3Ob9ANkswreCx7R3cKmY781K8QK3AqVL3xVh9A42JvIAbkkSA=="],
 
     "@hono/node-server": ["@hono/node-server@2.1.1", "", { "peerDependencies": { "hono": "^4" } }, "sha512-ELuehkj5VCBdgEw9zs+ivkKwyzzUCSQuE96YmiPvn1ECBoZCczbFXJLeEGMTYjphP6gydh4pHMqEYPVMYUVgQg=="],
+
+    "@hraness/cli-update": ["@hraness/cli-update@https://github.com/hraness/cli-update/releases/download/v0.1.0/hraness-cli-update-0.1.0.tgz", {}, "sha512-g0Bg0FYiyJqEJC9JGtAZsZ+r599c8iSNDd7ADi6weFCKBGuRXa2tOnn93+pTfLe1tcayXiLuAtDPp8meFHgKbg=="],
 
     "@hraness/relay": ["@hraness/relay@github:hraness/relay#5ef01b0", { "dependencies": { "@convex-dev/auth": "0.0.95" }, "peerDependencies": { "convex": ">=1.44.0" } }, "hraness-relay-5ef01b0", "sha512-nYnKFBdq3MpFceto71UwjPNEULS/aY5T9GLgpkj0GCaxRAkqRwysXFnipACwstr6kSKFMFjdDfkgYesAKVnLxw=="],
 

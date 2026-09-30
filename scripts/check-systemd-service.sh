@@ -87,13 +87,13 @@ if systemctl --user is-enabled --quiet "$name" 2>/dev/null; then fail "$name is 
 [ "$(run --json service status | field installed)" = False ] || fail "status still reports installed"
 
 echo "--- xcb update enable"
-run update enable
+run update enable --policy notify
 for file in xcb-update.timer xcb-update.service; do
   [ -f "$units/$file" ] || fail "$file was not written"
 done
 systemctl --user is-enabled --quiet xcb-update.timer || fail "xcb-update.timer is not enabled"
 systemctl --user is-active --quiet xcb-update.timer || fail "xcb-update.timer is not active"
-run update enable --policy auto >/dev/null || fail "a second enable is not idempotent"
+run update enable --policy notify >/dev/null || fail "a second enable is not idempotent"
 
 echo "--- xcb update disable"
 run update disable
@@ -104,7 +104,7 @@ if systemctl --user is-enabled --quiet xcb-update.timer 2>/dev/null; then fail "
 
 echo "--- a foreign xcb-update.timer is preserved"
 printf '[Timer]\nOnCalendar=hourly\n' > "$units/xcb-update.timer"
-if run update enable >/dev/null 2>&1; then fail "enable replaced a foreign timer"; fi
+if run update enable --policy notify >/dev/null 2>&1; then fail "enable replaced a foreign timer"; fi
 if run update disable >/dev/null 2>&1; then fail "disable removed a foreign timer"; fi
 [ "$(cat "$units/xcb-update.timer")" = "$(printf '[Timer]\nOnCalendar=hourly')" ] || fail "the foreign timer changed"
 [ ! -e "$units/xcb-update.service" ] || fail "enable wrote a service beside a foreign timer"

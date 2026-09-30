@@ -118,7 +118,8 @@ test("both release consumers reject substituted or absent signed byte digests", 
       const execute = (overrides = {}) => spawnSync("/bin/bash", ["-c", script], { cwd: root, env: { ...env, ...overrides }, timeout: 5_000 });
       writeFileSync(archive, original);
       writeFileSync(archive + ".sha256", checksum);
-      expect(execute().status).toBe(0);
+      const admitted = execute();
+      expect({ status: admitted.status, stderr: admitted.stderr.toString() }).toEqual({ status: 0, stderr: "" });
       expect(execute({ MACOS_ARCHIVE_SHA256: "" }).status).not.toBe(0);
       expect(execute({ MACOS_CHECKSUM_SHA256: "" }).status).not.toBe(0);
       writeFileSync(archive, "substituted Mac bytes");

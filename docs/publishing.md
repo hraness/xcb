@@ -274,3 +274,45 @@ published state in tests without claiming a release. Regenerate the README with
 `cd site && bun run sync:readme`, then run `bun run check` before deploying.
 A compatibility archive does not prove native artifacts exist, and a native
 entry for one platform does not prove another platform's asset exists.
+
+
+## Native update ownership
+
+New installers write an `install.json` version 2 record next to the installed
+helper. It binds the release method, stable channel, exact version, prefix,
+executable path, executable SHA-256, helper SHA-256, and whether the version was
+explicitly pinned. Automatic updates require all fields to match the running
+executable. A state-root override cannot redirect installation authority.
+
+The installer also creates `update-use.lock` once in its share directory.
+Ordinary installed xcb commands hold a shared lock until they exit; update
+commands hold it exclusively through verification and replacement. A private
+`update-in-progress` marker also blocks ordinary commands if the updater dies
+while its installer continues. The helper removes its matching marker only
+after publishing the complete install; a manual reinstall recovers a marker
+left by an interrupted helper. Existing
+supervisor and service locks also postpone updates. The updater checks only
+immutable stable releases from `hraness/xcb`; the recorded helper retains the
+archive checksum, exact-member, candidate-version, backup, and atomic-swap
+checks. An update never changes provider pins or restarts product services.
+
+A missing policy defaults to automatic only for supported unpinned installs.
+Saved notification-only or disabled policies retain their meaning. Older
+manifest versions need a release-installer rerun before becoming supported;
+source and package-manager installations retain their original update path.
+
+### Compatibility CLI updates
+
+The `xcb-compat` executable bundles the reviewed `@hraness/cli-update` release
+archive from its exact development dependency. The SDK entry does not import
+or call the updater. Existing registry runtime dependencies remain external
+and pinned to exact versions; `check:package` checks the packed dependency
+boundary and runs update status, help, and version under Bun and Node.
+
+The compatibility updater uses stable immutable `hraness/xcb` GitHub releases
+and `hraness-xcb-{version}.tgz`. It verifies the canonical release asset digest
+and package name/version/bin before the owning global package manager installs
+with scripts disabled. This preserves the compatibility package's existing
+archive-install contract; native archive attestations and every publication
+admission check above remain in force. It does not infer npm publication from
+a GitHub release or update the native `xcb` binary.

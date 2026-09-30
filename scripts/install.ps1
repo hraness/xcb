@@ -32,7 +32,13 @@
 
   # xcb.sh renders this from site/published-release.json; never type it.
   $defaultVersion = '@XCB_RELEASE_VERSION@'
-  $repository = if ($env:XCB_GITHUB) { $env:XCB_GITHUB } else { 'hraness/xcb' }
+  $repository = 'hraness/xcb'
+  if ($env:XCB_GITHUB -and $env:XCB_GITHUB -ne $repository) { Fail 'release repository must be hraness/xcb' }
+  $pinned = [bool] $env:XCB_VERSION
+  if ($env:XCB_INSTALL_PINNED) {
+    if ($env:XCB_INSTALL_PINNED -notin @('true', 'false')) { Fail 'XCB_INSTALL_PINNED must be true or false' }
+    $pinned = $env:XCB_INSTALL_PINNED -eq 'true'
+  }
   $guide = 'https://xcb.sh/install'
 
   $version = if ($env:XCB_VERSION) { $env:XCB_VERSION } else { $defaultVersion }
@@ -86,6 +92,15 @@
   $stage = Join-Path $binDir (".xcb-install-" + [Guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $stage | Out-Null
   try {
+    $updateGuard = Join-Path $shareDir 'update-in-progress'
+    $guardToken = ''
+    if (Test-Path -LiteralPath $updateGuard) {
+      $guardFile = Get-Item -LiteralPath $updateGuard -Force
+      if (-not (Test-Real $updateGuard) -or $guardFile.PSIsContainer -or $guardFile.Length -gt 128) { Fail 'update-in-progress record is unsafe' }
+      $guardToken = [System.IO.File]::ReadAllText($updateGuard).Trim()
+      if ($guardToken -cnotmatch '^xcb-update-v1:[0-9a-f]{32}$') { Fail 'invalid update-in-progress record' }
+    }
+    if ($env:XCB_UPDATE_GUARD -and $guardToken -cne $env:XCB_UPDATE_GUARD) { Fail 'update-in-progress record changed' }
     # A replaced xcb.exe that was running during the last install could not
     # be removed then; it can be now, unless it is still running.
     Get-ChildItem -LiteralPath $binDir -Filter 'xcb.exe.old-*' -Force -ErrorAction SilentlyContinue |
@@ -191,7 +206,7 @@
     Move-Item -LiteralPath $stagedHelper -Destination $helper -Force
 
     $manifest = [ordered]@{
-      version        = 1
+      version        = 2
       installMethod  = 'release'
       channel        = 'stable'
       versionString  = $version
@@ -199,10 +214,20 @@
       helperPath     = $helper
       sourceRoot     = ''
       binaryPath     = $destination
+      binarySha256   = $candidateDigest
+      helperSha256   = Get-Sha256 $helper
+      versionPinned  = $pinned
     } | ConvertTo-Json -Compress
     $stagedManifest = Join-Path $stage 'install.json'
     [System.IO.File]::WriteAllText($stagedManifest, $manifest + "`n", (New-Object System.Text.UTF8Encoding $false))
     Move-Item -LiteralPath $stagedManifest -Destination (Join-Path $shareDir 'install.json') -Force
+
+    $usageLock = Join-Path $shareDir 'update-use.lock'
+    if (-not (Test-Real $usageLock)) { Fail 'update use lock is unsafe' }
+    if (-not (Test-Path -LiteralPath $usageLock)) {
+      $usageFile = [System.IO.File]::Open($usageLock, 'CreateNew', 'Write', 'None')
+      $usageFile.Dispose()
+    }
 
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $entries = @()
@@ -221,6 +246,10 @@
     Write-Host $reported
     Write-Host 'Claude Code, Codex, and Devin run only in the Linux build of xcb; on Windows install it inside WSL2.'
     Write-Host "Guide: $guide"
+    if ($guardToken) {
+      if (-not (Test-Real $updateGuard) -or [System.IO.File]::ReadAllText($updateGuard).Trim() -cne $guardToken) { Fail 'update-in-progress record changed' }
+      Remove-Item -LiteralPath $updateGuard
+    }
   } finally {
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     $lock.Dispose()

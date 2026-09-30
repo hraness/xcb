@@ -6,6 +6,7 @@ set -eu
 : "${CARGO:=cargo}"
 : "${XCB_VERSION:=}"
 : "${XCB_GITHUB:=hraness/xcb}"
+: "${XCB_INSTALL_PINNED:=true}"
 
 script_path="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
 source_root=
@@ -50,6 +51,8 @@ shell_quote() {
   printf "'"
 }
 
+[ "$XCB_GITHUB" = hraness/xcb ] || fail "release repository must be hraness/xcb"
+case "$XCB_INSTALL_PINNED" in true|false) ;; *) fail "XCB_INSTALL_PINNED must be true or false" ;; esac
 bin_dir="$XCB_INSTALL_PREFIX/bin"
 mkdir -p "$bin_dir"
 bin_dir=$(cd "$bin_dir" && pwd -P)
@@ -84,6 +87,21 @@ trap cleanup 0
 trap 'exit 1' HUP INT TERM
 stage=$(mktemp -d "$bin_dir/.xcb-install.XXXXXX")
 chmod 0700 "$stage"
+
+# A runtime update records this token before starting its installer. Keep it
+# until the complete install is published, including if that parent is killed.
+install_prefix=$(cd "$(dirname "$bin_dir")" && pwd -P)
+update_guard="$install_prefix/share/xcb/update-in-progress"
+guard_token=
+if [ -e "$update_guard" ] || [ -L "$update_guard" ]; then
+  regular_file "$update_guard" || fail "update-in-progress record is unsafe"
+  [ "$(wc -c < "$update_guard" | tr -d '[:space:]')" -le 128 ] || fail "update-in-progress record is too large"
+  guard_token=$(cat "$update_guard")
+  printf '%s\n' "$guard_token" | LC_ALL=C grep -Eq '^xcb-update-v1:[0-9a-f]{32}$' || fail "invalid update-in-progress record"
+fi
+if [ -n "${XCB_UPDATE_GUARD:-}" ]; then
+  [ "$guard_token" = "$XCB_UPDATE_GUARD" ] || fail "update-in-progress record changed"
+fi
 
 sha256_cmd=$(command -v sha256sum || true)
 sha256_kind=sha256sum
@@ -262,13 +280,20 @@ manifest_prefix=$(json_escape "$install_prefix")
 manifest_helper=$(json_escape "$share_dir/install-native.sh")
 manifest_source=$(json_escape "$source_root")
 manifest_binary=$(json_escape "$destination")
-printf '{"version":1,"installMethod":"%s","channel":"stable","versionString":"%s","prefix":"%s","helperPath":"%s","sourceRoot":"%s","binaryPath":"%s"}\n' \
-  "$install_method" "$expected_version" "$manifest_prefix" "$manifest_helper" "$manifest_source" "$manifest_binary" > "$stage/install.json"
+helper_digest=$(sha256 "$share_dir/install-native.sh")
+printf '{"version":2,"installMethod":"%s","channel":"stable","versionString":"%s","prefix":"%s","helperPath":"%s","sourceRoot":"%s","binaryPath":"%s","binarySha256":"%s","helperSha256":"%s","versionPinned":%s}\n' \
+  "$install_method" "$expected_version" "$manifest_prefix" "$manifest_helper" "$manifest_source" "$manifest_binary" "$candidate_digest" "$helper_digest" "$XCB_INSTALL_PINNED" > "$stage/install.json"
 chmod 0600 "$stage/install.json"
 if [ -e "$share_dir/install.json" ] || [ -L "$share_dir/install.json" ]; then
   regular_file "$share_dir/install.json" || fail "existing install manifest is unsafe"
 fi
 mv -f "$stage/install.json" "$share_dir/install.json"
+usage_lock="$share_dir/update-use.lock"
+if [ -e "$usage_lock" ] || [ -L "$usage_lock" ]; then
+  regular_file "$usage_lock" || fail "update use lock is unsafe"
+else
+  (umask 077; set -C; : > "$usage_lock") || fail "could not create update use lock"
+fi
 
 # Another `xcb` earlier on PATH (a Homebrew or cargo install, an old copy)
 # would be picked over the one just installed. Warn, never modify it.
@@ -314,3 +339,10 @@ esac
 echo "Installed $destination ($candidate_digest)"
 echo "$reported_version"
 echo "Restart open xcb terminals, then run xcb doctor to refresh provider pins."
+
+# A manual reinstall also repairs a retained interrupted-update marker. The
+# existing installer lock excludes another helper; never remove a changed token.
+if [ -n "$guard_token" ]; then
+  regular_file "$update_guard" && [ "$(cat "$update_guard")" = "$guard_token" ] || fail "update-in-progress record changed"
+  rm "$update_guard"
+fi

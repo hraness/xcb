@@ -582,3 +582,49 @@ test("bootstrap leaves an inconclusive archive probe to the installer", () => {
     expect(installer).toBe("0.4.0\n");
   }
 });
+
+
+test("release install records bind the binary, helper and explicit version pin", () => {
+  const f = fixture();
+  f.release();
+  for (const pinned of ["true", "false"]) {
+    const result = f.run(true, { XCB_INSTALL_PINNED: pinned });
+    expect(result.status, result.stderr).toBe(0);
+    const record = JSON.parse(readFileSync(join(f.prefix, "share/xcb/install.json"), "utf8"));
+    expect(record.version).toBe(2);
+    expect(record.installMethod).toBe("release");
+    expect(record.sourceRoot).toBe("");
+    expect(record.versionPinned).toBe(pinned === "true");
+    expect(record.binarySha256).toBe(hash(readFileSync(f.destination)));
+    expect(record.helperSha256).toBe(hash(readFileSync(record.helperPath)));
+    expect(statSync(join(f.prefix, "share/xcb/update-use.lock")).mode & 0o777).toBe(0o600);
+  }
+});
+
+test("a foreign release repository is rejected before replacing anything", () => {
+  const f = fixture();
+  f.release();
+  const result = f.run(true, { XCB_GITHUB: "foreign/xcb" });
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain("release repository must be hraness/xcb");
+  f.unchanged();
+});
+
+
+test("installer keeps the parent-death guard until a complete verified install", () => {
+  const f = fixture();
+  const share = join(f.prefix, "share/xcb");
+  mkdirSync(share, { recursive: true, mode: 0o700 });
+  const guard = join(share, "update-in-progress");
+  const token = "xcb-update-v1:0123456789abcdef0123456789abcdef";
+  writeFileSync(guard, `${token}\n`, { mode: 0o600 });
+  f.release(undefined, true);
+  const failed = f.run(true, { XCB_UPDATE_GUARD: token });
+  expect(failed.status).not.toBe(0);
+  expect(readFileSync(guard, "utf8")).toBe(`${token}\n`);
+  expect(readFileSync(f.destination, "utf8")).toBe(f.previous);
+  f.release();
+  const installed = f.run(true, { XCB_UPDATE_GUARD: token });
+  expect(installed.status, installed.stderr).toBe(0);
+  expect(existsSync(guard)).toBe(false);
+});

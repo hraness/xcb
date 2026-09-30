@@ -33,12 +33,17 @@
   endpoint; custom endpoints require an explicit environment key, and future
   backends own separate credential custody.
   `src/index.ts` is the package's complete public surface.
-- `src/cli/` is the standalone `xcb` terminal surface (`cli.ts` entry,
+- `src/cli/` is the standalone `xcb-compat` terminal surface (`cli.ts` entry,
   chat/run/resume/sessions/doctor/auth/judge/migrate commands) built on the same
   task runtime; `claude-task-adapter.ts` and `cli/sandbox.ts` own the
   seatbelted subscription route it drives. `cli/state.ts` resolves `~/.xcb`
   (env `XCB_STATE`) and owns the explicit `migrate` copy from legacy
   `~/.agentmixer`; SQLite `agentmixer_*` tables rename lazily at open.
+  `cli/update.ts` sets the compatibility update policy; the `cli.ts` executable
+  calls the shared updater before loading `cli-program.ts` or application state.
+  Bundle the exact released updater
+  development dependency into the CLI, keep SDK imports inert, and preserve the
+  external exact-version registry dependency and packed-package contracts.
 - `test/` contains synthetic boundary and concurrency tests.
 - `qualification/` holds the host qualification fixtures and native-tooling
   checks; its `contact-workspace.ts` is a vendored synthetic fixture, not a

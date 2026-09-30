@@ -21,6 +21,8 @@ main() {
   repository="hraness/xcb"
   guide="https://xcb.sh/install"
 
+  pinned=false
+  [ -n "${XCB_VERSION:-}" ] && pinned=true
   version="${XCB_VERSION:-$default_version}"
   version="${version#v}"
   printf '%s\n' "$version" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
@@ -69,7 +71,7 @@ main() {
   had_xcb=0
   [ -e "$prefix/bin/xcb" ] && had_xcb=1
 
-  if ! XCB_VERSION="$version" sh "$temporary/install-native.sh"; then
+  if ! XCB_VERSION="$version" XCB_INSTALL_PINNED="$pinned" sh "$temporary/install-native.sh"; then
     if [ "$os" = Linux ]; then
       echo "If the error mentions GLIBC, this release needs a newer glibc than this system has (check with: getconf GNU_LIBC_VERSION); build from source instead: $guide#source" >&2
     fi
