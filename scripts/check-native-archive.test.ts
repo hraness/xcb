@@ -1,15 +1,16 @@
 import { afterEach, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { fixtureRequirement, withMacosVerifierFixture } from "./macos-signature-fixture";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
-const binary = (version: string) => `#!/bin/sh\n[ "$#" = 1 ] && [ "$1" = --version ] || exit 17\nprintf 'xcb ${version}\\n'\n`;
+const binary = (version: string) => `#!/bin/sh\n[ -z "\${FIXTURE_EXECUTION_LOG:-}" ] || printf 'executed\\n' >> "$FIXTURE_EXECUTION_LOG"\n[ "$#" = 1 ] && [ "$1" = --version ] || exit 17\nprintf 'xcb ${version}\\n'\n`;
 
 type Entry = { name: string; type?: string; contents?: string; link?: string };
 function archive(entries: readonly Entry[]): Buffer {
@@ -82,4 +83,63 @@ test("a binary reporting another version or a foreign archive name is rejected",
   const foreign = fixture([{ name: "xcb", contents: binary("0.4.0") }], { name: "xcb-0.4.0-linux-x86_64.zip" });
   expect(check("0.4.0", foreign).stderr).toContain("is not an xcb-0.4.0-<os>-<arch>.tar.gz release archive");
   expect(check("latest", stale).stderr).toContain("stable semantic version");
+});
+
+function checkMacosFixture(version: string, path: string, verdict = "valid", unsignedBuild = false) {
+  const root = dirname(path), stubs = join(root, "stubs");
+  mkdirSync(stubs);
+  const script = join(root, "check-native-archive.sh");
+  writeFileSync(script, withMacosVerifierFixture(readFileSync(new URL("./check-native-archive.sh", import.meta.url), "utf8"), stubs));
+  const verifierLog = join(root, "codesign.log"), executionLog = join(root, "executed.log");
+  const result = spawnSync("/bin/sh", [script, ...(unsignedBuild ? ["--unsigned-build"] : []), version, path], {
+    encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024,
+    env: { PATH: "/usr/bin:/bin", LC_ALL: "C", FIXTURE_CODESIGN_RESULT: verdict, FIXTURE_CODESIGN_LOG: verifierLog, FIXTURE_EXECUTION_LOG: executionLog },
+  });
+  return { result, verifierLog, executionLog };
+}
+
+test("final macOS archives verify the stable Developer ID identity before executing", () => {
+  const path = fixture([{ name: "xcb", contents: binary("0.15.2") }], { name: "xcb-0.15.2-darwin-aarch64.tar.gz" });
+  const { result, verifierLog, executionLog } = checkMacosFixture("0.15.2", path);
+  expect(result.status, result.stderr).toBe(0);
+  expect(readFileSync(verifierLog, "utf8").trim().split("\n").slice(0, 5)).toEqual(["--verify", "--strict", "--all-architectures", "--test-requirement", fixtureRequirement]);
+  expect(readFileSync(executionLog, "utf8")).toBe("executed\n");
+});
+
+for (const verdict of ["unsigned", "adhoc", "wrong-team", "wrong-identifier", "tampered", "untrusted-anchor", "wrong-certificate"]) {
+  test(`final macOS archive rejects verifier verdict ${verdict} before executing`, () => {
+    const path = fixture([{ name: "xcb", contents: binary("0.15.2") }], { name: "xcb-0.15.2-darwin-aarch64.tar.gz" });
+    const { result, verifierLog, executionLog } = checkMacosFixture("0.15.2", path, verdict);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("required Apple Developer ID signature");
+    expect(existsSync(verifierLog)).toBe(true);
+    expect(existsSync(executionLog)).toBe(false);
+  });
+}
+
+test.each(["aarch64", "x86_64"])("explicit unsigned-build mode admits a distinctly named macOS %s intermediate", arch => {
+  const path = fixture([{ name: "xcb", contents: binary("0.15.2") }], { name: `xcb-0.15.2-darwin-${arch}.unsigned.tar.gz` });
+  const { result, verifierLog, executionLog } = checkMacosFixture("0.15.2", path, "unsigned", true);
+  expect(result.status, result.stderr).toBe(0);
+  expect(existsSync(verifierLog)).toBe(false);
+  expect(readFileSync(executionLog, "utf8")).toBe("executed\n");
+  expect(check("0.15.2", path).status).not.toBe(0);
+});
+
+for (const platform of ["darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64"]) {
+  test(`unsigned-build mode cannot admit a final ${platform} release filename`, () => {
+    const path = fixture([{ name: "xcb", contents: binary("0.15.2") }], { name: `xcb-0.15.2-${platform}.tar.gz` });
+    const { result, verifierLog, executionLog } = checkMacosFixture("0.15.2", path, "unsigned", true);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("unsigned build validation accepts only");
+    expect(existsSync(verifierLog)).toBe(false);
+    expect(existsSync(executionLog)).toBe(false);
+  });
+}
+
+test("historical macOS archives retain the pre-signing release contract", () => {
+  const path = fixture([{ name: "xcb", contents: binary("0.15.1") }], { name: "xcb-0.15.1-darwin-aarch64.tar.gz" });
+  const { result, verifierLog } = checkMacosFixture("0.15.1", path, "unsigned");
+  expect(result.status, result.stderr).toBe(0);
+  expect(existsSync(verifierLog)).toBe(false);
 });
