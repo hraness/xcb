@@ -24,18 +24,6 @@ export function ComparisonPage({ entry }: Readonly<{ entry: Comparison }>) {
           lead={<RichText text={entry.lead} />}
           meta={<>Updated <time dateTime={entry.updated}>{formatDate(entry.updated)}</time>. Sources are listed below.</>}
         />
-        <PageSection id="picks" title="Which one to pick">
-          <div className="xcb-picks">
-            <div>
-              <h3>Pick {entry.tool} when</h3>
-              <ul>{entry.picks.tool.map((line) => <li key={line}><RichText text={line} /></li>)}</ul>
-            </div>
-            <div>
-              <h3>Pick xcb when</h3>
-              <ul>{entry.picks.xcb.map((line) => <li key={line}><RichText text={line} /></li>)}</ul>
-            </div>
-          </div>
-        </PageSection>
         <PageSection id="table" title="Side by side" wide>
           <MarketingComparison
             caption={`${entry.tool} and xcb at a glance`}
@@ -54,6 +42,18 @@ export function ComparisonPage({ entry }: Readonly<{ entry: Comparison }>) {
               </div>)}
             </dl>
           </details>
+        </PageSection>
+        <PageSection id="picks" title="Which one to pick">
+          <div className="xcb-picks">
+            <div>
+              <h3>Pick {entry.tool} when</h3>
+              <ul>{entry.picks.tool.map((line) => <li key={line}><RichText text={line} /></li>)}</ul>
+            </div>
+            <div>
+              <h3>Pick xcb when</h3>
+              <ul>{entry.picks.xcb.map((line) => <li key={line}><RichText text={line} /></li>)}</ul>
+            </div>
+          </div>
         </PageSection>
         {(entry.sections ?? []).map((section) => (
           <PageSection key={section.id} id={section.id} title={section.title}>
