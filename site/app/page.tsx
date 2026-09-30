@@ -19,12 +19,14 @@ import { publishedRelease } from "./publication";
 import { releaseStatusLabel } from "./release-state";
 import { SiteHeader } from "./site-header";
 
+import { productMessaging, productName } from "./messaging";
+
 const repository = "https://github.com/hraness/xcb";
 
 // Hero heading and summary come from the portfolio registry's xcb messaging record.
-const heading = "Use your Claude, Codex, and Devin plans from one agent.";
-const summary = "Bring your coding subscriptions into one conversation. xcb picks an account and model for each task, helps you use quota before it resets, and lets you continue recent Claude and Codex conversations.";
-const metaDescription = "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
+const heading = productMessaging.hero.heading;
+const summary = productMessaging.hero.summary;
+const metaDescription = productMessaging.meta;
 
 const questions = [
   { question: "Can I use the subscriptions I already have?", answer: "Yes. You sign in to your own Claude, Codex, and Devin accounts through each provider’s own tool, and xcb routes work among them. It has no model access of its own and does not lift provider usage limits; each provider’s pricing and terms still apply." },
@@ -51,12 +53,12 @@ const readiness = [
 export default function Home() {
   const publisher = { "@type": "Organization", "@id": "https://hraness.com/#organization", name: "Hraness", url: "https://hraness.com/" };
   const structuredData = [
-    { "@context": "https://schema.org", "@type": "WebSite", "@id": "https://xcb.sh/#website", url: "https://xcb.sh/", name: "Excalibur (xcb)", alternateName: ["xcb", "Excalibur"], inLanguage: "en-US", publisher },
+    { "@context": "https://schema.org", "@type": "WebSite", "@id": "https://xcb.sh/#website", url: "https://xcb.sh/", name: productName, alternateName: ["xcb", "Excalibur"], inLanguage: "en-US", publisher },
     {
       "@context": "https://schema.org",
       "@type": "SoftwareApplication",
       "@id": "https://xcb.sh/#app",
-      name: "Excalibur (xcb)",
+      name: productName,
       alternateName: ["xcb", "Excalibur"],
       url: "https://xcb.sh/",
       description: metaDescription,
@@ -69,7 +71,7 @@ export default function Home() {
       publisher,
       ...(publishedRelease === null ? {} : { softwareVersion: publishedRelease.version }),
     },
-    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: "Excalibur (xcb)", description: metaDescription, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.sh/", targetProduct: { "@id": "https://xcb.sh/#app" } },
+    { "@context": "https://schema.org", "@type": "SoftwareSourceCode", name: productName, description: metaDescription, codeRepository: repository, programmingLanguage: ["Rust", "TypeScript"], license: "https://opensource.org/license/mit", url: "https://xcb.sh/", targetProduct: { "@id": "https://xcb.sh/#app" } },
     { "@context": "https://schema.org", "@type": "FAQPage", mainEntity: questions.map(({ question, answer }) => ({ "@type": "Question", name: question, acceptedAnswer: { "@type": "Answer", text: answer } })) },
   ];
   return (
@@ -83,17 +85,17 @@ export default function Home() {
             backdrop={false}
             className="xcb-hero"
             frame={<RouterShowcase className="xcb-home-showcase" />}
-            name="Excalibur (xcb)"
+            name={productName}
             heading={heading}
             headingId="hero-title"
             summary={summary}
-            actions={[{ href: "/install", label: "Install xcb" }, { href: "#use", label: "See how it works" }]}
+            actions={[{ href: "/install", label: productMessaging.hero.primaryAction }, { href: "#use", label: productMessaging.hero.secondaryAction }]}
             boundary={`Free and open source · ${releaseStatusLabel(publishedRelease)}`}
           />
 
           <p className="xcb-launch-link"><a className="xcb-text-link" href="/blog/one-agent-for-all-your-ai-plans">Introducing Excalibur: the short version →</a></p>
 
-          <MarketingSection id="router" heading="Use your quota before it resets" headingId="router-title" summary="Let xcb choose among your subscriptions when you send a task. It favors unused Claude and Codex quota approaching a reset when fresh usage reports are available.">
+          <MarketingSection id="router" heading={productMessaging.headings["home-router"]} headingId="router-title" summary="Let xcb choose among your subscriptions when you send a task. It favors unused Claude and Codex quota approaching a reset when fresh usage reports are available.">
             <MarketingPillars
               ariaLabel="How xcb uses your subscriptions"
               columns={3}
@@ -108,29 +110,29 @@ export default function Home() {
 
           <MarketingInterfaceGrid
             id="use"
-            heading="Two ways to use xcb"
+            heading={productMessaging.headings["home-interfaces"]}
             headingId="use-title"
             interfaces={[
               {
-                label: "As your coding agent",
+                label: productMessaging.headings["home-interface-agent"],
                 summary: "Type work into one thread that spans your projects. xcb picks the project and an account that can take the task, and the task keeps running after you close the terminal.",
                 example: <><CodeBlock code={agentExample} copyLabel="Copy command" /><p>Then type a task, such as “Fix the failing parser test in ~/src/app”.</p><a className="xcb-text-link" href="/docs/getting-started">Getting started →</a></>,
               },
               {
-                label: "Inside your agent or app",
+                label: productMessaging.headings["home-interface-integration"],
                 summary: "Keep your existing agent or app and hand a task to xcb. It picks an account and model, runs the task, and returns the result as JSON.",
                 example: <><CodeBlock code={routeExample} copyValue="xcb --json route < task.json" copyLabel="Copy command" /><p>With the <a href="/docs/sdk">TypeScript SDK</a>, the app names the account and model.</p><a className="xcb-text-link" href="/docs/route">Route tasks →</a></>,
               },
             ]}
           />
 
-          <MarketingSection id="import-sessions" heading="Continue your Claude and Codex conversations" headingId="import-sessions-title" summary="Import conversations used in the last 24 hours by default, then continue with an account that can take the task.">
+          <MarketingSection id="import-sessions" heading={productMessaging.headings["home-import-sessions"]} headingId="import-sessions-title" summary="Import conversations used in the last 24 hours by default, then continue with an account that can take the task.">
             <CodeBlock code={importExample} copyLabel="Copy commands" />
             <p>xcb copies user and assistant messages as context. Choose an imported conversation with <code>/sessions</code> and send a new message to continue. Source files stay in place, and import does not take control of a running provider session.</p>
             <a className="xcb-text-link" href="/docs/projects-and-tasks#import-sessions">Import conversations →</a>
           </MarketingSection>
 
-          <MarketingSection id="install" heading="Install xcb" headingId="install-title" summary={publishedRelease === null ? "No release is published yet; build from source with Git and Rust 1.97.1." : "Install the latest release, connect your Claude account, and open your thread."}>
+          <MarketingSection id="install" heading={productMessaging.headings["home-install"]} headingId="install-title" summary={publishedRelease === null ? "No release is published yet; build from source with Git and Rust 1.97.1." : "Install the latest release, connect your Claude account, and open your thread."}>
             {publishedRelease === null
               ? <CodeBlock code={"git clone https://github.com/hraness/xcb.git && cd xcb\n./scripts/install-native.sh"} copyLabel="Copy commands" />
               : (
@@ -157,7 +159,7 @@ export default function Home() {
             <a className="xcb-text-link" href="/docs/providers">Supported builds and setup →</a>
           </details>
 
-          <MarketingQuestionList heading="Questions" headingId="questions-title" id="questions" questions={questions.map(({ question, answer }) => ({ question, answer: <p>{answer}</p> }))} />
+          <MarketingQuestionList heading={productMessaging.headings["home-questions"]} headingId="questions-title" id="questions" questions={questions.map(({ question, answer }) => ({ question, answer: <p>{answer}</p> }))} />
         </MarketingPage>
       </main>
       <AskAiAboutThis className="ask-ai" url="https://xcb.sh" />

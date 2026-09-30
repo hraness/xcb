@@ -1,3 +1,4 @@
+import { productMessaging } from "../app/messaging";
 import { expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import Home from "../app/page";
@@ -44,10 +45,11 @@ test("the homepage leads with the registry headline and installs with one comman
   expect(html.match(/<h1\b/gu)).toHaveLength(1);
   const heroHeadings: string[] = [];
   new HTMLRewriter().on("h1#hero-title", { text(chunk) { heroHeadings.push(chunk.text); } }).transform(html);
-  expect(heroHeadings.join("").trim()).toBe("Use your Claude, Codex, and Devin plans from one agent.");
+  expect(heroHeadings.join("").trim()).toBe(productMessaging.hero.heading);
   const heroSummary: string[] = [];
   new HTMLRewriter().on('header[aria-labelledby="hero-title"] .hraness-marketing-hero__summary', { text(chunk) { heroSummary.push(chunk.text); } }).transform(html);
-  for (const feature of ["subscriptions", "quota", "Claude", "Codex"]) expect(heroSummary.join("")).toContain(feature);
+  expect(heroSummary.join("")).toBe(productMessaging.hero.summary);
+  for (const feature of ["Claude", "Codex", "Devin", "account"]) expect(heroSummary.join("")).toContain(feature);
   if (publishedRelease === null) {
     expect(html).toContain("./scripts/install-native.sh");
   } else {
