@@ -7,7 +7,8 @@ import { defineSocialImageSite } from "@hraness/web-discovery/social-image/card"
  * shared @hraness/web-discovery template through this record; each route's
  * `opengraph-image` passes only its page copy from `social-cards.ts`. The icon
  * is the header's crossed-swords artwork, read from the repo so the card and
- * the header never drift. The theme is Tokyo Night light.
+ * the header never drift. The theme is Tokyo Night light with a crimson
+ * "blade" wash, which keeps xcb's card distinct from SWFT's pale blue.
  */
 const markSvg = readFileSync(join(process.cwd(), "public/marks/xcb.svg"));
 
@@ -23,5 +24,6 @@ export const socialSite = defineSocialImageSite({
     background: "#e1e2e7",
     foreground: "#3760bf",
     muted: "#6172b0",
+    wash: "#E0061C",
   },
 });
