@@ -139,7 +139,9 @@ pub async fn execute(store: &Store, command: Commands, machine: bool) -> Result<
                             "choose the Claude account for your browser: xcb tools setup-browser --account <name>"
                         }));
                     }
-                    accounts.remove(0)
+                    accounts.into_iter().next().ok_or(Error::Unavailable(
+                        "sign in to a Claude account with xcb setup claude before connecting its browser extension",
+                    ))?
                 }
             };
             if account.provider != xcb_core::Provider::Claude || !account.enabled {

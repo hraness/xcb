@@ -574,17 +574,24 @@ fn validate_requirement_pins(
         })
         .transpose()?
         .unwrap_or(false);
-    if requirements.signed_in_browser
-        && (provider.is_some_and(|provider| !requirements.allows(provider))
+    if requirements.signed_in_browser {
+        let pinned_provider = match account {
+            Some(id) => match store.account(id) {
+                Ok(metadata) => Some(metadata.provider),
+                // Storage/deserialization diagnostics can contain private
+                // account values. Pin validation exposes a fixed public error.
+                Err(_) => return Err(Error::Unavailable("pinned account could not be read")),
+            },
+            None => None,
+        };
+        if provider.is_some_and(|provider| !requirements.allows(provider))
             || incompatible_model
-            || account
-                .map(|id| store.account(id))
-                .transpose()?
-                .is_some_and(|account| !requirements.allows(account.provider)))
-    {
-        return Err(Error::Conflict(
-            "signed-in browser tasks require Codex; remove the incompatible provider, account, or model pin",
-        ));
+            || pinned_provider.is_some_and(|provider| !requirements.allows(provider))
+        {
+            return Err(Error::Conflict(
+                "signed-in browser tasks require Codex; remove the incompatible provider, account, or model pin",
+            ));
+        }
     }
     Ok(())
 }
@@ -706,7 +713,7 @@ async fn route_with_admitted(
     let excluded_routes = request.excluded_routes;
     let excluded_accounts = request.excluded_accounts;
     let Ranking {
-        mut candidates,
+        candidates,
         classification,
         reflex,
         class,
@@ -718,7 +725,10 @@ async fn route_with_admitted(
         now,
     } = rank_with_admitted(store, config, request, admitted).await?;
     requirements.signed_in_browser |= classification.signed_in_browser == Some(true);
-    let candidate = candidates.remove(0);
+    let candidate = candidates
+        .into_iter()
+        .next()
+        .ok_or(Error::Unavailable("no eligible route"))?;
     let warning = quota_degradation_warning(
         &models,
         &catalog,
@@ -1235,6 +1245,52 @@ fn quota_degradation_warning(
 mod tests {
     use super::*;
     use xcb_core::models::Mode;
+
+    #[test]
+    fn browser_pin_lookup_exposes_only_fixed_errors_for_missing_and_corrupt_accounts() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = xcb_core::canonical(root.path()).unwrap();
+        let store = Store::open(&root_path.join("state")).unwrap();
+        let selected = store
+            .add_account(Provider::Codex, "fixture", 1, None)
+            .unwrap();
+        let requirements = xcb_core::session::TaskRequirements {
+            signed_in_browser: true,
+        };
+        assert!(
+            validate_requirement_pins(&store, requirements, None, None, Some(&selected.id)).is_ok()
+        );
+        let missing = Id::new("missing-account").unwrap();
+        let missing_error =
+            validate_requirement_pins(&store, requirements, None, None, Some(&missing))
+                .unwrap_err();
+        assert!(matches!(
+            missing_error,
+            Error::Unavailable("pinned account could not be read")
+        ));
+        let db = rusqlite::Connection::open(store.root().join("xcb.sqlite")).unwrap();
+        db.execute(
+            "UPDATE accounts SET payload = ?1 WHERE id = ?2",
+            rusqlite::params![
+                r#"{"provider":"private-corrupt-account-value"}"#,
+                selected.id.as_str()
+            ],
+        )
+        .unwrap();
+        assert!(store.account(&selected.id).is_err());
+        let corrupt_error =
+            validate_requirement_pins(&store, requirements, None, None, Some(&selected.id))
+                .unwrap_err();
+        assert!(matches!(
+            corrupt_error,
+            Error::Unavailable("pinned account could not be read")
+        ));
+        assert!(
+            !corrupt_error
+                .to_string()
+                .contains("private-corrupt-account-value")
+        );
+    }
 
     #[tokio::test]
     async fn signed_in_browser_requirement_filters_prefers_and_survives_model_fallback() {
