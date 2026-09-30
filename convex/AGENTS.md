@@ -16,3 +16,14 @@
   directory at a production deployment from a dev shell.
 - The command union (`xcb.relay.v1` kinds) is frozen in
   `docs/plans/remote-access.md`; changing it is a contract change.
+
+## Host availability
+
+- `hostStatus.ts` is separate, opt-in product telemetry. Its two fixed
+  anonymous aliases, HTTP routes and `xcbHostStatus` table do not change
+  relay authentication, commands, device presence or encrypted projections.
+- Store only each alias's latest accepted receipt. Keep reads and writes
+  bounded to the two fixed ids, enforce the one-minute minimum write interval,
+  and never publish credentials, credential hashes, hostnames or task data.
+- Credential rotation changes an existing row's sequence generation. Public
+  reads show `never` until the new credential supplies its first observation.

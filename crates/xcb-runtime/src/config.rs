@@ -143,6 +143,9 @@ pub struct Config {
     /// routes never used, and providers that serve only as a fallback. See
     /// [`crate::routing_stack`].
     pub routing: RoutingConfig,
+    /// Host pressure protection for managed workers. Explicitly enabled
+    /// after checking telemetry with `xcb resources` on this machine.
+    pub resources: crate::host_resources::ResourcePolicy,
     pub extensions: Extensions,
 }
 pub const DEFAULT_QUOTA_LIMIT_COOLDOWN_MS: u64 = 1_800_000;
@@ -158,12 +161,17 @@ impl Default for Config {
             turn_timeout_ms: 1_800_000,
             quota_limit_cooldown_ms: DEFAULT_QUOTA_LIMIT_COOLDOWN_MS,
             routing: RoutingConfig::default(),
+            resources: crate::host_resources::ResourcePolicy::default(),
             extensions: Extensions::default(),
         }
     }
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
+        self.resources.validate().map_err(|message| Error::Guided {
+            message,
+            next: Some("check resources in config.json".into()),
+        })?;
         let context = &self.extensions.gobstopper;
         let continuation = &self.extensions.auto_continue;
         if self.version != 1

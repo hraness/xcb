@@ -15,10 +15,27 @@ xcb service status    # whether it starts at login, whether the supervisor runs,
 
 The declaration uses absolute paths for the binary and state folder, runs no
 shell, and restarts at most once a minute. Each state folder gets its own label,
-`dev.hraness.xcb.habitat.<id>`, and its log is in `~/Library/Logs/xcb`. The
+`dev.hraness.xcb.habitat.<id>`. A watchdog checks the supervisor it starts and
+keeps three diagnostic log files of at most 2 MiB each under
+`<state>/managed/service-logs`. The
 supervisor's lock prevents two supervisors from running the same work, and a
 replaced binary's supervisor finishes its running tasks before the new one
 takes over.
+
+`xcb service status --json` reports `supervisor_health` as `fresh`, `stale`,
+`missing`, or `stopped`, together with the heartbeat age. A held process lock
+alone does not establish that the supervisor is responding. The watchdog
+allows startup and wake-from-sleep time before acting on a stale heartbeat.
+It can stop only the child it launched and verified. It does not kill worker
+process groups, clear account locks, or retry work whose outcome is uncertain.
+
+Older service declarations remain supported and appear with
+`watchdog_enabled: false`. To adopt the watchdog, let work finish, pause future
+work, uninstall the idle service, and install it again. An edited service file
+is preserved. Check the reported health and watchdog state after installation.
+`supervisor_watched` describes the running supervisor; an installed watchdog
+cannot adopt a supervisor that was already started separately. Once that
+supervisor exits safely, new starts use the installed watchdog.
 
 When the supervisor runs at login, macOS may block it from folders such as
 Documents, Desktop, or Downloads. `xcb service status` reports the blocked
@@ -37,7 +54,8 @@ is off. xcb runs missed schedule occurrences once on its next start.
 On Linux the declaration is a systemd user unit,
 `~/.config/systemd/user/xcb-habitat-<id>.service`, which xcb enables with
 `systemctl --user enable --now`. systemd restarts the supervisor a minute after
-it exits, and the log is in `~/.local/state/xcb`. It needs a systemd user
+it exits. The watchdog keeps its logs under the state folder. Older service
+declarations write to `~/.local/state/xcb`. It needs a systemd user
 manager, which a desktop or SSH login session has.
 
 systemd stops your user services when your last session ends. On a server or
@@ -55,3 +73,5 @@ with the same name that you wrote stays untouched, and the command refuses.
 
 The declaration follows Apple's [launchd job
 contract](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html).
+
+For memory and disk protection, see [unattended operation](unattended.md).
