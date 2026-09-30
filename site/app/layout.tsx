@@ -4,6 +4,7 @@ import { DesignPaletteProvider, ThemeColorSync } from "@hraness/design-kit/react
 import { HranessSiteFooter } from "@hraness/site-footer/react";
 import { siteDefaultPalette } from "../palette";
 import { supportProfile } from "../../src/support-profile";
+import { productMessaging, productName } from "./messaging";
 import "./globals.css";
 import "./docs/docs.css";
 import "./compare/compare.css";
@@ -18,9 +19,8 @@ import "./calm.css";
  */
 const initialPalette = getDesignPaletteTheme("tokyo-night", "light");
 
-const title = "Excalibur (xcb) · Use your Claude, Codex, and Devin plans from one agent";
-const description =
-  "Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for, picking an account that is signed in and idle.";
+const title = `${productName} · ${productMessaging.hero.heading.replace(/\.$/u, "")}`;
+const description = productMessaging.meta;
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://xcb.sh"),
@@ -33,7 +33,7 @@ export const metadata: Metadata = {
   openGraph: {
     title,
     description,
-    siteName: "Excalibur (xcb)",
+    siteName: productName,
     type: "website",
     url: "/",
   },

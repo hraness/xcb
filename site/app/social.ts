@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { defineSocialImageSite } from "@hraness/web-discovery/social-image/card";
 
+import { productMessaging, productName } from "./messaging";
+
 /**
  * The site's one social-image declaration. Every share card comes from the
  * shared @hraness/web-discovery template through this record; each route's
@@ -13,12 +15,12 @@ import { defineSocialImageSite } from "@hraness/web-discovery/social-image/card"
 const markSvg = readFileSync(join(process.cwd(), "public/marks/xcb.svg"));
 
 export const socialSite = defineSocialImageSite({
-  description: "Route coding tasks across the Claude, Codex, and Devin plans you pay for.",
+  description: productMessaging.tagline,
   domain: "xcb.sh",
   // Product names a card must not break across lines.
   keepTogether: ["Claude Code Router"],
   icon: { kind: "mark", src: `data:image/svg+xml;base64,${markSvg.toString("base64")}` },
-  name: "Excalibur (xcb)",
+  name: productName,
   theme: {
     accent: "#2e7de9",
     background: "#e1e2e7",
