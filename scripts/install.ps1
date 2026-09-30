@@ -92,6 +92,15 @@
   $stage = Join-Path $binDir (".xcb-install-" + [Guid]::NewGuid().ToString('N'))
   New-Item -ItemType Directory -Path $stage | Out-Null
   try {
+    $updateGuard = Join-Path $shareDir 'update-in-progress'
+    $guardToken = ''
+    if (Test-Path -LiteralPath $updateGuard) {
+      $guardFile = Get-Item -LiteralPath $updateGuard -Force
+      if (-not (Test-Real $updateGuard) -or $guardFile.PSIsContainer -or $guardFile.Length -gt 128) { Fail 'update-in-progress record is unsafe' }
+      $guardToken = [System.IO.File]::ReadAllText($updateGuard).Trim()
+      if ($guardToken -cnotmatch '^xcb-update-v1:[0-9a-f]{32}$') { Fail 'invalid update-in-progress record' }
+    }
+    if ($env:XCB_UPDATE_GUARD -and $guardToken -cne $env:XCB_UPDATE_GUARD) { Fail 'update-in-progress record changed' }
     # A replaced xcb.exe that was running during the last install could not
     # be removed then; it can be now, unless it is still running.
     Get-ChildItem -LiteralPath $binDir -Filter 'xcb.exe.old-*' -Force -ErrorAction SilentlyContinue |
@@ -237,6 +246,10 @@
     Write-Host $reported
     Write-Host 'Claude Code, Codex, and Devin run only in the Linux build of xcb; on Windows install it inside WSL2.'
     Write-Host "Guide: $guide"
+    if ($guardToken) {
+      if (-not (Test-Real $updateGuard) -or [System.IO.File]::ReadAllText($updateGuard).Trim() -cne $guardToken) { Fail 'update-in-progress record changed' }
+      Remove-Item -LiteralPath $updateGuard
+    }
   } finally {
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     $lock.Dispose()

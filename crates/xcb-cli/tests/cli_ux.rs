@@ -1043,6 +1043,91 @@ fn json_upgrade_reports_the_installed_release_without_installer_output_on_stdout
 }
 
 #[test]
+fn killed_updater_parent_cannot_admit_work_while_its_helper_is_live() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new("update-parent-death");
+    let share = xcb_runtime::private::directory(&sandbox.root.join("share/xcb")).unwrap();
+    let installer = share.join("install-native.sh");
+    let binary = sandbox.root.join("bin/xcb");
+    std::fs::copy(env!("CARGO_BIN_EXE_xcb"), &binary).unwrap();
+    sandbox.script(&installer, "#!/bin/sh\nprintf ready > \"$XCB_INSTALL_PREFIX/helper-started\"\ni=0\nwhile [ ! -f \"$XCB_INSTALL_PREFIX/helper-release\" ]; do i=$((i+1)); [ \"$i\" -lt 100 ] || exit 77; /bin/sleep 0.05; done\n/bin/rm \"$XCB_INSTALL_PREFIX/share/xcb/update-in-progress\"\nprintf done > \"$XCB_INSTALL_PREFIX/helper-finished\"\n");
+    let record = serde_json::json!({
+        "version":2,"installMethod":"release","channel":"stable","sourceRoot":"",
+        "versionString":env!("CARGO_PKG_VERSION"),"versionPinned":false,
+        "prefix":sandbox.root,"helperPath":installer,"binaryPath":binary,
+        "binarySha256":xcb_runtime::process::executable_digest(&binary).unwrap(),
+        "helperSha256":xcb_runtime::process::executable_digest(&installer).unwrap(),
+    });
+    std::fs::write(share.join("install.json"), record.to_string()).unwrap();
+    std::fs::set_permissions(
+        share.join("install.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    xcb_runtime::private::create(&share.join("update-use.lock"), b"").unwrap();
+    let asset = format!("xcb-99.0.1-{}.tar.gz", xcb_runtime::update::platform());
+    let release = serde_json::json!({"tag_name":"v99.0.1","draft":false,"prerelease":false,"immutable":true,
+        "assets":[{"name":asset},{"name":format!("{asset}.sha256")}]});
+    sandbox.script(
+        &sandbox.root.join("bin/curl"),
+        &format!("#!/bin/sh\nprintf '%s\\n' '{release}'\n"),
+    );
+    let mut parent = Command::new(&binary)
+        .env_clear()
+        .env("HOME", sandbox.root.join("home"))
+        .env("PATH", sandbox.root.join("bin"))
+        .arg("--state")
+        .arg(sandbox.state())
+        .args(["--json", "upgrade", "99.0.1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let wait_for = |name: &str| {
+        for _ in 0..200 {
+            if sandbox.root.join(name).exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("helper did not publish {name}");
+    };
+    wait_for("helper-started");
+    parent.kill().unwrap();
+    parent.wait().unwrap();
+    let output = Command::new(&binary)
+        .env_clear()
+        .env("HOME", sandbox.root.join("home"))
+        .env("PATH", sandbox.root.join("bin"))
+        .arg("--state")
+        .arg(sandbox.state())
+        .args(["--json", "accounts"])
+        .output()
+        .unwrap();
+    // Release the owned fixture child before making assertions that can panic.
+    std::fs::write(sandbox.root.join("helper-release"), b"").unwrap();
+    wait_for("helper-finished");
+    assert!(
+        !output.status.success(),
+        "work was admitted during interrupted replacement: {output:?}"
+    );
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("update is unfinished"),
+        "{error}"
+    );
+    assert!(
+        !sandbox.state().exists(),
+        "the refused command must not open product state"
+    );
+    assert!(!share.join("update-in-progress").exists());
+}
+
+#[test]
 fn json_update_daemon_reports_a_disabled_check_without_network_access() {
     let sandbox = Sandbox::new("update-daemon-json");
     assert!(sandbox.run(&["update", "disable"], &[]).status.success());

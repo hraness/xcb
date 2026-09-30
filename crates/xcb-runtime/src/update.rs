@@ -599,8 +599,38 @@ fn hold_installation_at(
         ));
     }
     let held = usage_lock(&record, false)?;
+    if update_guard_present(&record)? {
+        return Err(Error::Unavailable(reinstall!(
+            "an xcb update is unfinished; wait for its installer to finish"
+        )));
+    }
     verified_install_at(root, current, true, executable)?;
     Ok(Some(held))
+}
+
+fn update_guard_path(install: &InstallManifest) -> PathBuf {
+    install.prefix.join("share/xcb/update-in-progress")
+}
+
+fn update_guard_present(install: &InstallManifest) -> Result<bool> {
+    match private::read(&update_guard_path(install), 128) {
+        Ok(_) => Ok(true),
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn clear_update_guard(install: &InstallManifest, token: &str) -> Result<()> {
+    let path = update_guard_path(install);
+    match private::read(&path, 128) {
+        Ok(bytes) if bytes == format!("{token}\n").as_bytes() => {
+            std::fs::remove_file(path)?;
+            private::sync_directory(&install.prefix.join("share/xcb"))
+        }
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(Error::Conflict("the update-in-progress record changed")),
+        Err(error) => Err(error),
+    }
 }
 
 fn idle_runtime(root: &Path) -> Result<Vec<private::ExclusiveLock>> {
@@ -879,11 +909,26 @@ fn upgrade_locked(
     if quiet {
         command.stdout(Stdio::from(std::io::stderr()));
     }
-    let status = command.status()?;
-    if !status.success() {
-        return Err(Error::Io(std::io::Error::other(format!(
-            "xcb installer exited with {status}"
-        ))));
+    // This marker outlives an abruptly killed updater parent. The installer
+    // removes its matching token only after publishing the complete install.
+    // Until then ordinary commands refuse even if the parent's OS lock is gone.
+    let token = format!("xcb-update-v1:{}", uuid::Uuid::new_v4().simple());
+    private::create(
+        &update_guard_path(&install),
+        format!("{token}\n").as_bytes(),
+    )?;
+    command.env("XCB_UPDATE_GUARD", &token);
+    let status = command.status();
+    if !matches!(&status, Ok(status) if status.success()) {
+        if verified_install(root, current, true).is_ok() {
+            clear_update_guard(&install, &token)?;
+        }
+        return Err(match status {
+            Ok(status) => Error::Io(std::io::Error::other(format!(
+                "xcb installer exited with {status}"
+            ))),
+            Err(error) => error.into(),
+        });
     }
     let binary = install.binary_path.as_deref().ok_or(Error::PrivateState)?;
     let installed = verified_install_at(root, &release.version, true, binary)?;
@@ -893,6 +938,7 @@ fn upgrade_locked(
             "installed xcb changed during version verification",
         ));
     }
+    clear_update_guard(&install, &token)?;
     if !quiet {
         eprintln!(
             "xcb: upgraded to {}; restart open terminals and run xcb doctor.",
@@ -1371,6 +1417,29 @@ mod tests {
         assert!(
             hold_installation_at(&root, "0.15.1", &binary).is_err(),
             "an inconsistent release install never proceeds unprotected"
+        );
+    }
+
+    #[test]
+    fn unfinished_helper_stays_protected_after_its_parent_lock_is_released() {
+        let (_temp, binary, _) = owned_install();
+        let root = binary.parent().unwrap().parent().unwrap().join("share/xcb");
+        let install = verified_install_at(&root, "0.15.1", false, &binary).unwrap();
+        let updating = usage_lock(&install, true).unwrap();
+        let token = "xcb-update-v1:0123456789abcdef0123456789abcdef";
+        private::create(
+            &update_guard_path(&install),
+            format!("{token}\n").as_bytes(),
+        )
+        .unwrap();
+        drop(updating);
+        assert!(hold_installation_at(&root, "0.15.1", &binary).is_err());
+        assert!(clear_update_guard(&install, "another updater").is_err());
+        clear_update_guard(&install, token).unwrap();
+        assert!(
+            hold_installation_at(&root, "0.15.1", &binary)
+                .unwrap()
+                .is_some()
         );
     }
 

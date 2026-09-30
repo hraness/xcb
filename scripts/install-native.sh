@@ -71,6 +71,21 @@ trap 'exit 1' HUP INT TERM
 stage=$(mktemp -d "$bin_dir/.xcb-install.XXXXXX")
 chmod 0700 "$stage"
 
+# A runtime update records this token before starting its installer. Keep it
+# until the complete install is published, including if that parent is killed.
+install_prefix=$(cd "$(dirname "$bin_dir")" && pwd -P)
+update_guard="$install_prefix/share/xcb/update-in-progress"
+guard_token=
+if [ -e "$update_guard" ] || [ -L "$update_guard" ]; then
+  regular_file "$update_guard" || fail "update-in-progress record is unsafe"
+  [ "$(wc -c < "$update_guard" | tr -d '[:space:]')" -le 128 ] || fail "update-in-progress record is too large"
+  guard_token=$(cat "$update_guard")
+  printf '%s\n' "$guard_token" | LC_ALL=C grep -Eq '^xcb-update-v1:[0-9a-f]{32}$' || fail "invalid update-in-progress record"
+fi
+if [ -n "${XCB_UPDATE_GUARD:-}" ]; then
+  [ "$guard_token" = "$XCB_UPDATE_GUARD" ] || fail "update-in-progress record changed"
+fi
+
 sha256_cmd=$(command -v sha256sum || true)
 sha256_kind=sha256sum
 if [ -z "$sha256_cmd" ]; then
@@ -304,3 +319,10 @@ esac
 echo "Installed $destination ($candidate_digest)"
 echo "$reported_version"
 echo "Restart open xcb terminals, then run xcb doctor to refresh provider pins."
+
+# A manual reinstall also repairs a retained interrupted-update marker. The
+# existing installer lock excludes another helper; never remove a changed token.
+if [ -n "$guard_token" ]; then
+  regular_file "$update_guard" && [ "$(cat "$update_guard")" = "$guard_token" ] || fail "update-in-progress record changed"
+  rm "$update_guard"
+fi

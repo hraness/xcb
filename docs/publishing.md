@@ -277,7 +277,11 @@ executable. A state-root override cannot redirect installation authority.
 
 The installer also creates `update-use.lock` once in its share directory.
 Ordinary installed xcb commands hold a shared lock until they exit; update
-commands hold it exclusively through verification and replacement. Existing
+commands hold it exclusively through verification and replacement. A private
+`update-in-progress` marker also blocks ordinary commands if the updater dies
+while its installer continues. The helper removes its matching marker only
+after publishing the complete install; a manual reinstall recovers a marker
+left by an interrupted helper. Existing
 supervisor and service locks also postpone updates. The updater checks only
 immutable stable releases from `hraness/xcb`; the recorded helper retains the
 archive checksum, exact-member, candidate-version, backup, and atomic-swap
