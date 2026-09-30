@@ -128,6 +128,117 @@ class MaintenanceTests(unittest.TestCase):
         self.assertIn("telemetry_unavailable", result["incidents"])
         self.assertEqual(len(m.load(self.root / "samples.json", None)["history"]), 1)
 
+    def sampled_review_health(self, at_s=10000):
+        with patch.object(m, "probe", side_effect=[resources(), service()]):
+            result = m.sample_tick(self.config, at_s)
+        self.assertTrue(result["sample"]["resource_ok"])
+        self.assertTrue(result["sample"]["service_ok"])
+        samples = m.load(self.root / "samples.json", None)
+        return result, m.heartbeat_payload(samples, samples["at_s"], 1)["health"]
+
+    def test_active_review_healthy_until_deadline_grace_then_attention(self):
+        state = {**m.review_default(), "pending": {"started_s": 10000, "id": "preserved"}}
+        path = self.root / "reviews.json"
+        m.write(path, state)
+        before = path.read_bytes()
+        with m.owner(self.root, "review"):
+            for at_s, expected in ((10000, "ok"), (10660, "ok"), (10661, "degraded"), (9999, "degraded")):
+                with self.subTest(at_s=at_s):
+                    result, health = self.sampled_review_health(at_s)
+                    self.assertEqual(health, expected)
+                    self.assertEqual(result["sample"]["review_attention"], None if expected == "ok" else "unresolved")
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_unlocked_pending_review_degrades_without_changing_uncertain_state(self):
+        self.samples()
+        with self.assertRaises(KeyboardInterrupt):
+            m.review_tick(self.config, 10000, lambda *a, **kw: (_ for _ in ()).throw(KeyboardInterrupt()))
+        path = self.root / "reviews.json"
+        before = path.read_bytes()
+        result, health = self.sampled_review_health(10001)
+        self.assertEqual(health, "degraded")
+        self.assertIn("maintenance_review_unresolved", result["incidents"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(m.review_tick(self.config, 10001)["review"], "uncertain_previous_run")
+
+    def test_recorded_failure_remains_attention_while_review_lock_is_held(self):
+        self.samples()
+        m.review_tick(self.config, 10000, lambda *a, **kw: {"outcome": "timeout", "code": -15, "stdout": b""})
+        state = m.load(self.root / "reviews.json", None)
+        self.assertTrue(state["pending"]["failure_recorded"])
+        with m.owner(self.root, "review"):
+            result, health = self.sampled_review_health(10001)
+        self.assertEqual(health, "degraded")
+        self.assertIn("maintenance_review_unresolved", result["incidents"])
+        self.assertEqual(m.load(self.root / "reviews.json", None), state)
+
+    def test_missing_completion_attention_clears_after_completed_review(self):
+        result, health = self.sampled_review_health()
+        self.assertEqual(health, "degraded")
+        self.assertIn("maintenance_review_not_completed", result["incidents"])
+        self.assertEqual(m.review_tick(self.config, 10000, lambda *a, **kw: completion())["review"], "completed")
+        result, health = self.sampled_review_health(10001)
+        self.assertEqual(health, "ok")
+        self.assertIsNone(result["sample"]["review_attention"])
+
+    def test_completed_review_overdue_grace_boundary(self):
+        m.write(self.root / "reviews.json", {**m.review_default(), "last_completed_s": 10000})
+        for at_s, expected in ((10000, "ok"), (13720, "ok"), (13721, "degraded")):
+            with self.subTest(at_s=at_s):
+                result, health = self.sampled_review_health(at_s)
+                self.assertEqual(health, expected)
+                self.assertEqual(result["sample"]["review_attention"], None if expected == "ok" else "overdue")
+
+    def test_unreadable_review_state_preserves_native_sampling_and_heartbeat(self):
+        path = self.root / "reviews.json"
+        for state in ([], {"version": 1}, {**m.review_default(), "version": 2},
+                      {**m.review_default(), "last_completed_s": 10001},
+                      {**m.review_default(), "last_completed_s": True},
+                      {**m.review_default(), "pending": {"started_s": "invalid"}}):
+            with self.subTest(state=state):
+                m.write(path, state)
+                result, health = self.sampled_review_health()
+                self.assertEqual(health, "degraded")
+                self.assertIn("maintenance_review_state_unavailable", result["incidents"])
+                self.assertEqual(m.load(path, None), state)
+        for raw in (b"{bad json", b'{"version":1,"version":2}'):
+            path.write_bytes(raw)
+            result, health = self.sampled_review_health()
+            self.assertEqual(health, "degraded")
+            self.assertIn("maintenance_review_state_unavailable", result["incidents"])
+            self.assertEqual(path.read_bytes(), raw)
+        path.chmod(0o644)
+        self.assertEqual(self.sampled_review_health()[0]["sample"]["review_attention"], "state_unavailable")
+        path.chmod(0o600)
+        with patch.object(m, "owner", side_effect=OSError("private failure")):
+            self.assertEqual(m.review_attention(self.config, 10000), "state_unavailable")
+
+    def test_disabled_reviews_ignore_missing_corrupt_and_pending_state(self):
+        self.config["reviews_enabled"] = False
+        path = self.root / "reviews.json"
+        for raw in (None, b"{bad json", m.encoded({**m.review_default(), "pending": {"started_s": 1}})):
+            if raw is not None:
+                path.write_bytes(raw)
+                path.chmod(0o600)
+            result, health = self.sampled_review_health()
+            self.assertEqual(health, "ok")
+            self.assertIsNone(result["sample"]["review_attention"])
+            self.assertEqual(result["incidents"], [])
+            if raw is not None:
+                self.assertEqual(path.read_bytes(), raw)
+
+    def test_review_start_during_native_probes_uses_fresh_clock(self):
+        def probe(config, argv, runner):
+            if "service" in argv:
+                m.write(self.root / "reviews.json", {**m.review_default(), "pending": {"started_s": 10001}})
+                return service()
+            return resources()
+        with m.owner(self.root, "review"), patch.object(m, "probe", side_effect=probe), \
+             patch.object(m.time, "time", side_effect=[10000, 10002]):
+            result = m.sample_tick(self.config)
+        self.assertEqual(result["at_s"], 10000)
+        self.assertIsNone(result["sample"]["review_attention"])
+
     def test_pressure_requires_sustained_samples_critical_immediate(self):
         history = [m.sanitize_sample(resources("warning"), service(), 10000 + n * 60) for n in range(3)]
         self.assertNotIn("memory_sustained_pressure", m.incident_codes(self.config, history[:2]))
