@@ -10,6 +10,23 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.14.2 - 2026-09-30
+
+Adding a Claude or Codex account in a terminal now takes you through sign-in
+and model loading without copying an account ID. Pickers show your current
+choice and explain what to do when their lists are empty.
+
+- `xcb accounts add claude` and `xcb accounts add codex` finish account setup
+  in an interactive terminal. JSON and piped commands still only add a record.
+- `xcb setup` offers existing accounts and an option to add another. Use
+  `--new` to add directly or `--account` to finish a specific account’s setup.
+- Account, model, session, conversation, and pane pickers open on the current
+  choice when available. Empty lists and filters with no matches show next steps.
+- Selecting a turned-off account explains how to enable it.
+- Codex sign-in shows the device code and copies it on macOS when clipboard
+  access works, then waits for Enter before opening the sign-in page. If either operation
+  fails, you can use the displayed code and link.
+
 ## 0.14.1 - 2026-09-29
 
 Automatic continuation now reads how a turn ended and answers the way you

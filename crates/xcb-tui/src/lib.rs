@@ -1735,15 +1735,38 @@ impl App {
         }
         true
     }
-    fn picker(&mut self, title: &str, items: Vec<PickItem>) {
+    fn picker(&mut self, title: &str, mut items: Vec<PickItem>) {
         self.inbox_scope = None;
         self.live_picker = None;
         self.live_inspect = None;
+        let selected = items.iter().position(|item| match &item.action {
+            PickAction::Account(id) => self
+                .view
+                .session
+                .as_ref()
+                .is_some_and(|session| &session.account == id),
+            PickAction::Model(key) => self
+                .view
+                .session
+                .as_ref()
+                .is_some_and(|session| session.model.key() == *key),
+            PickAction::Session(id) => self
+                .view
+                .session
+                .as_ref()
+                .is_some_and(|session| &session.id == id),
+            PickAction::Conversation(id) => self.view.conversation.as_ref() == Some(id),
+            PickAction::Pane(id) => &self.view.pane.id == id,
+            _ => false,
+        });
+        if let Some(selected) = selected {
+            items[selected].label.push_str(" · current");
+        }
         self.modal = Some(Modal::Picker {
             title: title.into(),
             query: String::new(),
             items,
-            selected: 0,
+            selected: selected.unwrap_or(0),
         });
     }
     fn edit_pane(&mut self, pane: &Pane, expected: Option<String>) {
@@ -2976,7 +2999,10 @@ impl App {
                     return true;
                 }
                 Some(account) if !account.enabled => {
-                    self.notice = "This account is disabled. Enable it before selecting it.".into();
+                    self.notice = format!(
+                        "This account is disabled: /quit, then run xcb accounts enable {}. Reopen xcb to select it.",
+                        account.id
+                    );
                     return true;
                 }
                 None => {

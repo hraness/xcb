@@ -1998,7 +1998,27 @@ fn render_modal(
                 ..inner
             };
             if count == 0 {
-                frame.render_widget(Paragraph::new("  No matches").style(muted()), list_area);
+                let message = if !items.is_empty() {
+                    "No matches · Ctrl-U clears the filter".to_owned()
+                } else if title.starts_with("Accounts") {
+                    "No accounts yet · Esc closes; /quit, then xcb setup codex or xcb setup claude"
+                        .to_owned()
+                } else if title.starts_with("Models") {
+                    "No models available · Esc closes; /quit, then xcb setup codex or xcb setup claude"
+                        .to_owned()
+                } else if title.contains("sessions") || title == "Control conversations" {
+                    "No sessions yet · Esc closes; /new starts fresh work".to_owned()
+                } else if title == "Managed tasks" {
+                    "No tasks yet · Esc closes; send a prompt to start work".to_owned()
+                } else {
+                    "Nothing here yet · Esc closes".to_owned()
+                };
+                frame.render_widget(
+                    Paragraph::new(message)
+                        .style(muted())
+                        .wrap(Wrap { trim: false }),
+                    list_area,
+                );
             } else {
                 let mut state = ListState::default().with_selected(Some(*selected));
                 frame.render_stateful_widget(

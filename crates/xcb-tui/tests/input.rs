@@ -798,6 +798,7 @@ fn account_picker_labels_disabled_rows_and_only_submits_enabled_accounts() {
         );
         assert!(matches!(app.modal, Some(Modal::Picker { .. })));
         assert!(app.notice.contains("disabled"));
+        assert!(app.notice.contains("xcb accounts enable disabled"));
         assert_eq!(app.composer.text(), "keep my draft");
         picker_key(&mut app, &tx, KeyCode::Down);
         picker_key(&mut app, &tx, KeyCode::Enter);
@@ -1033,6 +1034,43 @@ fn model_picker_filters_to_the_bound_sessions_provider() {
 }
 
 #[test]
+fn pickers_start_on_the_current_account_model_and_session() {
+    for command in ["/accounts", "/model", "/sessions", "/pane"] {
+        let (tx, rx) = sync_channel(4);
+        let mut app = App::default();
+        let mut view = view_for("s_current");
+        let session = view.session.as_ref().unwrap().clone();
+        view.accounts = vec![
+            picker_account("other", session.model.provider, true),
+            picker_account(session.account.as_str(), session.model.provider, true),
+        ];
+        view.models = vec![
+            catalog_model(session.model.provider, "other", None),
+            session.model.clone(),
+        ];
+        let mut other = session.clone();
+        other.id = xcb_core::Id::new("s_other").unwrap();
+        view.sessions = vec![other, session];
+        let mut other_pane = view.pane.clone();
+        other_pane.id = xcb_core::Id::new("other_pane").unwrap();
+        view.panes = vec![other_pane, view.pane.clone()];
+        app.apply(Update::View(Box::new(view)));
+        app.composer.set_text(command);
+        picker_key(&mut app, &tx, KeyCode::Enter);
+        let Some(Modal::Picker {
+            items, selected, ..
+        }) = &app.modal
+        else {
+            panic!("expected picker for {command}");
+        };
+        assert_eq!(*selected, 1, "{command}");
+        assert!(items[1].label.ends_with(" · current"));
+        assert!(!items[0].label.ends_with(" · current"));
+        assert!(rx.try_recv().is_err());
+    }
+}
+
+#[test]
 fn ctrl_c_clears_a_draft_before_cancelling_a_live_turn_then_quits_when_idle() {
     let (tx, rx) = sync_channel(8);
     let mut app = App::default();
@@ -1238,10 +1276,17 @@ fn managed_session_picker_switches_control_conversations() {
     app.composer.set_text("/s");
     picker_key(&mut app, &tx, KeyCode::Enter);
     match &app.modal {
-        Some(Modal::Picker { title, .. }) => assert_eq!(title, "Control conversations"),
+        Some(Modal::Picker {
+            title,
+            items,
+            selected,
+            ..
+        }) => {
+            assert_eq!(title, "Control conversations");
+            assert!(items[*selected].label.ends_with(" · current"));
+        }
         _ => panic!("conversation picker"),
     }
-    picker_key(&mut app, &tx, KeyCode::Down);
     picker_key(&mut app, &tx, KeyCode::Down);
     picker_key(&mut app, &tx, KeyCode::Enter);
     assert!(
@@ -1282,6 +1327,7 @@ fn managed_session_picker_offers_a_new_conversation() {
         }
         _ => panic!("conversation picker"),
     }
+    picker_key(&mut app, &tx, KeyCode::Home);
     picker_key(&mut app, &tx, KeyCode::Enter);
     assert!(matches!(
         rx.try_recv(),

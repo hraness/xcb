@@ -79,8 +79,8 @@ xcb setup claude
 xcb
 ```
 
-`xcb setup` adds an account, checks the Claude Code build, opens the browser
-sign-in, and loads the account's models. xcb keeps that sign-in in its own
+`xcb setup` lets you choose an existing account or add another, checks the
+Claude Code build, opens browser sign-in, and loads the account's models. xcb keeps that sign-in in its own
 state folder, apart from your usual Claude Code login. `xcb setup codex`
 works the same way; Devin connects by importing the Devin CLI's sign-in
 ([accounts and models](https://xcb.sh/docs/providers)).
