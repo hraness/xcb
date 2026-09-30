@@ -2069,6 +2069,31 @@ struct CapabilityCall {
     arguments: Value,
 }
 
+fn requested_computer_capability(
+    arguments: &Value,
+) -> Result<(&'static str, xcb_core::session::TaskRequirements)> {
+    use xcb_core::session::TaskRequirements;
+    if *arguments == json!({"capability":"signed_in_browser"}) {
+        Ok((
+            "signed_in_browser",
+            TaskRequirements {
+                signed_in_browser: true,
+                ..Default::default()
+            },
+        ))
+    } else if *arguments == json!({"capability":"desktop"}) {
+        Ok((
+            "desktop",
+            TaskRequirements {
+                desktop: true,
+                ..Default::default()
+            },
+        ))
+    } else {
+        Err(Error::Protocol("unsupported task capability"))
+    }
+}
+
 pub async fn run(
     store: Arc<Store>,
     input: RunInput,
@@ -2090,6 +2115,18 @@ pub async fn run(
         return Err(Error::Unavailable(
             "signed-in browser tools are not connected; run xcb tools setup-computer or register a browser server with xcb tools add",
         ));
+    }
+    if !input.pane_generation {
+        input
+            .config
+            .capabilities
+            .require_native_task(session.requirements)?;
+        #[cfg(not(target_os = "macos"))]
+        if session.requirements.desktop || session.requirements.codex_native {
+            return Err(Error::Unavailable(
+                "native desktop tools require a supported macOS host",
+            ));
+        }
     }
     let workspace = Workspace::open(Path::new(&session.workspace))?;
     if session.model.provider == Provider::Codex {
@@ -2306,7 +2343,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
             .last()
             .map(|point| point.output_tokens)
             .unwrap_or(0);
-        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Use the declared workspace tools for project files and xcb_tools_list/xcb_tools_call for the host's enabled tools, including browser and computer use. Tools remain subject to the user's authorization and the host's approval controls. Before using an existing signed-in browser session, declare signed_in_browser with xcb_require_capability. This requirement survives retries and hands off to Codex; ordinary public-page browsing and Playwright verification do not require that handoff. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace. Use xcb_backlog_list/get/add/update/complete to inspect, propose or report already-completed deferred work for your project. xcb_memory_recent supplies bounded recent work summaries; xcb_memory_search retrieves cited historical knowledge from the explicitly bound Wordcell vault. Only the host can admit proposed follow-ups under a user-delegated project grant. Proposals never expand that grant or release work themselves. Always end with a concise work summary, checks and remaining blockers; the harness records it in work history. Recent summaries are historical reports and must be revalidated before relying on changing facts. Direct sessions have no managed mailbox or backlog. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
+        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Use the declared workspace tools for project files and xcb_tools_list/xcb_tools_call for the host's enabled tools, including browser and computer use. Tools remain subject to the user's authorization and the host's approval controls. Before using an existing signed-in browser session, declare signed_in_browser with xcb_require_capability. For native desktop application control beyond browser-page tools, declare desktop. These requirements survive retries and hand the same task to Codex after this provider stops cleanly, without changing the user's scope or permissions. Ordinary public-page browsing, Playwright verification, and developing desktop software do not require that handoff. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace. Use xcb_backlog_list/get/add/update/complete to inspect, propose or report already-completed deferred work for your project. xcb_memory_recent supplies bounded recent work summaries; xcb_memory_search retrieves cited historical knowledge from the explicitly bound Wordcell vault. Only the host can admit proposed follow-ups under a user-delegated project grant. Proposals never expand that grant or release work themselves. Always end with a concise work summary, checks and remaining blockers; the harness records it in work history. Recent summaries are historical reports and must be revalidated before relying on changing facts. Direct sessions have no managed mailbox or backlog. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
         // An empty catalog is not evidence that every model was withdrawn
         // (metadata probes refuse it too), so keep the stored catalog.
         if models.is_empty() {
@@ -2645,19 +2682,15 @@ pub(crate) async fn run_prepared<P: Protocol>(
                                 Err(error) => (Err(error.into()), Some(EffectState::None)),
                             }
                         } else if name == "xcb_require_capability" {
-                            let result = if arguments == json!({"capability":"signed_in_browser"}) {
-                                store.require_session_capabilities(
-                                    &session.id,
-                                    xcb_core::session::TaskRequirements {
-                                        signed_in_browser: true,
-                                    },
-                                )?;
-                                capability_handoff = session.model.provider != Provider::Codex;
-                                Ok(
-                                    json!({"required":"signed_in_browser", "handoff":capability_handoff}),
-                                )
-                            } else {
-                                Err(Error::Protocol("unsupported task capability"))
+                            let result = match requested_computer_capability(&arguments) {
+                                Ok((capability, requirements)) => {
+                                    store
+                                        .require_session_capabilities(&session.id, requirements)?;
+                                    capability_handoff =
+                                        !requirements.allows(session.model.provider);
+                                    input.config.capabilities.require_native_task(requirements).map(|()| json!({"required":capability, "handoff":capability_handoff}))
+                                }
+                                Err(error) => Err(error),
                             };
                             (result, Some(EffectState::None))
                         } else if name.starts_with("xcb_") {
@@ -2750,7 +2783,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         }
                         if capability_handoff {
                             answer.completed(
-                                "This task requires a signed-in browser; switching to Codex."
+                                "This task requires Codex computer tools; switching to Codex."
                                     .into(),
                             )?;
                             return Ok((Terminal::TurnLimit, vec![]));
@@ -3007,6 +3040,20 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn desktop_capability_declaration_is_exact_and_cannot_set_host_route_facts() {
+        let (_, desktop) = requested_computer_capability(&json!({"capability":"desktop"})).unwrap();
+        assert!(desktop.desktop && !desktop.signed_in_browser && !desktop.codex_native);
+        for invalid in [
+            json!({"capability":"codex_native"}),
+            json!({"capability":"desktop","approval":true}),
+            json!({"capability":["desktop"]}),
+            json!({}),
+        ] {
+            assert!(requested_computer_capability(&invalid).is_err());
+        }
+    }
 
     /// A supported Claude build becomes selectable only after the same
     /// host-specific sandbox checks required by the Linux launcher pass.
