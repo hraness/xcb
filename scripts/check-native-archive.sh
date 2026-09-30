@@ -2,16 +2,32 @@
 # Admit packaged native release archives exactly the way scripts/install-native.sh
 # does before it installs one: the adjacent `.sha256` describes the archive
 # bytes, the archive lists exactly one regular member named `xcb`, and the
-# extracted binary reports `xcb <version>`. Run it on the platform that built
-# the archive; the binary is executed.
+# extracted binary has the required macOS release signature, then reports
+# `xcb <version>`. Run on the platform that built the archive. The explicit
+# --unsigned-build mode accepts only distinctly named local build intermediates.
 set -eu
 
-usage() { echo "usage: $0 VERSION ARCHIVE.tar.gz [ARCHIVE.tar.gz ...]" >&2; exit 2; }
+usage() { echo "usage: $0 [--unsigned-build] VERSION ARCHIVE.tar.gz [ARCHIVE.tar.gz ...]" >&2; exit 2; }
 fail() { echo "error: $*" >&2; exit 1; }
+unsigned_build=no
+if [ "${1:-}" = --unsigned-build ]; then unsigned_build=yes; shift; fi
 [ "$#" -ge 2 ] || usage
 version=${1#v}
 shift
 printf '%s\n' "$version" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || fail "version must be a stable semantic version"
+
+historical_unsigned_release() {
+  printf '%s\n' "$1" | awk -F . '{ exit !($1 == 0 && ($2 < 15 || ($2 == 15 && $3 < 2))) }'
+}
+verify_macos_release_signature() {
+  apple_team_id='8AAP53VTW3'
+  apple_identifier='dev.hraness.xcb'
+  printf '%s\n' "$apple_team_id" | LC_ALL=C grep -Eq '^[A-Z0-9]{10}$' || fail "release Apple Developer Team ID is not configured"
+  [ -x /usr/bin/codesign ] || fail "macOS codesign is required to verify this release"
+  requirement="anchor apple generic and identifier \"$apple_identifier\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$apple_team_id\""
+  /usr/bin/codesign --verify --strict --all-architectures --test-requirement "=$requirement" "$1" \
+    || fail "release does not have the required Apple Developer ID signature"
+}
 
 sha256_cmd=$(command -v sha256sum || true)
 sha256_kind=sha256sum
@@ -48,8 +64,10 @@ trap 'rm -rf "$work"' EXIT
 for archive in "$@"; do
   [ -f "$archive" ] && [ ! -L "$archive" ] || fail "$archive is not a regular file"
   base=$(basename "$archive")
-  case "$base" in
-    "xcb-$version-"*-*.tar.gz) ;;
+  case "$unsigned_build:$base" in
+    "yes:xcb-$version-darwin-aarch64.unsigned.tar.gz"|"yes:xcb-$version-darwin-x86_64.unsigned.tar.gz") ;;
+    yes:*) fail "unsigned build validation accepts only distinctly named macOS build intermediates" ;;
+    "no:xcb-$version-darwin-aarch64.tar.gz"|"no:xcb-$version-linux-x86_64.tar.gz"|"no:xcb-$version-linux-aarch64.tar.gz") ;;
     *) fail "$base is not an xcb-$version-<os>-<arch>.tar.gz release archive" ;;
   esac
   checksum_file="$archive.sha256"
@@ -69,6 +87,9 @@ for archive in "$@"; do
   rm -f "$work/xcb"
   tar -xzOf "$archive" xcb > "$work/xcb"
   chmod 0755 "$work/xcb"
+  if [ "$unsigned_build" = no ] && [ "$base" = "xcb-$version-darwin-aarch64.tar.gz" ] && ! historical_unsigned_release "$version"; then
+    verify_macos_release_signature "$work/xcb"
+  fi
   reported=$("$work/xcb" --version) || fail "extracted xcb --version failed for $base"
   [ "$reported" = "xcb $version" ] || fail "extracted binary reports '$reported', expected 'xcb $version'"
   echo "ok: $base sha256=$actual reports '$reported'"

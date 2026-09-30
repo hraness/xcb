@@ -401,18 +401,12 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
-          key: site-chromium-headless-shell-${{ runner.os }}-1.58.2
-      # verify-site-browser.mjs launches headless, which only needs the
-      # headless shell. The runner image already carries its system libraries;
-      # install them only if the shell cannot start.
-      - name: Install Chromium headless shell
+          key: site-chromium-full-${{ runner.os }}-${{ hashFiles('site/bun.lock') }}
+      # The verifier checks the full package-pinned Chromium executable and
+      # its launch arguments. Provision that browser and its system libraries.
+      - name: Install pinned Chromium
         working-directory: site
-        run: |
-          node node_modules/playwright-core/cli.js install --only-shell chromium
-          if ! node -e "require('playwright-core').chromium.launch().then((browser) => browser.close())"; then
-            echo "::warning::Chromium headless shell could not start; installing its system dependencies"
-            node node_modules/playwright-core/cli.js install-deps chromium
-          fi
+        run: node node_modules/playwright-core/cli.js install --with-deps --no-shell chromium
       - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: github.ref == 'refs/heads/main' && steps.chromium-cache.outputs.cache-hit != 'true'
         with:

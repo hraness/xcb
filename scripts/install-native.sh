@@ -16,6 +16,23 @@ fail() { echo "error: $*" >&2; exit 1; }
 version_valid() {
   printf '%s\n' "$1" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 }
+# Releases before 0.15.2 predate Developer ID signing. This exception applies
+# only to an explicitly requested historical version, never to a new release.
+historical_unsigned_release() {
+  printf '%s\n' "$1" | awk -F . '{ exit !($1 == 0 && ($2 < 15 || ($2 == 15 && $3 < 2))) }'
+}
+verify_macos_release_signature() {
+  apple_team_id='8AAP53VTW3'
+  apple_identifier='dev.hraness.xcb'
+  printf '%s\n' "$apple_team_id" | LC_ALL=C grep -Eq '^[A-Z0-9]{10}$' || fail "release Apple Developer Team ID is not configured"
+  [ -x /usr/bin/codesign ] || fail "macOS codesign is required to verify this release"
+  # Pin a stable identity, not a build's CDHash. Verify locally before executing
+  # downloaded bytes; notarization is checked by the release pipeline so an
+  # install does not depend on Apple's network availability.
+  requirement="anchor apple generic and identifier \"$apple_identifier\" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$apple_team_id\""
+  /usr/bin/codesign --verify --strict --all-architectures --test-requirement "=$requirement" "$1" \
+    || fail "release does not have the required Apple Developer ID signature"
+}
 sha256() {
   if [ "$sha256_kind" = sha256sum ]; then
     hash_output=$("$sha256_cmd" < "$1") || return 1
@@ -186,6 +203,9 @@ fi
 regular_file "$stage/candidate" || fail "candidate must be a regular non-symlink file"
 chmod 0755 "$stage/candidate"
 candidate_digest=$(sha256 "$stage/candidate")
+if [ "$install_method" = release ] && [ "$os" = darwin ] && ! historical_unsigned_release "$expected_version"; then
+  verify_macos_release_signature "$stage/candidate"
+fi
 reported_version=$("$stage/candidate" --version) || fail "candidate --version failed"
 [ "$reported_version" = "xcb $expected_version" ] || fail "candidate reports '$reported_version', expected 'xcb $expected_version'"
 [ "$candidate_digest" = "$(sha256 "$stage/candidate")" ] || fail "candidate changed during verification"

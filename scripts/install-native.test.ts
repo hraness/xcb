@@ -8,11 +8,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import { fixtureRequirement, withMacosVerifierFixture } from "./macos-signature-fixture";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
-const binary = (version: string, label = "candidate") => `#!/bin/sh\n[ "$#" = 1 ] && [ "$1" = --version ] || exit 17\nprintf 'xcb ${version}\\n'\n# ${label}\n`;
+const binary = (version: string, label = "candidate") => `#!/bin/sh\n[ -z "\${FIXTURE_EXECUTION_LOG:-}" ] || printf 'executed\\n' >> "$FIXTURE_EXECUTION_LOG"\n[ "$#" = 1 ] && [ "$1" = --version ] || exit 17\nprintf 'xcb ${version}\\n'\n# ${label}\n`;
 
 /** `uname` reporting FIXTURE_UNAME_S / FIXTURE_UNAME_M when set, so one host
  * can exercise every platform's archive selection. */
@@ -127,7 +128,16 @@ fi
     expect(readFileSync(destination, "utf8")).toBe(previous);
     expect(readdirSync(join(prefix, "bin"))).toEqual(["xcb"]);
   }
-  return { root, repository, prefix, candidate, destination, previous, release, run, unchanged };
+  function mockMacosVerifier() {
+    const installer = join(repository, "scripts/install-native.sh");
+    writeFileSync(installer, withMacosVerifierFixture(readFileSync(installer, "utf8"), stubs));
+    return {
+      FIXTURE_UNAME_S: "Darwin", FIXTURE_UNAME_M: "arm64", XCB_VERSION: "0.15.2",
+      FIXTURE_CODESIGN_RESULT: "valid", FIXTURE_CODESIGN_LOG: join(root, "codesign.log"),
+      FIXTURE_EXECUTION_LOG: join(root, "executed.log"),
+    };
+  }
+  return { root, repository, prefix, candidate, destination, previous, release, run, unchanged, mockMacosVerifier };
 }
 
 test("native source upgrade validates staged bytes, atomically replaces, and backs up the old digest", () => {
@@ -304,6 +314,86 @@ test("native release binary version mismatch preserves the installed binary", ()
   f.release();
   expect(f.run(true).status).not.toBe(0);
   f.unchanged();
+});
+
+test("macOS release verifies the pinned Developer ID before executing and installing the candidate", () => {
+  const f = fixture("0.15.2");
+  f.release();
+  const extra = f.mockMacosVerifier();
+  const result = f.run(true, extra);
+  expect(result.status, result.stderr).toBe(0);
+  const args = readFileSync(extra.FIXTURE_CODESIGN_LOG, "utf8").trim().split("\n");
+  expect(args.slice(0, 5)).toEqual(["--verify", "--strict", "--all-architectures", "--test-requirement", fixtureRequirement]);
+  expect(args[5]).toEndWith("/candidate");
+  expect(readFileSync(extra.FIXTURE_EXECUTION_LOG, "utf8")).toBe("executed\n");
+  expect(readFileSync(f.destination, "utf8")).toBe(binary("0.15.2"));
+});
+
+for (const verdict of ["unsigned", "adhoc", "wrong-team", "wrong-identifier", "tampered", "untrusted-anchor", "wrong-certificate"]) {
+  test(`macOS release rejects verifier verdict ${verdict} without executing or replacing anything`, () => {
+    const f = fixture("0.15.2");
+    f.release();
+    const extra = f.mockMacosVerifier();
+    const metadata = join(f.prefix, "share/xcb");
+    mkdirSync(metadata, { recursive: true });
+    writeFileSync(join(metadata, "install-native.sh"), "preserve installer");
+    writeFileSync(join(metadata, "install.json"), "preserve manifest");
+    const result = f.run(true, { ...extra, FIXTURE_CODESIGN_RESULT: verdict });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("required Apple Developer ID signature");
+    expect(existsSync(extra.FIXTURE_EXECUTION_LOG)).toBe(false);
+    expect(readFileSync(join(metadata, "install-native.sh"), "utf8")).toBe("preserve installer");
+    expect(readFileSync(join(metadata, "install.json"), "utf8")).toBe("preserve manifest");
+    f.unchanged();
+  });
+}
+
+test("an unconfigured macOS release Team fails closed before candidate execution", () => {
+  const f = fixture("0.15.2");
+  f.release();
+  const extra = f.mockMacosVerifier();
+  const installer = join(f.repository, "scripts/install-native.sh");
+  writeFileSync(installer, readFileSync(installer, "utf8").replace(/apple_team_id='[^']*'/, "apple_team_id='__XCB_APPLE_TEAM_ID__'"));
+  const result = f.run(true, extra);
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain("Apple Developer Team ID is not configured");
+  expect(existsSync(extra.FIXTURE_EXECUTION_LOG)).toBe(false);
+  expect(existsSync(extra.FIXTURE_CODESIGN_LOG)).toBe(false);
+  f.unchanged();
+});
+
+for (const version of ["0.15.2", "0.15.10", "0.16.0", "1.0.0"]) {
+  test(`macOS version ${version} never falls back to historical unsigned admission`, () => {
+    const f = fixture(version);
+    f.release();
+    const extra = f.mockMacosVerifier();
+    const result = f.run(true, { ...extra, XCB_VERSION: version, FIXTURE_CODESIGN_RESULT: "unsigned" });
+    expect(result.status).not.toBe(0);
+    expect(existsSync(extra.FIXTURE_CODESIGN_LOG)).toBe(true);
+    expect(existsSync(extra.FIXTURE_EXECUTION_LOG)).toBe(false);
+    f.unchanged();
+  });
+}
+
+test("explicit historical macOS release 0.15.1 retains its pre-signing installation contract", () => {
+  const f = fixture("0.15.1");
+  f.release();
+  const extra = f.mockMacosVerifier();
+  const result = f.run(true, { ...extra, XCB_VERSION: "0.15.1", FIXTURE_CODESIGN_RESULT: "unsigned" });
+  expect(result.status, result.stderr).toBe(0);
+  expect(existsSync(extra.FIXTURE_CODESIGN_LOG)).toBe(false);
+});
+
+test("source macOS builds and Linux releases do not require a Developer ID signature", () => {
+  for (const fromRelease of [false, true]) {
+    const f = fixture("0.15.2");
+    f.release();
+    writeFileSync(join(f.repository, "Cargo.toml"), '[workspace.package]\nversion = "0.15.2"\n');
+    const extra = f.mockMacosVerifier();
+    const result = f.run(fromRelease, { ...extra, XCB_VERSION: fromRelease ? "0.15.2" : "", FIXTURE_UNAME_S: fromRelease ? "Linux" : "Darwin", FIXTURE_CODESIGN_RESULT: "unsigned" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(existsSync(extra.FIXTURE_CODESIGN_LOG)).toBe(false);
+  }
 });
 
 for (const [label, entries] of Object.entries({

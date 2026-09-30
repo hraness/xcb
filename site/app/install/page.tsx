@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { PlatformBadges, PlatformInstall } from "@hraness/design-kit/react";
+import { agentSetupTargets } from "@hraness/design-kit";
+import { AgentSetupPrompt, PlatformBadges, PlatformInstall } from "@hraness/design-kit/react";
 import { AskAiAboutThis } from "@hraness/ui";
 import { CodeBlock } from "../code-block";
 import { supportedBuilds } from "../docs/provider-status";
@@ -13,6 +14,7 @@ import { installPlatforms, runsOnPlatforms } from "./platforms";
 
 const title = installTitle;
 const description = installDescription;
+const agentTargets = agentSetupTargets(agentPrompt);
 
 export const metadata: Metadata = {
   title,
@@ -95,7 +97,7 @@ export default function Install() {
 
         <PageSection id="agent" title="Ask your agent to install it">
           <p>Already using Claude Code, Codex, or another coding agent? Paste this prompt into it. It installs and checks xcb, then leaves the sign-in to you:</p>
-          <CodeBlock code={agentPrompt} language="text" copyLabel="Copy prompt" />
+          <AgentSetupPrompt label="Ask your coding agent to install xcb" prompt={agentPrompt} targets={agentTargets} />
         </PageSection>
 
         <PageSection id="build-on" title="Build on xcb">
