@@ -180,6 +180,53 @@ impl CapabilityConfig {
     pub fn is_empty(&self) -> bool {
         self.servers.is_empty()
     }
+    /// Configuration readiness only. Launch still verifies the pinned code and
+    /// cleanup inventory; a browser extension's Computer tag is not desktop UI.
+    pub(crate) fn require_native_task(
+        &self,
+        requirements: xcb_core::session::TaskRequirements,
+    ) -> Result<()> {
+        if !requirements.desktop && !requirements.codex_native {
+            return Ok(());
+        }
+        self.validate()?;
+        let ready = self.servers.iter().any(|server| {
+            if server.transport != CapabilityTransport::CodexNative
+                || server.name != "cua_repl"
+                || server.shutdown_tool.as_deref() != Some("turn_ended")
+                || !server.tools.as_ref().is_some_and(|tools| {
+                    ["js", "turn_ended"]
+                        .iter()
+                        .all(|name| tools.iter().any(|tool| tool == name))
+                })
+            {
+                return false;
+            }
+            let Some(surfaces) = server.environment.get("CUA_REPL_ENABLED_SURFACES") else {
+                return false;
+            };
+            let surfaces = surfaces.split(',').map(str::trim).collect::<Vec<_>>();
+            !surfaces.is_empty()
+                && surfaces.len() <= 2
+                && surfaces
+                    .iter()
+                    .all(|surface| ["browser", "computer"].contains(surface))
+                && surfaces.iter().collect::<BTreeSet<_>>().len() == surfaces.len()
+                && server.features.contains(&CapabilityFeature::Browser)
+                    == surfaces.contains(&"browser")
+                && server.features.contains(&CapabilityFeature::Computer)
+                    == surfaces.contains(&"computer")
+                && (!requirements.desktop || surfaces.contains(&"computer"))
+        });
+        if !ready {
+            return Err(Error::Unavailable(if requirements.desktop {
+                "desktop tools are not connected; run xcb tools setup-computer with the computer surface enabled"
+            } else {
+                "native computer tools are not connected; run xcb tools setup-computer"
+            }));
+        }
+        Ok(())
+    }
     pub fn validate(&self) -> Result<()> {
         if self.servers.len() > MAX_SERVERS
             || self
@@ -643,6 +690,25 @@ impl CapabilityManager {
         arguments: &Value,
     ) -> Result<()> {
         let index = self.native_index(name)?;
+        if matches!(tool, "js" | "js_reset") {
+            let requirements = self
+                .run
+                .session
+                .as_ref()
+                .map(|id| {
+                    self.store
+                        .session(id)?
+                        .ok_or(Error::Unavailable("session not found"))
+                        .map(|session| session.requirements)
+                })
+                .transpose()?
+                .unwrap_or_default()
+                .merge(xcb_core::session::TaskRequirements {
+                    codex_native: true,
+                    ..Default::default()
+                });
+            self.config.require_native_task(requirements)?;
+        }
         if id.len() > 1024
             || !matches!(
                 serde_json::from_str::<Value>(id),
@@ -681,7 +747,8 @@ impl CapabilityManager {
             self.store.require_session_capabilities(
                 session,
                 xcb_core::session::TaskRequirements {
-                    signed_in_browser: true,
+                    codex_native: true,
+                    ..Default::default()
                 },
             )?;
         }
@@ -1306,6 +1373,70 @@ mod tests {
     }
 
     #[test]
+    fn desktop_readiness_requires_native_computer_surface_and_cleanup() {
+        use xcb_core::session::TaskRequirements;
+        let desktop = TaskRequirements {
+            desktop: true,
+            ..Default::default()
+        };
+        let native = TaskRequirements {
+            codex_native: true,
+            ..Default::default()
+        };
+        let mut server = config();
+        server.name = "cua_repl".into();
+        server.transport = CapabilityTransport::CodexNative;
+        server.tools = Some(vec!["js".into(), "turn_ended".into()]);
+        server.shutdown_tool = Some("turn_ended".into());
+        server
+            .environment
+            .insert("CUA_REPL_ENABLED_SURFACES".into(), "browser".into());
+        let check = |server: CapabilityServer, requirements| {
+            CapabilityConfig {
+                servers: vec![server],
+            }
+            .require_native_task(requirements)
+        };
+        assert!(check(server.clone(), native).is_ok());
+        assert!(check(server.clone(), desktop).is_err());
+        // A declared Computer tag cannot promote an enabled browser surface.
+        server.features.push(CapabilityFeature::Computer);
+        assert!(check(server.clone(), desktop).is_err());
+        server.environment.insert(
+            "CUA_REPL_ENABLED_SURFACES".into(),
+            "browser,computer".into(),
+        );
+        assert!(check(server.clone(), desktop).is_ok());
+        server.features = vec![CapabilityFeature::Computer];
+        server
+            .environment
+            .insert("CUA_REPL_ENABLED_SURFACES".into(), "computer".into());
+        assert!(check(server.clone(), desktop).is_ok());
+        assert!(check(server.clone(), native).is_ok());
+        for invalid in ["", "computer,computer", "computer,other", "computer,"] {
+            let mut changed = server.clone();
+            changed
+                .environment
+                .insert("CUA_REPL_ENABLED_SURFACES".into(), invalid.into());
+            assert!(check(changed, desktop).is_err());
+        }
+        let mut changed = server.clone();
+        changed.environment.clear();
+        assert!(check(changed, desktop).is_err());
+        let mut changed = server.clone();
+        changed.transport = CapabilityTransport::Shared;
+        assert!(check(changed, desktop).is_err());
+        let mut changed = server.clone();
+        changed.transport = CapabilityTransport::Shared;
+        assert!(check(changed, desktop).is_err());
+        let mut changed = server.clone();
+        changed.shutdown_tool = None;
+        assert!(check(changed, desktop).is_err());
+        server.tools = Some(vec!["js".into()]);
+        assert!(check(server, desktop).is_err());
+    }
+
+    #[test]
     fn owner_configuration_is_closed_bounded_and_unique() {
         config().validate().unwrap();
         let mut bad = config();
@@ -1421,7 +1552,7 @@ while IFS= read -r frame; do
                 *'"name":"hang"'*) IFS= read -r unused ;;
                 *'"name":"reverse"'*) printf '{"jsonrpc":"2.0","id":900,"method":"elicitation/create","params":{"message":"Approve"}}\n' ;;
                 *'"name":"fail"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"known operation failed"}],"isError":true}}\n' "$id" ;;
-                *'"name":"shutdown"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[]}}\n' "$id" ;;
+                *'"name":"shutdown"'*|*'"name":"turn_ended"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[]}}\n' "$id" ;;
                 *) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[{"type":"text","text":"page"},{"type":"image","mimeType":"image/png","data":"fixture"}]}}\n' "$id" ;;
             esac ;;
     esac
@@ -1993,53 +2124,107 @@ done
     }
 
     #[cfg(unix)]
-    #[tokio::test]
-    async fn native_images_and_computer_requirement_are_durable_before_fallback() {
-        use base64::Engine;
-        let (_directory, mut manager) = native_manager(true).await;
-        let session = manager.run.session.clone().unwrap();
-        assert!(
-            !manager
-                .store
-                .session(&session)
-                .unwrap()
-                .unwrap()
-                .requirements
-                .signed_in_browser
-        );
-        manager.servers[0]
-            .as_mut()
-            .unwrap()
-            .tools
-            .as_mut()
-            .unwrap()
-            .push(json!({"name":"js","inputSchema":{"type":"object"}}));
+    async fn native_js_manager(surface: &str) -> (tempfile::TempDir, CapabilityManager) {
+        let (directory, mut manager) = native_manager(true).await;
+        manager.config.servers[0]
+            .environment
+            .insert("CUA_REPL_ENABLED_SURFACES".into(), surface.into());
+        manager.config.servers[0].features = vec![if surface == "computer" {
+            CapabilityFeature::Computer
+        } else {
+            CapabilityFeature::Browser
+        }];
+        manager.config.servers[0].tools =
+            Some(vec!["js".into(), "capture".into(), "turn_ended".into()]);
+        manager.config.servers[0].shutdown_tool = Some("turn_ended".into());
+        let tools = manager.servers[0].as_mut().unwrap().tools.as_mut().unwrap();
+        for name in ["js", "turn_ended"] {
+            tools.push(json!({"name":name,"inputSchema":{"type":"object"}}));
+        }
         manager
-            .native_effect_begin("cua_repl", "103", "js", &json!({}))
+            .native_set_turn_context("cua_repl", "fixture-thread", "fixture-turn")
+            .unwrap();
+        (directory, manager)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn desktop_declared_during_browser_turn_blocks_native_effects() {
+        let (_directory, mut manager) = native_js_manager("browser").await;
+        let id = manager.run.session.clone().unwrap();
+        manager
+            .store
+            .require_session_capabilities(
+                &id,
+                xcb_core::session::TaskRequirements {
+                    desktop: true,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         assert!(
             manager
+                .native_effect_begin("cua_repl", "103", "js", &json!({}))
+                .is_err()
+        );
+        assert_eq!(manager.effects(), EffectState::None);
+        let requirements = manager.store.session(&id).unwrap().unwrap().requirements;
+        assert!(
+            requirements.desktop && !requirements.codex_native && !requirements.signed_in_browser
+        );
+        assert!(manager.shutdown().await);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_images_and_computer_requirement_are_durable_before_fallback() {
+        use base64::Engine;
+        for surface in ["browser", "computer"] {
+            let (_directory, mut manager) = native_js_manager(surface).await;
+            let session = manager.run.session.clone().unwrap();
+            assert!(
+                !manager
+                    .store
+                    .session(&session)
+                    .unwrap()
+                    .unwrap()
+                    .requirements
+                    .codex_native
+            );
+            manager
+                .native_effect_begin("cua_repl", "103", "js", &json!({}))
+                .unwrap();
+            assert!(
+                manager
+                    .store
+                    .session(&session)
+                    .unwrap()
+                    .unwrap()
+                    .requirements
+                    .codex_native
+            );
+            let required = manager
                 .store
                 .session(&session)
                 .unwrap()
                 .unwrap()
-                .requirements
-                .signed_in_browser
-        );
-        manager.native_send("cua_repl",&json!({"jsonrpc":"2.0","id":103,"method":"tools/call","params":{"name":"js","arguments":{}}})).await.unwrap();
-        let _response = manager.native_frame("cua_repl").await.unwrap().unwrap();
-        let attachment =
-            crate::attachments::from_rgba(manager.store.root(), 2, 2, vec![255; 16]).unwrap();
-        let data = base64::engine::general_purpose::STANDARD
-            .encode(crate::attachments::read(manager.store.root(), &attachment).unwrap());
-        let reply = manager.native_effect_settle("cua_repl","103",&json!({"content":[{"type":"text","text":"Page ready"},{"type":"image","mimeType":"image/png","data":data}]})).unwrap();
-        assert_eq!(reply["content"][1]["data"], data);
-        let messages = manager.store.messages(&session, 10).unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].attachments, vec![attachment]);
-        assert!(messages[0].text.contains("Page ready"));
-        assert!(!messages[0].text.contains(&data));
-        assert!(manager.shutdown().await);
+                .requirements;
+            assert!(!required.signed_in_browser && !required.desktop);
+            manager.native_send("cua_repl",&json!({"jsonrpc":"2.0","id":103,"method":"tools/call","params":{"name":"js","arguments":{}}})).await.unwrap();
+            let _response = manager.native_frame("cua_repl").await.unwrap().unwrap();
+            let attachment =
+                crate::attachments::from_rgba(manager.store.root(), 2, 2, vec![255; 16]).unwrap();
+            let data = base64::engine::general_purpose::STANDARD
+                .encode(crate::attachments::read(manager.store.root(), &attachment).unwrap());
+            let reply = manager.native_effect_settle("cua_repl","103",&json!({"content":[{"type":"text","text":"Page ready"},{"type":"image","mimeType":"image/png","data":data}]})).unwrap();
+            assert_eq!(reply["content"][1]["data"], data);
+            let messages = manager.store.messages(&session, 10).unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].attachments, vec![attachment]);
+            assert!(messages[0].text.contains("Page ready"));
+            assert!(!messages[0].text.contains(&data));
+            assert!(manager.shutdown().await);
+        }
     }
 
     #[cfg(unix)]

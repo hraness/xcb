@@ -169,13 +169,13 @@ exact SHA-256, before it runs anything. `xcb doctor` shows what it found.
 
 [How routing works](https://xcb.sh/docs/how-routing-works) covers each step.
 
-Tasks that require an existing signed-in browser stay with Codex and prefer
-Astra, including after a retry or handoff. Use `xcb run --signed-in-browser`
-to make that requirement explicit. `xcb tools setup-computer` connects the
-installed desktop computer-use plugin on macOS; shared MCP servers can be
-connected for every provider. `xcb tools setup-browser` connects Claude's
-Chrome extension for Codex, Claude, and Devin. See
-[browser and shared tools](docs/tools.md).
+Tasks that require an existing signed-in browser or native desktop control
+stay with Codex and prefer Astra, including after a retry or handoff. Use
+`xcb run --signed-in-browser` or `xcb run --desktop` to state that requirement.
+Claude and Devin can hand these tasks to Codex after their current run ends
+safely. `xcb tools setup-computer` connects the installed desktop computer-use
+plugin on macOS. `xcb tools setup-browser` connects Claude's Chrome extension
+for Codex, Claude, and Devin. See [browser and shared tools](docs/tools.md).
 
 ## Everyday commands
 

@@ -56,13 +56,19 @@ const designKitPortfolio = "https://github.com/hraness/design-kit/blob/v0.17.0/s
 const xcbAt = (rev: string, path: string) => `https://github.com/hraness/xcb/blob/${rev}/${path}`;
 
 /**
- * The launch beats have no independent review yet, so the post ships
- * quarantined (readable by link, noindex). A separate read-only review that
- * checks each beat against the sources below sets this and the lifecycle.
+ * The launch beats' review, by a different agent from the one that drafted
+ * them: a read-only check of each beat against the sources below at 4d94782
+ * and the live page on 2026-09-30. It scored the post 9 of 12 with no zero;
+ * its platform, quota, and source fixes are applied, which it rated as raising
+ * factual confidence to 2.
  */
-const beatsReview: ArticleReview | null = null;
-const beatsAt = (path: string) => xcbAt("a242be4", path);
-const beatsCheckedOn: ArticleIsoDate = "2026-09-29";
+const beatsReview: ArticleReview = {
+  reviewer: "Claude Opus 5.5 (claude-opus-5-5) independent editorial review",
+  reviewerType: "ai",
+  reviewedOn: "2026-09-30",
+};
+const beatsAt = (path: string) => xcbAt("4d94782", path);
+const beatsCheckedOn: ArticleIsoDate = "2026-09-30";
 
 /** Introducing Excalibur's fact check read xcb at 27dc148 and the two external sites on this date. */
 const launch = (path: string) => xcbAt("27dc148", path);
@@ -134,7 +140,7 @@ export const blogPosts: readonly BlogPost[] = [
       { title: "Published release record", href: beatsAt("site/published-release.json"), checkedOn: beatsCheckedOn },
     ],
     admission: {
-      lifecycle: "quarantined",
+      lifecycle: "indexable",
       readerJob: "Decide in a minute whether xcb is for you when you pay for more than one AI coding plan, and share the one piece that makes the case.",
       nonObviousAnswer: "xcb does not add capacity; it spends the quota you already have in the right order, favoring unused quota close to a reset, and moves a task to another account when a provider reports a limit mid-task.",
       originalContribution: "Ten standalone claims, each checked against xcb's README and docs at the pinned commit and paired with an illustration drawn from the CLI's own output shapes, which the social posts are cut from without rewording.",

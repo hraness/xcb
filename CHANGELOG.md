@@ -10,6 +10,36 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.16.2 - 2026-09-30
+
+Claude and Devin can hand tasks that need native desktop control to Codex,
+which runs the installed computer tools with automatic approval review.
+
+- Add `xcb run --desktop` and let agents request desktop control when they
+  discover that a task needs it. Keep the task's conversation through a safe
+  handoff to Codex, preferring Astra when no model is pinned.
+- Preserve browser and desktop requirements through quota failover, retries,
+  and resumed work, including when no matching account is currently available.
+- Check that the installed connector supports native desktop control before
+  starting a desktop task. Shared browser tools do not satisfy that check.
+- Keep tasks on Codex after a native tool call without treating every native
+  call as a request to use a signed-in website.
+
+## 0.16.1 - 2026-09-30
+
+Mac releases preserve the submitted binary when Apple notarization takes longer
+than the CI wait, so failed-job retries can finish the original submission.
+
+- Save the signed candidate and its submission record before waiting for Apple,
+  after removing temporary signing credentials.
+- Resume finalization with the original artifact and submission ID. Verify the
+  release identity and hashes before requiring Apple's acceptance and checking
+  its online notarization ticket.
+- Refuse repeated signing or submission when an earlier attempt ran. Keep
+  pending candidates separate from publishable release assets.
+- Document initial notarization delays, the failed-job retry procedure, and
+  recovery limits when submitted bytes are unavailable.
+
 ## 0.16.0 - 2026-09-30
 
 Tasks that need an existing signed-in browser stay with Codex and prefer

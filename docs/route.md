@@ -49,8 +49,10 @@ field except `version`, `workspace`, and `task` is optional.
 - `dryRun: true` reports the route without creating a session, holding an
   account, or starting a provider.
 - `requirements: {"signed_in_browser": true}` requires Codex for an existing
-  signed-in browser. The requirement persists with the saved session, and a
-  conflicting provider, account, or model pin is rejected. See
+  signed-in browser; `requirements: {"desktop": true}` requires Codex for
+  native desktop application control. Both can be set together. Requirements
+  persist with the saved session, and a conflicting provider, account, or
+  model pin is rejected. See
   [browser and shared tools](tools.md) for setup and handoff behavior.
 
 Pins limit the choice; xcb never falls back outside them. With no pins, xcb
@@ -59,8 +61,9 @@ enabled, idle, and not at a known usage limit, with a model recently seen in
 the provider's catalog. It orders those models by your
 [preference stack](quota-routing.md#preference-stack), then by task type,
 relative quality, cost, and latency, remaining usage, and your configured
-favorites, and an optional judge can only reorder routes that already
-qualify. A pinned `model` that the stack's `never` list excludes fails with
+favorites. An optional judge can require browser or desktop capabilities and
+rank eligible routes; it preserves your pins and the provider checks above.
+A pinned `model` that the stack's `never` list excludes fails with
 `unavailable`. See [quota routing](quota-routing.md) for the rules.
 
 ## Response

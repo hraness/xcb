@@ -114,7 +114,7 @@ pub async fn execute(store: &Store, command: Commands, machine: bool) -> Result<
                     "Configured desktop browser and computer tools for Codex with automatic approval review."
                 );
                 println!(
-                    "Tasks that need a signed-in browser stay with Codex, including work handed off by Claude or Devin."
+                    "Tasks that need a signed-in browser or native desktop control stay with Codex, including work handed off by Claude or Devin."
                 );
             }
         }
