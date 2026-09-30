@@ -147,6 +147,19 @@ class SigningTests(unittest.TestCase):
         self.assertEqual(receipt["submissionId"], UUID)
         self.assertEqual(receipt["status"], "Invalid")
 
+    def test_cleanup_preserves_keychains_added_during_signing(self):
+        added = str(self.root / "another user.keychain-db")
+
+        def add_during_signing(args, timeout=60):
+            if "--sign" in args:
+                self.search_list.append(added)
+            return self.tool(args, timeout)
+
+        with patch.object(signing, "run", add_during_signing):
+            self.sign()
+        self.assertEqual(self.search_list, [*self.original_search_list, added])
+        self.assertTrue(self.output.exists())
+
     def test_incomplete_notary_status_is_not_success(self):
         self.status = "In Progress"
         with self.assertRaisesRegex(signing.SigningError, "not Accepted"):

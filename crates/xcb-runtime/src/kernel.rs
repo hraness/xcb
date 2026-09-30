@@ -308,6 +308,13 @@ async fn configured_judge_continuation(
     judge_continuation(judge.as_ref(), input).await
 }
 
+/// Hard route constraints checked after resolving explicit model aliases.
+#[derive(Clone, Copy, Default)]
+pub struct SessionRoutePolicy {
+    pub requirements: xcb_core::session::TaskRequirements,
+    pub required_provider: Option<Provider>,
+}
+
 /// `managed_task` marks the session with the owning managed task atomically
 /// at creation, so reconciliation can prove custody of an orphan if the
 /// supervisor dies before `prepare` admits it. Direct/interactive sessions
@@ -319,6 +326,28 @@ pub fn new_session(
     account: Option<&Id>,
     model: Option<&str>,
     managed_task: Option<&Id>,
+) -> Result<Session> {
+    new_session_with_policy(
+        store,
+        workspace,
+        config,
+        account,
+        model,
+        managed_task,
+        SessionRoutePolicy::default(),
+    )
+}
+
+/// Resolve the established account/model aliases, then check hard route
+/// requirements before persisting any session or launching a provider.
+pub fn new_session_with_policy(
+    store: &Store,
+    workspace: &Path,
+    config: &Config,
+    account: Option<&Id>,
+    model: Option<&str>,
+    managed_task: Option<&Id>,
+    policy: SessionRoutePolicy,
 ) -> Result<Session> {
     // An explicit model chooses its provider when no account was supplied.
     // The saved default is a preference, not a cross-provider override.
@@ -399,6 +428,19 @@ pub fn new_session(
     };
     let account = store.account(&id)?;
     let model = choose_model(store, account.provider, model, config)?;
+    if !policy.requirements.allows(model.provider) {
+        return Err(Error::Conflict(
+            "signed-in browser tasks require Codex; remove the incompatible provider, account, or model pin",
+        ));
+    }
+    if policy
+        .required_provider
+        .is_some_and(|provider| provider != model.provider)
+    {
+        return Err(Error::Conflict(
+            "explicit provider conflicts with the selected account or model",
+        ));
+    }
     let session = match managed_task {
         Some(task) => store.create_managed_session(&id, model, workspace, now_ms(), task)?,
         None => store.create_session(&id, model, workspace, now_ms())?,
@@ -680,9 +722,54 @@ async fn execute_mode(
 ) -> Result<Outcome> {
     let pane_generation = mode.pane_generation();
     let config = Config::load(store.root())?.0;
-    let session = store
+    let mut session = store
         .session(&session_id)?
         .ok_or(Error::Unavailable("session not found"))?;
+    if !session.requirements.allows(session.model.provider) {
+        let prior = store.latest_settled_outcome(&session_id)?;
+        if !prior.as_ref().is_some_and(|outcome| {
+            signed_in_browser_handoff_permitted(outcome, pane_generation, *cancel.borrow())
+        }) {
+            return Err(Error::Unavailable(
+                "signed-in browser handoff needs a current joined turn with settled effects and no pending approval",
+            ));
+        }
+        let excluded_routes = BTreeSet::new();
+        let excluded_accounts = BTreeSet::new();
+        let decision = routing::smart_route(
+            &store,
+            &config,
+            routing::RouteRequest {
+                requirements: session.requirements,
+                task: &text,
+                required_provider: session.route_pins.provider,
+                preferred_provider: Some(Provider::Codex),
+                required_model: session.route_pins.model.as_deref(),
+                excluded_routes: &excluded_routes,
+                excluded_accounts: &excluded_accounts,
+                account: session.route_pins.account.as_ref(),
+            },
+        )
+        .await?;
+        if *cancel.borrow() {
+            return Err(Error::Unavailable(
+                "cancelled before signed-in browser handoff",
+            ));
+        }
+        store.rebind(
+            &session_id,
+            session.revision,
+            &decision.account,
+            decision.model,
+        )?;
+        session = store
+            .session(&session_id)?
+            .ok_or(Error::Unavailable("session not found"))?;
+        observer(Progress::Notice(format!(
+            "Signed-in browser access: continuing on Codex · {}",
+            session.model.label
+        )));
+    }
     let _workspace = workspace_lease(&store, &session)?;
     fire_hooks(
         &store,
@@ -817,6 +904,57 @@ async fn execute_inner(
         )
         .await;
         let outcome = result?;
+        // Capability discovery is a handoff, including one-shot managed turns.
+        // Never report its provider notice as successful task completion.
+        let durable = store
+            .session(&session_id)?
+            .ok_or(Error::Unavailable("session not found"))?;
+        if !durable.requirements.allows(session.model.provider) {
+            if !supervise {
+                return Ok(outcome);
+            }
+            if !signed_in_browser_handoff_permitted(&outcome, pane_generation, *cancel.borrow()) {
+                return Err(Error::Unavailable(
+                    "signed-in browser handoff is blocked until the prior provider is joined and all effects and attention are settled",
+                ));
+            }
+            let excluded_routes = BTreeSet::new();
+            let excluded_accounts = BTreeSet::new();
+            let decision = routing::smart_route(
+                &store,
+                &config,
+                routing::RouteRequest {
+                    requirements: durable.requirements,
+                    task: &original_task,
+                    required_provider: durable.route_pins.provider,
+                    preferred_provider: Some(Provider::Codex),
+                    required_model: durable.route_pins.model.as_deref(),
+                    excluded_routes: &excluded_routes,
+                    excluded_accounts: &excluded_accounts,
+                    account: durable.route_pins.account.as_ref(),
+                },
+            )
+            .await?;
+            if *cancel.borrow() {
+                return Err(Error::Unavailable(
+                    "cancelled before signed-in browser handoff",
+                ));
+            }
+            store.rebind(
+                &session_id,
+                durable.revision,
+                &decision.account,
+                decision.model.clone(),
+            )?;
+            observer(Progress::Notice(format!(
+                "Signed-in browser access: continuing the same task on Codex · {}",
+                decision.model.label
+            )));
+            text = "The previous provider discovered that this task requires the user's existing signed-in browser and has stopped cleanly. Continue the original user task from the complete conversation and current workspace. Do not repeat completed effects; inspect relevant state first. Use the available signed-in browser capability for the requested account operations, and retain all existing task scope and permissions.".into();
+            attachments = vec![];
+            role = Role::System;
+            continue;
+        }
         if !supervise || pane_generation || *cancel.borrow() {
             return Ok(outcome);
         }
@@ -970,7 +1108,10 @@ async fn execute_inner(
                 .collect();
             // An opening "Use <provider>" directive pins the provider for the
             // whole task; failover never widens past it.
-            let required_provider = routing::explicit_provider_intent(&original_task);
+            let required_provider = current
+                .route_pins
+                .provider
+                .or_else(|| routing::explicit_provider_intent(&original_task));
             // The router applies the same eligibility as automatic routing
             // (a Devin account without a meter, or one whose last reading
             // aged out, is a target) and orders the routes; `next_route`
@@ -982,6 +1123,7 @@ async fn execute_inner(
                     &store,
                     &current_config,
                     routing::FailoverRequest {
+                    requirements: current.requirements,
                         task: &original_task,
                         account: &current.account,
                         model: &current.model,
@@ -989,7 +1131,8 @@ async fn execute_inner(
                         tried: &tried,
                         limited_accounts: &limited_accounts,
                         required_provider,
-                        required_model: None,
+                        required_model: current.route_pins.model.as_deref(),
+                        required_account: current.route_pins.account.as_ref(),
                     },
                 ) => ranked?,
             };
@@ -1113,6 +1256,24 @@ async fn execute_inner(
         }
         return Ok(outcome);
     }
+}
+
+fn signed_in_browser_handoff_permitted(
+    outcome: &Outcome,
+    pane_generation: bool,
+    cancelled: bool,
+) -> bool {
+    !cancelled
+        && !pane_generation
+        && outcome.facts.joined
+        && outcome.facts.effects != EffectState::Uncertain
+        && !outcome.facts.pending_attention
+        && outcome.facts.failure.is_none()
+        && matches!(
+            outcome.facts.terminal,
+            Terminal::Completed | Terminal::TurnLimit
+        )
+        && outcome.state == State::Idle
 }
 
 fn append_input(
@@ -1902,6 +2063,101 @@ fn pane_prompt(request: &str) -> Result<String> {
 mod tests {
     use super::*;
     use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn explicit_session_policy_preserves_aliases_and_rejects_conflicts_before_persistence() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = xcb_core::canonical(directory.path())
+            .unwrap()
+            .join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Store::open(&workspace.parent().unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 2, None)
+            .unwrap();
+        auth::store_token(
+            &store,
+            &account.id,
+            b"sk-ant-oat01-syntheticToken000000000000",
+        )
+        .unwrap();
+        let model = route_candidate(0).1;
+        store
+            .set_models(Provider::Claude, std::slice::from_ref(&model))
+            .unwrap();
+        let config = Config::default();
+        for policy in [
+            SessionRoutePolicy {
+                requirements: xcb_core::session::TaskRequirements {
+                    signed_in_browser: true,
+                },
+                required_provider: None,
+            },
+            SessionRoutePolicy {
+                requirements: Default::default(),
+                required_provider: Some(Provider::Codex),
+            },
+        ] {
+            assert!(
+                new_session_with_policy(
+                    &store,
+                    &workspace,
+                    &config,
+                    Some(&account.id),
+                    Some(model.id.as_str()),
+                    None,
+                    policy
+                )
+                .is_err()
+            );
+            assert!(store.sessions(16).unwrap().is_empty());
+            assert!(store.unsettled_runs().unwrap().is_empty());
+        }
+        let key = model.key();
+        for alias in [model.id.as_str(), model.label.as_str(), key.as_str()] {
+            let session = new_session_with_policy(
+                &store,
+                &workspace,
+                &config,
+                Some(&account.id),
+                Some(alias),
+                None,
+                SessionRoutePolicy {
+                    requirements: Default::default(),
+                    required_provider: Some(Provider::Claude),
+                },
+            )
+            .unwrap();
+            assert_eq!(session.model.key(), model.key());
+        }
+        assert!(store.unsettled_runs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn signed_in_browser_handoff_requires_joined_known_effects_and_never_routes_a_policy_denial() {
+        let mut outcome = quota_outcome(Failure::Policy);
+        outcome.state = State::Idle;
+        outcome.facts.terminal = Terminal::Completed;
+        assert!(!signed_in_browser_handoff_permitted(&outcome, false, false));
+        outcome.facts.failure = None;
+        assert!(signed_in_browser_handoff_permitted(&outcome, false, false));
+        outcome.facts.terminal = Terminal::TurnLimit;
+        assert!(signed_in_browser_handoff_permitted(&outcome, false, false));
+        outcome.facts.joined = false;
+        assert!(!signed_in_browser_handoff_permitted(&outcome, false, false));
+        outcome.facts.joined = true;
+        outcome.facts.effects = EffectState::Uncertain;
+        assert!(!signed_in_browser_handoff_permitted(&outcome, false, false));
+        outcome.facts.effects = EffectState::None;
+        assert!(signed_in_browser_handoff_permitted(&outcome, false, false));
+        outcome.facts.pending_attention = true;
+        assert!(!signed_in_browser_handoff_permitted(&outcome, false, false));
+        outcome.facts.pending_attention = false;
+        outcome.state = State::NeedsAnswer;
+        assert!(!signed_in_browser_handoff_permitted(&outcome, false, false));
+        outcome.state = State::Idle;
+        assert!(!signed_in_browser_handoff_permitted(&outcome, false, true));
+    }
 
     #[test]
     fn ui_submission_acknowledges_only_the_exact_durable_input() {

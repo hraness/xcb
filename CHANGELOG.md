@@ -10,7 +10,7 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## 0.16.0 - 2026-09-30
+## 0.16.1 - 2026-09-30
 
 Verified native release installs and supported global compatibility installs
 keep xcb current before interactive commands, with an opt-out and checks that
@@ -33,6 +33,26 @@ protect pinned tools and running work.
 - Keep help and version output free of updater state changes. Protect an
   interrupted native install even when the updater parent stops before its
   installer, and verify the new executable before reporting success.
+
+## 0.16.0 - 2026-09-30
+
+Tasks that need an existing signed-in browser stay with Codex and prefer
+Astra. Shared host tools add browser and computer capabilities through each
+provider's tool bridge.
+
+- Keep signed-in-browser requirements and explicit route choices across
+  retries, resumed work, and safe handoffs from Claude or Devin. Ordinary
+  browser tests and login-code work continue to use normal routing.
+- Register checked MCP servers for all three providers. Share screenshots
+  through private session attachments, including after a provider handoff.
+- Connect Codex's installed desktop computer-use plugin with its automatic
+  approval reviewer. Connect Claude's Chrome extension through a selected
+  xcb Claude account, without sharing that account's credentials with other
+  providers.
+- Track host tool processes and browser tabs through cancellation and
+  recovery. Approval denials stop work without retrying another provider.
+- Fix Mac release signing and installation checks to use Apple's required
+  keychain lookup and signature-verification syntax.
 
 ## 0.15.2 - 2026-09-30
 

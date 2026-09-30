@@ -51,6 +51,7 @@ pub struct ProfiledModel {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteDecision {
+    pub requirements: xcb_core::session::TaskRequirements,
     pub account: Id,
     pub model: ModelChoice,
     pub profile: ModelProfile,
@@ -79,6 +80,7 @@ pub const NO_ELIGIBLE_ROUTE: &str =
 pub const NO_QUOTA_AVAILABLE_ROUTE: &str = "usage limits block a matching admitted route; no eligible fallback is available; wait for the reported quota reset or connect another account";
 
 pub struct RouteRequest<'a> {
+    pub requirements: xcb_core::session::TaskRequirements,
     pub task: &'a str,
     pub required_provider: Option<Provider>,
     pub preferred_provider: Option<Provider>,
@@ -99,6 +101,7 @@ pub struct FailoverRoute {
 /// What [`failover_routes`] needs to rank replacements for a route that
 /// settled with a usage limit.
 pub struct FailoverRequest<'a> {
+    pub requirements: xcb_core::session::TaskRequirements,
     pub task: &'a str,
     /// The account and model the limited turn ran on.
     pub account: &'a Id,
@@ -114,6 +117,8 @@ pub struct FailoverRequest<'a> {
     pub required_provider: Option<Provider>,
     /// An exact model key the task is pinned to.
     pub required_model: Option<&'a str>,
+    /// An explicitly selected account remains binding during quota failover.
+    pub required_account: Option<&'a Id>,
 }
 
 #[derive(Clone)]
@@ -551,6 +556,46 @@ fn admitted_providers(store: &Store) -> BTreeSet<Provider> {
         .collect()
 }
 
+fn validate_requirement_pins(
+    store: &Store,
+    requirements: xcb_core::session::TaskRequirements,
+    provider: Option<Provider>,
+    model: Option<&str>,
+    account: Option<&Id>,
+) -> Result<()> {
+    let incompatible_model = model
+        .map(|key| {
+            store.models().map(|models| {
+                !models.iter().any(|model| {
+                    (model.key() == key || model.id.as_str() == key || model.label == key)
+                        && requirements.allows(model.provider)
+                })
+            })
+        })
+        .transpose()?
+        .unwrap_or(false);
+    if requirements.signed_in_browser {
+        let pinned_provider = match account {
+            Some(id) => match store.account(id) {
+                Ok(metadata) => Some(metadata.provider),
+                // Storage/deserialization diagnostics can contain private
+                // account values. Pin validation exposes a fixed public error.
+                Err(_) => return Err(Error::Unavailable("pinned account could not be read")),
+            },
+            None => None,
+        };
+        if provider.is_some_and(|provider| !requirements.allows(provider))
+            || incompatible_model
+            || pinned_provider.is_some_and(|provider| !requirements.allows(provider))
+        {
+            return Err(Error::Conflict(
+                "signed-in browser tasks require Codex; remove the incompatible provider, account, or model pin",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn smart_route(
     store: &Store,
     config: &Config,
@@ -590,6 +635,7 @@ async fn failover_routes_with_admitted(
     admitted: &BTreeSet<Provider>,
 ) -> Result<Vec<FailoverRoute>> {
     let FailoverRequest {
+        requirements,
         task,
         account,
         model,
@@ -598,6 +644,7 @@ async fn failover_routes_with_admitted(
         limited_accounts,
         required_provider,
         required_model,
+        required_account,
     } = request;
     if required_provider.is_some_and(|provider| provider != model.provider) {
         return Ok(vec![]);
@@ -618,13 +665,14 @@ async fn failover_routes_with_admitted(
         store,
         config,
         RouteRequest {
+            requirements,
             task,
             required_provider,
             preferred_provider: None,
             required_model,
             excluded_routes: &excluded_routes,
             excluded_accounts: &excluded_accounts,
-            account: None,
+            account: required_account,
         },
         admitted,
     )
@@ -660,11 +708,12 @@ async fn route_with_admitted(
     request: RouteRequest<'_>,
     admitted: &BTreeSet<Provider>,
 ) -> Result<RouteDecision> {
+    let mut requirements = request.requirements;
     let required_model = request.required_model;
     let excluded_routes = request.excluded_routes;
     let excluded_accounts = request.excluded_accounts;
     let Ranking {
-        mut candidates,
+        candidates,
         classification,
         reflex,
         class,
@@ -675,7 +724,11 @@ async fn route_with_admitted(
         offers,
         now,
     } = rank_with_admitted(store, config, request, admitted).await?;
-    let candidate = candidates.remove(0);
+    requirements.signed_in_browser |= classification.signed_in_browser == Some(true);
+    let candidate = candidates
+        .into_iter()
+        .next()
+        .ok_or(Error::Unavailable("no eligible route"))?;
     let warning = quota_degradation_warning(
         &models,
         &catalog,
@@ -708,7 +761,15 @@ async fn route_with_admitted(
     let reason = format!(
         "{}{} · {} tier · {} task · Pareto P{} · quality {} · relative cost {} · relative latency {}{}{}{}",
         warning.unwrap_or_default(),
-        classification.reason(),
+        format_args!(
+            "{}{}",
+            classification.reason(),
+            if requirements.signed_in_browser {
+                " · signed-in browser requires Codex"
+            } else {
+                ""
+            }
+        ),
         if classification.frontier {
             "frontier"
         } else {
@@ -733,6 +794,7 @@ async fn route_with_admitted(
             .unwrap_or(""),
     );
     Ok(RouteDecision {
+        requirements,
         account: candidate.account,
         model: candidate.model,
         profile: candidate.profile,
@@ -786,6 +848,7 @@ async fn rank_with_admitted(
     admitted: &BTreeSet<Provider>,
 ) -> Result<Ranking> {
     let RouteRequest {
+        mut requirements,
         task,
         required_provider,
         preferred_provider,
@@ -794,6 +857,13 @@ async fn rank_with_admitted(
         excluded_accounts,
         account: account_hint,
     } = request;
+    validate_requirement_pins(
+        store,
+        requirements,
+        required_provider,
+        required_model,
+        account_hint,
+    )?;
     let now = now_ms();
     let offers = crate::offers::load(store.root()).unwrap_or_default();
     // A model pairs only with accounts whose own catalog (or, before an
@@ -809,6 +879,7 @@ async fn rank_with_admitted(
         .iter()
         .filter(|account| {
             admitted.contains(&account.provider)
+                && requirements.allows(account.provider)
                 && required_provider.is_none_or(|provider| provider == account.provider)
                 && account.enabled
                 && !account.authentication_required
@@ -859,7 +930,7 @@ async fn rank_with_admitted(
         })
         .collect::<Result<_>>()?;
     let class = classify_task(task);
-    let backend = if config.extensions.judge.enabled {
+    let backend = if config.extensions.judge.enabled && !requirements.signed_in_browser {
         judge::resolve(store.root(), &config.extensions.judge)
             .ok()
             .flatten()
@@ -873,6 +944,14 @@ async fn rank_with_admitted(
         class == TaskClass::Routine,
     )
     .await;
+    requirements.signed_in_browser |= classification.signed_in_browser == Some(true);
+    validate_requirement_pins(
+        store,
+        requirements,
+        required_provider,
+        required_model,
+        account_hint,
+    )?;
     let reflex = route_reflex(store.root(), config, &mut classification).await;
     let stack = &config.routing;
     // A pinned model the owner excluded is refused, never widened.
@@ -889,9 +968,10 @@ async fn rank_with_admitted(
         &offers,
         now,
         task,
-        classification.frontier,
+        classification.frontier && !requirements.signed_in_browser,
         |model| {
-            required_model.is_none_or(|key| model.key() == key)
+            requirements.allows(model.provider)
+                && required_model.is_none_or(|key| model.key() == key)
                 && !stack.excluded(model)
                 && accounts.iter().any(|account| {
                     catalog.offers(&account.id, account.provider, model)
@@ -934,6 +1014,15 @@ async fn rank_with_admitted(
             });
         }
     }
+    // Signed-in browser operations prefer Astra independently of coding-task
+    // tier preferences, but never widen eligibility or override exact pins.
+    if requirements.signed_in_browser
+        && candidates
+            .iter()
+            .any(|candidate| candidate.model.id.as_str().contains("-astra"))
+    {
+        candidates.retain(|candidate| candidate.model.id.as_str().contains("-astra"));
+    }
     // A fallback provider's routes count only when nothing else can take the
     // task now.
     if candidates
@@ -949,7 +1038,10 @@ async fn rank_with_admitted(
     let (matched, mut unmatched): (Vec<_>, Vec<_>) = candidates
         .into_iter()
         .partition(|candidate| candidate.stack.is_some());
-    retain_quality_tier(&mut unmatched, classification.frontier);
+    retain_quality_tier(
+        &mut unmatched,
+        classification.frontier && !requirements.signed_in_browser,
+    );
     let mut candidates = matched;
     candidates.extend(unmatched);
     // The stack position decides first, then the newest family version among
@@ -1154,6 +1246,185 @@ mod tests {
     use super::*;
     use xcb_core::models::Mode;
 
+    #[test]
+    fn browser_pin_lookup_exposes_only_fixed_errors_for_missing_and_corrupt_accounts() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = xcb_core::canonical(root.path()).unwrap();
+        let store = Store::open(&root_path.join("state")).unwrap();
+        let selected = store
+            .add_account(Provider::Codex, "fixture", 1, None)
+            .unwrap();
+        let requirements = xcb_core::session::TaskRequirements {
+            signed_in_browser: true,
+        };
+        assert!(
+            validate_requirement_pins(&store, requirements, None, None, Some(&selected.id)).is_ok()
+        );
+        let missing = Id::new("missing-account").unwrap();
+        let missing_error =
+            validate_requirement_pins(&store, requirements, None, None, Some(&missing))
+                .unwrap_err();
+        assert!(matches!(
+            missing_error,
+            Error::Unavailable("pinned account could not be read")
+        ));
+        let db = rusqlite::Connection::open(store.root().join("xcb.sqlite")).unwrap();
+        db.execute(
+            "UPDATE accounts SET payload = ?1 WHERE id = ?2",
+            rusqlite::params![
+                r#"{"provider":"private-corrupt-account-value"}"#,
+                selected.id.as_str()
+            ],
+        )
+        .unwrap();
+        assert!(store.account(&selected.id).is_err());
+        let corrupt_error =
+            validate_requirement_pins(&store, requirements, None, None, Some(&selected.id))
+                .unwrap_err();
+        assert!(matches!(
+            corrupt_error,
+            Error::Unavailable("pinned account could not be read")
+        ));
+        assert!(
+            !corrupt_error
+                .to_string()
+                .contains("private-corrupt-account-value")
+        );
+    }
+
+    #[tokio::test]
+    async fn signed_in_browser_requirement_filters_prefers_and_survives_model_fallback() {
+        use crate::authentication_tests::account;
+        let root = tempfile::tempdir().unwrap();
+        let root_path = xcb_core::canonical(root.path()).unwrap();
+        let store = Store::open(&root_path.join("state")).unwrap();
+        let codex = account(&store, Provider::Codex);
+        account(&store, Provider::Claude);
+        let astra = model(Provider::Codex, "gpt-6-astra", None, Some("ultra"));
+        let sol = model(Provider::Codex, "gpt-6-sol", None, Some("high"));
+        store
+            .set_models(Provider::Codex, &[astra.clone(), sol.clone()])
+            .unwrap();
+        store
+            .set_models(
+                Provider::Claude,
+                &[model(Provider::Claude, "claude-opus-4-8", None, None)],
+            )
+            .unwrap();
+        let routes = BTreeSet::new();
+        let accounts = BTreeSet::new();
+        let admitted = Provider::ALL.into_iter().collect();
+        let request = || RouteRequest {
+            requirements: xcb_core::session::TaskRequirements {
+                signed_in_browser: true,
+            },
+            task: "read this dashboard",
+            required_provider: None,
+            preferred_provider: Some(Provider::Claude),
+            required_model: None,
+            excluded_routes: &routes,
+            excluded_accounts: &accounts,
+            account: None,
+        };
+        let first = route_with_admitted(&store, &Config::default(), request(), &admitted)
+            .await
+            .unwrap();
+        assert_eq!(first.account, codex);
+        assert_eq!(first.model.key(), astra.key());
+        assert!(first.requirements.signed_in_browser);
+        let excluded = [format!("{} · {}", astra.key(), codex)].into();
+        let fallback = route_with_admitted(
+            &store,
+            &Config::default(),
+            RouteRequest {
+                excluded_routes: &excluded,
+                ..request()
+            },
+            &admitted,
+        )
+        .await
+        .unwrap();
+        assert_eq!(fallback.model.key(), sol.key());
+        assert!(fallback.requirements.signed_in_browser);
+        assert!(
+            route_with_admitted(
+                &store,
+                &Config::default(),
+                RouteRequest {
+                    required_provider: Some(Provider::Claude),
+                    ..request()
+                },
+                &admitted
+            )
+            .await
+            .is_err()
+        );
+        let empty = Store::open(&root_path.join("empty")).unwrap();
+        account(&empty, Provider::Claude);
+        empty
+            .set_models(
+                Provider::Claude,
+                &[model(Provider::Claude, "claude-opus-4-8", None, None)],
+            )
+            .unwrap();
+        assert!(
+            route_with_admitted(&empty, &Config::default(), request(), &admitted)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn signed_in_browser_metadata_is_monotonic_backwards_compatible_and_guards_rebind() {
+        use crate::authentication_tests::{account, model};
+        let root = tempfile::tempdir().unwrap();
+        let root_path = xcb_core::canonical(root.path()).unwrap();
+        let workspace = root_path.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let store = Store::open(&root_path.join("state")).unwrap();
+        let codex = account(&store, Provider::Codex);
+        let claude = account(&store, Provider::Claude);
+        let session = store
+            .create_session(&codex, model(Provider::Codex), &workspace, now_ms())
+            .unwrap();
+        let mut old = serde_json::to_value(&session).unwrap();
+        old.as_object_mut().unwrap().remove("requirements");
+        old.as_object_mut().unwrap().remove("route_pins");
+        assert!(
+            !serde_json::from_value::<xcb_core::session::Session>(old)
+                .unwrap()
+                .requirements
+                .signed_in_browser
+        );
+        let required = store
+            .require_session_capabilities(
+                &session.id,
+                xcb_core::session::TaskRequirements {
+                    signed_in_browser: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(required.revision, session.revision);
+        assert!(
+            store
+                .require_session_capabilities(&session.id, Default::default())
+                .unwrap()
+                .requirements
+                .signed_in_browser
+        );
+        assert!(
+            store
+                .rebind(
+                    &session.id,
+                    required.revision,
+                    &claude,
+                    model(Provider::Claude)
+                )
+                .is_err()
+        );
+        assert_eq!(store.session(&session.id).unwrap().unwrap().account, codex);
+    }
+
     #[tokio::test]
     async fn no_fallback_reports_observed_quota_only_within_requested_routes() {
         use crate::authentication_tests::{account, fail_authentication};
@@ -1178,6 +1449,7 @@ mod tests {
         let accounts = BTreeSet::new();
         let admitted = [Provider::Codex, Provider::Claude].into();
         let request = || RouteRequest {
+            requirements: Default::default(),
             task: &prompt,
             required_provider: None,
             preferred_provider: None,
@@ -1214,6 +1486,7 @@ mod tests {
                 &store,
                 &config,
                 RouteRequest {
+                    requirements: Default::default(),
                     required_model: Some(&key),
                     account: Some(&codex),
                     ..request()
@@ -1225,14 +1498,17 @@ mod tests {
         );
         for constrained in [
             RouteRequest {
+                requirements: Default::default(),
                 required_model: Some("codex/unobserved-model"),
                 ..request()
             },
             RouteRequest {
+                requirements: Default::default(),
                 required_provider: Some(Provider::Claude),
                 ..request()
             },
             RouteRequest {
+                requirements: Default::default(),
                 account: Some(&claude),
                 ..request()
             },
@@ -1248,6 +1524,7 @@ mod tests {
                 &store,
                 &config,
                 RouteRequest {
+                    requirements: Default::default(),
                     excluded_routes: &excluded_routes,
                     ..request()
                 },
@@ -1262,6 +1539,7 @@ mod tests {
                 &store,
                 &config,
                 RouteRequest {
+                    requirements: Default::default(),
                     excluded_accounts: &excluded_accounts,
                     ..request()
                 },
@@ -1323,6 +1601,7 @@ mod tests {
         let excluded_accounts = BTreeSet::new();
         let admitted = [Provider::Devin].into();
         let request = || RouteRequest {
+            requirements: Default::default(),
             task: "In add.js the add function subtracts; change it so it adds.",
             required_provider: None,
             preferred_provider: None,
@@ -1422,6 +1701,7 @@ mod tests {
         let excluded_accounts = BTreeSet::new();
         let admitted = [Provider::Devin].into();
         let request = |required_model| RouteRequest {
+            requirements: Default::default(),
             task: &prompt,
             required_provider: Some(Provider::Devin),
             preferred_provider: Some(Provider::Devin),
@@ -1447,6 +1727,7 @@ mod tests {
             &store,
             &config,
             RouteRequest {
+                requirements: Default::default(),
                 excluded_routes: &excluded,
                 ..request(None)
             },
@@ -1481,6 +1762,7 @@ mod tests {
         let excluded = BTreeSet::new();
         let excluded_accounts = BTreeSet::new();
         let request = || RouteRequest {
+            requirements: Default::default(),
             task: &prompt,
             required_provider: None,
             preferred_provider: None,
@@ -1531,6 +1813,7 @@ mod tests {
             &store,
             &config,
             RouteRequest {
+                requirements: Default::default(),
                 required_provider: Some(Provider::Devin),
                 ..request()
             },
@@ -1578,6 +1861,7 @@ mod tests {
         let none = BTreeSet::new();
         let no_accounts = BTreeSet::new();
         let request = || RouteRequest {
+            requirements: Default::default(),
             task: "fix a test",
             required_provider: None,
             preferred_provider: None,
@@ -1638,6 +1922,7 @@ mod tests {
         let no_accounts = BTreeSet::new();
         let admitted = [Provider::Claude, Provider::Codex].into();
         let request = |failure, tried, required_provider| FailoverRequest {
+            requirements: Default::default(),
             task: "fix a test",
             account: &first,
             model: &opus,
@@ -1646,6 +1931,7 @@ mod tests {
             limited_accounts: &no_accounts,
             required_provider,
             required_model: None,
+            required_account: None,
         };
         let keys = |routes: &[FailoverRoute]| -> Vec<String> {
             routes
@@ -1653,6 +1939,29 @@ mod tests {
                 .map(|route| format!("{}/{}", route.account, route.model.key()))
                 .collect()
         };
+        let opus_key = opus.key();
+        let mut model_pin = request(Failure::AccountQuota, &none, None);
+        model_pin.required_model = Some(&opus_key);
+        let pinned = failover_routes_with_admitted(&store, &config, model_pin, &admitted)
+            .await
+            .unwrap();
+        assert_eq!(keys(&pinned), vec![format!("{second}/{opus_key}")]);
+        let mut account_pin = request(Failure::ModelQuota, &none, None);
+        account_pin.required_account = Some(&first);
+        let pinned = failover_routes_with_admitted(&store, &config, account_pin, &admitted)
+            .await
+            .unwrap();
+        assert!(!pinned.is_empty());
+        assert!(pinned.iter().all(|route| route.account == first));
+        let mut exact_pin = request(Failure::AccountQuota, &none, None);
+        exact_pin.required_account = Some(&first);
+        exact_pin.required_model = Some(&opus_key);
+        assert!(
+            failover_routes_with_admitted(&store, &config, exact_pin, &admitted)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let account_limit = failover_routes_with_admitted(
             &store,
             &config,
@@ -1788,6 +2097,7 @@ mod tests {
         let no_accounts = BTreeSet::new();
         let admitted = [Provider::Claude, Provider::Devin].into();
         let request = |limited_accounts| FailoverRequest {
+            requirements: Default::default(),
             task: "fix a test",
             account: &limited,
             model: &sonnet,
@@ -1796,6 +2106,7 @@ mod tests {
             limited_accounts,
             required_provider: None,
             required_model: None,
+            required_account: None,
         };
         let routes =
             failover_routes_with_admitted(&store, &config, request(&no_accounts), &admitted)
@@ -1863,6 +2174,7 @@ mod tests {
         let none = BTreeSet::new();
         let excluded_accounts = BTreeSet::new();
         let request = || RouteRequest {
+            requirements: Default::default(),
             task: "Use Codex. Fix a test",
             required_provider: Some(Provider::Codex),
             preferred_provider: None,
@@ -1927,6 +2239,7 @@ mod tests {
         let routes = BTreeSet::new();
         let accounts = BTreeSet::new();
         let request = || RouteRequest {
+            requirements: Default::default(),
             task: "fix a test",
             required_provider: None,
             preferred_provider: None,
@@ -2223,6 +2536,7 @@ mod tests {
         let excluded = BTreeSet::new();
         let excluded_accounts = BTreeSet::new();
         let request = || RouteRequest {
+            requirements: Default::default(),
             task: "Fix a failing assertion",
             required_provider: Some(Provider::Codex),
             preferred_provider: None,
@@ -2256,6 +2570,7 @@ mod tests {
                 &store,
                 &config,
                 RouteRequest {
+                    requirements: Default::default(),
                     account: Some(&soon),
                     ..request()
                 },
@@ -2317,6 +2632,7 @@ mod tests {
         let excluded = BTreeSet::new();
         let excluded_accounts = BTreeSet::new();
         let request = |task| RouteRequest {
+            requirements: Default::default(),
             task,
             required_provider: None,
             preferred_provider: None,
@@ -2353,6 +2669,7 @@ mod tests {
                 &store,
                 &config,
                 RouteRequest {
+                    requirements: Default::default(),
                     required_provider: Some(Provider::Codex),
                     ..request("Fix a failing assertion")
                 },
@@ -2521,6 +2838,7 @@ mod tests {
                     store,
                     config,
                     RouteRequest {
+                        requirements: Default::default(),
                         task: prompt,
                         required_provider: Some(Provider::Devin),
                         preferred_provider: None,
@@ -2593,6 +2911,7 @@ mod tests {
     #[tokio::test]
     async fn tiers_follow_the_documented_table() {
         let judged = |frontier, kind: &str, difficulty, scope| task_classifier::Classification {
+            signed_in_browser: None,
             frontier,
             source: "test",
             score_milli: None,
@@ -2713,6 +3032,7 @@ mod tests {
         let no_accounts = BTreeSet::new();
         let admitted = [Provider::Codex, Provider::Claude].into();
         let request = |task, excluded_accounts| RouteRequest {
+            requirements: Default::default(),
             task,
             required_provider: None,
             preferred_provider: None,
@@ -2835,6 +3155,7 @@ mod tests {
             &store,
             &config,
             FailoverRequest {
+                requirements: Default::default(),
                 task: &prompt,
                 account: &first,
                 model: &astra,
@@ -2843,6 +3164,7 @@ mod tests {
                 limited_accounts: &limited,
                 required_provider: None,
                 required_model: None,
+                required_account: None,
             },
             &admitted,
         )
@@ -2904,6 +3226,7 @@ mod tests {
         let no_accounts = BTreeSet::new();
         let admitted = [Provider::Codex, Provider::Devin].into();
         let request = |required_model| RouteRequest {
+            requirements: Default::default(),
             task: "fix a test",
             required_provider: None,
             preferred_provider: None,
@@ -2937,6 +3260,7 @@ mod tests {
             &store,
             &config,
             FailoverRequest {
+                requirements: Default::default(),
                 task: "fix a test",
                 account: &codex,
                 model: &sol,
@@ -2945,6 +3269,7 @@ mod tests {
                 limited_accounts: &no_accounts,
                 required_provider: None,
                 required_model: None,
+                required_account: None,
             },
             &admitted,
         )

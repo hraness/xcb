@@ -57,7 +57,7 @@ export default function Docs() {
           <section aria-labelledby="readiness">
             <h2 id="readiness">What works today</h2>
             <p>{providerStatus.claude} {providerStatus.codex} {providerStatus.devin}</p>
-            <p>Providers work through xcb’s file tools rather than their own shells and plugins, so a task can do less than in the provider’s own CLI. Codex, Devin, and the <a href="/docs/workspace">command runner</a> need macOS ARM64; on Linux, xcb runs Claude. See <a href="/docs/providers">accounts and models</a> for supported builds.</p>
+            <p>Providers use xcb’s workspace tools and registered host MCP servers. Native shells and unrelated provider plugins remain unavailable. Codex, Devin, and the <a href="/docs/workspace">command runner</a> need macOS ARM64; on Linux, xcb runs Claude. The <a href="/docs/workspace">workspace guide</a> covers browser and computer tools; see <a href="/docs/providers">accounts and models</a> for supported builds.</p>
           </section>
           <section aria-labelledby="standalone-package">
             <h2 id="standalone-package">Building on xcb?</h2>

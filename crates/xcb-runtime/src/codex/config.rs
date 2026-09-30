@@ -125,6 +125,7 @@ fn catalog_from_bytes(
     transform_catalog(
         catalog_source_from_bytes(binary, expected_sha256)?,
         selected,
+        false,
     )
 }
 
@@ -158,7 +159,11 @@ fn catalog_source_from_bytes(binary: &[u8], expected_sha256: &str) -> Result<Val
         .map_err(Error::from)
 }
 
-fn transform_catalog(source: Value, selected: Option<&str>) -> Result<StaticCatalog> {
+fn transform_catalog(
+    source: Value,
+    selected: Option<&str>,
+    native_cua: bool,
+) -> Result<StaticCatalog> {
     let rows = source
         .get("models")
         .and_then(Value::as_array)
@@ -177,6 +182,12 @@ fn transform_catalog(source: Value, selected: Option<&str>) -> Result<StaticCata
         }
         // Unqualified models are deliberately absent from selectable metadata.
         if !QUALIFIED_MODELS.contains(&slug) || selected.is_some_and(|wanted| wanted != slug) {
+            continue;
+        }
+        // The pinned model must already support Node REPL. Native CUA needs
+        // that real capability in its turn metadata; never invent support
+        // for an absent or disabled capability in an upstream model row.
+        if native_cua && row.get("node_repl_disabled") != Some(&json!(false)) {
             continue;
         }
         for field in [
@@ -211,16 +222,18 @@ fn transform_catalog(source: Value, selected: Option<&str>) -> Result<StaticCata
             ("supports_search_tool", json!(false)),
             ("supports_experimental_context", json!(false)),
             ("multi_agent_version", json!("disabled")),
-            ("node_repl_disabled", json!(true)),
+            ("node_repl_disabled", json!(!native_cua)),
         ] {
             row.insert(key.into(), value);
         }
         result.push(Value::Object(row));
     }
     if result.is_empty() {
-        return Err(Error::Unavailable(
-            "Codex model lacks exact-build broker-only qualification",
-        ));
+        return Err(Error::Unavailable(if native_cua {
+            "Codex model lacks pinned native-computer support"
+        } else {
+            "Codex model lacks exact-build broker-only qualification"
+        }));
     }
     let models = result
         .iter()
@@ -301,6 +314,19 @@ pub fn static_catalog(root: &Path, pin: &Pin, selected: Option<&str>) -> Result<
     static_catalog_bound(root, pin, selected, &pin.sha256)
 }
 
+/// Only the launcher with an admitted native CUA proxy uses this catalog.
+/// It retains pinned Node REPL support while leaving all other native tool
+/// restrictions identical to the normal broker catalog.
+#[cfg(target_os = "macos")]
+pub(crate) fn static_catalog_with_native(
+    root: &Path,
+    pin: &Pin,
+    selected: Option<&str>,
+) -> Result<StaticCatalog> {
+    runtime_admitted(pin)?;
+    static_catalog_bound_mode(root, pin, selected, &pin.sha256, true)
+}
+
 /// The extraction path, bound to an explicit expected executable digest so a
 /// synthetic build can exercise it in tests. Production admission always
 /// first binds the version/digest pair through `static_catalog`.
@@ -309,6 +335,16 @@ pub(crate) fn static_catalog_bound(
     pin: &Pin,
     selected: Option<&str>,
     expected_sha256: &str,
+) -> Result<StaticCatalog> {
+    static_catalog_bound_mode(root, pin, selected, expected_sha256, false)
+}
+
+fn static_catalog_bound_mode(
+    root: &Path,
+    pin: &Pin,
+    selected: Option<&str>,
+    expected_sha256: &str,
+    native_cua: bool,
 ) -> Result<StaticCatalog> {
     if pin.provider != Provider::Codex || pin.sha256 != expected_sha256 {
         return Err(Error::Unavailable("Codex build is not the admitted build"));
@@ -319,7 +355,7 @@ pub(crate) fn static_catalog_bound(
         .as_deref()
         .and_then(|path| cached_catalog_source(path, expected_sha256))
     {
-        return transform_catalog(source, selected);
+        return transform_catalog(source, selected, native_cua);
     }
     let mut bytes = Vec::new();
     std::fs::File::open(&pin.executable)?
@@ -332,7 +368,7 @@ pub(crate) fn static_catalog_bound(
     }
     #[cfg(test)]
     CATALOG_EXTRACTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    transform_catalog(source, selected)
+    transform_catalog(source, selected, native_cua)
 }
 
 /// Binary scans that produced a catalog, for cache tests.
@@ -348,13 +384,20 @@ pub(crate) fn catalog_extractions() -> usize {
 /// benchmark embed in a synthetic executable.
 #[cfg(test)]
 pub(crate) fn fixture_catalog_source() -> Value {
-    json!({"models":[{"slug":"gpt-6-astra","display_name":"Astra","supported_reasoning_levels":[],"shell_type":"unified_exec","visibility":"list","priority":0,"supported_in_api":true,"support_verbosity":true,"truncation_policy":{},"experimental_supported_tools":["native"],"use_responses_lite":true,"model_messages":{"instructions_template":"retained"}}]})
+    json!({"models":[{"slug":"gpt-6-astra","display_name":"Astra","supported_reasoning_levels":[],"shell_type":"unified_exec","visibility":"list","priority":0,"supported_in_api":true,"support_verbosity":true,"truncation_policy":{},"experimental_supported_tools":["native"],"node_repl_disabled":false,"use_responses_lite":true,"model_messages":{"instructions_template":"retained"}}]})
 }
 
 /// The host protects both this file and the catalog against provider writes.
 /// Automatic review selects the reviewer; it does not widen the read-only
 /// sandbox or admit native callbacks outside the host broker.
 pub fn configuration(catalog_path: &Path) -> Result<String> {
+    configuration_with_native(catalog_path, None)
+}
+
+pub(crate) fn configuration_with_native(
+    catalog_path: &Path,
+    native: Option<&Value>,
+) -> Result<String> {
     let path = catalog_path
         .to_str()
         .filter(|s| {
@@ -421,7 +464,86 @@ pub fn configuration(catalog_path: &Path) -> Result<String> {
         ]
         .map(str::to_owned),
     );
+    if let Some(server) = native {
+        lines.retain(|line| line != "mcp_servers = {}");
+        validate_native_definition(server)?;
+        lines.push("[mcp_servers.cua_repl]".into());
+        for key in ["command", "args", "enabled", "enabled_tools"] {
+            lines.push(format!("{key} = {}", serde_json::to_string(&server[key])?));
+        }
+        let environment = server["env"]
+            .as_object()
+            .ok_or(Error::Protocol("Codex native environment"))?;
+        lines.push(format!(
+            "env = {{ {} }}",
+            environment
+                .iter()
+                .map(|(name, value)| {
+                    Ok(format!(
+                        "{} = {}",
+                        serde_json::to_string(name)?,
+                        serde_json::to_string(value)?
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join(", ")
+        ));
+        lines.push(String::new());
+    }
     Ok(lines.join("\n"))
+}
+
+fn validate_native_definition(server: &Value) -> Result<()> {
+    super::closed(
+        server,
+        &["command", "args", "env", "enabled", "enabled_tools"],
+    )?;
+    let command = server["command"]
+        .as_str()
+        .ok_or(Error::Protocol("Codex native command"))?;
+    let env = server["env"]
+        .as_object()
+        .ok_or(Error::Protocol("Codex native environment"))?;
+    super::require(
+        Path::new(command).is_absolute()
+            && command.len() <= 4096
+            && !command.chars().any(char::is_control)
+            && server["args"] == json!(["native-mcp-stdio"])
+            && server["enabled"] == true
+            && server["enabled_tools"].as_array().is_some_and(|tools| {
+                !tools.is_empty()
+                    && tools.len() <= 3
+                    && tools.contains(&json!("js"))
+                    && tools
+                        .iter()
+                        .all(|tool| matches!(tool.as_str(), Some("js" | "js_reset" | "turn_ended")))
+                    && tools
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        == tools.len()
+            })
+            && env.len() == 2
+            && env
+                .get("XCB_MCP_SOCKET")
+                .and_then(Value::as_str)
+                .is_some_and(|path| {
+                    Path::new(path).is_absolute()
+                        && path.len() <= 100
+                        && !path.chars().any(char::is_control)
+                })
+            && env
+                .get("XCB_MCP_TOKEN")
+                .and_then(Value::as_str)
+                .is_some_and(|token| {
+                    (32..=128).contains(&token.len())
+                        && token
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                }),
+        "Codex native tool definition changed",
+    )
 }
 
 pub fn thread_configuration(effort: Option<&str>) -> Value {
@@ -437,7 +559,16 @@ pub fn thread_configuration(effort: Option<&str>) -> Value {
     config
 }
 
+#[cfg(all(test, unix))]
 pub(crate) fn validate_config(value: &Value, catalog_path: &Path) -> Result<()> {
+    validate_config_with_native(value, catalog_path, None)
+}
+
+pub(crate) fn validate_config_with_native(
+    value: &Value,
+    catalog_path: &Path,
+    native: Option<&Value>,
+) -> Result<()> {
     let c = value
         .get("config")
         .and_then(Value::as_object)
@@ -455,7 +586,6 @@ pub(crate) fn validate_config(value: &Value, catalog_path: &Path) -> Result<()> 
         ("check_for_update_on_startup", json!(false)),
         ("allow_login_shell", json!(false)),
         ("notify", json!([])),
-        ("mcp_servers", json!({})),
         ("plugins", json!({})),
         ("model_providers", json!({})),
         ("model_catalog_json", json!(catalog_path)),
@@ -463,6 +593,29 @@ pub(crate) fn validate_config(value: &Value, catalog_path: &Path) -> Result<()> 
         if c.get(key) != Some(&expected) {
             return Err(Error::Protocol("Codex isolated configuration mismatch"));
         }
+    }
+    match native {
+        None if c.get("mcp_servers") != Some(&json!({})) => {
+            return Err(Error::Protocol("Codex unexpected native servers"));
+        }
+        Some(expected) => {
+            validate_native_definition(expected)?;
+            let servers = c
+                .get("mcp_servers")
+                .and_then(Value::as_object)
+                .filter(|servers| servers.len() == 1)
+                .ok_or(Error::Protocol("Codex native server inventory changed"))?;
+            let actual = servers
+                .get("cua_repl")
+                .ok_or(Error::Protocol("Codex native server missing"))?;
+            let mut expected = expected.clone();
+            expected["environment_id"] = json!("local");
+            expected["tool_timeout_sec"] = Value::Null;
+            if actual != &expected {
+                return Err(Error::Protocol("Codex native server controls changed"));
+            }
+        }
+        None => {}
     }
     if c.get("chatgpt_base_url") != Some(&json!("https://chatgpt.com/backend-api/")) {
         return Err(Error::Protocol("Codex ChatGPT endpoint changed"));
@@ -513,7 +666,7 @@ mod tests {
     #[test]
     fn catalog_preserves_native_protocol_and_metadata() {
         let source = fixture_catalog_source();
-        let catalog = transform_catalog(source, Some("gpt-6-astra")).unwrap();
+        let catalog = transform_catalog(source, Some("gpt-6-astra"), false).unwrap();
         let row: Value = serde_json::from_slice(&catalog.bytes).unwrap();
         assert_eq!(
             row["models"][0]["model_messages"]["instructions_template"],
@@ -523,7 +676,7 @@ mod tests {
         assert_eq!(row["models"][0]["shell_type"], "disabled");
         assert_eq!(row["models"][0]["multi_agent_version"], "disabled");
         assert_eq!(row["models"][0]["experimental_supported_tools"], json!([]));
-        assert!(transform_catalog(row, Some("unqualified")).is_err());
+        assert!(transform_catalog(row, Some("unqualified"), false).is_err());
     }
     #[test]
     fn untested_builds_and_forged_catalogs_are_not_admitted() {
@@ -558,6 +711,33 @@ mod tests {
             .map(|(_, _, schema)| schema)
             .collect();
         assert_eq!(schemas.len(), REVIEWED_BUILDS.len());
+    }
+
+    #[test]
+    fn native_catalog_retains_only_pinned_node_support_and_no_other_authority() {
+        let source = fixture_catalog_source();
+        let normal = transform_catalog(source.clone(), Some("gpt-6-astra"), false).unwrap();
+        let native = transform_catalog(source.clone(), Some("gpt-6-astra"), true).unwrap();
+        assert_ne!(normal.sha256, native.sha256);
+        assert_eq!(native.admission.catalog_sha256, digest(&native.bytes));
+        let normal: Value = serde_json::from_slice(&normal.bytes).unwrap();
+        let mut native: Value = serde_json::from_slice(&native.bytes).unwrap();
+        assert_eq!(normal["models"][0]["node_repl_disabled"], true);
+        assert_eq!(native["models"][0]["node_repl_disabled"], false);
+        native["models"][0]["node_repl_disabled"] = json!(true);
+        assert_eq!(normal, native);
+        assert_eq!(native["models"][0]["shell_type"], "disabled");
+        assert_eq!(
+            native["models"][0]["experimental_supported_tools"],
+            json!([])
+        );
+        assert_eq!(native["models"][0]["multi_agent_version"], "disabled");
+        assert!(native["models"][0]["apply_patch_tool_type"].is_null());
+        for unsupported in [json!(true), Value::Null, json!("false")] {
+            let mut changed = source.clone();
+            changed["models"][0]["node_repl_disabled"] = unsupported;
+            assert!(transform_catalog(changed, Some("gpt-6-astra"), true).is_err());
+        }
     }
 
     // Unix catalog paths; Codex launch is refused on Windows.
@@ -604,6 +784,16 @@ mod tests {
         assert_eq!(first.sha256, second.sha256);
         assert_eq!(first.bytes, second.bytes);
         assert_eq!(catalog_extractions() - extracted, 1);
+        let native =
+            static_catalog_bound_mode(&root, &pin, Some("gpt-6-astra"), &sha256, true).unwrap();
+        assert_ne!(native.sha256, first.sha256);
+        assert_eq!(catalog_extractions() - extracted, 1);
+        assert_eq!(
+            static_catalog_bound(&root, &pin, Some("gpt-6-astra"), &sha256)
+                .unwrap()
+                .sha256,
+            first.sha256
+        );
         // A corrupted cache file is derived state: it is ignored, re-extracted,
         // and republished, never admitted.
         std::fs::write(&cache, b"not a catalog").unwrap();

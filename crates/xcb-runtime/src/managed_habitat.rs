@@ -179,6 +179,7 @@ fn write_schedule(
 
 #[derive(Default)]
 pub(super) struct CreateOptions<'a> {
+    pub requirements: xcb_core::session::TaskRequirements,
     pub deferred: bool,
     pub priority: u8,
     pub worker: Option<&'a WorkerMutation>,

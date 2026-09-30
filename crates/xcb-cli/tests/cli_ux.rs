@@ -1043,6 +1043,46 @@ fn json_upgrade_reports_the_installed_release_without_installer_output_on_stdout
 }
 
 #[test]
+fn protocol_helpers_refuse_an_unfinished_update_before_opening_product_state() {
+    let sandbox = Sandbox::new("protocol-update-guard");
+    let share = xcb_runtime::private::directory(&sandbox.root.join("share/xcb")).unwrap();
+    let installer = share.join("install-native.sh");
+    let binary = sandbox.root.join("bin/xcb");
+    std::fs::copy(env!("CARGO_BIN_EXE_xcb"), &binary).unwrap();
+    sandbox.script(&installer, "#!/bin/sh\nexit 0\n");
+    let record = serde_json::json!({
+        "version":2,"installMethod":"release","channel":"stable","sourceRoot":"",
+        "versionString":env!("CARGO_PKG_VERSION"),"versionPinned":false,
+        "prefix":sandbox.root,"helperPath":installer,"binaryPath":binary,
+        "binarySha256":xcb_runtime::process::executable_digest(&binary).unwrap(),
+        "helperSha256":xcb_runtime::process::executable_digest(&installer).unwrap(),
+    });
+    xcb_runtime::private::create(&share.join("install.json"), record.to_string().as_bytes())
+        .unwrap();
+    xcb_runtime::private::create(&share.join("update-use.lock"), b"").unwrap();
+    xcb_runtime::private::create(&share.join("update-in-progress"), b"fixture").unwrap();
+    for command in ["broker-stdio", "native-mcp-stdio"] {
+        let output = Command::new(&binary)
+            .env_clear()
+            .env("HOME", sandbox.root.join("home"))
+            .env("PATH", sandbox.root.join("bin"))
+            .arg("--state")
+            .arg(sandbox.state())
+            .args(["--json", command])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{command}: {output:?}");
+        assert!(output.stdout.is_empty(), "{command}: {output:?}");
+        assert!(
+            text(&output.stderr).contains("update is unfinished"),
+            "{command}: {output:?}"
+        );
+        assert!(!sandbox.state().exists(), "{command} opened product state");
+    }
+}
+
+#[test]
 fn killed_updater_parent_cannot_admit_work_while_its_helper_is_live() {
     use std::os::unix::fs::PermissionsExt;
     use std::time::{Duration, Instant};

@@ -207,6 +207,8 @@ impl ManagedConversation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedTask {
+    #[serde(default)]
+    pub requirements: xcb_core::session::TaskRequirements,
     pub version: u32,
     pub id: Id,
     pub operation: Id,
@@ -2311,7 +2313,10 @@ impl ManagedStore {
         ui_mutation: Option<&habitat::UiMutation>,
     ) -> Result<ManagedTask> {
         next.validate()?;
-        if !next.same_identity(expected) || next.revision != expected.revision + 1 {
+        if !next.same_identity(expected)
+            || next.revision != expected.revision + 1
+            || next.requirements.merge(expected.requirements) != next.requirements
+        {
             return Err(Error::Conflict("managed task transition changed identity"));
         }
         let (policy, receipt, receipt_json) = Self::algal_receipt(&next).await?;
@@ -2498,6 +2503,7 @@ impl ManagedStore {
             None
         };
         let mut task = ManagedTask {
+            requirements: options.requirements.merge(options.program_parent.map(|parent| parent.requirements).unwrap_or_default()),
             version: 1,
             id: task_id.clone(),
             operation,
@@ -2957,6 +2963,25 @@ impl ManagedStore {
     /// Explicit composer submission: create ordinary new work with the original
     /// text and images. Answers, cancellation, and continuation use exact task
     /// actions; this path never interprets the prompt as one of those actions.
+    /// Explicit monotonic annotation for a queued task or later capability discovery.
+    pub async fn require_task_capabilities(
+        &self,
+        id: &Id,
+        requirements: xcb_core::session::TaskRequirements,
+    ) -> Result<ManagedTask> {
+        let task = self
+            .task(id)?
+            .ok_or(Error::Unavailable("managed task not found"))?;
+        let mut next = task.clone();
+        next.requirements = next.requirements.merge(requirements);
+        if next.requirements == task.requirements {
+            return Ok(task);
+        }
+        next.revision += 1;
+        next.updated_at_ms = now_ms();
+        self.transition(&task, next, None).await
+    }
+
     pub async fn submit_new(
         &self,
         conversation: &Id,
@@ -3479,6 +3504,7 @@ impl ManagedStore {
             message_count,
             delivered_preferences,
             None,
+            task.requirements,
         )
         .await
     }
@@ -3493,8 +3519,10 @@ impl ManagedStore {
         message_count: usize,
         delivered_preferences: String,
         batch: Option<&inbox::Batch>,
+        requirements: xcb_core::session::TaskRequirements,
     ) -> Result<ManagedTask> {
         let mut next = task.clone();
+        next.requirements = next.requirements.merge(requirements);
         if let Some(batch) = batch
             && !batch.events.is_empty()
         {
@@ -3709,6 +3737,24 @@ impl ManagedStore {
             .as_ref()
             .is_ok_and(|outcome| xcb_core::policy::no_reply(&outcome.text, &outcome.facts));
         let mut next = task.clone();
+        if let Some(id) = &task.session
+            && let Some(actual) = store.session(id)?
+        {
+            next.requirements = next.requirements.merge(actual.requirements);
+            let route = format!("{} · {}", actual.model.key(), actual.account);
+            if actual.requirements.signed_in_browser
+                && actual.model.provider == Provider::Codex
+                && next.route.as_deref() != Some(route.as_str())
+            {
+                next.route = Some(route.clone());
+                next.route_reason = Some(
+                    "signed-in browser capability handoff continued the same task on Codex".into(),
+                );
+                if !next.tried_routes.contains(&route) {
+                    next.tried_routes.push(route);
+                }
+            }
+        }
         // A run that produced an outcome provably appended the prompt it was
         // handed: this session's transcript now carries the task context and
         // every input that prompt contained. A failed dispatch proves
@@ -5105,6 +5151,31 @@ fn blocked_on_account(task: &ManagedTask) -> bool {
     task.state == TaskState::Queued && task.detail.starts_with(NO_ACCOUNT_DETAIL)
 }
 
+/// Carry task requirements and explicit provider restrictions into both new
+/// and resumed workers without changing the transcript's settlement identity.
+fn preserve_worker_route(
+    store: &Store,
+    session: xcb_core::session::Session,
+    requirements: xcb_core::session::TaskRequirements,
+    required_provider: Option<Provider>,
+) -> Result<xcb_core::session::Session> {
+    let mut pins = session.route_pins.clone();
+    if pins
+        .provider
+        .zip(required_provider)
+        .is_some_and(|(pin, required)| pin != required)
+    {
+        return Err(Error::Conflict(
+            "required provider conflicts with the worker's saved provider pin",
+        ));
+    }
+    pins.provider = pins.provider.or(required_provider);
+    if pins.provider != session.route_pins.provider {
+        store.set_session_route_pins(&session.id, pins)?;
+    }
+    store.require_session_capabilities(&session.id, requirements)
+}
+
 enum Dispatch {
     /// A worker was spawned for the task.
     Started,
@@ -5393,6 +5464,17 @@ impl Supervisor {
                 ),
             }
         }
+        // Rebind can change the account inside a running worker. Refresh the
+        // supervisor's hints before admitting siblings; Store leases remain
+        // the final atomic custody gate across this small observation window.
+        for (id, account) in &mut self.active_accounts {
+            if let Some(task) = self.managed.task(id)?
+                && let Some(session) = task.session
+                && let Some(session) = self.store.session(&session)?
+            {
+                *account = session.account;
+            }
+        }
         let due: Vec<_> = {
             let mut pending = std::mem::take(&mut self.unrecorded);
             let (due, waiting): (Vec<_>, Vec<_>) = pending.drain(..).partition(|entry| {
@@ -5664,6 +5746,17 @@ impl Supervisor {
         let mut routing_prompt = worker_prompt(&prompt_task, &preferences, &[], false);
         append_context(&mut routing_prompt, &imported_context);
         let config = Config::load(store.root())?.0;
+        let requirements = task
+            .worker_sessions
+            .iter()
+            .chain(task.session.iter())
+            .try_fold(task.requirements, |requirements, id| {
+                store.session(id).map(|session| {
+                    requirements.merge(session.map(|s| s.requirements).unwrap_or_default())
+                })
+            })?;
+        let (provider_preference, provider_required) = managed.effective_route_preferences(task)?;
+        let required_provider = provider_required.then_some(provider_preference).flatten();
         let created_session = task.session.is_none();
         let mut route_reason = task
             .route_reason
@@ -5671,7 +5764,9 @@ impl Supervisor {
             .unwrap_or_else(|| "continuing the existing worker session".into());
         let session = if let Some(id) = &task.session {
             match store.session(id)? {
-                Some(session) => session,
+                Some(session) => {
+                    preserve_worker_route(&store, session, requirements, required_provider)?
+                }
                 None => {
                     return match managed
                         .fail_unstarted(
@@ -5698,15 +5793,13 @@ impl Supervisor {
                     Err(error) => Err(error),
                 };
             }
-            let (provider_preference, provider_required) =
-                managed.effective_route_preferences(task)?;
-            let required_provider = provider_required.then_some(provider_preference).flatten();
             let excluded_routes: BTreeSet<_> = task.tried_routes.iter().cloned().collect();
             let excluded_accounts: BTreeSet<_> = task.failed_accounts.iter().cloned().collect();
             let decision = match routing::smart_route(
                 &store,
                 &config,
                 routing::RouteRequest {
+                    requirements,
                     task: &routing_prompt,
                     required_provider,
                     preferred_provider: provider_preference,
@@ -5753,7 +5846,12 @@ impl Supervisor {
                 Some(&model_key),
                 Some(&task.id),
             ) {
-                Ok(session) => session,
+                Ok(session) => preserve_worker_route(
+                    &store,
+                    session,
+                    decision.requirements,
+                    required_provider,
+                )?,
                 Err(Error::Conflict(reason) | Error::Unavailable(reason)) => {
                     return Ok(Dispatch::Deferred(format!(
                         "waiting for an eligible worker: {reason}"
@@ -5848,6 +5946,7 @@ impl Supervisor {
                 message_count,
                 preferences_fingerprint(&preferences),
                 (!batch.events.is_empty()).then_some(&batch),
+                session.requirements,
             )
             .await
         {
@@ -8605,6 +8704,7 @@ mod tests {
 
     fn bare_task(chat: Id, workspace: &Path) -> ManagedTask {
         ManagedTask {
+            requirements: Default::default(),
             version: 1,
             id: message("t_x"),
             operation: message("op_x"),
@@ -8875,6 +8975,131 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn signed_in_browser_resumed_worker_preserves_task_requirements_pins_and_settlement() {
+        let root = root();
+        let workspace = workspace(&root);
+        let state = state_dir(&root);
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_browser_resume").await;
+        let id = task.session.as_ref().unwrap();
+        let original = xcb.session(id).unwrap().unwrap();
+        let input = Message {
+            id: new_id("input"),
+            role: Role::User,
+            text: task.goal.clone(),
+            attachments: vec![],
+            at_ms: now_ms(),
+            provenance: None,
+        };
+        let current = xcb.append_message(id, original.revision, &input).unwrap();
+        let run = xcb.prepare_run(id, current.revision, now_ms()).unwrap();
+        let outcome = idle_outcome(Terminal::Completed, "Earlier work completed.");
+        xcb.settle_outcome(&run, &input.id, &outcome, now_ms())
+            .unwrap();
+        let settled_revision = xcb.session(id).unwrap().unwrap().revision;
+        let task = managed
+            .require_task_capabilities(
+                &task.id,
+                xcb_core::session::TaskRequirements {
+                    signed_in_browser: true,
+                },
+            )
+            .await
+            .unwrap();
+        let session = preserve_worker_route(
+            &xcb,
+            xcb.session(id).unwrap().unwrap(),
+            task.requirements,
+            Some(Provider::Claude),
+        )
+        .unwrap();
+        assert!(session.requirements.signed_in_browser);
+        assert_eq!(session.route_pins.provider, Some(Provider::Claude));
+        assert_eq!(session.revision, settled_revision);
+        assert!(xcb.latest_settled_outcome(id).unwrap().is_some());
+        let repeated =
+            preserve_worker_route(&xcb, session.clone(), Default::default(), None).unwrap();
+        assert!(repeated.requirements.signed_in_browser);
+        assert_eq!(repeated.route_pins.provider, Some(Provider::Claude));
+        assert!(
+            preserve_worker_route(&xcb, repeated, Default::default(), Some(Provider::Codex),)
+                .is_err()
+        );
+        let no_routes = BTreeSet::new();
+        let no_accounts = BTreeSet::new();
+        assert!(matches!(
+            routing::smart_route(
+                &xcb,
+                &Config::default(),
+                routing::RouteRequest {
+                    requirements: session.requirements,
+                    task: "continue this browser task",
+                    required_provider: session.route_pins.provider,
+                    preferred_provider: None,
+                    required_model: None,
+                    excluded_routes: &no_routes,
+                    excluded_accounts: &no_accounts,
+                    account: None,
+                },
+            )
+            .await,
+            Err(Error::Conflict(_))
+        ));
+        assert_eq!(xcb.session(id).unwrap().unwrap().account, original.account);
+        assert!(xcb.unsettled_runs().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn signed_in_browser_handoff_completion_adopts_actual_route_and_requirement() {
+        let root = root();
+        let workspace = workspace(&root);
+        let state = state_dir(&root);
+        let managed = ManagedStore::open(&state).unwrap();
+        let xcb = Store::open(&state).unwrap();
+        let chat = conversation(&managed, &workspace).await;
+        let task = prepared_task(&managed, &xcb, &chat, &workspace, "m_browser_handoff").await;
+        let id = task.session.as_ref().unwrap();
+        let codex = crate::authentication_tests::account(&xcb, Provider::Codex);
+        let model = crate::authentication_tests::model(Provider::Codex);
+        let required = xcb
+            .require_session_capabilities(
+                id,
+                xcb_core::session::TaskRequirements {
+                    signed_in_browser: true,
+                },
+            )
+            .unwrap();
+        xcb.rebind(id, required.revision, &codex, model.clone())
+            .unwrap();
+        let actual = xcb.session(id).unwrap().unwrap();
+        let input = Message {
+            id: new_id("input"),
+            role: Role::User,
+            text: task.goal.clone(),
+            attachments: vec![],
+            at_ms: now_ms(),
+            provenance: None,
+        };
+        let current = xcb.append_message(id, actual.revision, &input).unwrap();
+        let run = xcb.prepare_run(id, current.revision, now_ms()).unwrap();
+        let outcome = idle_outcome(Terminal::Completed, "Finished the requested browser task.");
+        xcb.settle_outcome(&run, &input.id, &outcome, now_ms())
+            .unwrap();
+        let finished = managed.finish(&xcb, &task.id, Ok(outcome)).await.unwrap();
+        let route = format!("{} · {}", model.key(), codex);
+        assert_eq!(finished.route.as_deref(), Some(route.as_str()));
+        assert!(finished.requirements.signed_in_browser);
+        assert!(finished.tried_routes.contains(&route));
+        assert_eq!(finished.session.as_ref(), Some(id));
+        let mut cleared = finished.clone();
+        cleared.requirements = Default::default();
+        cleared.revision += 1;
+        assert!(managed.transition(&finished, cleared, None).await.is_err());
     }
 
     async fn mark_running(managed: &ManagedStore, task: &ManagedTask) -> ManagedTask {

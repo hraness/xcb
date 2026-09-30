@@ -98,6 +98,7 @@ async fn prepare(f: &Fixture, task: &ManagedTask) -> (ManagedTask, String) {
             message_count,
             String::new(),
             (!batch.events.is_empty()).then_some(&batch),
+            task.requirements,
         )
         .await
         .unwrap();
