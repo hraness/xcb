@@ -36,6 +36,7 @@ pub enum Progress {
     Notice(String),
 }
 pub type Observer = Arc<dyn Fn(Progress) + Send + Sync>;
+pub use crate::device_login::DeviceLoginPrompt;
 
 /// Diagnostic for a turn refused before its prompt was sent because the
 /// session's model left the freshly discovered provider catalog.
@@ -1223,6 +1224,36 @@ pub async fn login_codex(_store: &Store, _account: &Id, _pin: &Pin) -> Result<()
 
 #[cfg(unix)]
 pub async fn login_codex(store: &Store, account: &Id, pin: &Pin) -> Result<()> {
+    login_codex_inner(store, account, pin, None).await
+}
+
+#[cfg(windows)]
+pub async fn login_codex_with_prompt(
+    _store: &Store,
+    _account: &Id,
+    _pin: &Pin,
+    _sender: tokio::sync::mpsc::Sender<DeviceLoginPrompt>,
+) -> Result<()> {
+    Err(Error::providers_unsupported())
+}
+
+#[cfg(unix)]
+pub async fn login_codex_with_prompt(
+    store: &Store,
+    account: &Id,
+    pin: &Pin,
+    sender: tokio::sync::mpsc::Sender<DeviceLoginPrompt>,
+) -> Result<()> {
+    login_codex_inner(store, account, pin, Some(sender)).await
+}
+
+#[cfg(unix)]
+async fn login_codex_inner(
+    store: &Store,
+    account: &Id,
+    pin: &Pin,
+    sender: Option<tokio::sync::mpsc::Sender<DeviceLoginPrompt>>,
+) -> Result<()> {
     use rustix::process::{Pid, Signal, kill_process_group};
     use std::{os::fd::AsFd, process::Stdio};
     crate::codex::runtime_admitted(pin)?;
@@ -1247,7 +1278,16 @@ pub async fn login_codex(store: &Store, account: &Id, pin: &Pin) -> Result<()> {
         }
     };
     // Keep stdout available for the CLI's final JSON acknowledgement.
-    plan.command.stdout(Stdio::from(status_output));
+    if sender.is_some() {
+        // The assisted UI owns Enter; device authorization itself uses no
+        // terminal input. Legacy manual login keeps its inherited stdin.
+        plan.command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    } else {
+        plan.command.stdout(Stdio::from(status_output));
+    }
     artifacts.retain_before_launch();
     let mut child = match plan.command.spawn() {
         Ok(child) => child,
@@ -1275,16 +1315,39 @@ pub async fn login_codex(store: &Store, account: &Id, pin: &Pin) -> Result<()> {
         .and_then(Pid::from_raw)
         .ok_or(Error::Protocol("login process group"))?;
     let mut custody = LoginGroup(Some(group));
+    let captured = sender.map(|sender| (child.stdout.take(), child.stderr.take(), sender));
+    let has_bridge = captured.is_some();
+    // Readers are owned by this future, never spawned or detached. Pipe EOF
+    // is independent of physical provider exit.
+    let bridge = async move {
+        match captured {
+            Some((Some(stdout), Some(stderr), sender)) => {
+                crate::device_login::forward(stdout, stderr, tokio::io::stderr(), sender).await
+            }
+            Some(_) => Err(std::io::Error::other("Codex sign-in output capture failed")),
+            None => Ok(()),
+        }
+    };
+    tokio::pin!(bridge);
+    let mut bridge_done = !has_bridge;
     let marked = store.mark_spawned(&run, pid);
-    let result = if marked.is_ok() {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => Err(Error::Unavailable("Codex sign-in cancelled")),
-            result = tokio::time::timeout(Duration::from_secs(600), child.wait()) => match result {
-                Ok(Ok(status)) if status.success() => Ok(()),
-                Ok(Ok(_)) => Err(Error::Unavailable("Codex sign-in did not complete")),
-                Ok(Err(error)) => Err(error.into()),
-                Err(_) => Err(Error::Unavailable("Codex sign-in timed out")),
-            },
+    let mut result = if marked.is_ok() {
+        let deadline = tokio::time::sleep(Duration::from_secs(600));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => break Err(Error::Unavailable("Codex sign-in cancelled")),
+                _ = &mut deadline => break Err(Error::Unavailable("Codex sign-in timed out")),
+                output = &mut bridge, if !bridge_done => {
+                    bridge_done = true;
+                    if let Err(error) = output { break Err(error.into()); }
+                },
+                status = child.wait() => break match status {
+                    Ok(status) if status.success() => Ok(()),
+                    Ok(_) => Err(Error::Unavailable("Codex sign-in did not complete")),
+                    Err(error) => Err(error.into()),
+                },
+            }
         }
     } else {
         marked.map(|_| ())
@@ -1311,6 +1374,14 @@ pub async fn login_codex(store: &Store, account: &Id, pin: &Pin) -> Result<()> {
     })
     .await
     .unwrap_or(false);
+    if !bridge_done {
+        // A bounded output tail cannot hold account cleanup indefinitely.
+        if let Ok(Err(error)) = tokio::time::timeout(Duration::from_secs(1), &mut bridge).await
+            && result.is_ok()
+        {
+            result = Err(error.into());
+        }
+    }
     if !joined {
         return Err(Error::Unavailable(
             "sign-in process stop unproven; account custody retained",

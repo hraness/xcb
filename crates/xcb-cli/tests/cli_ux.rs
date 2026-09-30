@@ -537,10 +537,7 @@ fn every_command_help_exits_zero() {
         assert!(!output.stdout.is_empty(), "{args:?}");
     }
     let root = text(&plain(&["--help"]).stdout);
-    assert!(
-        root.contains("\nStart here\n  setup          Add an account"),
-        "{root}"
-    );
+    assert!(root.contains("\nStart here\n  setup          "), "{root}");
     for internal in [
         "managed-daemon",
         "broker-stdio",
@@ -563,12 +560,13 @@ fn setup_adds_one_account_then_stops_at_the_provider_check() {
     assert_eq!(output.status.code(), Some(1));
     let stdout = text(&output.stdout);
     assert!(stdout.starts_with("✓ Added claude/a_"), "{stdout}");
-    assert_eq!(
-        text(&output.stderr),
-        "→ Checking Claude Code first (the same check as xcb doctor --provider claude).\n\
-         ✗ xcb can't find `claude` on your PATH. Install it, or set XCB_CLAUDE to its absolute path.\n\
-         → xcb doctor --provider claude\n"
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("xcb can't find `claude` on your PATH"),
+        "{stderr}"
     );
+    assert!(stderr.contains("xcb doctor --provider claude"), "{stderr}");
+    assert!(stderr.contains("xcb setup claude --account a_"), "{stderr}");
     // Running it again reuses the account instead of adding a second one.
     let again = sandbox.run(&["setup", "claude"], &[]);
     assert!(
@@ -1544,4 +1542,136 @@ fn task_and_rename_commands_print_sentences_unless_json() {
         text(&prune.stdout).starts_with("No offline command jobs"),
         "{prune:?}"
     );
+}
+
+/// A terminal subprocess with no provider binaries or credentials. Python's
+/// stdlib opens the PTY so the real CLI's terminal detection is exercised.
+fn account_terminal(sandbox: &Sandbox, args: &[&str], input: &str) -> String {
+    let python = ["/usr/bin/python3", "/usr/local/bin/python3"]
+        .into_iter()
+        .find(|path| Path::new(path).is_file())
+        .expect("Python 3 is required for the terminal CLI regression tests");
+    let script = r#"
+import os, pty, select, subprocess, sys, time
+master, slave = pty.openpty()
+child = subprocess.Popen(sys.argv[1:], stdin=slave, stdout=slave, stderr=slave)
+os.close(slave)
+data = bytearray()
+sent = False
+deadline = time.monotonic() + 10
+try:
+    while time.monotonic() < deadline:
+        if select.select([master], [], [], .1)[0]:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            data.extend(chunk)
+            if not sent and b'Choose an account:' in data:
+                os.write(master, os.environ['XCB_TEST_INPUT'].encode())
+                sent = True
+        elif child.poll() is not None:
+            break
+    try:
+        child.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+        raise RuntimeError('terminal CLI timed out: ' + data.decode(errors='replace'))
+finally:
+    os.close(master)
+    if child.poll() is None:
+        child.kill()
+        child.wait()
+sys.stdout.buffer.write(data)
+"#;
+    let output = Command::new(python)
+        .env_clear()
+        .env("HOME", sandbox.root.join("home"))
+        .env("PATH", sandbox.root.join("bin"))
+        .env("LANG", "en_US.UTF-8")
+        .env("XCB_TEST_INPUT", input)
+        .args(["-c", script, env!("CARGO_BIN_EXE_xcb"), "--state"])
+        .arg(sandbox.state())
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    text(&output.stdout)
+}
+
+#[test]
+fn account_terminal_add_continues_without_copying_the_id() {
+    let sandbox = Sandbox::new("account-terminal-add");
+    sandbox.fake_provider("claude", "0.1.0 (Claude Code)");
+    let output = account_terminal(&sandbox, &["accounts", "add", "claude"], "");
+    assert!(output.contains("Added claude/a_"), "{output}");
+    assert!(output.contains("xcb can't run Claude Code"), "{output}");
+    assert!(!output.contains("Next: xcb accounts login"), "{output}");
+    assert!(output.contains("xcb setup claude --account a_"), "{output}");
+    let store = xcb_runtime::store::Store::open(&sandbox.state()).unwrap();
+    assert_eq!(store.accounts().unwrap().len(), 1);
+    assert!(store.unsettled_runs().unwrap().is_empty());
+}
+
+#[test]
+fn account_terminal_setup_cancel_preserves_existing_accounts() {
+    let sandbox = Sandbox::new("account-terminal-cancel");
+    let id = sandbox.add(&["codex"]);
+    for input in ["0\n", "\x04"] {
+        let output = account_terminal(&sandbox, &["setup", "codex"], input);
+        assert!(output.contains("Choose an account:"), "{output}");
+        assert!(!output.contains("Added"), "{output}");
+        assert!(!output.contains("installed"), "{output}");
+    }
+    let store = xcb_runtime::store::Store::open(&sandbox.state()).unwrap();
+    let accounts = store.accounts().unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id.as_str(), id);
+    assert!(store.unsettled_runs().unwrap().is_empty());
+}
+
+#[test]
+fn account_add_json_and_nonterminal_only_create_accounts() {
+    let sandbox = Sandbox::new("account-add-automation");
+    let id = sandbox.add(&["codex"]);
+    let output = sandbox.run(&["accounts", "add", "claude"], &[]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(text(&output.stdout).contains("Added claude/a_"));
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let store = xcb_runtime::store::Store::open(&sandbox.state()).unwrap();
+    assert_eq!(store.accounts().unwrap().len(), 2);
+    assert_eq!(
+        store
+            .account(&xcb_core::Id::new(&id).unwrap())
+            .unwrap()
+            .id
+            .as_str(),
+        id
+    );
+    assert!(store.unsettled_runs().unwrap().is_empty());
+}
+
+#[test]
+fn account_setup_new_preserves_existing_account_and_can_retry_exact_row() {
+    let sandbox = Sandbox::new("account-setup-new");
+    let original = sandbox.add(&["claude"]);
+    sandbox.fake_provider("claude", "0.1.0 (Claude Code)");
+    let created = sandbox.run(&["setup", "claude", "--new"], &[]);
+    assert!(!created.status.success(), "{created:?}");
+    let store = xcb_runtime::store::Store::open(&sandbox.state()).unwrap();
+    let accounts = store.accounts().unwrap();
+    assert_eq!(accounts.len(), 2);
+    let added = accounts
+        .iter()
+        .find(|account| account.id.as_str() != original)
+        .unwrap();
+    assert!(text(&created.stderr).contains(&format!("xcb setup claude --account {}", added.id)));
+    let retry = sandbox.run(&["setup", "claude", "--account", added.id.as_str()], &[]);
+    assert!(!retry.status.success(), "{retry:?}");
+    assert_eq!(store.accounts().unwrap().len(), 2);
+    assert!(!text(&retry.stdout).contains("Added"));
+    assert!(store.unsettled_runs().unwrap().is_empty());
 }

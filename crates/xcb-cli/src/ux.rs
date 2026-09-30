@@ -235,7 +235,7 @@ Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin
 subscriptions you already pay for.
 
 Start here
-  xcb setup claude       Add a Claude account, check Claude Code and sign in
+  xcb setup claude       Choose or add a Claude account and sign in
   xcb                    Open your thread (needs a terminal)
   xcb run -p \"<task>\"    Run one task here and print the result
   xcb doctor             Check providers, accounts and unfinished runs
@@ -263,7 +263,7 @@ directory; xcb picks each task's project directory and says which.
 Usage: xcb [command] [options]
 
 Start here
-  setup          Add an account, check the provider and sign in, in one step
+  setup          Choose or add an account, check the provider and sign in
   chat           Open your thread; --new starts a project view for this folder
   run            Run one task here and print the result
   doctor         Check providers, accounts and unfinished runs

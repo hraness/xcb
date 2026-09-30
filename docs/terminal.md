@@ -7,6 +7,8 @@ the project directory, account, and model for each task. `/sessions` (alias
 `/rename <name>` changes a conversation's title. `/status` shows routing and
 agent state.
 
+Account, model, session, conversation, and pane pickers open on the current choice when it is available and mark it “current”. Empty lists explain how to populate them; if a filter has no matches, Ctrl-U clears the filter. An account that needs sign-in or is turned off shows the command to reconnect or enable it.
+
 The editor follows familiar Codex CLI keys. Type `/` to search commands, use
 Up/Down to select, Tab to complete, and Enter to run. Escape closes a menu and
 keeps your draft. Type `?` on an empty prompt or press F1 for scrollable help.
