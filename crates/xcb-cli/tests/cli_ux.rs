@@ -1045,6 +1045,34 @@ fn json_upgrade_reports_the_installed_release_without_installer_output_on_stdout
 #[test]
 fn killed_updater_parent_cannot_admit_work_while_its_helper_is_live() {
     use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    struct UpdaterParent {
+        child: Option<std::process::Child>,
+        release: PathBuf,
+    }
+
+    impl UpdaterParent {
+        fn cleanup(&mut self) -> std::io::Result<Option<Output>> {
+            let Some(mut child) = self.child.take() else {
+                return Ok(None);
+            };
+            let released = std::fs::write(&self.release, b"");
+            let _ = child.kill();
+            // The helper inherits stderr. Draining that pipe also waits for
+            // the released helper to close it, including on assertion unwind.
+            let output = child.wait_with_output();
+            released?;
+            output.map(Some)
+        }
+    }
+
+    impl Drop for UpdaterParent {
+        fn drop(&mut self) {
+            let _ = self.cleanup();
+        }
+    }
+
     let sandbox = Sandbox::new("update-parent-death");
     let share = xcb_runtime::private::directory(&sandbox.root.join("share/xcb")).unwrap();
     let installer = share.join("install-native.sh");
@@ -1072,7 +1100,7 @@ fn killed_updater_parent_cannot_admit_work_while_its_helper_is_live() {
         &sandbox.root.join("bin/curl"),
         &format!("#!/bin/sh\nprintf '%s\\n' '{release}'\n"),
     );
-    let mut parent = Command::new(&binary)
+    let child = Command::new(&binary)
         .env_clear()
         .env("HOME", sandbox.root.join("home"))
         .env("PATH", sandbox.root.join("bin"))
@@ -1080,22 +1108,35 @@ fn killed_updater_parent_cannot_admit_work_while_its_helper_is_live() {
         .arg(sandbox.state())
         .args(["--json", "upgrade", "99.0.1"])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let wait_for = |name: &str| {
-        for _ in 0..200 {
-            if sandbox.root.join(name).exists() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("helper did not publish {name}");
+    let mut parent = UpdaterParent {
+        child: Some(child),
+        release: sandbox.root.join("helper-release"),
     };
-    wait_for("helper-started");
-    parent.kill().unwrap();
-    parent.wait().unwrap();
+    // This deadline detects a hung fixture, not a startup performance limit:
+    // verifying the debug executable can contend with the other CLI tests.
+    let started = Instant::now();
+    while !sandbox.root.join("helper-started").exists() {
+        let status = parent.child.as_mut().unwrap().try_wait().unwrap();
+        if status.is_some() || started.elapsed() >= Duration::from_secs(10) {
+            let elapsed = started.elapsed();
+            let guarded = share.join("update-in-progress").exists();
+            let output = parent.cleanup().unwrap().unwrap();
+            panic!(
+                "helper did not start after {elapsed:?}; parent status: {status:?}; \
+                 update guard present: {guarded}; stdout: {}; stderr: {}",
+                text(&output.stdout),
+                text(&output.stderr),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    eprintln!("updater helper ready after {:?}", started.elapsed());
+    parent.child.as_mut().unwrap().kill().unwrap();
+    parent.child.as_mut().unwrap().wait().unwrap();
     let output = Command::new(&binary)
         .env_clear()
         .env("HOME", sandbox.root.join("home"))
@@ -1106,8 +1147,11 @@ fn killed_updater_parent_cannot_admit_work_while_its_helper_is_live() {
         .output()
         .unwrap();
     // Release the owned fixture child before making assertions that can panic.
-    std::fs::write(sandbox.root.join("helper-release"), b"").unwrap();
-    wait_for("helper-finished");
+    let updater_output = parent.cleanup().unwrap().unwrap();
+    assert!(
+        sandbox.root.join("helper-finished").exists(),
+        "helper did not finish: {updater_output:?}"
+    );
     assert!(
         !output.status.success(),
         "work was admitted during interrupted replacement: {output:?}"

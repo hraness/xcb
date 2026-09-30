@@ -1550,10 +1550,16 @@ fn dispatch_update(root: &std::path::Path, command: Commands, as_json: bool) -> 
 fn dispatch(cli: Cli) -> impl std::future::Future<Output = Result<i32>> {
     // Allocate the command state once. Embedding it in each caller's async
     // frame can overflow a normal 2 MiB stack before any command runs.
-    Box::pin(dispatch_inner(cli))
+    Box::pin(async move {
+        let mut installation = None;
+        Box::pin(dispatch_inner(cli, &mut installation)).await
+    })
 }
 
-async fn dispatch_inner(cli: Cli) -> Result<i32> {
+async fn dispatch_inner(
+    cli: Cli,
+    installation: &mut Option<private::ExclusiveLock>,
+) -> Result<i32> {
     let updater_command = matches!(
         &cli.command,
         Some(Commands::Update { .. } | Commands::Upgrade { .. })
@@ -1562,7 +1568,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
     // The provider's MCP helper must not open application state or emit any
     // ordinary CLI output on its protocol-only standard streams.
     if matches!(&cli.command, Some(Commands::BrokerStdio)) {
-        let _installation = xcb_runtime::update::hold_installation(std::path::Path::new("/"))?;
+        *installation = xcb_runtime::update::hold_installation(std::path::Path::new("/"))?;
         return broker_stdio().await;
     }
     // The hidden in-namespace forwarder must not touch CLI state: inside the
@@ -1578,7 +1584,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
         child,
     }) = &cli.command
     {
-        let _installation = xcb_runtime::update::hold_installation(std::path::Path::new("/"))?;
+        *installation = xcb_runtime::update::hold_installation(std::path::Path::new("/"))?;
         return egress_forward(socket, *port, lo_up, env_file, *target_port, child).await;
     }
     // The sandbox test's confined half runs inside bwrap with no state root
@@ -1623,7 +1629,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
             .status()?;
         return Ok(update_reentry_exit_code(status));
     }
-    let _installation = if updater_command {
+    *installation = if updater_command {
         None
     } else {
         xcb_runtime::update::hold_installation(&update_root)?
@@ -4138,7 +4144,8 @@ async fn main() {
                 | Commands::SandboxProbe { .. }
         )
     );
-    let code = match dispatch(cli).await {
+    let mut installation = None;
+    let code = match Box::pin(dispatch_inner(cli, &mut installation)).await {
         Ok(code) => code,
         Err(error) => ux::report_error(&error, json, protocol),
     };

@@ -39,8 +39,9 @@
   seatbelted subscription route it drives. `cli/state.ts` resolves `~/.xcb`
   (env `XCB_STATE`) and owns the explicit `migrate` copy from legacy
   `~/.agentmixer`; SQLite `agentmixer_*` tables rename lazily at open.
-  `cli/update.ts` sets the compatibility update policy; `cli.ts` calls the shared
-  updater before opening application state. Bundle the exact released updater
+  `cli/update.ts` sets the compatibility update policy; the `cli.ts` executable
+  calls the shared updater before loading `cli-program.ts` or application state.
+  Bundle the exact released updater
   development dependency into the CLI, keep SDK imports inert, and preserve the
   external exact-version registry dependency and packed-package contracts.
 - `test/` contains synthetic boundary and concurrency tests.

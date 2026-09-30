@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -303,8 +303,20 @@ export async function packageSmoke(tarballArgument?: string): Promise<void> {
         throw new Error("Installed xcb-compat --help did not print the usage surface");
       }
       const productState = join(consumer, `update-must-not-open-${expectedRuntime}`);
-      const update = record(JSON.parse(await run([executable, installedCli, "update", "status", "--json"], consumer,
-        { ...process.env, XCB_STATE: productState, HOME: consumer })), "installed update status");
+      // The real installed updater must work even when the product graph is
+      // unavailable. This detects an accidental eager import in a built shim.
+      const programs = (await readdir(dirname(installedCli))).filter(name => /^cli-program-[A-Za-z0-9]+\.js$/u.test(name));
+      if (programs.length !== 1) throw new Error("Expected one lazy compatibility product module");
+      const program = join(dirname(installedCli), programs[0]!);
+      const heldProgram = join(consumer, "held-cli-program.js");
+      await rename(program, heldProgram);
+      let update: Record<string, unknown>;
+      try {
+        update = record(JSON.parse(await run([executable, installedCli, "update", "status", "--json"], consumer,
+          { ...process.env, XCB_STATE: productState, HOME: consumer })), "installed update status");
+      } finally {
+        await rename(heldProgram, program);
+      }
       if (update.package !== PACKAGE_NAME || update.currentVersion !== manifest.version
         || update.status !== "unsupported" || update.supported !== false) {
         throw new Error("Packed CLI must report a project installation without attempting to update it");

@@ -21,6 +21,9 @@ async function cli(args: readonly string[], input?: string, state?: string): Pro
       ...process.env, XCB_STATE: root, NO_COLOR: "1",
       XCB_CLAUDE: join(root, "no-such-claude"), XCB_CODEX: join(root, "no-such-codex"), XCB_DEVIN: join(root, "no-such-devin"),
       PATH: join(root, "empty-path"), HOME: root,
+      // Bun's transpiler cache otherwise creates Library/Caches in the fake
+      // HOME, independently of CLI application or updater state.
+      BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
     },
     stdin: input === undefined ? "ignore" : "pipe",
     stdout: "pipe", stderr: "pipe",
