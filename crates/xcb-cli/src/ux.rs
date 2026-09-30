@@ -291,6 +291,7 @@ Conversations and tasks
 
 Setup
   service        Start xcb's background supervisor at login (macOS)
+  resources      Inspect memory and disk pressure; enable launch limits
   update         Check for updates and set the update policy
   upgrade        Install the latest verified release
   completions    Print shell completions

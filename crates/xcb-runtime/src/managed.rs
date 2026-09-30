@@ -56,6 +56,8 @@ mod project;
 pub use project::{MemoryBinding, ProjectPolicy, ProjectProposal};
 #[path = "managed_inbox.rs"]
 mod inbox;
+#[path = "managed_resources.rs"]
+mod resources;
 pub use inbox::{InboxEvent, InboxWatch};
 #[path = "managed_program_state.rs"]
 mod program_state;
@@ -5134,6 +5136,7 @@ struct Supervisor {
     /// Last time the supervisor re-checked the retention stamp; opens run
     /// the first check so this only matters on long-lived daemons.
     retention_checked: Instant,
+    resources: resources::Resources,
 }
 
 impl Supervisor {
@@ -5153,6 +5156,7 @@ impl Supervisor {
             progress_bytes: Vec::new(),
             progress_at: Instant::now(),
             retention_checked: Instant::now(),
+            resources: resources::Resources::default(),
         }
     }
 
@@ -5418,6 +5422,9 @@ impl Supervisor {
         });
         let ids: BTreeSet<_> = tasks.iter().map(|task| task.id.clone()).collect();
         self.launch_attempts.retain(|id, _| ids.contains(id));
+        // Sampling never holds up joins or cancellation. Only one collection
+        // may be in flight, even if a filesystem stops answering.
+        self.refresh_resources(&tasks).await;
         for task in &tasks {
             if !task.cancel_requested {
                 continue;
@@ -5550,6 +5557,10 @@ impl Supervisor {
                 Err(error) => Err(error),
             };
         }
+        let resource_advisory = match self.resource_admission(task) {
+            Ok(advisory) => advisory,
+            Err(reason) => return Ok(Dispatch::Deferred(reason)),
+        };
         if let Some(program) = &task.program {
             if task.program_waiting {
                 return Ok(Dispatch::Deferred("waiting for managed child".into()));
@@ -5751,6 +5762,9 @@ impl Supervisor {
             && task.context_carried
             && message_count > task.message_count_before;
         let mut prompt = worker_prompt(&prompt_task, &preferences, &[], carried);
+        if let Some(advisory) = resource_advisory {
+            append_context(&mut prompt, &advisory);
+        }
         append_context(&mut prompt, &managed.project_context_in(&task.workspace)?);
         if !carried {
             append_context(&mut prompt, &imported_context);
@@ -6140,18 +6154,33 @@ fn ensure_daemon_within(root: &Path, executable: &Path, confirm: Duration) -> Re
         }
         Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
     }
+    let watchdog_instance = crate::habitat_service::watchdog_installed(root, executable)?
+        .then(|| uuid::Uuid::new_v4().to_string());
     let mut command = Command::new(executable);
     command
         .arg("--state")
         .arg(root)
-        .arg("managed-daemon")
+        .arg(if watchdog_instance.is_some() {
+            "service-run"
+        } else {
+            "managed-daemon"
+        })
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(instance) = &watchdog_instance {
+        command.env("XCB_SERVICE_INSTANCE", instance);
+    }
     crate::os::detach(&mut command);
     let spawned_ms = now_ms();
     let mut child = command.spawn().map_err(Error::LaunchNotStarted)?;
-    let confirmed = confirm_daemon(&directory, &mut child, spawned_ms, confirm);
+    let confirmed = confirm_daemon(
+        &directory,
+        &mut child,
+        spawned_ms,
+        confirm,
+        watchdog_instance.as_deref(),
+    );
     if matches!(child.try_wait(), Ok(None)) {
         // Collect the detached supervisor's exit status when it ends, so it
         // never lingers as a zombie of this client.
@@ -6172,6 +6201,7 @@ fn confirm_daemon(
     child: &mut std::process::Child,
     spawned_ms: u64,
     window: Duration,
+    watchdog_instance: Option<&str>,
 ) -> Result<()> {
     let state_root = managed_root.parent().ok_or(Error::PrivateState)?;
     let deadline = Instant::now() + window;
@@ -6180,7 +6210,18 @@ fn confirm_daemon(
             // A clean exit means another supervisor holds the lock.
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => return Err(startup_failure(managed_root, spawned_ms, status)),
-            Ok(None) if crate::managed_supervisor::registered(state_root, child.id()) => {
+            Ok(None)
+                if watchdog_instance.map_or_else(
+                    || crate::managed_supervisor::registered(state_root, child.id()),
+                    |instance| {
+                        crate::managed_supervisor::registered_service_child(
+                            state_root,
+                            child.id(),
+                            instance,
+                        )
+                    },
+                ) =>
+            {
                 return Ok(());
             }
             // Its status cannot be read; no failure was observed.
