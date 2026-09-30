@@ -7,8 +7,7 @@ import type { ArticleVideoRecord } from "@hraness/design-kit";
  * (`/media/xcb-launch-1x1.mp4`) is for social posts and is not embedded.
  * tests/launch.test.ts fails when any file named here is missing.
  */
-export const launchFilm: Readonly<{ caption: string; video: ArticleVideoRecord }> | null = {
-  caption: "The launch film, captioned, with no narration. Every screen in it is an illustration.",
+export const launchFilm: Readonly<{ video: ArticleVideoRecord }> | null = {
   video: {
     name: "Introducing Excalibur",
     description:

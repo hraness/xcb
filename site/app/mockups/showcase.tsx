@@ -2,7 +2,7 @@
 
 import { ModeShowcase, type ShowcaseChoice, type ShowcaseSurface } from "@hraness/design-kit/mockups/client";
 
-import { boardNote, illustrationCaption, type RouterMode } from "./fixtures";
+import { boardNote, type RouterMode } from "./fixtures";
 import { AccountsBoard, TasksView, ThreadView } from "./surfaces";
 
 type Surface = "accounts" | "thread" | "tasks";
@@ -26,7 +26,6 @@ const modes: readonly ShowcaseChoice<RouterMode>[] = [
 export function RouterShowcase({ className }: Readonly<{ className?: string }> = {}) {
   return (
     <ModeShowcase
-      caption={illustrationCaption}
       className={className}
       height={340}
       label={(surface) => `Illustration of xcb: ${surface.label.toLowerCase()}`}

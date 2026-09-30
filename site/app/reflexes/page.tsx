@@ -65,8 +65,8 @@ export default function Reflexes() {
                 <div className="xcb-evolve-step"><strong>certify</strong><span>act once your replies prove it</span></div>
               </div>
               <p>A challenger is promoted only if, on held-out labels that arrived after it was fitted, it lowers log loss without losing accuracy or ranking quality. Each generation records its parent and the trial that promoted it. <code>xcb reflex rollback settle 0</code> returns to the defaults.</p>
-              <p>Replaying real operator history from a weak starting point, forward trials reached an AUC of 0.77, against 0.75 for a fixed one-in-five holdout and 0.58 for not learning at all, and none of your labels is withheld from learning forever. From a good starting point, trials mostly leave it alone.</p>
-              <a className="xcb-text-link" href={`${reference}#measured-on-operator-history`}>Full measurements ↗</a>
+              <p>Trials use the replies that arrive after training. Successful candidates become the active rule; the rest leave it unchanged. Once a trial ends, its labels can help train the next candidate.</p>
+              <a className="xcb-text-link" href={`${reference}#measured-on-operator-history`}>Replay methods and results ↗</a>
             </div>
           </MarketingSection>
 

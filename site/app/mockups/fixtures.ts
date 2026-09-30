@@ -13,7 +13,6 @@
  * tests/launch.test.ts reads those sources and fails when a shape drifts.
  */
 
-export const illustrationCaption = "Illustration. Accounts, projects, and tasks are made up.";
 
 /** The two moments the quota board, thread, and task list show. */
 export type RouterMode = "reset" | "limit";
