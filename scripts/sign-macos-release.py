@@ -207,7 +207,7 @@ def diagnostic(path, receipt):
             temporary.unlink(missing_ok=True)
 
 
-def sign(archive, version, output, work):
+def submit(archive, version, output, work):
     requirement = apple_requirement()
     checked_work(work)
     require(sys.platform == "darwin", "Developer ID signing requires macOS")
@@ -216,6 +216,7 @@ def sign(archive, version, output, work):
     require(all(values.values()), "Apple signing credentials are incomplete")
     require(re.fullmatch(r"[A-Z0-9]{10}", values["APPLE_NOTARY_KEY_ID"]), "invalid notary key ID")
     require(re.fullmatch(UUID_PATTERN, values["APPLE_NOTARY_ISSUER_ID"]), "invalid notary issuer ID")
+    context = release_context(version)
     receipt_path = work.with_name("xcb-apple-notarization.json")
     require(not receipt_path.exists() and not receipt_path.is_symlink(), "notarization diagnostic already exists")
     work.mkdir(mode=0o700)
@@ -254,17 +255,12 @@ def sign(archive, version, output, work):
             run(["/usr/bin/codesign", "--force", "--sign", matches[0], "--keychain", keychain,
                  "--identifier", IDENTIFIER, "--options", "runtime", "--timestamp",
                  "--requirements", "=designated => " + requirement, binary], timeout=180)
-            run(["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", "=" + requirement, binary])
-            metadata = run(["/usr/bin/codesign", "--display", "--verbose=4", binary])
-            require(f"Identifier={IDENTIFIER}\n" in metadata and f"TeamIdentifier={TEAM_ID}\n" in metadata,
-                    "signed binary identity mismatch")
-            require(re.search(r"^CodeDirectory .*flags=.*\(.*runtime.*\)", metadata, re.M)
-                    and re.search(r"^Timestamp=.+", metadata, re.M), "signature needs hardened runtime and secure timestamp")
+            verify_signature(binary)
             submitted = work / "notarization.zip"
             with zipfile.ZipFile(submitted, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
                 bundle.write(binary, "xcb")
             receipt = {
-                "schemaVersion": 1, "version": version_value(version), "teamId": TEAM_ID,
+                **context, "schemaVersion": 2, "teamId": TEAM_ID,
                 "identifier": IDENTIFIER, "submissionId": None, "state": "submission-started",
                 "status": None, "unsignedArchiveSha256": digest(archive.read_bytes()),
                 "signedBinarySha256": digest(binary.read_bytes()),
@@ -282,6 +278,131 @@ def sign(archive, version, output, work):
             receipt.update(submissionId=submission_id, state="submitted")
             diagnostic(receipt_path, receipt)
             print(f"Apple notarization submission {submission_id}; receipt xcb-apple-notarization.json", flush=True)
+        finally:
+            values.clear()
+            password = ""
+            cleanup_credentials(work)
+        # Only these two allowlisted files cross the credential boundary.
+        # The producer succeeds after their immutable upload, before any wait.
+        output.mkdir(mode=0o700)
+        private_file(output / "notarization.zip", regular_file(submitted))
+        diagnostic(output / "receipt.json", receipt)
+    finally:
+        cleanup(work)
+
+
+def release_context(version):
+    context = {
+        "repository": os.environ.get("GITHUB_REPOSITORY", ""),
+        "version": version_value(version),
+        "sourceSha": os.environ.get("VERIFIED_SHA", ""),
+        "workflowRunId": os.environ.get("GITHUB_RUN_ID", ""),
+        "producerAttempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+        "unsignedArtifactId": os.environ.get("UNSIGNED_ARTIFACT_ID", ""),
+        "unsignedArtifactDigest": os.environ.get("UNSIGNED_ARTIFACT_DIGEST", ""),
+    }
+    require(context["repository"] == "hraness/xcb", "wrong signing repository")
+    require(re.fullmatch(r"[0-9a-f]{40}", context["sourceSha"]), "invalid release source SHA")
+    for field in ("workflowRunId", "producerAttempt", "unsignedArtifactId"):
+        require(re.fullmatch(r"[1-9][0-9]{0,19}", context[field]), "invalid release identity")
+    require(re.fullmatch(r"[0-9a-f]{64}", context["unsignedArtifactDigest"]), "invalid unsigned artifact digest")
+    return context
+
+
+def zip_contents(data, limits):
+    with zipfile.ZipFile(io.BytesIO(data)) as source:
+        entries = source.infolist()
+        require(len(entries) == len(limits) and {entry.filename for entry in entries} == set(limits),
+                "candidate ZIP has an unexpected inventory")
+        for entry in entries:
+            require(not entry.is_dir() and stat.S_IFMT(entry.external_attr >> 16) in (0, stat.S_IFREG)
+                    and 0 < entry.file_size <= limits[entry.filename] and not entry.flag_bits & 1
+                    and entry.compress_type in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED),
+                    "candidate ZIP entry is not bounded plaintext regular data")
+        return {entry.filename: source.read(entry) for entry in entries}
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, "duplicate candidate receipt field")
+        result[key] = value
+    return result
+
+
+def candidate_contents(archive, expected_digest, version):
+    require(re.fullmatch(r"[0-9a-f]{64}", expected_digest), "invalid candidate artifact digest")
+    data = regular_file(archive)
+    require(digest(data) == expected_digest, "candidate artifact ZIP digest mismatch")
+    files = zip_contents(data, {"receipt.json": 8192, "notarization.zip": MAX_BYTES})
+    receipt = json.loads(files["receipt.json"], object_pairs_hook=unique_object)
+    expected = release_context(version)
+    fields = set(expected) | {"schemaVersion", "teamId", "identifier", "submissionId", "state", "status",
+                             "unsignedArchiveSha256", "signedBinarySha256", "submissionZipSha256"}
+    require(isinstance(receipt, dict) and set(receipt) == fields, "invalid candidate receipt schema")
+    require(type(receipt["schemaVersion"]) is int and receipt["schemaVersion"] == 2,
+            "invalid candidate receipt version")
+    producer = receipt["producerAttempt"]
+    require(isinstance(producer, str) and re.fullmatch(r"[1-9][0-9]{0,19}", producer)
+            and int(producer) <= int(expected["producerAttempt"])
+            and producer == os.environ.get("CANDIDATE_PRODUCER_ATTEMPT"), "invalid candidate producer attempt")
+    expected["producerAttempt"] = producer
+    require(all(type(receipt[key]) is str and receipt[key] == value for key, value in expected.items()),
+            "candidate differs from exact release and unsigned producer identity")
+    require(receipt["teamId"] == TEAM_ID and receipt["identifier"] == IDENTIFIER
+            and receipt["state"] == "submitted" and receipt["status"] is None,
+            "candidate is not an original submitted payload")
+    require(isinstance(receipt["submissionId"], str) and re.fullmatch(UUID_PATTERN, receipt["submissionId"]),
+            "invalid candidate submission ID")
+    for field in ("unsignedArchiveSha256", "signedBinarySha256", "submissionZipSha256"):
+        require(isinstance(receipt[field], str) and re.fullmatch(r"[0-9a-f]{64}", receipt[field]),
+                "invalid candidate byte digest")
+    require(digest(files["notarization.zip"]) == receipt["submissionZipSha256"], "submission ZIP digest mismatch")
+    binary = zip_contents(files["notarization.zip"], {"xcb": MAX_BYTES})["xcb"]
+    require(digest(binary) == receipt["signedBinarySha256"], "signed candidate digest mismatch")
+    require(len(binary) >= 32 and struct.unpack("<II", binary[:8]) == (0xFEEDFACF, 0x0100000C)
+            and struct.unpack("<I", binary[12:16])[0] == 2, "candidate must be an arm64 Mach-O executable")
+    return receipt, binary
+
+
+def verify_signature(binary):
+    run(["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", "=" + apple_requirement(), binary])
+    metadata = run(["/usr/bin/codesign", "--display", "--verbose=4", binary])
+    require(f"Identifier={IDENTIFIER}\n" in metadata and f"TeamIdentifier={TEAM_ID}\n" in metadata,
+            "signed binary identity mismatch")
+    require(re.search(r"^CodeDirectory .*flags=.*\(.*runtime.*\)", metadata, re.M)
+            and re.search(r"^Timestamp=.+", metadata, re.M), "signature needs hardened runtime and secure timestamp")
+
+
+def finalize(archive, expected_digest, version, output, work):
+    checked_work(work)
+    require(sys.platform == "darwin", "notarization verification requires macOS")
+    require(not output.exists(), "final output directory already exists")
+    values = {name: os.environ.pop(name, "") for name in SECRET_NAMES}
+    require(not any(values[name] for name in SECRET_NAMES[:2]), "finalizer must not receive signing credentials")
+    require(all(values[name] for name in SECRET_NAMES[2:]), "notarization credentials are incomplete")
+    require(re.fullmatch(r"[A-Z0-9]{10}", values["APPLE_NOTARY_KEY_ID"]), "invalid notary key ID")
+    require(re.fullmatch(UUID_PATTERN, values["APPLE_NOTARY_ISSUER_ID"]), "invalid notary issuer ID")
+    receipt, contents = candidate_contents(archive, expected_digest, version)
+    receipt_path = work.with_name("xcb-apple-notarization.json")
+    require(not receipt_path.exists() and not receipt_path.is_symlink(), "notarization diagnostic already exists")
+    work.mkdir(mode=0o700)
+    try:
+        binary = work / "xcb"
+        private_file(binary, contents)
+        binary.chmod(0o755)
+        # Verify the immutable payload before contacting Apple. No signing key,
+        # keychain, source build or payload execution exists in this job.
+        verify_signature(binary)
+        credentials = work / "credentials"
+        credentials.mkdir(mode=0o700)
+        key = credentials / "AuthKey.p8"
+        try:
+            private_file(key, base64.b64decode(values["APPLE_NOTARY_KEY_P8_BASE64"], validate=True))
+            authentication = ["--key", key, "--key-id", values["APPLE_NOTARY_KEY_ID"],
+                              "--issuer", values["APPLE_NOTARY_ISSUER_ID"], "--output-format", "json"]
+            submission_id = receipt["submissionId"]
+            diagnostic(receipt_path, receipt)
             try:
                 response = json.loads(run(["/usr/bin/xcrun", "notarytool", "wait", submission_id,
                                           *authentication, "--timeout", "15m"], timeout=960))
@@ -290,25 +411,19 @@ def sign(archive, version, output, work):
                 receipt["state"] = "wait-incomplete"
                 diagnostic(receipt_path, receipt)
                 raise
-            # Do not copy arbitrary service response strings or logs into the
-            # receipt. Only these public status values are retained.
             status = response.get("status")
             receipt.update(state="wait-complete", status=status if status in (
                 "Accepted", "Invalid", "Rejected", "In Progress") else "Unrecognized")
             diagnostic(receipt_path, receipt)
             require(status == "Accepted", "Apple notarization was not Accepted")
-            # Raw CLI tarballs cannot carry stapled tickets. Apple's online
-            # notarization check must recognize the signed executable itself.
             run(["/usr/bin/codesign", "--verify", "--strict", "--check-notarization",
-                 "--test-requirement", "=" + requirement, binary], timeout=180)
+                 "--test-requirement", "=" + apple_requirement(), binary], timeout=180)
+            require(digest(regular_file(binary)) == receipt["signedBinarySha256"], "candidate changed during verification")
             receipt["state"] = "verified"
             diagnostic(receipt_path, receipt)
         finally:
             values.clear()
-            password = ""
             cleanup_credentials(work)
-        # Credential removal precedes final packaging and the later workflow
-        # smoke step. Neither packaging nor signing executes the payload.
         output.mkdir(mode=0o700)
         final = output / archive_name(version)
         with tarfile.open(final, "w:gz", format=tarfile.USTAR_FORMAT) as bundle:
@@ -318,9 +433,11 @@ def sign(archive, version, output, work):
             with binary.open("rb") as payload:
                 bundle.addfile(entry, payload)
         Path(str(final) + ".sha256").write_text(digest(final.read_bytes()) + "\n", encoding="ascii")
-        print(f"Signed and notarized {final.name}; submission {response['id']}")
+        print(f"Verified signed and notarized {final.name}; submission {submission_id}")
     finally:
+        values.clear()
         cleanup(work)
+
 
 
 def main():
@@ -331,11 +448,17 @@ def main():
     extract.add_argument("digest")
     extract.add_argument("version", type=version_value)
     extract.add_argument("destination", type=Path)
-    signing = commands.add_parser("sign")
+    signing = commands.add_parser("submit")
     signing.add_argument("archive", type=Path)
     signing.add_argument("version", type=version_value)
     signing.add_argument("output", type=Path)
     signing.add_argument("work", type=Path)
+    finalizing = commands.add_parser("finalize")
+    finalizing.add_argument("archive", type=Path)
+    finalizing.add_argument("digest")
+    finalizing.add_argument("version", type=version_value)
+    finalizing.add_argument("output", type=Path)
+    finalizing.add_argument("work", type=Path)
     cleaning = commands.add_parser("cleanup")
     cleaning.add_argument("work", type=Path)
     args = parser.parse_args()
@@ -346,8 +469,10 @@ def main():
     try:
         if args.command == "extract-artifact":
             unpack_artifact(args.archive, args.digest, args.version, args.destination)
-        elif args.command == "sign":
-            sign(args.archive, args.version, args.output, args.work)
+        elif args.command == "submit":
+            submit(args.archive, args.version, args.output, args.work)
+        elif args.command == "finalize":
+            finalize(args.archive, args.digest, args.version, args.output, args.work)
         else:
             cleanup(args.work)
     except Exception as error:

@@ -2695,7 +2695,7 @@ impl Store {
         }
         if !session.requirements.allows(model.provider) {
             return Err(Error::Conflict(
-                "signed-in browser tasks require Codex; this session cannot move to another provider",
+                "this task requires Codex; this session cannot move to another provider",
             ));
         }
         session.account = account.clone();
@@ -2956,6 +2956,7 @@ mod tests {
                 &session.id,
                 xcb_core::session::TaskRequirements {
                     signed_in_browser: true,
+                    ..Default::default()
                 },
             )
             .unwrap();

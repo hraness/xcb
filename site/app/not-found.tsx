@@ -1,3 +1,4 @@
+import { SiteNotFoundAnalytics } from "./site-analytics";
 import type { Metadata } from "next";
 import { RouteNotFoundPage } from "@hraness/design-kit/react";
 
@@ -31,6 +32,7 @@ const routes = [
 export default function NotFound() {
   return (
     <>
+      <SiteNotFoundAnalytics />
       <SiteHeader />
       <main id="main" tabIndex={-1}>
         <RouteNotFoundPage

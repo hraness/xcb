@@ -430,7 +430,7 @@ pub fn new_session_with_policy(
     let model = choose_model(store, account.provider, model, config)?;
     if !policy.requirements.allows(model.provider) {
         return Err(Error::Conflict(
-            "signed-in browser tasks require Codex; remove the incompatible provider, account, or model pin",
+            "this task requires Codex; remove the incompatible provider, account, or model pin",
         ));
     }
     if policy
@@ -728,10 +728,10 @@ async fn execute_mode(
     if !session.requirements.allows(session.model.provider) {
         let prior = store.latest_settled_outcome(&session_id)?;
         if !prior.as_ref().is_some_and(|outcome| {
-            signed_in_browser_handoff_permitted(outcome, pane_generation, *cancel.borrow())
+            computer_resume_permitted(outcome, pane_generation, *cancel.borrow())
         }) {
             return Err(Error::Unavailable(
-                "signed-in browser handoff needs a current joined turn with settled effects and no pending approval",
+                "computer tool handoff needs a current joined turn with settled effects and no pending approval",
             ));
         }
         let excluded_routes = BTreeSet::new();
@@ -752,9 +752,7 @@ async fn execute_mode(
         )
         .await?;
         if *cancel.borrow() {
-            return Err(Error::Unavailable(
-                "cancelled before signed-in browser handoff",
-            ));
+            return Err(Error::Unavailable("cancelled before computer tool handoff"));
         }
         store.rebind(
             &session_id,
@@ -766,7 +764,7 @@ async fn execute_mode(
             .session(&session_id)?
             .ok_or(Error::Unavailable("session not found"))?;
         observer(Progress::Notice(format!(
-            "Signed-in browser access: continuing on Codex · {}",
+            "Computer access: continuing on Codex · {}",
             session.model.label
         )));
     }
@@ -913,9 +911,9 @@ async fn execute_inner(
             if !supervise {
                 return Ok(outcome);
             }
-            if !signed_in_browser_handoff_permitted(&outcome, pane_generation, *cancel.borrow()) {
+            if !computer_handoff_permitted(&outcome, pane_generation, *cancel.borrow()) {
                 return Err(Error::Unavailable(
-                    "signed-in browser handoff is blocked until the prior provider is joined and all effects and attention are settled",
+                    "computer tool handoff is blocked until the prior provider is joined and all effects and attention are settled",
                 ));
             }
             let excluded_routes = BTreeSet::new();
@@ -936,9 +934,7 @@ async fn execute_inner(
             )
             .await?;
             if *cancel.borrow() {
-                return Err(Error::Unavailable(
-                    "cancelled before signed-in browser handoff",
-                ));
+                return Err(Error::Unavailable("cancelled before computer tool handoff"));
             }
             store.rebind(
                 &session_id,
@@ -947,10 +943,10 @@ async fn execute_inner(
                 decision.model.clone(),
             )?;
             observer(Progress::Notice(format!(
-                "Signed-in browser access: continuing the same task on Codex · {}",
+                "Computer access: continuing the same task on Codex · {}",
                 decision.model.label
             )));
-            text = "The previous provider discovered that this task requires the user's existing signed-in browser and has stopped cleanly. Continue the original user task from the complete conversation and current workspace. Do not repeat completed effects; inspect relevant state first. Use the available signed-in browser capability for the requested account operations, and retain all existing task scope and permissions.".into();
+            text = "The previous provider discovered that this task requires Codex computer tools and has stopped cleanly. Continue the original user task from the complete conversation and current workspace. Do not repeat completed effects; inspect relevant state first. Use only the browser or desktop access required by that original task, and retain all existing task scope and permissions.".into();
             attachments = vec![];
             role = Role::System;
             continue;
@@ -1136,7 +1132,9 @@ async fn execute_inner(
                     },
                 ) => ranked?,
             };
+            store.require_session_capabilities(&session_id, ranked.requirements)?;
             let mut candidates: Vec<_> = ranked
+                .routes
                 .into_iter()
                 .filter_map(|route| {
                     let row = view.accounts.iter().find(|row| row.id == route.account)?;
@@ -1258,11 +1256,15 @@ async fn execute_inner(
     }
 }
 
-fn signed_in_browser_handoff_permitted(
-    outcome: &Outcome,
-    pane_generation: bool,
-    cancelled: bool,
-) -> bool {
+fn computer_resume_permitted(outcome: &Outcome, pane_generation: bool, cancelled: bool) -> bool {
+    computer_handoff_permitted(outcome, pane_generation, cancelled)
+        || (!cancelled
+            && !pane_generation
+            && outcome.state == State::Limited
+            && failover_permitted(&outcome.facts, &BTreeSet::new(), checkpointed(outcome)))
+}
+
+fn computer_handoff_permitted(outcome: &Outcome, pane_generation: bool, cancelled: bool) -> bool {
     !cancelled
         && !pane_generation
         && outcome.facts.joined
@@ -2090,6 +2092,7 @@ mod tests {
             SessionRoutePolicy {
                 requirements: xcb_core::session::TaskRequirements {
                     signed_in_browser: true,
+                    ..Default::default()
                 },
                 required_provider: None,
             },
@@ -2134,29 +2137,57 @@ mod tests {
     }
 
     #[test]
+    fn desktop_resume_accepts_safe_quota_checkpoint_but_never_other_failures() {
+        let mut outcome = quota_outcome(Failure::AccountQuota);
+        outcome.state = State::Limited;
+        assert!(computer_resume_permitted(&outcome, false, false));
+        assert!(!computer_resume_permitted(&outcome, false, true));
+        assert!(!computer_resume_permitted(&outcome, true, false));
+        for failure in [
+            Failure::Authentication,
+            Failure::Policy,
+            Failure::Transport,
+            Failure::Unknown,
+        ] {
+            outcome.facts.failure = Some(failure);
+            assert!(!computer_resume_permitted(&outcome, false, false));
+        }
+        outcome.facts.failure = Some(Failure::ModelQuota);
+        assert!(computer_resume_permitted(&outcome, false, false));
+        outcome.facts.effects = EffectState::Uncertain;
+        assert!(!computer_resume_permitted(&outcome, false, false));
+        outcome.facts.effects = EffectState::None;
+        outcome.facts.pending_attention = true;
+        assert!(!computer_resume_permitted(&outcome, false, false));
+        outcome.facts.pending_attention = false;
+        outcome.facts.joined = false;
+        assert!(!computer_resume_permitted(&outcome, false, false));
+    }
+
+    #[test]
     fn signed_in_browser_handoff_requires_joined_known_effects_and_never_routes_a_policy_denial() {
         let mut outcome = quota_outcome(Failure::Policy);
         outcome.state = State::Idle;
         outcome.facts.terminal = Terminal::Completed;
-        assert!(!signed_in_browser_handoff_permitted(&outcome, false, false));
+        assert!(!computer_handoff_permitted(&outcome, false, false));
         outcome.facts.failure = None;
-        assert!(signed_in_browser_handoff_permitted(&outcome, false, false));
+        assert!(computer_handoff_permitted(&outcome, false, false));
         outcome.facts.terminal = Terminal::TurnLimit;
-        assert!(signed_in_browser_handoff_permitted(&outcome, false, false));
+        assert!(computer_handoff_permitted(&outcome, false, false));
         outcome.facts.joined = false;
-        assert!(!signed_in_browser_handoff_permitted(&outcome, false, false));
+        assert!(!computer_handoff_permitted(&outcome, false, false));
         outcome.facts.joined = true;
         outcome.facts.effects = EffectState::Uncertain;
-        assert!(!signed_in_browser_handoff_permitted(&outcome, false, false));
+        assert!(!computer_handoff_permitted(&outcome, false, false));
         outcome.facts.effects = EffectState::None;
-        assert!(signed_in_browser_handoff_permitted(&outcome, false, false));
+        assert!(computer_handoff_permitted(&outcome, false, false));
         outcome.facts.pending_attention = true;
-        assert!(!signed_in_browser_handoff_permitted(&outcome, false, false));
+        assert!(!computer_handoff_permitted(&outcome, false, false));
         outcome.facts.pending_attention = false;
         outcome.state = State::NeedsAnswer;
-        assert!(!signed_in_browser_handoff_permitted(&outcome, false, false));
+        assert!(!computer_handoff_permitted(&outcome, false, false));
         outcome.state = State::Idle;
-        assert!(!signed_in_browser_handoff_permitted(&outcome, false, true));
+        assert!(!computer_handoff_permitted(&outcome, false, true));
     }
 
     #[test]

@@ -14,9 +14,10 @@ before depending on unattended updates.
 ## Release credentials
 
 The `xcb-apple-release` GitHub environment accepts release tags only. It has
-no required reviewers or wait timer. Only the Mac signing job uses this
-environment; pull-request checks and native compilation do not receive its
-credentials.
+no required reviewers or wait timer. The Mac submission and finalization jobs
+use this environment; pull-request checks and native compilation do not receive
+its credentials. Only the submission step receives the signing certificate.
+Finalization receives the notary API credentials alone.
 
 | Environment secret | Purpose |
 | --- | --- |
@@ -43,37 +44,66 @@ leaf certificate.
 ## Build and publication
 
 The native build produces a separate unsigned intermediate archive. Its
-workflow artifact name cannot be selected for publication. The signing job
+workflow artifact name cannot be selected for publication. The submission job
 waits for source verification, downloads the same run's identified artifact,
 and checks its digest before extracting the single executable.
 
-The signing job imports the certificate into a temporary Keychain on its isolated
-runner and temporarily includes that Keychain in the user search list. Cleanup
-uses Apple’s supported deletion command to remove its Keychain and search-list
-entry, preserving other entries and additions made during signing. The initial
-search-list update is not atomic, so the job must not share its runner with
-another search-list writer. It signs the
-executable with hardened runtime and a secure timestamp, and checks its Apple
-certificate chain, Team ID, and application identifier. It submits the signed
-executable to Apple's notary service and requires an `Accepted` result and a
-successful notarization check. Credential cleanup runs on failure as well as
-success.
-The temporary Keychain is appended to the existing user search list so macOS
-can discover its issuer certificate. Deleting that owned Keychain removes its
-search-list entry while preserving the other entries. Native regression tests
-exercise Apple's requirement parser as well as the mocked release workflow.
+The submission job imports the certificate into a temporary Keychain on its
+isolated runner and appends that Keychain to the user search list so macOS can
+find its issuer certificate. It signs the executable with hardened runtime and
+a secure timestamp, verifies the Apple certificate chain and identity, then
+submits the signed executable to Apple's notary service. Credential cleanup
+runs on success, failure, and cancellation where the runner can still execute.
+Apple's Keychain deletion command removes the job's Keychain and search-list
+entry while preserving other entries. The initial search-list update is not
+atomic, so the job must not share its runner with another search-list writer.
 
-The job records Apple's submission ID and the input and signed-file hashes
-before waiting up to 15 minutes for notarization. This small diagnostic remains
-available as a workflow artifact after a timeout so the existing submission can
-be checked without automatically submitting it again. It contains no private
-keys or service logs. A timeout fails the release.
+After credential cleanup, the job uploads the submitted ZIP and a small JSON
+record containing Apple's submission ID, the release identity, and the input
+and signed-file hashes. This candidate contains no private keys or service logs.
+Its artifact name cannot be selected for publication. The upload must succeed
+before the separate finalization job starts waiting for Apple.
+
+Finalization downloads the candidate by the successful submission job's numeric
+artifact ID and verifies its digest, originating run, source commit, version,
+submission ID, and signed bytes. It waits up to 15 minutes for the original
+submission. Publication requires `Accepted`, a successful online notarization
+check, and verification that the executable's bytes are unchanged. Native
+regression tests exercise Apple's requirement parser alongside the simulated
+submission and retry tests.
 
 The final archive and checksum are created from the signed bytes. The release
 pipeline verifies and attests that archive before publication. A command-line
 executable distributed in a tar archive cannot carry a stapled notarization
 ticket; release verification checks Apple's online ticket. Installation checks
 the code signature without adding an Apple-network request to each install.
+
+## Waiting for Apple and retrying
+
+An initial submission can remain `In Progress` beyond the 15-minute wait. The
+timeout ends the CI attempt; it does not mean Apple rejected the binary. The
+release stays unpublished until Apple accepts the submission and all release
+checks pass. The candidate and submission record remain available as workflow
+artifacts for 30 days.
+
+When the submission job succeeded and finalization timed out, select **Re-run
+failed jobs** on that same GitHub Actions run. Finalization downloads the
+original candidate and waits on its existing submission ID. It does not sign
+the executable or submit it again. Avoid frequent retries while Apple is still
+processing the submission; each retry occupies another Mac runner during the
+wait.
+
+Do not use **Re-run all jobs** to retry notarization. The submission job refuses
+to run again after an earlier attempt started, including when its result is
+uncertain. If that job failed, or its candidate artifact is missing, expired,
+or does not match the recorded identity, stop and inspect the saved diagnostics.
+An accepted submission ID alone cannot reconstruct the submitted binary.
+
+Older release workflows that saved only the submission ID cannot recover the
+signed payload through this retry path. Rerunning an immutable release tag
+continues to use that tag's workflow and signing code. A new release must use
+the corrected pipeline; rebuilding or signing again does not recreate the
+original submitted bytes.
 
 ## Updating an existing installation
 

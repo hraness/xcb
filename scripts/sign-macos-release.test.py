@@ -32,6 +32,8 @@ class SigningTests(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         self.work = self.root / "xcb-apple-signing"
         self.output = self.root / "signed-artifacts"
+        self.candidate = self.root / "candidate"
+        self.candidate_zip = self.root / "candidate.zip"
         self.archive = self.root / signing.archive_name(VERSION, unsigned=True)
         self.binary = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0) + b"not executable"
         self.native_archive()
@@ -47,6 +49,9 @@ class SigningTests(unittest.TestCase):
         self.tool_failure = None
         self.environment = {
             "RUNNER_TEMP": str(self.root), "HOME": str(self.root),
+            "GITHUB_REPOSITORY": "hraness/xcb", "GITHUB_RUN_ID": "321", "GITHUB_RUN_ATTEMPT": "1",
+            "VERIFIED_SHA": "a" * 40, "UNSIGNED_ARTIFACT_ID": "123", "UNSIGNED_ARTIFACT_DIGEST": "b" * 64,
+            "CANDIDATE_PRODUCER_ATTEMPT": "1",
             "APPLE_DEVELOPER_ID_P12_BASE64": base64.b64encode(b"fake private p12").decode(),
             "APPLE_DEVELOPER_ID_P12_PASSWORD": "never-print-me",
             "APPLE_NOTARY_KEY_P8_BASE64": base64.b64encode(b"fake private p8").decode(),
@@ -107,8 +112,25 @@ class SigningTests(unittest.TestCase):
             return json.dumps({"status": self.status, "id": self.wait_id})
         return ""
 
+    def submit(self):
+        signing.submit(self.archive, VERSION, self.candidate, self.work)
+        self.assertFalse(self.work.exists())
+        with zipfile.ZipFile(self.candidate_zip, "w") as archive:
+            for path in self.candidate.iterdir():
+                archive.write(path, path.name)
+        self.candidate_digest = signing.digest(self.candidate_zip.read_bytes())
+
+    def finalize(self):
+        # A different runner receives only the notary credentials and original
+        # immutable upload. Repeated attempts use the same ZIP and UUID.
+        for name in signing.SECRET_NAMES[2:]:
+            os.environ[name] = self.environment[name]
+        (self.root / "xcb-apple-notarization.json").unlink(missing_ok=True)
+        signing.finalize(self.candidate_zip, self.candidate_digest, VERSION, self.output, self.work)
+
     def sign(self):
-        signing.sign(self.archive, VERSION, self.output, self.work)
+        self.submit()
+        self.finalize()
 
     def test_final_archive_is_signed_then_notarized_and_keychain_is_removed(self):
         self.sign()
@@ -125,7 +147,7 @@ class SigningTests(unittest.TestCase):
         self.assertIn("certificate leaf[field.1.2.840.113635.100.6.1.13] exists", codesign[-2])
         notarized = next(i for i, args in enumerate(self.calls) if "--check-notarization" in args)
         removed = next(i for i, args in enumerate(self.calls) if "delete-keychain" in args)
-        self.assertLess(notarized, removed)
+        self.assertLess(removed, notarized)
         self.assertFalse(self.work.exists())
         self.assertEqual(self.search_list, self.original_search_list)
         self.assertTrue(all(args[0] in ("/usr/bin/security", "/usr/bin/codesign", "/usr/bin/xcrun") for args in self.calls))
@@ -369,6 +391,209 @@ class SigningTests(unittest.TestCase):
         with self.assertRaisesRegex(signing.SigningError, "exactly the unsigned archive"):
             signing.unpack_artifact(archive, signing.digest(archive.read_bytes()), VERSION, self.root / "extracted")
         self.assertFalse((self.root / "extracted").exists())
+
+    def rewrite_candidate(self, mutate):
+        with zipfile.ZipFile(self.candidate_zip) as archive:
+            files = {name: archive.read(name) for name in archive.namelist()}
+        mutate(files)
+        with zipfile.ZipFile(self.candidate_zip, "w") as archive:
+            for name, contents in files.items():
+                archive.writestr(name, contents)
+        self.candidate_digest = signing.digest(self.candidate_zip.read_bytes())
+
+    def rewrite_receipt(self, field, value):
+        def mutate(files):
+            receipt = json.loads(files["receipt.json"])
+            receipt[field] = value
+            files["receipt.json"] = json.dumps(receipt).encode()
+        self.rewrite_candidate(mutate)
+
+    def test_submitted_checkpoint_is_secret_free_and_does_not_wait_or_package(self):
+        self.submit()
+        self.assertFalse(self.output.exists())
+        self.assertFalse(any("wait" in args or "--check-notarization" in args for args in self.calls))
+        self.assertEqual(set(path.name for path in self.candidate.iterdir()), {"notarization.zip", "receipt.json"})
+        receipt, payload = signing.candidate_contents(self.candidate_zip, self.candidate_digest, VERSION)
+        self.assertEqual(payload, self.binary)
+        self.assertEqual(receipt["state"], "submitted")
+        self.assertIsNone(receipt["status"])
+        encoded = (self.candidate / "receipt.json").read_text()
+        for secret in ("fake private p12", "fake private p8", "never-print-me", str(self.work)):
+            self.assertNotIn(secret, encoded)
+        self.assertEqual(self.search_list, self.original_search_list)
+
+    def test_late_acceptance_reuses_original_candidate_and_uuid_without_signing_or_submitting(self):
+        self.submit()
+        before = self.candidate_zip.read_bytes()
+        self.calls.clear()
+        self.tool_failure = "wait"
+        with self.assertRaises(signing.SigningError):
+            self.finalize()
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.work.exists())
+        self.assertEqual(self.candidate_zip.read_bytes(), before)
+        self.tool_failure = None
+        os.environ["GITHUB_RUN_ATTEMPT"] = "2"
+        self.finalize()
+        self.assertTrue(self.output.exists())
+        self.assertEqual(self.candidate_zip.read_bytes(), before)
+        self.assertEqual(sum("wait" in args for args in self.calls), 2)
+        self.assertTrue(all(args[3] == UUID for args in self.calls if "notarytool" in args))
+        self.assertFalse(any("--sign" in args or "submit" in args or args[0] == "/usr/bin/security" for args in self.calls))
+        with tarfile.open(self.output / signing.archive_name(VERSION)) as archive:
+            self.assertEqual(archive.extractfile("xcb").read(), self.binary)
+
+    def test_finalizer_refuses_signing_credentials(self):
+        self.submit()
+        os.environ["APPLE_DEVELOPER_ID_P12_PASSWORD"] = "must-not-be-here"
+        self.calls.clear()
+        with self.assertRaisesRegex(signing.SigningError, "must not receive"):
+            self.finalize()
+        self.assertFalse(self.calls)
+        self.assertFalse(self.output.exists())
+
+    def test_candidate_byte_or_identity_substitution_rejected_before_apple_tools(self):
+        self.submit()
+        original = self.candidate_zip.read_bytes()
+        original_digest = self.candidate_digest
+        cases = {"schemaVersion": 1, "repository": "other/xcb", "sourceSha": "c" * 40,
+                 "workflowRunId": "322", "unsignedArtifactId": "124", "unsignedArtifactDigest": "c" * 64,
+                 "version": "9.9.9", "producerAttempt": "2", "teamId": "Z9Y8X7W6V5",
+                 "identifier": "other.binary", "submissionId": "missing", "state": "verified",
+                 "status": "Accepted", "signedBinarySha256": "c" * 64, "submissionZipSha256": "c" * 64,
+                 "unsignedArchiveSha256": "not-a-digest", "extra": "untrusted"}
+        for field, value in cases.items():
+            with self.subTest(field=field):
+                self.candidate_zip.write_bytes(original)
+                self.candidate_digest = original_digest
+                self.rewrite_receipt(field, value)
+                self.calls.clear()
+                with self.assertRaises(signing.SigningError):
+                    self.finalize()
+                self.assertFalse(self.calls)
+                self.assertFalse(self.output.exists())
+                self.assertFalse(self.work.exists())
+
+    def test_candidate_attempt_must_match_immutable_artifact_metadata(self):
+        self.submit()
+        os.environ["GITHUB_RUN_ATTEMPT"] = "3"
+        os.environ["CANDIDATE_PRODUCER_ATTEMPT"] = "2"
+        with self.assertRaisesRegex(signing.SigningError, "producer attempt"):
+            self.finalize()
+
+    def test_wrong_candidate_upload_digest_rejected_before_apple_tools(self):
+        self.submit()
+        self.candidate_digest = "0" * 64
+        self.calls.clear()
+        with self.assertRaisesRegex(signing.SigningError, "ZIP digest mismatch"):
+            self.finalize()
+        self.assertFalse(self.calls)
+
+    def test_candidate_inventory_and_duplicate_receipt_fields_are_rejected(self):
+        self.submit()
+        original = self.candidate_zip.read_bytes()
+        for kind in ("extra", "duplicate-json", "missing", "inner-extra"):
+            with self.subTest(kind=kind):
+                self.candidate_zip.write_bytes(original)
+                def mutate(files):
+                    if kind == "extra":
+                        files["../credentials"] = b"bad"
+                    elif kind == "missing":
+                        del files["receipt.json"]
+                    elif kind == "duplicate-json":
+                        files["receipt.json"] = files["receipt.json"].replace(b'{', b'{"schemaVersion":2,', 1)
+                    else:
+                        inner = io.BytesIO()
+                        with zipfile.ZipFile(inner, "w") as archive:
+                            archive.writestr("xcb", self.binary)
+                            archive.writestr("credentials", b"bad")
+                        files["notarization.zip"] = inner.getvalue()
+                        receipt = json.loads(files["receipt.json"])
+                        receipt["submissionZipSha256"] = signing.digest(inner.getvalue())
+                        files["receipt.json"] = json.dumps(receipt).encode()
+                self.rewrite_candidate(mutate)
+                self.calls.clear()
+                with self.assertRaises(signing.SigningError):
+                    self.finalize()
+                self.assertFalse(self.calls)
+
+    def test_symlink_and_oversized_candidate_entries_are_rejected_without_reading(self):
+        self.submit()
+        for mode, size in ((stat.S_IFLNK | 0o777, 20), (stat.S_IFREG | 0o600, 8193)):
+            with self.subTest(mode=mode):
+                with zipfile.ZipFile(self.candidate_zip, "w") as archive:
+                    entry = zipfile.ZipInfo("receipt.json")
+                    entry.external_attr = mode << 16
+                    archive.writestr(entry, b"x" * size)
+                    archive.writestr("notarization.zip", b"not parsed")
+                self.candidate_digest = signing.digest(self.candidate_zip.read_bytes())
+                with patch.object(signing.zipfile.ZipFile, "read", side_effect=AssertionError("must validate before read")):
+                    with self.assertRaises(signing.SigningError):
+                        self.finalize()
+
+    def test_candidate_rejects_unexpected_compression_before_reading(self):
+        self.submit()
+        with zipfile.ZipFile(self.candidate_zip, "w", compression=zipfile.ZIP_BZIP2) as archive:
+            archive.writestr("receipt.json", b"bounded but unsupported")
+            archive.writestr("notarization.zip", b"not parsed")
+        self.candidate_digest = signing.digest(self.candidate_zip.read_bytes())
+        with patch.object(signing.zipfile.ZipFile, "read", side_effect=AssertionError("must validate before read")):
+            with self.assertRaises(signing.SigningError):
+                self.finalize()
+
+    def test_cancelled_finalizer_preserves_candidate_and_removes_notary_key(self):
+        self.submit()
+        before = self.candidate_zip.read_bytes()
+        def interrupt(args, timeout=60):
+            if "wait" in args:
+                raise KeyboardInterrupt()
+            return self.tool(args, timeout)
+        with patch.object(signing, "run", interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.finalize()
+        self.assertFalse(self.work.exists())
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.candidate_zip.read_bytes(), before)
+
+    def test_finalizer_rechecks_signature_and_strict_notarization(self):
+        self.submit()
+        for failure in ("--test-requirement", "--check-notarization"):
+            with self.subTest(failure=failure):
+                self.tool_failure = failure
+                self.calls.clear()
+                with self.assertRaises(signing.SigningError):
+                    self.finalize()
+                self.assertFalse(self.work.exists())
+                self.assertFalse(self.output.exists())
+                if failure == "--test-requirement":
+                    self.assertFalse(any("notarytool" in args for args in self.calls))
+
+    def test_finalizer_never_packages_when_notary_credential_cleanup_fails(self):
+        self.submit()
+        original = signing.cleanup_credentials
+        def failed_cleanup(work):
+            present = (work / "credentials").exists()
+            original(work)
+            if present:
+                raise signing.SigningError("cleanup failed")
+        with patch.object(signing, "cleanup_credentials", failed_cleanup):
+            with self.assertRaisesRegex(signing.SigningError, "cleanup failed"):
+                self.finalize()
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.work.exists())
+
+    def test_changed_binary_during_apple_verification_is_never_packaged(self):
+        self.submit()
+        def mutate(args, timeout=60):
+            result = self.tool(args, timeout)
+            if "--check-notarization" in args:
+                Path(args[-1]).write_bytes(b"changed during verification")
+            return result
+        with patch.object(signing, "run", mutate):
+            with self.assertRaisesRegex(signing.SigningError, "changed during verification"):
+                self.finalize()
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.work.exists())
 
     def test_cleanup_rejects_unowned_path(self):
         with self.assertRaisesRegex(signing.SigningError, "dedicated runner"):
