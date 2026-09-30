@@ -10,6 +10,22 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.15.2 - 2026-09-30
+
+Mac release builds use a stable Apple Developer ID identity so updates can
+retain the application's identity in macOS permission checks.
+
+- Sign Mac release binaries with the `dev.hraness.xcb` identifier, a Developer
+  ID Application certificate, hardened runtime, and Apple's timestamp service.
+- Require Apple notarization before publishing Mac release archives. Signing
+  credentials are available only to the release signing job.
+- Verify the expected Apple signing identity before running or installing a
+  downloaded Mac binary. Source builds and explicitly selected older releases
+  keep their existing installation paths.
+- Document the one-time installer update and the separate permission test
+  needed when moving from an ad hoc build to a Developer ID build. The first
+  signed installation can require another macOS approval.
+
 ## 0.15.1 - 2026-09-30
 
 Workspace metadata checks no longer pause the supervisor when a filesystem

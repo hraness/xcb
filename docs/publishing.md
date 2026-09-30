@@ -34,13 +34,17 @@ An immutable annotated `v<version>` tag at a commit in current `main` history
    packaged archive exactly like the installer through
    `scripts/check-native-archive.sh`: exactly one regular `xcb` member, a
    matching `.sha256`, and the extracted binary reporting `xcb <version>`. It
-   then attests each tarball's build provenance
-   (`actions/attest-build-provenance`; this is the only job holding
-   `attestations: write` and `id-token: write`) and preserves
+   then attests Linux and Windows archives' build provenance
+   (`actions/attest-build-provenance`) and preserves
    `xcb-<version>-<os>-<arch>.tar.gz` plus its adjacent `.sha256` checksum as
    run-bound workflow artifacts. Later jobs resolve each platform's newest
    native artifact in this run to its numeric artifact ID, so re-running a
    failed later job reuses the assets its run already built and attested.
+   The Mac build produces a separately named unsigned intermediate. After
+   source verification passes, the Mac signing job verifies that intermediate's
+   workflow identity and digest, signs and notarizes the executable, and creates
+   the final archive and checksum. Only those signed bytes are attested and
+   made available to publication. See [Mac release signing](macos-signing.md).
 5. **Publish immutable GitHub Release.** The only job holding
    `contents: write`. Re-verifies every downloaded native archive against its
    adjacent checksum, then creates the immutable Latest GitHub Release
@@ -185,7 +189,7 @@ not carry, and it serves no binaries.
 
 ## Native binary release
 
-The `native_artifact` job inside `.github/workflows/release.yml` builds `xcb`
+The native build jobs inside `.github/workflows/release.yml` build `xcb`
 for Linux x86_64 on `ubuntu-22.04`, Linux ARM64 on `ubuntu-22.04-arm`, and
 macOS ARM64 on `macos-15` from the verified tag commit through
 `scripts/build-native.sh`, and Windows x86_64 on `windows-2025` through
@@ -201,12 +205,17 @@ supports: `scripts/check-glibc-floor.py` fails the release when the
 binary needs a symbol version newer than glibc 2.34 (RHEL 9; Ubuntu 22.04 and
 Debian 12 ship newer). CI runs the same check on every change for x86_64,
 and for ARM64 on every push to `main` and on pull requests that change the
-build, toolchain, or lockfile. Each archive is admitted twice with the installer's
-own rules — once in `build-native.sh`, once as a separate workflow step through
-`scripts/check-native-archive.sh` — which require exactly one regular `xcb`
+build, toolchain, or lockfile. The build and final release checks use
+`scripts/check-native-archive.sh`, whose rules require exactly one regular `xcb`
 member (no AppleDouble companions or extended attributes), a matching
-`.sha256`, and an extracted binary reporting `xcb <version>`. Each tarball's
-build provenance is attested with `actions/attest-build-provenance`; verify a
+`.sha256`, and an extracted binary reporting `xcb <version>`. The Mac build
+first produces an unsigned intermediate; its final archive is created only
+after Developer ID signing and notarization. Final Mac archive checks verify
+the expected signing team and `dev.hraness.xcb` identity before executing the
+binary. Signing credentials are restricted to the release signing job; see
+[Mac release signing](macos-signing.md) for setup and migration.
+Each final tarball's build provenance is attested with
+`actions/attest-build-provenance`; verify a
 downloaded archive with:
 
 ```sh
