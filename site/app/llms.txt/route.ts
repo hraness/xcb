@@ -1,15 +1,20 @@
 import { blogPostPath, indexableBlogPosts } from "../blog/posts";
 import { providerStatus, supportedBuilds } from "../docs/provider-status";
 import { docsTopics } from "../docs/topics";
-import { publicationMarkdown, publishedRelease } from "../publication";
+import { nativePlatforms, publicationMarkdown, publishedRelease } from "../publication";
 
 // llms.txt is a machine-readable site summary. Its release claim comes from
 // the same signed-off datum as every public page, so it cannot drift.
 export const dynamic = "force-static";
 
+const releasedPlatforms = nativePlatforms
+  .filter(({ platform }) => publishedRelease?.native.some((asset) => asset.platform === platform))
+  .map(({ label }) => label);
 const releaseLine = publishedRelease === null
   ? "No native xcb binary or @hraness/xcb package archive is published yet; build from source."
-  : "Verified release archives cover macOS ARM64 (darwin-aarch64) and Linux x86_64 (linux-x86_64); other hosts build from source.";
+  : releasedPlatforms.length === 0
+    ? "The verified @hraness/xcb package archive is available; native binaries must be built from source."
+    : `Verified release archives cover ${releasedPlatforms.join(", ")}; other hosts build from source.`;
 const releaseDetails = publicationMarkdown(publishedRelease);
 const docsLines = docsTopics.map((topic) => `- [${topic.title}](https://xcb.sh/docs/${topic.slug}): ${topic.description}`).join("\n");
 // Only indexable posts are listed; quarantined posts stay out of machine-readable maps.
@@ -23,7 +28,7 @@ xcb is a terminal and router for developers who pay for more than one coding age
 
 ## Use it as a coding agent
 
-Plain \`xcb\` opens one thread for all your projects. xcb picks each task's project folder and says why, then picks an account and model. Tasks keep running after you close the terminal, and a turn that stops at a usage limit continues on another account or model. Set up with \`xcb setup claude\` or \`xcb setup codex\`; Devin connects by importing the Devin CLI's sign-in.
+Plain \`xcb\` opens one thread for all your projects. xcb picks each task's project folder and says why, then picks an account and model. Tasks keep running after you close the terminal, and a turn that stops at a usage limit continues on another account or model. Set up with \`xcb setup claude\`, \`xcb setup codex\`, or \`xcb setup devin\`.
 
 ## Use subscription capacity before it resets
 
