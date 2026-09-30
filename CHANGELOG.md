@@ -10,12 +10,13 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## 0.14.0 - 2026-09-29
+## 0.14.1 - 2026-09-29
 
 Automatic continuation now reads how a turn ended and answers the way you
 would: it sees in-flight work through, hands back steps the worker could
 have done itself, takes the worker's own recommendation, and leaves only
-the steps that need you.
+the steps that need you. An application's approval to use an account and
+model now lasts until something it covers changes instead of 24 hours.
 
 - A completed turn that describes work still in flight is told to see it
   through; one that waits for you to run a merge, a rerun, a push or a
@@ -35,6 +36,7 @@ the steps that need you.
 - A configured judge only vetoes a continuation; it no longer starts one.
 - "Can't you do this yourself?" and "stop asking" replies now teach the
   ledger that the turn stopped short.
+- An application's approval to use an account and model no longer runs out after 24 hours. It lasts until the xcb binary, provider build, platform, application settings or account sign-in changes, so a scheduled application no longer stops each day until the tests are rerun and the live check repeated. A model approved this way also stays usable without a daily catalog refresh. `qualification.expiresAt` in `generate --capabilities` is now always `null`.
 
 ## 0.14.0 - 2026-09-29
 
@@ -92,7 +94,6 @@ its next route with the same rules as automatic routing, rotating equal
 accounts least-recently-used first.
 
 
-- An application's approval to use an account and model no longer runs out after 24 hours. It lasts until the xcb binary, provider build, platform, application settings or account sign-in changes, so a scheduled application no longer stops each day until the tests are rerun and the live check repeated. A model approved this way also stays usable without a daily catalog refresh. `qualification.expiresAt` in `generate --capabilities` is now always `null`.
 - The GitHub release step checks each uploaded file once instead of downloading every uploaded file again after each upload, which made a failed GitHub API call likely once releases carried eleven files.
 - An account whose provider refuses a turn for its usage limit without saying when the limit resets (every Codex `usageLimitExceeded` and Devin resource-exhaustion error, and a Claude rejection without a reset time) now stays at a known usage limit for `quota_limit_cooldown_ms` (default 30 minutes, 1 minute to 7 days in `config.json`) instead of reading as ready and being routed to again. Automatic routing, `xcb --json route`, other terminals, and `xcb accounts` (`quotaBlockedUntilMs`) all see the limit; a reset the provider reports later replaces it, even when sooner. Limits on one model only are still not recorded against the whole account.
 - Failover after a usage limit in `xcb run` and the terminal now picks routes with the same rules as automatic routing, so accounts without a usage meter (Devin) or with a reading older than five minutes are targets; it prefers the same model on another account, then the same provider, then other providers, and rotates equal accounts least-recently-used first. It is no longer cut off by the auto-continue time budget, and when no account can take the task it says which accounts are at a limit, signed out, or busy, and the earliest known reset. See `docs/failover.md`.
