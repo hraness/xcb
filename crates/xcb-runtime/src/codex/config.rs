@@ -559,7 +559,7 @@ pub fn thread_configuration(effort: Option<&str>) -> Value {
     config
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn validate_config(value: &Value, catalog_path: &Path) -> Result<()> {
     validate_config_with_native(value, catalog_path, None)
 }

@@ -48,6 +48,7 @@ impl CapabilityBundle {
     }
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 pub struct BundleLimits {
     pub max_entries: usize,
@@ -56,6 +57,7 @@ pub struct BundleLimits {
     pub max_depth: usize,
     pub max_manifest_bytes: usize,
 }
+#[cfg(unix)]
 impl Default for BundleLimits {
     fn default() -> Self {
         Self {
@@ -67,6 +69,11 @@ impl Default for BundleLimits {
         }
     }
 }
+
+// Verification on other platforms refuses before reading any bundle content.
+#[cfg(not(unix))]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BundleLimits {}
 
 #[cfg(unix)]
 mod implementation {
@@ -107,7 +114,9 @@ mod implementation {
         },
     }
 
+    #[cfg(any(target_os = "macos", test))]
     struct Stage(PathBuf);
+    #[cfg(any(target_os = "macos", test))]
     impl Drop for Stage {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
@@ -131,6 +140,7 @@ mod implementation {
         Ok(())
     }
 
+    #[cfg(any(target_os = "macos", test))]
     fn disjoint(a: &Path, b: &Path) -> bool {
         !a.starts_with(b) && !b.starts_with(a)
     }
@@ -458,6 +468,7 @@ mod implementation {
         Ok(())
     }
 
+    #[cfg(any(target_os = "macos", test))]
     fn capture(
         source: &Path,
         single: Option<&str>,
@@ -532,6 +543,7 @@ mod implementation {
         Ok(bundle)
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub fn snapshot(
         trusted_root: &Path,
         bundle_store: &Path,
@@ -553,6 +565,7 @@ mod implementation {
         )
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub fn snapshot_file(
         trusted_file: &Path,
         bundle_store: &Path,
@@ -580,34 +593,12 @@ mod implementation {
 }
 
 #[cfg(unix)]
-pub use implementation::{snapshot, snapshot_file, verify};
+pub use implementation::verify;
+#[cfg(all(unix, any(target_os = "macos", test)))]
+pub use implementation::{snapshot, snapshot_file};
 
 #[cfg(not(unix))]
 pub fn verify(_root: &Path, _sha256: &str, _limits: BundleLimits) -> Result<()> {
-    Err(Error::Unavailable(
-        "private capability bundles require Unix custody",
-    ))
-}
-
-#[cfg(not(unix))]
-pub fn snapshot(
-    _trusted_root: &Path,
-    _store: &Path,
-    _workspace: &Path,
-    _limits: BundleLimits,
-) -> Result<CapabilityBundle> {
-    Err(Error::Unavailable(
-        "private capability bundles require Unix custody",
-    ))
-}
-
-#[cfg(not(unix))]
-pub fn snapshot_file(
-    _trusted_file: &Path,
-    _store: &Path,
-    _workspace: &Path,
-    _limits: BundleLimits,
-) -> Result<CapabilityBundle> {
     Err(Error::Unavailable(
         "private capability bundles require Unix custody",
     ))
