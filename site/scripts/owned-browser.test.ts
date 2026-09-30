@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { Browser } from 'playwright-core';
-import { browserOwner, ownedChromiumLaunchOptions, pinnedBrowserExecutable, verifyOwnedChromium } from './owned-browser.mjs';
+import { chromium, type Browser, type LaunchOptions } from 'playwright-core';
+import { localVerificationOrigin, browserOwner, ownedChromiumLaunchOptions, pinnedBrowserExecutable, pinnedChromiumDefinition, verifyOwnedChromium } from './owned-browser.mjs';
 
 let directory: string;
 let pinned: string;
@@ -17,6 +17,28 @@ beforeEach(async () => {
   pinned = await executable(join(directory, 'chromium-1234', 'chrome-mac-arm64', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'));
 });
 afterEach(async () => { await rm(directory, { recursive: true, force: true }); });
+
+describe('external local verification origin', () => {
+  test('absence keeps the existing local and production modes', () => {
+    expect(localVerificationOrigin(undefined)).toBeUndefined();
+    expect(localVerificationOrigin(undefined, true)).toBeUndefined();
+  });
+  test('accepts only explicit canonical loopback ports', () => {
+    for (const value of ['http://127.0.0.1:1', 'http://127.0.0.1:12345', 'http://127.0.0.1:65535']) {
+      expect(localVerificationOrigin(value)).toBe(value);
+      expect(() => localVerificationOrigin(value, true)).toThrow('production');
+    }
+  });
+  test('rejects noncanonical ports and any remote, credentialed or path-bearing value', () => {
+    for (const value of [
+      'https://127.0.0.1:12345', 'http://localhost:12345', 'http://0.0.0.0:12345', 'http://[::1]:12345',
+      'http://127.0.0.1', 'http://127.0.0.1:0', 'http://127.0.0.1:80', 'http://127.0.0.1:01',
+      'http://127.0.0.1:65536', 'http://127.0.0.1:12345/', 'http://127.0.0.1:12345/docs',
+      'http://127.0.0.1:12345?x=1', 'http://127.0.0.1:12345#x', 'http://name@127.0.0.1:12345',
+      'http://127.0.0.1:12345@elsewhere.test', 'http://elsewhere.test:12345', null, false, 1, {},
+    ]) expect(() => localVerificationOrigin(value)).toThrow();
+  });
+});
 
 describe('pinned browser identity', () => {
   test('uses the exact pinned browser by default', async () => {
@@ -78,6 +100,38 @@ describe('pinned browser identity', () => {
 
 describe('physical Chromium command line', () => {
   const defaults = ['--no-first-run', '--disable-features=DefaultA,DefaultB', '--headless'];
+  test('qualifies installed Playwright 1.63.0 against its actual launch arguments', async () => {
+    const definition = pinnedChromiumDefinition();
+    expect(definition.expectedVersion).toBe('153.0.8010.12');
+    const recorder = join(directory, 'argv-recorder');
+    const output = join(directory, 'argv.json');
+    // This owned executable only records argv and exits; it starts no browser.
+    await writeFile(recorder, `#!${process.execPath}\nawait import('node:fs/promises').then(({ writeFile }) => writeFile(${JSON.stringify(output)}, JSON.stringify(process.argv.slice(2))));\n`, { mode: 0o700 });
+    const record = async (options: Pick<LaunchOptions, 'args' | 'ignoreDefaultArgs'> = {}): Promise<string[]> => {
+      await rm(output, { force: true });
+      await expect(chromium.launch({ executablePath: recorder, headless: true, ...options, timeout: 5000,
+        env: { PATH: '/usr/bin:/bin', TMPDIR: directory } })).rejects.toThrow();
+      return JSON.parse(await readFile(output, 'utf8')) as string[];
+    };
+    const actualDefaults = await record();
+    const defaultFeatures = actualDefaults.filter(argument => argument.startsWith('--disable-features='));
+    expect(defaultFeatures).toHaveLength(1);
+    expect(definition.defaultArgs.filter(argument => argument.startsWith('--disable-features='))).toEqual(defaultFeatures);
+    const supplied = ['--xcb-owned-browser-fixture', '--disable-features=TaskExtraFeature'];
+    const actual = await record(ownedChromiumLaunchOptions(recorder, definition.defaultArgs, supplied));
+    const switches = actual.filter(argument => argument.startsWith('--disable-features='));
+    expect(switches).toHaveLength(1);
+    expect(switches[0]!.slice('--disable-features='.length).split(',')).toEqual([
+      ...new Set([...defaultFeatures[0]!.slice('--disable-features='.length).split(','), 'TaskExtraFeature', 'PaintHolding', 'MacAppCodeSignClone']),
+    ]);
+    expect(actual.filter(argument => argument === '--mute-audio')).toHaveLength(1);
+    expect(actual).toContain('--enable-automation');
+    expect(actual).toContain('--xcb-owned-browser-fixture');
+    const stable = (arguments_: string[]) => arguments_.filter(argument =>
+      !argument.startsWith('--user-data-dir=') && !argument.startsWith('--disable-features='));
+    expect(stable(actual).filter(argument => argument !== '--xcb-owned-browser-fixture'
+      && (argument !== '--enable-automation' || actualDefaults.includes(argument)))).toEqual(stable(actualDefaults));
+  });
   test('preserves unrelated defaults and merges one feature switch', () => {
     const options = ownedChromiumLaunchOptions(pinned, defaults, ['--blink-settings=pointer', '--disable-features=DefaultB,Custom', '--mute-audio']);
     const physical = [...defaults.filter(arg => !options.ignoreDefaultArgs.includes(arg)), ...options.args];

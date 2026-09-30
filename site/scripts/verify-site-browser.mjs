@@ -5,16 +5,19 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { browserOwner, ownedChromiumLaunchOptions, pinnedBrowserExecutable, pinnedChromiumDefinition, verifyOwnedChromium } from "./owned-browser.mjs";
+import { localVerificationOrigin, browserOwner, ownedChromiumLaunchOptions, pinnedBrowserExecutable, pinnedChromiumDefinition, verifyOwnedChromium } from "./owned-browser.mjs";
 import { chromium } from "playwright-core";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const production = process.argv.includes("--production");
-assert.ok(process.argv.slice(2).every(argument => argument === "--production"), "Unknown argument");
+assert.ok(process.argv.slice(2).every(argument => argument === "--production" || argument.startsWith("--local-origin=")), "Unknown argument");
+const localOriginArguments = process.argv.slice(2).filter(argument => argument.startsWith("--local-origin="));
+assert.ok(localOriginArguments.length <= 1, "Use at most one local verification origin.");
+const localOrigin = localVerificationOrigin(localOriginArguments[0]?.slice("--local-origin=".length), production);
 const routes = ["/", "/docs", "/install", "/download", "/compare", "/reflexes", "/blog"];
 const artifacts = resolve(process.env.SITE_BROWSER_ARTIFACTS ?? "/tmp/xcb-site-browser");
 await mkdir(artifacts, { recursive: true });
-let origin = "https://xcb.sh";
+let origin = localOrigin ?? "https://xcb.sh";
 let server;
 let exited;
 let output = "";
@@ -50,7 +53,7 @@ try {
   launchOptions = { ...ownedChromiumLaunchOptions(executablePath, definition.defaultArgs), timeout: 15_000,
     handleSIGHUP: false, handleSIGINT: false, handleSIGTERM: false };
   if (interruption) throw interruption;
-  if (!production) {
+  if (!production && localOrigin === undefined) {
     const reservation = createServer();
     reservation.listen(0, "127.0.0.1");
     await once(reservation, "listening");

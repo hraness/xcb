@@ -7,6 +7,17 @@ import { dirname, isAbsolute, join } from 'node:path';
 const require = createRequire(import.meta.url);
 const requiredDisabledFeatures = ['PaintHolding', 'MacAppCodeSignClone'];
 
+export function localVerificationOrigin(value, production = false) {
+  if (value === undefined) return undefined;
+  assert.equal(production, false, 'Local verification origin cannot be combined with production.');
+  assert.equal(typeof value, 'string', 'Local verification origin must be a string.');
+  const match = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})$/u.exec(value);
+  assert.ok(match && Number(match[1]) <= 65535, 'Use an explicit canonical HTTP loopback port without credentials, path, query or fragment.');
+  const origin = new URL(value).origin;
+  assert.equal(origin, value, 'Local verification origin must retain its explicit canonical port.');
+  return origin;
+}
+
 function rejectInstalledChrome(path) {
   const normalized = path.replaceAll('\\', '/').toLowerCase();
   assert.ok(!/\/google chrome(?: beta| dev| canary)?\.app\//u.test(normalized)
@@ -57,7 +68,7 @@ export function pinnedChromiumDefinition() {
   // reconcile its own runtime rather than fall back to another installation.
   let runtime;
   if (installedVersion === '1.58.2') runtime = require(join(coreRoot, 'lib/server/playwright.js'));
-  else if (installedVersion === '1.61.1' || installedVersion === '1.62.0') runtime = require(join(coreRoot, 'lib/coreBundle.js')).server;
+  else if (installedVersion === '1.61.1' || installedVersion === '1.62.0' || installedVersion === '1.63.0') runtime = require(join(coreRoot, 'lib/coreBundle.js')).server;
   else throw new Error('Reconcile the authored Playwright pin’s Chromium runtime before browser verification.');
   const { createPlaywright } = runtime;
   const formatter = createPlaywright?.({ sdkLanguage: 'javascript' }).chromium;
