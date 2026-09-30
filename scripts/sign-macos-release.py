@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import stat
@@ -159,17 +160,42 @@ def private_file(path, data):
         output.write(data)
 
 
+def keychain_search_list():
+    entries = shlex.split(run(["/usr/bin/security", "list-keychains", "-d", "user"]))
+    require(all(Path(entry).is_absolute() for entry in entries), "invalid keychain search list")
+    return entries
+
+
+def participate_keychain(keychain, present):
+    # This release job owns its runner. Read the current list on every change:
+    # cleanup removes only our path, preserving additions made since startup.
+    # security has no atomic compare-and-set; do not run beside another writer.
+    current = keychain_search_list()
+    owned = str(keychain)
+    desired = [entry for entry in current if entry != owned]
+    if present:
+        desired.append(owned)
+    if desired != current:
+        run(["/usr/bin/security", "list-keychains", "-d", "user", "-s", *desired])
+    observed = keychain_search_list()
+    require((owned in observed) == present and all(entry in observed for entry in desired),
+            "keychain search list update was not retained")
+
+
 def cleanup_credentials(work):
     credentials = work / "credentials"
     if not credentials.exists():
         return
     require(credentials.is_dir() and not credentials.is_symlink(), "unsafe credential directory")
     keychain = credentials / "signing.keychain-db"
-    # Never add this keychain to the user's search list. Delete through the
-    # supported API before removing the exact private directory.
+    # Remove only the owned keychain from the current search list, then delete
+    # through the supported API before removing the exact private directory.
     try:
         if keychain.exists():
-            run(["/usr/bin/security", "delete-keychain", keychain])
+            try:
+                participate_keychain(keychain, False)
+            finally:
+                run(["/usr/bin/security", "delete-keychain", keychain])
     finally:
         shutil.rmtree(credentials)
 
@@ -238,13 +264,14 @@ def sign(archive, version, output, work):
                  "-P", values["APPLE_DEVELOPER_ID_P12_PASSWORD"], "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"])
             run(["/usr/bin/security", "set-key-partition-list", "-S", "apple-tool:,apple:,codesign:",
                  "-s", "-k", password, keychain])
+            participate_keychain(keychain, True)
             identities = run(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning", keychain])
             matches = re.findall(r'\b([0-9A-Fa-f]{40}) "Developer ID Application: [^"\n]+ \(' + TEAM_ID + r'\)"', identities)
             require(len(matches) == 1, "keychain must contain exactly one expected Developer ID Application identity")
             run(["/usr/bin/codesign", "--force", "--sign", matches[0], "--keychain", keychain,
                  "--identifier", IDENTIFIER, "--options", "runtime", "--timestamp",
-                 "--requirements", "designated => " + requirement, binary], timeout=180)
-            run(["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", requirement, binary])
+                 "--requirements", "=designated => " + requirement, binary], timeout=180)
+            run(["/usr/bin/codesign", "--verify", "--strict", "--test-requirement", "=" + requirement, binary])
             metadata = run(["/usr/bin/codesign", "--display", "--verbose=4", binary])
             require(f"Identifier={IDENTIFIER}\n" in metadata and f"TeamIdentifier={TEAM_ID}\n" in metadata,
                     "signed binary identity mismatch")
@@ -290,7 +317,7 @@ def sign(archive, version, output, work):
             # Raw CLI tarballs cannot carry stapled tickets. Apple's online
             # notarization check must recognize the signed executable itself.
             run(["/usr/bin/codesign", "--verify", "--strict", "--check-notarization",
-                 "--test-requirement", requirement, binary], timeout=180)
+                 "--test-requirement", "=" + requirement, binary], timeout=180)
             receipt["state"] = "verified"
             diagnostic(receipt_path, receipt)
         finally:

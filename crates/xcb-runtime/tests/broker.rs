@@ -891,17 +891,20 @@ fn compact_tool_listing_fits_devin_output_limit_and_matches_the_broker() {
     }
     let result = serde_json::to_vec(&json!({"tools": compact})).unwrap();
     assert!(
-        result.len() <= 4096,
+        result.len() <= 6144,
         "tools/list result is {} bytes",
         result.len()
     );
-    // The shape Devin's mcp_list_tools prints for one server.
+    // The shape Devin's mcp_list_tools prints for one server. The pinned
+    // 3000.11.3 run recorded in commit 49f5453 / PR #247 established its
+    // 10,000-character spill-to-file threshold. Leave at least 1,808 bytes
+    // of headroom with the expanded host-tool inventory and full guidance.
     let shown = serde_json::to_string_pretty(&json!([{
         "server_name": "xcb", "tools": compact, "resources": Value::Array(vec![]),
     }]))
     .unwrap();
     assert!(
-        shown.len() <= 6144,
+        shown.len() <= 8192,
         "mcp_list_tools output is {} characters",
         shown.len()
     );

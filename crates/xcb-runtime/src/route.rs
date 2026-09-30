@@ -38,6 +38,8 @@ pub struct RouteTaskRequest {
     pub workspace: String,
     pub task: String,
     #[serde(default)]
+    pub requirements: xcb_core::session::TaskRequirements,
+    #[serde(default)]
     pub provider: Option<Provider>,
     /// Account id or exact observed name; resolved against local accounts.
     #[serde(default)]
@@ -276,6 +278,7 @@ pub async fn dispatch(
         &store,
         &config,
         routing::RouteRequest {
+            requirements: request.requirements,
             task: &request.task,
             required_provider,
             preferred_provider: None,
@@ -322,6 +325,19 @@ pub async fn dispatch(
             .routed(route.clone()),
         )
     })?;
+    store
+        .require_session_capabilities(&session.id, decision.requirements)
+        .map_err(|_| Box::new(fail(RouteCode::Unavailable).routed(route.clone())))?;
+    store
+        .set_session_route_pins(
+            &session.id,
+            xcb_core::session::RoutePins {
+                provider: request.provider,
+                account: account.as_ref().map(|account| account.id.clone()),
+                model: request.model.clone(),
+            },
+        )
+        .map_err(|_| Box::new(fail(RouteCode::Unavailable).routed(route.clone())))?;
     let outcome = kernel::execute_once(
         store,
         session.id.clone(),
@@ -429,6 +445,7 @@ mod tests {
 
     fn request() -> RouteTaskRequest {
         RouteTaskRequest {
+            requirements: Default::default(),
             version: 1,
             workspace: "/tmp".into(),
             task: "fix the failing test".into(),

@@ -35,6 +35,7 @@ class SigningTests(unittest.TestCase):
         self.binary = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0) + b"not executable"
         self.native_archive()
         self.calls = []
+        self.keychains = [str(self.root / "login.keychain-db")]
         self.status = "Accepted"
         self.wait_id = UUID
         self.metadata = ("Identifier=dev.hraness.xcb\nTeamIdentifier=" + TEAM + "\n"
@@ -74,6 +75,15 @@ class SigningTests(unittest.TestCase):
         self.assertFalse(any(name in os.environ for name in signing.SECRET_NAMES))
         if self.tool_failure and self.tool_failure in args:
             raise signing.SigningError("mock Apple rejection")
+        if "list-keychains" in args:
+            if "-s" in args:
+                self.keychains = args[args.index("-s") + 1:]
+            return "\n".join(json.dumps(entry) for entry in self.keychains)
+        if "--sign" in args:
+            self.assertIn(str(self.work / "credentials" / "signing.keychain-db"), self.keychains)
+            self.assertTrue(args[args.index("--requirements") + 1].startswith("=designated => "))
+        if "--test-requirement" in args:
+            self.assertEqual(args[args.index("--test-requirement") + 1], "=" + signing.apple_requirement())
         if "create-keychain" in args:
             Path(args[-1]).touch(mode=0o600)
             for path in (self.work / "credentials").iterdir():
@@ -131,6 +141,31 @@ class SigningTests(unittest.TestCase):
         receipt = json.loads((self.root / "xcb-apple-notarization.json").read_text())
         self.assertEqual(receipt["submissionId"], UUID)
         self.assertEqual(receipt["status"], "Invalid")
+
+    def test_cleanup_preserves_keychains_added_during_signing(self):
+        original = self.tool
+        added = str(self.root / "another.keychain-db")
+        def tool(args, timeout=60):
+            if "--sign" in args:
+                self.keychains.append(added)
+            return original(args, timeout)
+        with patch.object(signing, "run", tool):
+            self.sign()
+        self.assertEqual(self.keychains, [str(self.root / "login.keychain-db"), added])
+
+    def test_search_list_cleanup_failure_blocks_publication(self):
+        original = self.tool
+        owned = str(self.work / "credentials" / "signing.keychain-db")
+        def tool(args, timeout=60):
+            if "list-keychains" in args and "-s" in args and owned not in map(str, args):
+                raise signing.SigningError("search list cleanup rejected")
+            return original(args, timeout)
+        with patch.object(signing, "run", tool):
+            with self.assertRaisesRegex(signing.SigningError, "search list cleanup rejected"):
+                self.sign()
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.work.exists())
+        self.assertTrue(any("delete-keychain" in args for args in self.calls))
 
     def test_incomplete_notary_status_is_not_success(self):
         self.status = "In Progress"

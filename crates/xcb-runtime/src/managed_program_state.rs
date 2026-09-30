@@ -634,6 +634,7 @@ impl ManagedStore {
             .is_some_and(|p| required && preference != Some(p));
         let now = now_ms().max(parent.updated_at_ms);
         let mut task = ManagedTask {
+            requirements: Default::default(),
             version: 1, id, operation: Id::new(format!("op_{}", digest(format!("xcb-program-operation-v1\0{source}"))))?,
             source_message: source.clone(), conversation: parent.conversation.clone(), workspace: parent.workspace.clone(),
             title: xcb_core::display_text(call.prompt.lines().find(|line| !line.trim().is_empty()).unwrap_or("Program worker"),160),

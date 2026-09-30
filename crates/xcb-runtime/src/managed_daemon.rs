@@ -1216,6 +1216,7 @@ impl ManagedStore {
             .digest()
             .map_err(|_| Error::Unavailable("ALGAL transition policy rejected"))?;
         let mut task = ManagedTask {
+            requirements: Default::default(),
             version: 1, id, operation: Id::new(format!("op_{}", digest(format!("xcb-daemon-operation-v1\0{source}"))))?,
             source_message: source.clone(), conversation: meta.conversation.clone(), workspace: meta.workspace.clone(),
             title: xcb_core::display_text(call.prompt.lines().find(|line| !line.trim().is_empty()).unwrap_or("Daemon worker"),160),

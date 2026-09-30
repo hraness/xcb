@@ -128,6 +128,7 @@ pub fn code(error: &Error) -> &'static str {
         Error::Unavailable(_) | Error::Message(_) | Error::Guided { .. } => "unavailable",
         Error::Protocol(_)
         | Error::CodexRpc { .. }
+        | Error::CodexNotification { .. }
         | Error::DevinModelChoices { .. }
         | Error::DevinRpc { .. } => "provider-protocol",
     }
@@ -292,6 +293,7 @@ Conversations and tasks
 Setup
   service        Start xcb's background supervisor at login (macOS)
   resources      Inspect memory and disk pressure; enable launch limits
+  tools          Manage browser, computer and other host tool connections
   update         Check for updates and set the update policy
   upgrade        Install the latest verified release
   completions    Print shell completions

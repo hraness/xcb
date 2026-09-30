@@ -146,6 +146,9 @@ pub struct Config {
     /// Host pressure protection for managed workers. Explicitly enabled
     /// after checking telemetry with `xcb resources` on this machine.
     pub resources: crate::host_resources::ResourcePolicy,
+    /// Explicitly registered host tool servers, shared by every provider.
+    #[serde(skip_serializing_if = "crate::capabilities::CapabilityConfig::is_empty")]
+    pub capabilities: crate::capabilities::CapabilityConfig,
     pub extensions: Extensions,
 }
 pub const DEFAULT_QUOTA_LIMIT_COOLDOWN_MS: u64 = 1_800_000;
@@ -162,12 +165,14 @@ impl Default for Config {
             quota_limit_cooldown_ms: DEFAULT_QUOTA_LIMIT_COOLDOWN_MS,
             routing: RoutingConfig::default(),
             resources: crate::host_resources::ResourcePolicy::default(),
+            capabilities: crate::capabilities::CapabilityConfig::default(),
             extensions: Extensions::default(),
         }
     }
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
+        self.capabilities.validate()?;
         self.resources.validate().map_err(|message| Error::Guided {
             message,
             next: Some("check resources in config.json".into()),
@@ -226,6 +231,9 @@ impl Config {
     pub fn save(&self, root: &Path, revision: Option<&str>) -> Result<()> {
         self.validate()?;
         let bytes = serde_json::to_vec_pretty(self)?;
+        if bytes.len() > 64 * 1024 {
+            return Err(xcb_core::Error::Limit("configuration bytes").into());
+        }
         let path = root.join("config.json");
         match revision {
             Some(revision) => private::replace(&path, &bytes, revision),
@@ -313,5 +321,37 @@ mod routing_config_tests {
         config.save(&root, None).unwrap();
         let (loaded, _) = Config::load(&root).unwrap();
         assert_eq!(loaded.routing, config.routing);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&private::read(&root.join("config.json"), 64 * 1024).unwrap())
+                .unwrap();
+        assert!(
+            saved.get("capabilities").is_none(),
+            "ordinary saves retain the legacy configuration schema"
+        );
+    }
+
+    #[test]
+    fn oversized_valid_configuration_does_not_replace_a_readable_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = state(&directory);
+        let config = Config::default();
+        config.save(&root, None).unwrap();
+        let (mut large, revision) = Config::load(&root).unwrap();
+        large.favorites = (0..128)
+            .map(|index| Preference {
+                provider: xcb_core::Provider::Codex,
+                model: Id::new(format!("{index:03}{}", "a".repeat(157))).unwrap(),
+                effort: Some(Id::new("a".repeat(160)).unwrap()),
+            })
+            .collect();
+        let patterns: Vec<_> = (0..64)
+            .map(|index| format!("codex/{index:02}{}", "a".repeat(120)))
+            .collect();
+        large.routing.never = patterns.clone();
+        large.routing.tiers.default = patterns;
+        large.validate().unwrap();
+        assert!(serde_json::to_vec_pretty(&large).unwrap().len() > 64 * 1024);
+        assert!(large.save(&root, revision.as_deref()).is_err());
+        assert_eq!(Config::load(&root).unwrap().1, revision);
     }
 }

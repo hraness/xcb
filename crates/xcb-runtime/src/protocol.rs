@@ -96,6 +96,18 @@ pub(crate) trait Protocol: Send {
         async { true }
     }
 
+    /// Effects owned by a native tool relay, including unfinished calls after
+    /// cancellation. Read after shutdown before settling the account lease.
+    fn host_effects(&self) -> xcb_core::policy::EffectState {
+        xcb_core::policy::EffectState::None
+    }
+
+    /// A trusted host tool asked for approval or reported a denied action.
+    /// Once observed the runner stops dispatching tools across every bridge.
+    fn host_pending_attention(&self) -> bool {
+        false
+    }
+
     /// A cooperative cancellation frame this provider understands, if any.
     /// The runner sends it once on host cancellation before stdin closes;
     /// codecs without a wire interrupt return `None` and the provider still

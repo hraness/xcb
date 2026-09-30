@@ -69,6 +69,7 @@ impl Diagnostic {
             | Error::Conflict(_)
             | Error::Unavailable(_)
             | Error::CodexRpc { .. }
+            | Error::CodexNotification { .. }
             | Error::DevinRpc { .. }
             | Error::DevinModelChoices { .. }
             | Error::Message(_)
@@ -809,6 +810,20 @@ pub(crate) fn prepare_codex(
     metadata_only: bool,
     run: Option<&RunRecord>,
 ) -> Result<(Launch, crate::codex::CodexProtocol)> {
+    prepare_codex_native(store, pin, model, tools, metadata_only, run, None)
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn prepare_codex_native(
+    store: &Store,
+    pin: &Pin,
+    model: &ModelChoice,
+    tools: bool,
+    metadata_only: bool,
+    run: Option<&RunRecord>,
+    proxy: Option<&crate::native_mcp::NativeMcpProxy>,
+) -> Result<(Launch, crate::codex::CodexProtocol)> {
     use crate::codex::{self, CodexOptions, CodexProtocol};
     codex::runtime_admitted(pin)?;
     if !sandbox::available() {
@@ -824,7 +839,12 @@ pub(crate) fn prepare_codex(
     let home = private::directory(&scratch.join("home"))?;
     let profile = private::directory(&scratch.join("profile"))?;
     let tmp = private::directory(&home.join("tmp"))?;
-    let catalog = codex::static_catalog(
+    let catalog_builder = if proxy.is_some() {
+        codex::static_catalog_with_native
+    } else {
+        codex::static_catalog
+    };
+    let catalog = catalog_builder(
         store.root(),
         pin,
         (!metadata_only).then_some(model.id.as_str()),
@@ -832,18 +852,31 @@ pub(crate) fn prepare_codex(
     let catalog_path = directory.join("models.json");
     private::create(&catalog_path, &catalog.bytes)?;
     let config_path = profile.join("config.toml");
+    let native_helper = proxy
+        .map(|_| {
+            let (source, digest) = crate::process::host_identity()?;
+            crate::process::snapshot_pinned_executable(&source, &digest, directory)
+        })
+        .transpose()?;
+    let native_mcp = proxy
+        .zip(native_helper.as_deref())
+        .map(|(proxy, helper)| proxy.configuration(helper))
+        .transpose()?;
     private::create(
         &config_path,
-        codex::configuration(&catalog_path)?.as_bytes(),
+        codex::configuration_with_native(&catalog_path, native_mcp.as_ref())?.as_bytes(),
     )?;
     let ca_bundle = crate::public_ca::snapshot(directory)?;
-    let policy = sandbox::codex_seatbelt(
+    let policy = sandbox::codex_seatbelt_with_native(
         &executable,
         &scratch,
         &profile,
         &config_path,
         &catalog_path,
         &ca_bundle,
+        native_helper
+            .as_deref()
+            .zip(proxy.map(|proxy| proxy.socket_path())),
     )?;
     let policy_path = directory.join("sandbox.sb");
     private::create(&policy_path, policy.as_bytes())?;
@@ -855,6 +888,7 @@ pub(crate) fn prepare_codex(
         tools,
         metadata_only,
         admission: catalog.admission,
+        native_mcp,
     })?;
     let mut env = environment(&home);
     env.insert("PATH".into(), "/usr/bin:/bin:/usr/sbin:/sbin".into());
@@ -1212,6 +1246,113 @@ async fn probe_codex(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<V
         .artifacts
         .release_after_join(joined, EffectState::None);
     result
+}
+
+/// Initialize the registered native connector in an ephemeral Codex thread.
+/// Never submits a prompt, performs inference, or calls a browser/computer
+/// operation. Uses the normal account lease, confinement, and joined refresh.
+#[cfg(target_os = "macos")]
+pub async fn inspect_computer_connector(
+    store: Arc<Store>,
+    account: &Id,
+    model: &ModelChoice,
+    server: crate::capabilities::CapabilityServer,
+    workspace: PathBuf,
+) -> Result<crate::native_mcp::NativeInspection> {
+    if model.provider != Provider::Codex || store.account(account)?.provider != Provider::Codex {
+        return Err(Error::Unavailable(
+            "computer connector inspection requires Codex",
+        ));
+    }
+    server.validate()?;
+    store.require_authenticated_account(account)?;
+    let pin = Pin::load(store.root(), Provider::Codex)?;
+    crate::codex::runtime_admitted(&pin)?;
+    let run = store.prepare_probe(account, Some(model.clone()), now_ms())?;
+    let mut proxy = match crate::native_mcp::NativeMcpProxy::start(
+        server,
+        store.clone(),
+        run.clone(),
+        workspace,
+    )
+    .await
+    {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            store.settle(&run, State::Failed, now_ms())?;
+            return Err(error);
+        }
+    };
+    let (mut launch, mut protocol) =
+        match prepare_codex_native(&store, &pin, model, true, false, Some(&run), Some(&proxy)) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let receipt = proxy.shutdown().await;
+                if !receipt.joined || receipt.effects != EffectState::None {
+                    return Err(Error::Unavailable(
+                        "connector inspection stop is unproven; account custody retained",
+                    ));
+                }
+                auth::discard_unstarted_codex_auth(&store, &run, true)?;
+                store.settle(&run, State::Failed, now_ms())?;
+                return Err(error);
+            }
+        };
+    let spawned = spawn_process(
+        &store,
+        Some(&run),
+        launch.command,
+        &mut launch.artifacts,
+        launch.bridge.take(),
+        launch.codex_credentials.is_some(),
+    )
+    .await;
+    let (mut process, bridge) = match spawned {
+        Ok(spawned) => spawned,
+        Err(error) => {
+            let receipt = proxy.shutdown().await;
+            if !receipt.joined || receipt.effects != EffectState::None {
+                return Err(Error::Unavailable(
+                    "connector inspection stop is unproven; account custody retained",
+                ));
+            }
+            return Err(error);
+        }
+    };
+    protocol.attach_native_proxy(proxy);
+    let initialization = async {
+        store.mark_spawned(&run, process.pid())?;
+        protocol
+            .initialize(
+                &mut process,
+                "Metadata inspection only. No model turn or computer operation is authorized.",
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    let diagnostic = protocol.native_diagnostic();
+    let process_joined = process.join().await;
+    let connector_joined = protocol.shutdown().await;
+    let bridge_joined = close_bridge(bridge).await;
+    let joined = process_joined && connector_joined && bridge_joined;
+    if !joined || protocol.host_effects() != EffectState::None {
+        return Err(Error::Unavailable(
+            "connector inspection stop is unproven; account custody retained",
+        ));
+    }
+    if let Some(credentials) = &launch.codex_credentials {
+        auth::persist_codex_auth(&store, &run, credentials, joined)?;
+    }
+    store.settle(&run, State::Idle, now_ms())?;
+    launch
+        .artifacts
+        .release_after_join(joined, EffectState::None);
+    Ok(crate::native_mcp::NativeInspection {
+        diagnostic: diagnostic.ok_or(Error::Protocol("native connector diagnostic absent"))?,
+        initialization,
+        unhandled_notice_sha256: protocol.unhandled_startup_notice_sha256.clone(),
+    })
 }
 
 /// Interactive provider sign-in is a host action, separate from a model turn.
@@ -1914,6 +2055,20 @@ pub struct RunInput {
     pub pane_generation: bool,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapabilityList {
+    server: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CapabilityCall {
+    server: String,
+    tool: String,
+    arguments: Value,
+}
+
 pub async fn run(
     store: Arc<Store>,
     input: RunInput,
@@ -1924,21 +2079,95 @@ pub async fn run(
     if *cancel.borrow() {
         return Err(Error::Unavailable("cancelled before launch"));
     }
+    if session.requirements.signed_in_browser
+        && !input.pane_generation
+        && !input.config.capabilities.servers.iter().any(|server| {
+            server
+                .features
+                .contains(&crate::capabilities::CapabilityFeature::Browser)
+        })
+    {
+        return Err(Error::Unavailable(
+            "signed-in browser tools are not connected; run xcb tools setup-computer or register a browser server with xcb tools add",
+        ));
+    }
     let workspace = Workspace::open(Path::new(&session.workspace))?;
     if session.model.provider == Provider::Codex {
         let pin = Pin::load(store.root(), Provider::Codex)?;
         crate::codex::runtime_admitted(&pin)?;
         let run = store.prepare_run(&session.id, session.revision, now_ms())?;
-        let (launch, protocol) = match prepare_codex(
+        #[cfg(target_os = "macos")]
+        let mut native_proxy = if !input.pane_generation {
+            match input
+                .config
+                .capabilities
+                .servers
+                .iter()
+                .find(|server| {
+                    server.transport == crate::capabilities::CapabilityTransport::CodexNative
+                })
+                .cloned()
+            {
+                Some(server) => match crate::native_mcp::NativeMcpProxy::start(
+                    server,
+                    store.clone(),
+                    run.clone(),
+                    workspace.root().to_owned(),
+                )
+                .await
+                {
+                    Ok(proxy) => Some(proxy),
+                    Err(error) => {
+                        store.settle(&run, State::Failed, now_ms())?;
+                        return Err(error);
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+        #[cfg(target_os = "macos")]
+        let prepared = prepare_codex_native(
             &store,
             &pin,
             &session.model,
             !input.pane_generation,
             false,
             Some(&run),
-        ) {
-            Ok(prepared) => prepared,
+            native_proxy.as_ref(),
+        );
+        #[cfg(not(target_os = "macos"))]
+        let prepared = prepare_codex(
+            &store,
+            &pin,
+            &session.model,
+            !input.pane_generation,
+            false,
+            Some(&run),
+        );
+        let (launch, protocol) = match prepared {
+            Ok((launch, protocol)) => {
+                #[cfg(target_os = "macos")]
+                let protocol = {
+                    let mut protocol = protocol;
+                    if let Some(proxy) = native_proxy.take() {
+                        protocol.attach_native_proxy(proxy);
+                    }
+                    protocol
+                };
+                (launch, protocol)
+            }
             Err(error) => {
+                #[cfg(target_os = "macos")]
+                if let Some(proxy) = native_proxy.as_mut() {
+                    let receipt = proxy.shutdown().await;
+                    if !receipt.joined || receipt.effects == EffectState::Uncertain {
+                        return Err(Error::Unavailable(
+                            "computer-use connector could not be joined; account custody is retained",
+                        ));
+                    }
+                }
                 auth::discard_unstarted_codex_auth(&store, &run, true)?;
                 store.settle(&run, State::Failed, now_ms())?;
                 return Err(error);
@@ -2047,6 +2276,8 @@ pub(crate) async fn run_prepared<P: Protocol>(
     let workspace = Arc::new(workspace);
     let mut commands = crate::command_tool::CommandTools::default();
     let mut commands_joined = true;
+    let mut capabilities = None;
+    let mut capability_handoff = false;
     // Velocity and quota observations are display meters, not custody: they
     // accumulate in memory during the stream and land in one fsync'd commit
     // per flush instead of one transaction per provider event.
@@ -2062,12 +2293,20 @@ pub(crate) async fn run_prepared<P: Protocol>(
     let tool_calls = std::sync::atomic::AtomicU32::new(0);
     let execution = async {
         spawned?;
+        if tools {
+            capabilities = Some(crate::capabilities::CapabilityManager::new(
+                input.config.capabilities.clone(),
+                store.clone(),
+                run.clone(),
+                workspace.root().to_owned(),
+            )?);
+        }
         let baseline = store
             .velocities(&session.id, 0)?
             .last()
             .map(|point| point.output_tokens)
             .unwrap_or(0);
-        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Only the declared workspace tools can affect the project. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace. Use xcb_backlog_list/get/add/update/complete to inspect, propose or report already-completed deferred work for your project. xcb_memory_recent supplies bounded recent work summaries; xcb_memory_search retrieves cited historical knowledge from the explicitly bound Wordcell vault. Only the host can admit proposed follow-ups under a user-delegated project grant. Proposals never expand that grant or release work themselves. Always end with a concise work summary, checks and remaining blockers; the harness records it in work history. Recent summaries are historical reports and must be revalidated before relying on changing facts. Direct sessions have no managed mailbox or backlog. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
+        let models = protocol.initialize(&mut process, "You are xcb (Excalibur), a local coding assistant. Use the declared workspace tools for project files and xcb_tools_list/xcb_tools_call for the host's enabled tools, including browser and computer use. Tools remain subject to the user's authorization and the host's approval controls. Before using an existing signed-in browser session, declare signed_in_browser with xcb_require_capability. This requirement survives retries and hands off to Codex; ordinary public-page browsing and Playwright verification do not require that handoff. workspace_exec runs bounded offline Linux commands in an isolated staged workspace; host secrets, host dependency trees and build products are excluded. Supported repositories provide filtered read-only Git HEAD/index for status and diffs; source Git configuration, hooks, history and Git writes are unavailable. Use gitInspectionAvailable and gitUnavailable in the command result to check support. Only successful joined commands publish revision-checked changes. Native provider shell or arbitrary host paths are unavailable. Managed workers can use xcb_swarm_status, xcb_message_list and xcb_message_send for durable cross-provider coordination inside this workspace. Use xcb_backlog_list/get/add/update/complete to inspect, propose or report already-completed deferred work for your project. xcb_memory_recent supplies bounded recent work summaries; xcb_memory_search retrieves cited historical knowledge from the explicitly bound Wordcell vault. Only the host can admit proposed follow-ups under a user-delegated project grant. Proposals never expand that grant or release work themselves. Always end with a concise work summary, checks and remaining blockers; the harness records it in work history. Recent summaries are historical reports and must be revalidated before relying on changing facts. Direct sessions have no managed mailbox or backlog. Keep file revisions and use expectedRevision when writing. Never claim effects you did not perform. Ask for human input when it is necessary.").await?;
         // An empty catalog is not evidence that every model was withdrawn
         // (metadata probes refuse it too), so keep the stored catalog.
         if models.is_empty() {
@@ -2179,6 +2418,18 @@ pub(crate) async fn run_prepared<P: Protocol>(
             if *cancel.borrow() {
                 return Ok((Terminal::Cancelled, vec![]));
             }
+            if protocol.host_pending_attention()
+                || capabilities
+                    .as_ref()
+                    .is_some_and(|manager| manager.policy_denied())
+            {
+                pending_attention = true;
+                quota_failure = Some(Failure::Policy);
+                observer(Progress::Notice(
+                    "A browser or computer action needs explicit approval; automatic work has stopped.".into(),
+                ));
+                return Ok((Terminal::Failed, vec![]));
+            }
             if frames >= crate::protocol::MAX_TURN_FRAMES {
                 // Volume is not a protocol violation: the tools that already
                 // ran are settled and the partial answer is kept. The turn
@@ -2204,6 +2455,14 @@ pub(crate) async fn run_prepared<P: Protocol>(
             for event in batch.events {
                 if *cancel.borrow() {
                     return Ok((Terminal::Cancelled, vec![]));
+                }
+                if protocol.host_pending_attention() {
+                    pending_attention = true;
+                    quota_failure = Some(Failure::Policy);
+                    observer(Progress::Notice(
+                        "Automatic approval review stopped a computer action; explicit approval is required.".into(),
+                    ));
+                    return Ok((Terminal::Failed, vec![]));
                 }
                 match event {
                     TurnEvent::Diagnostic(detail) => {
@@ -2261,7 +2520,11 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         });
                     }
                     TurnEvent::Assistant(text) if admitted => answer.completed(text)?,
-                    TurnEvent::Attention => pending_attention = true,
+                    TurnEvent::Attention => {
+                        pending_attention = true;
+                        quota_failure = Some(Failure::Policy);
+                        return Ok((Terminal::Failed, vec![]));
+                    }
                     // Quota is an observation, not provider work: an account
                     // rejected before admission still settles as a quota or
                     // authentication failure rather than an unknown one.
@@ -2351,6 +2614,52 @@ pub(crate) async fn run_prepared<P: Protocol>(
                                     (Err(error), None)
                                 }
                             }
+                        } else if name == "xcb_tools_image" {
+                            (
+                                crate::tool_output::reopen(&store, &session.id, &arguments),
+                                Some(EffectState::None),
+                            )
+                        } else if name == "xcb_tools_list" {
+                            let result =
+                                match serde_json::from_value::<CapabilityList>(arguments.clone()) {
+                                    Ok(request) => {
+                                        capabilities
+                                            .as_mut()
+                                            .expect("tools enabled")
+                                            .list(request.server.as_deref())
+                                            .await
+                                    }
+                                    Err(error) => Err(error.into()),
+                                };
+                            (result, Some(EffectState::None))
+                        } else if name == "xcb_tools_call" {
+                            match serde_json::from_value::<CapabilityCall>(arguments.clone()) {
+                                Ok(request) => {
+                                    let result = capabilities
+                                        .as_mut()
+                                        .expect("tools enabled")
+                                        .call(&request.server, &request.tool, request.arguments)
+                                        .await;
+                                    (result.result, Some(result.effects))
+                                }
+                                Err(error) => (Err(error.into()), Some(EffectState::None)),
+                            }
+                        } else if name == "xcb_require_capability" {
+                            let result = if arguments == json!({"capability":"signed_in_browser"}) {
+                                store.require_session_capabilities(
+                                    &session.id,
+                                    xcb_core::session::TaskRequirements {
+                                        signed_in_browser: true,
+                                    },
+                                )?;
+                                capability_handoff = session.model.provider != Provider::Codex;
+                                Ok(
+                                    json!({"required":"signed_in_browser", "handoff":capability_handoff}),
+                                )
+                            } else {
+                                Err(Error::Protocol("unsupported task capability"))
+                            };
+                            (result, Some(EffectState::None))
                         } else if name.starts_with("xcb_") {
                             let (output, call_effects) = managed_tool_call(
                                 &store,
@@ -2382,22 +2691,12 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         // Result shaping never aborts the turn: legal tool
                         // output that cannot ride the transcript bound is a
                         // tool rejection with guidance, not a protocol failure.
-                        let (text, failed) = match output {
-                            Ok(output) => match serde_json::to_string(&output) {
-                                Ok(text) => (text, false),
-                                Err(_) => ("tool result could not be encoded".to_owned(), true),
-                            },
-                            Err(error) => (error.to_string(), true),
-                        };
-                        let (text, failed) = if text.len() > MAX_TEXT_BYTES {
-                            (
-                                "tool result exceeds 256 KiB; read a smaller file or a range"
-                                    .to_owned(),
-                                true,
-                            )
-                        } else {
-                            (text, failed)
-                        };
+                        let prepared = crate::tool_output::prepare(
+                            store.root(),
+                            output,
+                            name == "xcb_tools_call" || name == "xcb_tools_image",
+                        );
+                        let text = prepared.text;
                         // The durable transcript carries display-safe text;
                         // the provider still receives the exact result.
                         let message = Message {
@@ -2408,7 +2707,7 @@ pub(crate) async fn run_prepared<P: Protocol>(
                                 MAX_TEXT_BYTES,
                             ),
                             at_ms: now_ms(),
-                            attachments: vec![],
+                            attachments: prepared.attachments,
                             provenance: Some(MessageProvenance {
                                 account: session.account.clone(),
                                 model: session.model.clone(),
@@ -2436,12 +2735,26 @@ pub(crate) async fn run_prepared<P: Protocol>(
                             store.append_tool_message(&session.id, &message)?;
                         }
                         protocol
-                            .reply(
-                                &mut process,
-                                &call_id,
-                                json!({"content":[{"type":"text","text":text}],"isError":failed}),
-                            )
+                            .reply(&mut process, &call_id, prepared.reply)
                             .await?;
+                        if capabilities
+                            .as_ref()
+                            .is_some_and(|manager| manager.policy_denied())
+                        {
+                            pending_attention = true;
+                            quota_failure = Some(Failure::Policy);
+                            observer(Progress::Notice(
+                                "The browser denied this action; automatic work has stopped for explicit approval.".into(),
+                            ));
+                            return Ok((Terminal::Failed, vec![]));
+                        }
+                        if capability_handoff {
+                            answer.completed(
+                                "This task requires a signed-in browser; switching to Codex."
+                                    .into(),
+                            )?;
+                            return Ok((Terminal::TurnLimit, vec![]));
+                        }
                     }
                     TurnEvent::Result {
                         terminal,
@@ -2511,9 +2824,23 @@ pub(crate) async fn run_prepared<P: Protocol>(
             crate::process::STDERR_NOTICE_BYTES
         )));
     }
+    let capabilities_joined = if let Some(manager) = capabilities.as_mut() {
+        let joined = manager.shutdown().await;
+        effects = combine_effects(effects, manager.effects());
+        pending_attention |= manager.policy_denied();
+        joined
+    } else {
+        true
+    };
     let protocol_joined = protocol.shutdown().await;
+    effects = combine_effects(effects, protocol.host_effects());
+    pending_attention |= protocol.host_pending_attention();
     let bridge_joined = close_bridge(bridge).await;
-    let joined = process_joined && protocol_joined && bridge_joined && commands_joined;
+    let joined = process_joined
+        && protocol_joined
+        && bridge_joined
+        && commands_joined
+        && capabilities_joined;
     let (terminal, models, failure) = match result {
         Ok(Ok((terminal, models))) => (
             terminal,
@@ -3893,7 +4220,7 @@ mod tests {
                 "ctrl" => assert!(text.contains('\u{0085}') && text.contains('\u{202e}')),
                 "lines" => assert_eq!(
                     text,
-                    "tool result exceeds 256 KiB; read a smaller file or a range"
+                    "tool result exceeds 256 KiB; request a smaller result"
                 ),
                 "big" => assert!(text.contains("exceeds the 128 KiB read limit")),
                 _ => (),

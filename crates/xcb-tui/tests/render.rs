@@ -18,6 +18,8 @@ fn expected_color(color: ratatui::style::Color) -> ratatui::style::Color {
 fn app() -> App {
     let mut app = App::default();
     app.view.session = Some(Session {
+        route_pins: Default::default(),
+        requirements: Default::default(),
         id: Id::new("session").unwrap(),
         account: Id::new("personal").unwrap(),
         model: ModelChoice {

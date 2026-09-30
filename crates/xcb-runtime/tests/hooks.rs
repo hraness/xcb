@@ -22,6 +22,8 @@ fn script(root: &Path, name: &str, body: &str) -> std::path::PathBuf {
 
 fn input(workspace: &Path, event: Event) -> HookInput {
     let session = Session {
+        route_pins: Default::default(),
+        requirements: Default::default(),
         id: "s_test".parse().unwrap(),
         account: "a_test".parse().unwrap(),
         model: ModelChoice {

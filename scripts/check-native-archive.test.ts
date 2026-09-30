@@ -102,7 +102,7 @@ test("final macOS archives verify the stable Developer ID identity before execut
   const path = fixture([{ name: "xcb", contents: binary("0.15.2") }], { name: "xcb-0.15.2-darwin-aarch64.tar.gz" });
   const { result, verifierLog, executionLog } = checkMacosFixture("0.15.2", path);
   expect(result.status, result.stderr).toBe(0);
-  expect(readFileSync(verifierLog, "utf8").trim().split("\n").slice(0, 5)).toEqual(["--verify", "--strict", "--all-architectures", "--test-requirement", fixtureRequirement]);
+  expect(readFileSync(verifierLog, "utf8").trim().split("\n").slice(0, 5)).toEqual(["--verify", "--strict", "--all-architectures", "--test-requirement", `=${fixtureRequirement}`]);
   expect(readFileSync(executionLog, "utf8")).toBe("executed\n");
 });
 

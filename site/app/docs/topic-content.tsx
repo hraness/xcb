@@ -121,7 +121,7 @@ function HowRoutingWorks() {
       <p>The scores are heuristics, not measured quality or prices. When a usage limit rules out a stronger model, the chosen route says so.</p>
       <h2 id="hold">3. Hold the account</h2>
       <p>Before the provider starts, xcb holds the account so no other task can use it. Each account runs one provider turn at a time, and tasks in the same project folder, or in a folder inside it, take turns. Tasks in different folders on different accounts run at the same time.</p>
-      <p>The provider runs in an operating-system sandbox: Seatbelt on macOS, <code>bwrap</code> on Linux. It gets xcb’s file tools for the task’s folder, no shell of its own, and network access to port 443 only. See <a href="/docs/security">security and privacy</a> for what that covers.</p>
+      <p>The provider runs in an operating-system sandbox: Seatbelt on macOS, <code>bwrap</code> on Linux. It gets xcb’s file tools for the task’s folder, no shell of its own, and network access to port 443 only. Registered host tool servers can provide additional access, including browser tools. Tasks that need an existing signed-in browser stay with Codex and prefer Astra. See <a href="/docs/security">security and privacy</a> for what that covers.</p>
       <h2 id="record">4. Record how the run ended</h2>
       <p>When the provider process exits, xcb records the result: completed, needs your input, failed, or cancelled. If it can’t confirm that the provider stopped or what it changed, it records the run as uncertain, keeps the account held, and does not retry. <code>xcb recover</code> shows those runs; see <a href="/docs/troubleshooting#unfinished-run">troubleshooting</a>.</p>
       <p>In the thread, a turn that stops at a usage limit continues on another route the task hasn’t tried yet, and a turn cut off by a turn or token limit can continue on its own (up to eight times in a row within an hour by default). An uncertain run never moves to another account. <code>xcb --json route</code> runs exactly one turn and leaves retries to the caller.</p>
@@ -166,6 +166,7 @@ function Security() {
       <p>None of these send prompts, files, or account details.</p>
       <h2 id="extensions">Extensions that run code</h2>
       <p>Hooks run programs you choose at session and turn events. They are off by default and need their own <code>xcb plugins enable hooks</code>. Panes change only what the terminal shows; they cannot run code or grant a provider new tools.</p>
+      <p>Registered host MCP servers run outside the provider sandbox with their own permissions. Providers receive their tools and results, but do not inherit their environments or credentials. Connect only servers you trust. The desktop computer-use connector uses Codex’s automatic approval reviewer. See <Ext href={`${repositoryDocs}/tools.md`}>browser and shared tools</Ext>.</p>
       <h2 id="report">Report a vulnerability</h2>
       <p>Report security issues privately as described in the <Ext href={`${repository}/blob/main/SECURITY.md`}>security policy</Ext>.</p>
     </>
@@ -348,6 +349,8 @@ cd xcb
         <li>A command’s file changes are applied only when it succeeds, after checking each file hasn’t changed since the copy. Each file replacement is atomic; the entire batch is not a transaction.</li>
       </ul>
       <p>The <Ext href={`${repositoryDocs}/command-runner.md`}>command runner reference</Ext> lists every limit.</p>
+      <h3>Browser and computer tools</h3>
+      <p><code>xcb tools setup-computer</code> connects an installed desktop computer-use plugin to Codex on macOS. <code>xcb tools setup-browser</code> connects Claude’s Chrome extension to Codex, Claude, and Devin. Use <code>xcb tools list</code> to see registered connections, or add another shared MCP server with <code>xcb tools add</code>. Use <code>xcb run --signed-in-browser</code> when a task needs your existing signed-in browser. Ordinary Playwright verification uses normal routing. The <Ext href={`${repositoryDocs}/tools.md`}>tool setup guide</Ext> covers account setup, access, and provider handoffs.</p>
       <h2 id="refresh">After an upgrade or VM restart</h2>
       <p>The runner is bound to the exact files it tested. After you upgrade xcb, stop running commands, check out the matching source version, and run setup again with <code>--refresh</code>. Refresh doesn’t clear a command whose result is uncertain; resolve it with <code>xcb recover</code> first, and don’t delete lock files or job records. <code>xcb command prune --yes</code> archives old finished jobs.</p>
     </>
@@ -696,6 +699,7 @@ const commandGroups: readonly Readonly<{ id: string; title: string; commands: re
     ["link, fleet, dispatch, send, remote", "Link machines through a relay and run work on them"],
     ["daemons, projects, memory, reflex", "Project agents, project grants, Wordcell notes, learned routing"],
     ["panes, plugins, hooks, judge", "Terminal panes, extensions, lifecycle hooks, the routing judge"],
+    ["tools", "Connect browser, computer, and shared MCP tool servers"],
     ["config, recover, command, generate", "Settings, unfinished runs, command-runner jobs, app text generation"],
   ] },
   { id: "commands-programs", title: "For programs", commands: [

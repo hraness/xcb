@@ -323,7 +323,7 @@ test("macOS release verifies the pinned Developer ID before executing and instal
   const result = f.run(true, extra);
   expect(result.status, result.stderr).toBe(0);
   const args = readFileSync(extra.FIXTURE_CODESIGN_LOG, "utf8").trim().split("\n");
-  expect(args.slice(0, 5)).toEqual(["--verify", "--strict", "--all-architectures", "--test-requirement", fixtureRequirement]);
+  expect(args.slice(0, 5)).toEqual(["--verify", "--strict", "--all-architectures", "--test-requirement", `=${fixtureRequirement}`]);
   expect(args[5]).toEndWith("/candidate");
   expect(readFileSync(extra.FIXTURE_EXECUTION_LOG, "utf8")).toBe("executed\n");
   expect(readFileSync(f.destination, "utf8")).toBe(binary("0.15.2"));
