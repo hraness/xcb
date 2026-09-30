@@ -54,7 +54,7 @@ export const boardPick: Readonly<Record<RouterMode, string>> = { reset: "a_3f9c0
 
 export const boardNote: Readonly<Record<RouterMode, string>> = {
   reset: "Both Claude accounts can take the task. work still has 62% left and resets in 38 minutes, so it goes first instead of letting that quota lapse.",
-  limit: "work hit its 5-hour limit mid-task. The task keeps its instructions and continues on personal.",
+  limit: "work hit its usage limit mid-task. The task keeps its instructions and continues on personal.",
 };
 
 export const sampleTask = "Fix the failing parser test in invoice-app";

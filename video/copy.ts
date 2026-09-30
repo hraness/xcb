@@ -34,8 +34,8 @@ export const filmCopy: FilmCopy = {
       highlight: "thread/thread-2",
     },
     {
-      heading: "Quota that resets first",
-      body: "The account whose unused quota is closest to lapsing gets the task.",
+      heading: "Quota about to reset",
+      body: "xcb favors unused quota that is about to reset.",
       focus: "accounts",
       target: "accounts/pick",
       highlight: "accounts/pick",
@@ -73,5 +73,5 @@ export const filmCopy: FilmCopy = {
     heading: "What it doesn't do",
     body: "xcb doesn't raise any usage limit. It spends the quota you already have, in a better order.",
   },
-  end: { line: `Free for macOS and Linux. ${LAUNCH_STATUS}.` },
+  end: { line: `Free for Apple silicon Macs and Linux. ${LAUNCH_STATUS}.` },
 };
