@@ -124,6 +124,10 @@ def load(path, default):
     return decode(read(path)) if path.exists() or path.is_symlink() else default
 
 
+class BusyOwner(ValueError):
+    """A valid maintenance lock is held by another invocation."""
+
+
 @contextlib.contextmanager
 def owner(directory, name):
     physical(directory, directory=True, private=True)
@@ -135,7 +139,7 @@ def owner(directory, name):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise ValueError("maintenance owner already active") from error
+            raise BusyOwner("maintenance owner already active") from error
         yield
     finally:
         os.close(fd)
@@ -334,6 +338,40 @@ def sanitize_sample(resources, service, at_s):
     return sample
 
 
+def review_attention(config, at_s=None):
+    """Report attention only; a released lock never proves child-process exit."""
+    if not config["reviews_enabled"]:
+        return None
+    directory = Path(config["state_dir"])
+
+    def assess(active):
+        state = load(directory / "reviews.json", review_default())
+        require(isinstance(state, dict) and state.get("version") == VERSION, "invalid review state")
+        # A review can start while native probes run; use time after this read.
+        now = int(time.time()) if at_s is None else at_s
+        pending = state["pending"]
+        if pending is not None:
+            require(isinstance(pending, dict) and numeric(pending.get("started_s")), "invalid pending review")
+            if pending.get("failure_recorded") is True or not active:
+                return "unresolved"
+            age = now - pending["started_s"]
+            return None if 0 <= age <= config["deadline_s"] + 60 else "unresolved"
+        completed = state["last_completed_s"]
+        if completed is None:
+            return "not_completed"
+        require(numeric(completed) and completed <= now, "invalid review completion")
+        return "overdue" if now - completed > config["review_interval_s"] + 120 else None
+
+    try:
+        try:
+            with owner(directory, "review"):
+                return assess(False)
+        except BusyOwner:
+            return assess(True)
+    except (ValueError, OSError, KeyError, TypeError):
+        return "state_unavailable"
+
+
 def incident_codes(config, history):
     if not history:
         return ["telemetry_missing"]
@@ -341,6 +379,9 @@ def incident_codes(config, history):
     codes = []
     if not current["resource_ok"] or not current["service_ok"]:
         codes.append("telemetry_unavailable")
+    attention = current.get("review_attention")
+    if attention in ("unresolved", "not_completed", "overdue", "state_unavailable"):
+        codes.append("maintenance_review_" + attention)
     if current.get("review_tools_ok") is False:
         codes.append("review_tool_binding_changed")
     if current["blocked"]:
@@ -368,6 +409,7 @@ def incident_codes(config, history):
 
 
 def sample_tick(config, at_s=None, runner=command, review_binding_warnings=None):
+    real_clock = at_s is None
     at_s = int(time.time()) if at_s is None else at_s
     directory = Path(config["state_dir"])
     with owner(directory, "sample"):
@@ -378,6 +420,7 @@ def sample_tick(config, at_s=None, runner=command, review_binding_warnings=None)
         warnings = [] if review_binding_warnings is None else review_binding_warnings
         require(isinstance(warnings, list) and all(name in REVIEW_TOOLS for name in warnings), "invalid binding warnings")
         sample["review_tools_ok"] = not warnings
+        sample["review_attention"] = review_attention(config, None if real_clock else at_s)
         history = [item for item in previous["history"] if 0 <= at_s - item["at_s"] <= 86400]
         history.append(sample)
         history = history[-HISTORY_LIMIT:]
@@ -497,6 +540,7 @@ def review_tick(config, at_s=None, runner=command):
         except (ValueError, OSError):
             # Keep intent and stable id. Never infer process exit from a timeout or PID lookup.
             run["outcome"] = "uncertain"
+            state["pending"]["failure_recorded"] = True
         write(directory / "reviews.json", state)
         return {"review": run["outcome"], "id": run["id"], "session_id": state["session_id"]}
 
