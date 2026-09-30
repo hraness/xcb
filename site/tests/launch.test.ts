@@ -45,11 +45,14 @@ describe("xcb launch facts", () => {
     expect(status?.post).toContain(LAUNCH_STATUS);
   });
 
-  test("the post is a quarantined beats post until reviewed", () => {
+  test("the post is an indexable beats post with an independent review", () => {
     const post = findBlogPost(launchPostSlug);
     expect(post?.format).toBe("beats");
-    expect(post?.admission.review).toBeNull();
-    expect(post?.admission.lifecycle).toBe("quarantined");
+    expect(post?.admission.review).toMatchObject({ reviewerType: "ai", reviewedOn: "2026-09-30" });
+    expect(post?.admission.lifecycle).toBe("indexable");
+    const scores: number[] = Object.values(post?.admission.scores ?? {});
+    expect(scores.every((score) => score > 0)).toBe(true);
+    expect(scores.reduce((sum, score) => sum + score, 0)).toBeGreaterThanOrEqual(9);
   });
 
   test("every beat has a visual and alt text, and the kit ends threads at the post", () => {
