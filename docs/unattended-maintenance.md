@@ -8,6 +8,8 @@ This is a trusted host operator, separate from xcb's sandboxed coding workers. I
 
 Use a stable checkout and an xcb build that supports `xcb --json resources --workspace ABSOLUTE_PATH` and the supervisor health fields in `xcb --json service status`. Run the local-efficiency doctor first and verify the intended workspace permission boundary, `on-request` approval policy, and `auto_review` reviewer. The runner does not change these settings.
 
+For unattended service, install standalone Python and Codex into protected, versioned locations outside updater-managed directories. On macOS, `/usr/bin/python3` can select the Python bundled with the active Xcode installation, and a Codex updater can prune older releases. Preserve each package's relocatable layout, verify its bytes and required dependencies, and test the exact installed paths before pinning them. Keep authentication in its existing home directory; never copy it into these runtime installations.
+
 Create a private directory for the configuration and supply absolute paths for the tools, skill, and workspace:
 
 ```sh
