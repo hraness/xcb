@@ -291,3 +291,19 @@ A missing policy defaults to automatic only for supported unpinned installs.
 Saved notification-only or disabled policies retain their meaning. Older
 manifest versions need a release-installer rerun before becoming supported;
 source and package-manager installations retain their original update path.
+
+### Compatibility CLI updates
+
+The `xcb-compat` executable bundles the reviewed `@hraness/cli-update` release
+archive from its exact development dependency. The SDK entry does not import
+or call the updater. Existing registry runtime dependencies remain external
+and pinned to exact versions; `check:package` checks the packed dependency
+boundary and runs update status, help, and version under Bun and Node.
+
+The compatibility updater uses stable immutable `hraness/xcb` GitHub releases
+and `hraness-xcb-{version}.tgz`. It verifies the canonical release asset digest
+and package name/version/bin before the owning global package manager installs
+with scripts disabled. This preserves the compatibility package's existing
+archive-install contract; native archive attestations and every publication
+admission check above remain in force. It does not infer npm publication from
+a GitHub release or update the native `xcb` binary.

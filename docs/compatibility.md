@@ -85,7 +85,38 @@ xcb-compat sessions          # list local sessions
 xcb-compat sessions rm <id>  # remove a session and its transcript
 xcb-compat sessions prune    # drop sessions idle over 30 days (or N days)
 xcb-compat resume [id]       # continue a session (default: most recent)
+xcb-compat update            # install the latest compatibility release
+xcb-compat update check      # check without installing (--json is available)
+xcb-compat update status     # show the installation and update preference
+xcb-compat update disable    # turn off automatic updates
+xcb-compat update enable     # turn them on, including for an exact-version install
 ```
+
+Verified Bun and npm global installs on macOS and Linux update automatically
+before interactive chat, run, resume, and doctor commands, at most once a day.
+Updates use the immutable `hraness/xcb` GitHub release archive, check its digest
+and package identity, and install through the manager that owns the running
+command. Install the GitHub CLI (`gh`) and authenticate it with
+`gh auth login --hostname github.com` to download the verified archive.
+If the installed CLI has no `update` command, repeat the documented global
+installation once to add update support.
+Package install scripts stay disabled. Other commands using the global
+installation must finish before it can change; an update starts the new CLI
+before running your requested command.
+
+Canonical GitHub release archive installs track newer releases by default.
+Bun installs requested with an exact version remain pinned until
+`xcb-compat update enable`. npm does not reliably retain the original version
+request; use `xcb-compat update disable` to keep a global npm copy fixed.
+`XCB_VERSION` preserves a product version binding. `HRANESS_NO_UPDATE=1` or
+`XCB_NO_UPDATE=1` skips automatic updates for one invocation.
+
+CI, noninteractive commands, agent invocations, help, and version output do not
+trigger automatic checks. Source checkouts, project dependencies, temporary `bunx` or
+`npx` installs, and Windows package-manager shims keep their existing update
+process. SDK imports never check for updates or install code. Update preferences
+are separate from the `~/.xcb` application state; update commands do not open
+sessions or provider credentials.
 
 Assistant text streams into the chat as the provider completes each content
 block, and provider-declared errors (for example a plan's session limit) print

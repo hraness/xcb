@@ -602,6 +602,7 @@ function Sdk() {
 # or
 bun add @hraness/xcb`}</Code>
       <p>The package also installs the <code>xcb-compat</code> command, which is separate from the native <code>xcb</code>.</p>
+      <p>Verified Bun/npm global copies on macOS and Linux update before interactive work using immutable GitHub release archives. Downloading updates requires the GitHub CLI (<code>gh</code>). Use <code>xcb-compat update check</code> to check a release and <code>xcb-compat update disable</code> to keep the installed version. Exact Bun version pins, source checkouts, project dependencies, and temporary installs keep their existing update process. SDK imports never check for updates. The <Ext href={`${repositoryDocs}/compatibility.md#command-line-interface`}>compatibility reference</Ext> covers update preferences and supported installs.</p>
       <h2 id="example">A complete example</h2>
       <p>This program runs as is. It uses a stand-in adapter that starts no provider and echoes the prompt, so you can watch the router hold the account during the task and release it after. Save it as <code>router-demo.ts</code> in the project where you installed the SDK:</p>
       <Code language="typescript">{sdkExample}</Code>

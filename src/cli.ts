@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { runCliUpdate } from "@hraness/cli-update";
+import { compatibilityUpdateOptions } from "./cli/update.ts";
 
 import { openAccountDatabase } from "./sqlite-port.ts";
 import { SqliteAccountLeases } from "./accounts.ts";
@@ -24,7 +27,7 @@ import { runCliTurn } from "./cli/run.ts";
 import { runCliChat } from "./cli/chat.ts";
 import { dim, green, red, yellow, printRemainingText } from "./cli/tui.ts";
 
-const VERSION = "0.15.1";
+const VERSION = "0.16.0";
 
 const USAGE = `xcb-compat: the TypeScript compatibility CLI for Excalibur (xcb), which routes
 coding tasks across the Claude, Codex, and Devin subscriptions you already pay
@@ -48,6 +51,10 @@ Usage:
   xcb-compat judge logout      remove the stored jev API key
   xcb-compat judge test        ask the judge a bounded question batch (live call)
   xcb-compat migrate           copy legacy AgentMixer state into ~/.xcb (keeps the original)
+  xcb-compat update            install the latest verified compatibility release
+  xcb-compat update check      check for a newer release (--json for structured output)
+  xcb-compat update status     show this installation's update policy
+  xcb-compat update disable    turn off automatic updates (enable turns them on)
   xcb-compat --version
 
 Options:
@@ -61,6 +68,15 @@ Environment:
   ${CLI_DEVIN_ENV}     pin an exact devin executable path
   ${JUDGE_KEY_ENV}   jev API key (also ${JUDGE_KEY_VENDOR_ENV}); overrides the vaulted key
   XCB_STATE     override the state root (default ~/.xcb)
+  HRANESS_NO_UPDATE=1          suppress automatic updates for this invocation
+  XCB_NO_UPDATE=1              suppress xcb automatic updates
+  XCB_VERSION                 preserve an explicit product version binding
+
+Supported Unix Bun/npm global installs update before interactive chat, run,
+resume, and doctor commands, at most once a day. GitHub CLI (gh), authenticated
+with gh auth login --hostname github.com, downloads the immutable archive.
+Source, project, temporary, and pinned installs keep their existing update
+process. SDK imports never update.
 `;
 
 function parseFlags(args: readonly string[]): { provider: CliProviderName | "auto"; providerExplicit: boolean; model: string | undefined; positional: string[]; prompt: string | undefined; cwd: string | undefined } {
@@ -513,7 +529,16 @@ export async function main(argv: readonly string[]): Promise<number> {
   return await runCliChat({ workspace, provider, ...(flags.model === undefined ? {} : { model: flags.model }) });
 }
 
-main(process.argv.slice(2)).then((code) => process.exit(code), (error) => {
+async function execute(argv: readonly string[]): Promise<number> {
+  const update = await runCliUpdate(compatibilityUpdateOptions({
+    version: VERSION, entrypoint: fileURLToPath(import.meta.url), argv,
+  }));
+  if (update.handled) return update.exitCode;
+  try { return await main(argv); }
+  finally { await update.release(); }
+}
+
+execute(process.argv.slice(2)).then((code) => process.exit(code), (error) => {
   process.stderr.write(`${red("xcb-compat:")} ${error instanceof Error ? error.message : "unexpected failure"}\n`);
   process.exit(1);
 });

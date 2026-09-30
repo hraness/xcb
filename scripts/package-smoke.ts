@@ -54,8 +54,8 @@ async function readBoundedCommandOutput(
   return Buffer.concat(chunks, length);
 }
 
-async function run(command: readonly string[], cwd: string): Promise<string> {
-  const child = Bun.spawn([...command], { cwd, stderr: "pipe", stdout: "pipe" });
+async function run(command: readonly string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<string> {
+  const child = Bun.spawn([...command], { cwd, ...(env === undefined ? {} : { env }), stderr: "pipe", stdout: "pipe" });
   const kill = () => child.kill(9);
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -248,7 +248,8 @@ export async function packageSmoke(tarballArgument?: string): Promise<void> {
     await writeFile(
       join(consumer, "smoke.mjs"),
       [
-        `import { ${REQUIRED_EXPORTS.join(", ")} } from "${PACKAGE_NAME}";`,
+        `globalThis.fetch = async () => { throw new Error("SDK import attempted a network request"); };`,
+        `const { ${REQUIRED_EXPORTS.join(", ")} } = await import("${PACKAGE_NAME}");`,
         `const built = codexManagedStaticCatalog({ model: "smoke-model", catalog: { models: [{`,
         `  slug: "smoke-model", display_name: "Smoke", description: "Synthetic",`,
         `  supported_reasoning_levels: [{ effort: "medium", description: "Normal work" }],`,
@@ -300,6 +301,16 @@ export async function packageSmoke(tarballArgument?: string): Promise<void> {
       const help = await run([executable, installedCli, "--help"], consumer);
       if (!help.includes("xcb-compat auth claude") || !help.includes("xcb-compat doctor") || help.includes("  xcb ")) {
         throw new Error("Installed xcb-compat --help did not print the usage surface");
+      }
+      const productState = join(consumer, `update-must-not-open-${expectedRuntime}`);
+      const update = record(JSON.parse(await run([executable, installedCli, "update", "status", "--json"], consumer,
+        { ...process.env, XCB_STATE: productState, HOME: consumer })), "installed update status");
+      if (update.package !== PACKAGE_NAME || update.currentVersion !== manifest.version
+        || update.status !== "unsupported" || update.supported !== false) {
+        throw new Error("Packed CLI must report a project installation without attempting to update it");
+      }
+      if (await access(productState).then(() => true, () => false)) {
+        throw new Error("The packed update command opened product state");
       }
     }
     console.log("XCB standalone package boundary verified under Bun and Node.");

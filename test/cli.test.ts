@@ -1,6 +1,6 @@
 import { CliSessionStore } from "../src/cli/sessions.ts";
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, realpath } from "node:fs/promises";
+import { mkdtemp, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -40,7 +40,28 @@ describe("xcb CLI", () => {
   test("--help prints the command surface", async () => {
     const { code, stdout } = await cli(["--help"]);
     expect(code).toBe(0);
-    for (const command of ["auth claude", "auth devin", "auth status", "auth logout", "doctor", "sessions", "resume", "run [-p", "--cwd", "devin"]) expect(stdout).toContain(command);
+    for (const command of ["auth claude", "auth devin", "auth status", "auth logout", "doctor", "sessions", "resume", "run [-p", "--cwd", "devin", "update check", "update status", "update disable"]) expect(stdout).toContain(command);
+  });
+
+  test("update commands run before opening application state and refuse source updates", async () => {
+    const root = join(await stateDir(), "not-created");
+    for (const operation of ["status", "check", "disable"]) {
+      const result = await cli(["update", operation, "--json"], undefined, root);
+      expect(result.code).toBe(operation === "status" ? 0 : 1);
+      const report = JSON.parse(result.stdout) as Record<string, unknown>;
+      expect(report.package).toBe("@hraness/xcb");
+      expect(report.status).toBe("unsupported");
+      expect(report.supported).toBe(false);
+      expect(await stat(root).catch(() => null)).toBeNull();
+    }
+  });
+
+  test("help and version keep both application and updater state untouched", async () => {
+    const root = join(await stateDir(), "not-created");
+    for (const command of ["--help", "--version", "help", "-v"]) {
+      expect((await cli([command, "ignored"], undefined, root)).code).toBe(0);
+      expect(await stat(root).catch(() => null)).toBeNull();
+    }
   });
 
   test("doctor reports missing providers and exits nonzero", async () => {

@@ -216,5 +216,7 @@ command, setting, and exit code.
 The name xcb is short for Excalibur. xcb was formerly AgentMixer: `xcb accounts import-agentmixer --source <path>`
 copies one Claude credential ([migrating](docs/compatibility.md#migrating-from-agentmixer)).
 The [compatibility reference](docs/compatibility.md) covers the TypeScript
-package and its `xcb-compat` CLI. [Contributing](CONTRIBUTING.md) ·
+package and its `xcb-compat` CLI. Supported Unix Bun/npm global copies update
+before interactive work; `xcb-compat update disable` turns that off. SDK imports
+never update. [Contributing](CONTRIBUTING.md) ·
 [Security](SECURITY.md) · [MIT license](LICENSE)

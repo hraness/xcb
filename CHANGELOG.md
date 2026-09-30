@@ -10,12 +10,13 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.16.0 - 2026-09-30
 
-Verified release installs keep xcb current before interactive commands, with an
-opt-out and checks that protect pinned tools and running work.
+Verified native release installs and supported global compatibility installs
+keep xcb current before interactive commands, with an opt-out and checks that
+protect pinned tools and running work.
 
-- Default to automatic updates only for unpinned release installs whose saved
+- Enable native automatic updates only for unpinned release installs whose saved
   paths, version, and executable and installer checksums still match. Preserve
   saved notification-only and disabled preferences.
 - Check at most once a day before interactive commands and start the updated
@@ -23,9 +24,15 @@ opt-out and checks that protect pinned tools and running work.
   and `HRANESS_NO_UPDATE=1` skip automatic checks.
 - Wait for other xcb commands, supervisors, and services to exit before
   replacing the binary. Updates do not stop work or restart services.
-- Refuse source builds, package-manager installations, mismatched install
-  records, mutable releases, and implicit downgrades. Exact-version installs
-  remain pinned; existing manual update commands remain available.
+- Keep source builds and package-managed native installs on their existing
+  update process. Refuse mismatched install records, mutable releases, and
+  implicit downgrades; preserve exact-version pins.
+- Add `xcb-compat update`, `check`, `status`, `enable`, and `disable`. Supported
+  Bun/npm global copies use the immutable compatibility archive and its digest,
+  with install scripts disabled and the SDK unchanged.
+- Keep help and version output free of updater state changes. Protect an
+  interrupted native install even when the updater parent stops before its
+  installer, and verify the new executable before reporting success.
 
 ## 0.15.1 - 2026-09-30
 
