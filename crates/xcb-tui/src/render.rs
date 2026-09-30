@@ -468,6 +468,12 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         );
         return;
     }
+    {
+        let mut cache = app.render_cache.borrow_mut();
+        normalize_cursor(&mut app.composer.textarea, &mut cache.composer_cursor);
+    }
+    let composer_layout =
+        crate::composer_layout::layout(&app.composer.textarea, area.width.saturating_sub(4));
     let target = app.composer_target_label();
     let target_identity = target
         .as_deref()
@@ -487,10 +493,10 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         .unwrap_or(u16::MAX)
         .min(3)
         .min(area.height.saturating_sub(4 + footer_height + notice_min));
-    let input_height = u16::try_from(app.composer.textarea.lines().len())
+    let input_height = u16::try_from(composer_layout.rows.len())
         .unwrap_or(u16::MAX)
-        .saturating_add(1)
-        .clamp(2, 7)
+        .saturating_add(2)
+        .clamp(3, 9)
         .min(
             area.height
                 .saturating_sub(2 + footer_height + attachment_height + notice_min),
@@ -650,15 +656,42 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
             parts[3],
         );
     }
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Rgb(40, 42, 46))),
+        parts[4],
+    );
     // A fixed gutter anchors the prompt while the textarea owns scrolling.
     let composer_padding = u16::from(parts[4].height > 1);
     let composer_area = Rect::new(
         parts[4].x.saturating_add(2),
         parts[4].y.saturating_add(composer_padding),
-        parts[4].width.saturating_sub(2),
-        parts[4].height.saturating_sub(composer_padding),
+        parts[4].width.saturating_sub(4),
+        parts[4]
+            .height
+            .saturating_sub(composer_padding + u16::from(parts[4].height > 2)),
     );
+    app.composer_width = composer_area.width;
     app.composer.textarea.set_block(Block::default());
+    app.composer.textarea.set_style(
+        Style::default()
+            .fg(Color::Rgb(208, 208, 205))
+            .bg(Color::Rgb(40, 42, 46)),
+    );
+    app.composer.textarea.set_cursor_style(
+        Style::default()
+            .fg(Color::Rgb(15, 17, 21))
+            .bg(Color::Rgb(123, 194, 239))
+            .add_modifier(if no_color(&|name| std::env::var_os(name)) {
+                Modifier::REVERSED
+            } else {
+                Modifier::empty()
+            }),
+    );
+    app.composer.textarea.set_placeholder_style(
+        Style::default()
+            .fg(Color::Rgb(148, 149, 146))
+            .bg(Color::Rgb(40, 42, 46)),
+    );
     // The gutter doubles as the Vim mode indicator once `/vim` is on.
     let gutter = match app.composer.vim_mode() {
         Some(VimMode::Normal) => "N",
@@ -666,7 +699,12 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         None => "›",
     };
     frame.render_widget(
-        Paragraph::new(gutter).style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(gutter).style(
+            Style::default()
+                .fg(Color::Rgb(208, 208, 205))
+                .bg(Color::Rgb(40, 42, 46))
+                .add_modifier(Modifier::BOLD),
+        ),
         Rect::new(parts[4].x, composer_area.y, 1, composer_area.height.min(1)),
     );
     app.composer
@@ -674,24 +712,24 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         .set_cursor_line_style(Style::default());
     app.composer.textarea.set_placeholder_text(
         if app.managed_mode() && app.view.state == State::Working {
-            "Describe work · /steer selects a task · /attention"
+            "Describe work · /attn"
         } else if app.view.remote_active {
             "Running in another terminal · your draft is kept here"
         } else if app.view.state == State::Working {
             "Type a follow-up while the agent works"
         } else {
-            "Ask xcb to work on something · / for commands"
+            "Ask xcb to do anything"
         },
     );
     {
         let mut cache = app.render_cache.borrow_mut();
         let cache = &mut *cache;
-        render_textarea(
+        render_composer(
             frame,
             &mut app.composer.textarea,
             composer_area,
             &mut cache.composer_scroll,
-            &mut cache.composer_cursor,
+            &composer_layout,
         );
     }
     // A live run owned by a sibling terminal is normal parallel work, not a
@@ -817,25 +855,23 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                     .map(|label| format!(" · {label}"))
                     .or_else(|| lowest.map(|p| format!(" · quota {}%", p.round() as u32)))
                     .unwrap_or_default();
-                format!(
-                    "{running} running{} · {waiting} {} you (/attention) · {}{}{}{}",
-                    if queued > 0 {
-                        format!(" · {queued} queued")
-                    } else {
-                        String::new()
-                    },
-                    if waiting == 1 { "needs" } else { "need" },
-                    if crate::in_thread(&app.view) {
-                        format!("{} projects", app.view.workspaces.len())
-                    } else {
-                        format!("{} chats", app.view.conversations.len())
-                    },
-                    routed
-                        .map(|route| format!(" · {route}"))
-                        .unwrap_or_default(),
-                    quota,
-                    account_hint,
-                )
+                let mut summary = Vec::new();
+                if running > 0 {
+                    summary.push(format!("{running} running"));
+                }
+                if queued > 0 {
+                    summary.push(format!("{queued} queued"));
+                }
+                if waiting > 0 {
+                    summary.push(format!(
+                        "{waiting} {} you · /attn",
+                        if waiting == 1 { "needs" } else { "need" }
+                    ));
+                }
+                if let Some(route) = routed {
+                    summary.push(route);
+                }
+                format!("{}{}{}", summary.join(" · "), quota, account_hint)
             })
         })
         .or_else(|| {
@@ -848,7 +884,7 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
                         "No accounts yet: /quit, then run xcb setup claude (or codex) · ? help"
                             .into()
                     } else {
-                        "automatic routing · global dispatcher".into()
+                        String::new()
                     }
                 })
         })
@@ -889,7 +925,7 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
             })
             .unwrap_or_else(|| {
                 if app.attachments.is_empty() {
-                    format!("? help · Ctrl-T history · Ctrl-G editor · {newline}")
+                    format!("? help · F6 sessions · {newline}")
                 } else {
                     format!("? help · /detach removes images · {newline}")
                 }
@@ -923,11 +959,11 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
     } else if !app.overview_focused() {
         let mut cache = app.render_cache.borrow_mut();
         cache.editor_open = false;
-        place_textarea_cursor(
+        place_composer_cursor(
             frame,
-            &app.composer.textarea,
             composer_area,
             &mut cache.composer_scroll,
+            &composer_layout,
         );
     }
 }
@@ -996,6 +1032,74 @@ fn normalize_cursor(textarea: &mut TextArea<'static>, previous: &mut Option<(usi
     }
     let DataCursor(row, column) = textarea.cursor();
     *previous = Some((row, column));
+}
+
+fn render_composer(
+    frame: &mut Frame<'_>,
+    textarea: &mut TextArea<'static>,
+    area: Rect,
+    scroll: &mut (usize, usize),
+    layout: &crate::composer_layout::Layout,
+) {
+    if area.is_empty() {
+        return;
+    }
+    frame.render_widget(&*textarea, area);
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(textarea.style()), area);
+    scroll.0 = next_scroll_top(scroll.0, layout.cursor.0, area.height as usize);
+    scroll.1 = 0;
+    if textarea.is_empty() {
+        frame.render_widget(
+            Paragraph::new(clean(textarea.placeholder_text()))
+                .style(textarea.placeholder_style().unwrap_or_else(muted)),
+            area,
+        );
+        return;
+    }
+    let DataCursor(row, col) = textarea.cursor();
+    let selection = textarea.selection_range();
+    let lines: Vec<_> = layout
+        .rows
+        .iter()
+        .skip(scroll.0)
+        .take(area.height as usize)
+        .map(|glyphs| {
+            Line::from(
+                glyphs
+                    .iter()
+                    .map(|glyph| {
+                        let style = if glyph.source == (row, col) {
+                            textarea.style().patch(textarea.cursor_style())
+                        } else if selection
+                            .is_some_and(|(start, end)| glyph.source >= start && glyph.source < end)
+                        {
+                            textarea.style().add_modifier(Modifier::REVERSED)
+                        } else {
+                            textarea.style()
+                        };
+                        Span::styled(glyph.text.as_str(), style)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn place_composer_cursor(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    scroll: &mut (usize, usize),
+    layout: &crate::composer_layout::Layout,
+) {
+    if area.is_empty() {
+        return;
+    }
+    frame.set_cursor_position(Position::new(
+        area.x + (layout.cursor.1 as u16).min(area.width - 1),
+        area.y + (layout.cursor.0.saturating_sub(scroll.0) as u16).min(area.height - 1),
+    ));
 }
 
 fn render_textarea(
@@ -1507,20 +1611,6 @@ fn tail_lines(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-fn hint_line(app: &App) -> Line<'static> {
-    let hint = if app
-        .view
-        .extensions
-        .iter()
-        .any(|(name, _)| name == "algal supervisor")
-    {
-        "Describe work or ask about the running task swarm"
-    } else {
-        "/help for commands · /pane to change this view"
-    };
-    Line::from(Span::styled(hint, muted()))
-}
-
 /// The heading row stays pinned; only the body scrolls, so the paused
 /// marker is always visible no matter where the viewport sits.
 fn render_heading(frame: &mut Frame<'_>, heading: Line<'static>, area: Rect) {
@@ -1686,7 +1776,7 @@ fn render_responses(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     // An entirely empty transcript shows the hint instead of a tail.
     let hint_rows = if total == 0 {
-        let rows = wrap_rows(&[hint_line(app)], width);
+        let rows = Vec::new();
         total = rows.len();
         rows
     } else {

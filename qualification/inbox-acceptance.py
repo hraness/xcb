@@ -213,7 +213,7 @@ def main():
         try:
             ready_by = time.monotonic() + 12
             def composer_ready():
-                return "›".encode() in capture and b"Ctrl-T history" in capture
+                return "›".encode() in capture and b"F6 sessions" in capture
 
             while not composer_ready() and time.monotonic() < ready_by:
                 drain(.1)

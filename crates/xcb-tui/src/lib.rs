@@ -1,5 +1,6 @@
 mod agent_grid;
 pub mod composer;
+mod composer_layout;
 pub mod external_editor;
 pub mod input_recovery;
 mod interaction;
@@ -49,64 +50,85 @@ pub struct SlashCommand {
 }
 pub const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
-        name: "/detach",
+        name: "/hide",
         alias: "",
+        args: "<number>",
+        summary: "hide a session from this overview",
+        needs_args: true,
+    },
+    SlashCommand {
+        name: "/pick",
+        alias: "",
+        args: "<number>",
+        summary: "select a numbered session",
+        needs_args: true,
+    },
+    SlashCommand {
+        name: "/show",
+        alias: "",
+        args: "",
+        summary: "restore hidden sessions",
+        needs_args: false,
+    },
+    SlashCommand {
+        name: "/detach",
+        alias: "/dtch",
         args: "[index|all]",
         summary: "remove a pending attachment",
         needs_args: false,
     },
     SlashCommand {
         name: "/resume",
-        alias: "",
+        alias: "/rsm",
         args: "",
         summary: "resume a saved conversation or session",
         needs_args: false,
     },
     SlashCommand {
         name: "/rename",
-        alias: "",
+        alias: "/ren",
         args: "[name]",
         summary: "rename this conversation or session",
         needs_args: false,
     },
     SlashCommand {
         name: "/status",
-        alias: "",
+        alias: "/stat",
         args: "",
         summary: "inspect current routing and agent state",
         needs_args: false,
     },
     SlashCommand {
         name: "/history",
-        alias: "",
+        alias: "/hist",
         args: "",
         summary: "browse saved transcript and older pages",
         needs_args: false,
     },
     SlashCommand {
         name: "/copy",
-        alias: "",
+        alias: "/cpy",
         args: "",
         summary: "copy the last assistant answer",
         needs_args: false,
     },
     SlashCommand {
         name: "/clear",
-        alias: "",
+        alias: "/clr",
         args: "",
         summary: "clear display without deleting history",
         needs_args: false,
     },
     SlashCommand {
         name: "/editor",
-        alias: "",
+        alias: "/edit",
         args: "",
         summary: "edit this draft in VISUAL or EDITOR",
         needs_args: false,
     },
     SlashCommand {
         name: "/drafts",
-        alias: "",
+        alias: "/drft",
         args: "",
         summary: "recover private drafts from earlier terminals",
         needs_args: false,
@@ -120,22 +142,22 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/thinking",
-        alias: "",
+        alias: "/thnk",
         args: "",
         summary: "show or hide reasoning output",
         needs_args: false,
     },
     SlashCommand {
         name: "/agents",
-        alias: "",
+        alias: "/agnt",
         args: "",
         summary: "inspect live managed agents and tasks",
         needs_args: false,
     },
     SlashCommand {
         name: "/overview",
-        alias: "",
-        args: "[all|active|attention|filter <text>|clear|hide|show]",
+        alias: "/ovw",
+        args: "[recent|all|active|attn|next|prev|filter <text>|clear|hide|show]",
         summary: "filter sessions; F6 browses the grid",
         needs_args: false,
     },
@@ -155,14 +177,14 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/cancel",
-        alias: "",
+        alias: "/stop",
         args: "[task-id]",
         summary: "request cancellation of a task",
         needs_args: false,
     },
     SlashCommand {
         name: "/steer",
-        alias: "",
+        alias: "/guid",
         args: "<task-id> <guidance>",
         summary: "queue guidance for a task's next allowed turn",
         needs_args: true,
@@ -176,42 +198,42 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/inbox",
-        alias: "",
+        alias: "/inbx",
         args: "[all|task-id]",
         summary: "see saved guidance and when it reached a worker",
         needs_args: false,
     },
     SlashCommand {
         name: "/project",
-        alias: "",
+        alias: "/proj",
         args: "[all|grant [project] <tasks> <hours> <goal>|pause|resume [project]]",
         summary: "automatic follow-up work within a task and hour budget",
         needs_args: false,
     },
     SlashCommand {
         name: "/program",
-        alias: "",
+        alias: "/prgm",
         args: "[task-id]",
         summary: "inspect resumable programs and their worker tasks",
         needs_args: false,
     },
     SlashCommand {
         name: "/memory",
-        alias: "",
+        alias: "/mem",
         args: "[project] search <query>",
         summary: "search the project's Wordcell vault",
         needs_args: true,
     },
     SlashCommand {
         name: "/workspace",
-        alias: "",
+        alias: "/work",
         args: "[name|path|add <dir>|move <task> <name|path>|go|clear]",
         summary: "focus the thread on a project or move new work",
         needs_args: false,
     },
     SlashCommand {
         name: "/attention",
-        alias: "",
+        alias: "/attn",
         args: "",
         summary: "questions, approvals and actions across agents",
         needs_args: false,
@@ -225,14 +247,14 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/reply",
-        alias: "",
+        alias: "/ans",
         args: "<task-id> <answer>",
         summary: "answer a task; permissions still require approval",
         needs_args: true,
     },
     SlashCommand {
         name: "/schedule",
-        alias: "",
+        alias: "/schd",
         args: "[all|every <seconds> …|pause <id>|resume <id>]",
         summary: "local recurring prompts for this agent",
         needs_args: false,
@@ -246,7 +268,7 @@ pub const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "/attach",
-        alias: "",
+        alias: "/img",
         args: "<path>",
         summary: "attach a file or image",
         needs_args: true,
@@ -1074,14 +1096,15 @@ pub struct App {
     pub(crate) render_cache: std::cell::RefCell<render::RenderCache>,
     dirty: bool,
     view_fingerprint: u64,
-    /// Mouse capture is off by default so terminal-native drag selection and
-    /// copy keep working; `/mouse` turns wheel scrolling on.
+    /// The interactive terminal enables mouse capture for wheel scrolling.
+    /// `/mouse` releases it for terminal-native text selection.
     pub mouse_capture: bool,
     /// Set by `/mouse`; the terminal loop applies the change and clears it.
     mouse_toggled: bool,
     /// Whether the terminal accepted the kitty keyboard-enhancement flags;
     /// only then does Shift-Enter arrive distinguishable from Enter.
     pub keyboard_enhanced: bool,
+    composer_width: u16,
     /// The help dialog was opened by `?` on an empty composer; a second `?`
     /// closes it and types the literal character instead.
     help_via_question: bool,
@@ -1246,6 +1269,9 @@ impl App {
             return Vec::new();
         };
         const MANAGED: &[&str] = &[
+            "/hide",
+            "/pick",
+            "/show",
             "/detach",
             "/resume",
             "/rename",
@@ -1296,7 +1322,10 @@ impl App {
         let mut matches: Vec<_> = SLASH_COMMANDS
             .iter()
             .filter(|command| available(command))
-            .filter(|command| command.name.starts_with(text))
+            .filter(|command| {
+                command.name.starts_with(text)
+                    || (!command.alias.is_empty() && command.alias.starts_with(text))
+            })
             .collect();
         matches.sort_by_key(|command| command.name);
         matches
@@ -2162,11 +2191,28 @@ impl App {
             .find(|entry| entry.alias == command)
             .map_or(command, |entry| entry.name);
         let command = match command {
+            "/attn" => "/attention",
+            "/ovw" => "/overview",
+            "/sess" => "/sessions",
+            "/hist" => "/history",
+            "/proj" => "/project",
+            "/work" => "/workspace",
+            "/schd" => "/schedule",
+            "/acct" => "/accounts",
+            "/mdl" => "/model",
+            "/clr" => "/clear",
+            "/cpy" => "/copy",
+            "/edit" => "/editor",
+            "/ren" => "/rename",
+            "/bklog" => "/backlog",
             "/resume" => "/sessions",
             "/agents" => "/tasks",
             other => other,
         };
         let arguments = arguments.trim();
+        if self.session_overview_command(input) {
+            return true;
+        }
         if self.interaction_command(command, arguments, output) {
             return true;
         }
@@ -2577,8 +2623,14 @@ impl App {
             self.notice = "Waiting for the image to finish loading; your draft is retained.".into();
             return true;
         }
+        if self.composer.move_visual(&event, self.composer_width) {
+            return true;
+        }
         match self.composer.handle(event) {
             ComposerAction::Submit(text) => {
+                if self.session_overview_command(&text) {
+                    return true;
+                }
                 if text.starts_with('/') {
                     return self.slash(&text, output);
                 }
@@ -3214,9 +3266,14 @@ pub fn run_with_options(
     // is indistinguishable from Enter, which the help text reflects.
     let keyboard_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
     let _restore = Restore { keyboard_enhanced };
-    // Mouse capture stays off so the terminal's own drag-select and copy keep
-    // working; `/mouse` enables wheel scrolling on request.
-    execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+    // Wheel scrolling is available immediately; `/mouse` releases capture
+    // for the terminal's native text selection.
+    execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    )?;
     if keyboard_enhanced {
         execute!(
             io::stdout(),
@@ -3226,6 +3283,7 @@ pub fn run_with_options(
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut app = App {
         keyboard_enhanced,
+        mouse_capture: true,
         initial_view_pending: true,
         ..App::default()
     };
