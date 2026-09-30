@@ -10,6 +10,16 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.14.5 - 2026-09-30
+
+Claude and Devin sign-in show the browser link in the terminal so you can
+open it yourself when browser handoff fails.
+
+- Claude recognizes terminal hyperlinks and prints the sign-in URL before
+  asking for an optional code.
+- Devin uses its supported browser-and-code sign-in flow, which prints the
+  link and asks for the code from the sign-in page.
+
 ## 0.14.4 - 2026-09-29
 
 Claude and Codex start with automatic approval review. xcb stops after a

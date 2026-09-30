@@ -324,6 +324,7 @@ struct ClaudeLoginObserver {
     bytes: Zeroizing<Vec<u8>>,
     url_sent: bool,
     prompt_sent: bool,
+    prompt_seen: bool,
     failed: bool,
 }
 
@@ -366,18 +367,27 @@ impl ClaudeLoginObserver {
         }
         self.bytes.extend_from_slice(bytes);
         static ANSI: OnceLock<Regex> = OnceLock::new();
+        static OSC: OnceLock<Regex> = OnceLock::new();
         static URL: OnceLock<Regex> = OnceLock::new();
         let raw = Zeroizing::new(String::from_utf8_lossy(&self.bytes).into_owned());
+        // Ink wraps visible links in OSC 8 hyperlinks. Remove the control
+        // payload and terminators, retaining only the visible URL. CSI-only
+        // stripping leaves an ESC after the URL, hiding it from the scanner.
+        let without_osc = Zeroizing::new(
+            OSC.get_or_init(|| Regex::new(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)").unwrap())
+                .replace_all(&raw, "")
+                .into_owned(),
+        );
         let text = Zeroizing::new(
             ANSI.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap())
-                .replace_all(&raw, "")
+                .replace_all(&without_osc, "")
                 .into_owned(),
         );
         self.failed |= text.contains("OAuth error:");
         let mut events = Vec::new();
         if !self.url_sent {
             let urls = URL.get_or_init(|| Regex::new(r"https://(?:claude\.com/cai/oauth/authorize|claude\.ai/oauth/authorize|platform\.claude\.com/oauth/authorize|console\.anthropic\.com/oauth/authorize)\?[A-Za-z0-9_~%=&.+:/-]+[\s]").unwrap());
-            if let Some(url) = urls.find(&text) {
+            for url in urls.find_iter(&text) {
                 let url = url.as_str().trim();
                 if url.len() <= 8192
                     && !oauth_url_has_secret(url)
@@ -387,10 +397,14 @@ impl ClaudeLoginObserver {
                 {
                     self.url_sent = true;
                     events.push(ClaudeLoginEvent::AuthorizationUrl(url.into()));
+                    break;
                 }
             }
         }
-        if !self.prompt_sent && text.contains("Paste code here if prompted") {
+        self.prompt_seen |= text.contains("Paste code here if prompted");
+        // A provider may render its prompt before its link. The terminal must
+        // receive the verified URL before waiting for optional manual input.
+        if self.url_sent && self.prompt_seen && !self.prompt_sent {
             self.prompt_sent = true;
             events.push(ClaudeLoginEvent::CodeRequested);
         }
@@ -1153,6 +1167,66 @@ pub fn prepare_codex_login(
 #[cfg(test)]
 mod claude_login_observer_tests {
     use super::*;
+    const TEST_URL: &str =
+        "https://claude.com/cai/oauth/authorize?client_id=test&state=test&code_challenge=test";
+
+    #[test]
+    fn native_osc_hyperlinks_emit_visible_oauth_link_before_prompt() {
+        for terminator in ["\x07", "\x1b\\"] {
+            let output = format!(
+                "\x1b[32m\x1b]8;;{TEST_URL}{terminator}{TEST_URL}\x1b]8;;{terminator}\x1b[0m\nPaste code here if prompted > "
+            );
+            for split in 0..output.len() {
+                let mut observer = ClaudeLoginObserver::default();
+                let mut events = observer.observe(&output.as_bytes()[..split]);
+                events.extend(observer.observe(&output.as_bytes()[split..]));
+                assert_eq!(
+                    events,
+                    vec![
+                        ClaudeLoginEvent::AuthorizationUrl(TEST_URL.into()),
+                        ClaudeLoginEvent::CodeRequested
+                    ],
+                    "OSC terminator {terminator:?}, split {split}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_before_url_waits_for_valid_authorization_link() {
+        let mut observer = ClaudeLoginObserver::default();
+        assert!(
+            observer
+                .observe(b"Paste code here if prompted > \n")
+                .is_empty()
+        );
+        assert!(
+            observer
+                .observe(b"https://claude.com/cai/oauth/authorize?client_id=x&state=x\n")
+                .is_empty()
+        );
+        assert_eq!(
+            observer.observe(format!("{TEST_URL}\n").as_bytes()),
+            vec![
+                ClaudeLoginEvent::AuthorizationUrl(TEST_URL.into()),
+                ClaudeLoginEvent::CodeRequested
+            ]
+        );
+        assert!(
+            observer
+                .observe(b"Paste code here if prompted > ")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn hidden_hyperlink_payload_never_becomes_the_visible_sign_in_link() {
+        let mut observer = ClaudeLoginObserver::default();
+        let output =
+            format!("\x1b]8;;{TEST_URL}\x07Sign in\x1b]8;;\x07\nPaste code here if prompted > ");
+        assert!(observer.observe(output.as_bytes()).is_empty());
+    }
+
     #[test]
     fn private_provider_errors_fail_without_relaying_details() {
         let mut observer = ClaudeLoginObserver::default();
