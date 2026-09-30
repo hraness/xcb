@@ -961,7 +961,6 @@ fn draw_frame(frame: &mut Frame<'_>, app: &mut App, ticks: u64) {
         cache.editor_open = false;
         place_composer_cursor(
             frame,
-            &app.composer.textarea,
             composer_area,
             &mut cache.composer_scroll,
             &composer_layout,
@@ -1090,7 +1089,6 @@ fn render_composer(
 
 fn place_composer_cursor(
     frame: &mut Frame<'_>,
-    textarea: &TextArea<'static>,
     area: Rect,
     scroll: &mut (usize, usize),
     layout: &crate::composer_layout::Layout,
