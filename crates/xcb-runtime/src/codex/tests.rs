@@ -96,9 +96,21 @@ fn forged_or_replayed_tools_never_reach_the_broker() {
 
 #[test]
 fn native_execution_and_permission_requests_are_not_granted() {
+    for method in [
+        "item/commandExecution/requestApproval",
+        "item/fileChange/requestApproval",
+        "item/permissions/requestApproval",
+    ] {
+        let (events, replies) = started()
+            .accept(
+                json!({"id":1,"method":method,"params":{"threadId":"thread1","turnId":"turn1"}}),
+            )
+            .unwrap();
+        assert!(matches!(events.as_slice(), [Event::Attention]));
+        assert_eq!(replies[0]["error"]["code"], -32601);
+        assert!(replies[0].get("result").is_none());
+    }
     let mut c = started();
-    let (_, replies) = c.accept(json!({"id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread1","turnId":"turn1"}})).unwrap();
-    assert_eq!(replies[0]["error"]["code"], -32601);
     assert!(
         c.accept(notice(
             "item/started",
@@ -107,6 +119,32 @@ fn native_execution_and_permission_requests_are_not_granted() {
         .is_err()
     );
     assert!(started().accept(json!({"id":1,"method":"account/chatgptAuthTokens/refresh","params":{"threadId":"thread1","turnId":"turn1"}})).is_err());
+}
+
+#[test]
+fn unqualified_descendants_cannot_claim_the_root_broker_or_lifecycle() {
+    // Exact 0.159.0's v2 delegation emits this parent activity record, then
+    // child-scoped turns. It is execution, even though its type is not the
+    // older collabAgentToolCall shape. A child without qualified inherited
+    // broker tools is never admitted as display-only traffic.
+    let activity = json!({"id":"spawn_one","type":"subAgentActivity","agentPath":"/root/child_one","agentThreadId":"child1","kind":"started"});
+    assert!(started().accept(notice("item/started", activity)).is_err());
+    for notification in [
+        json!({"method":"thread/status/changed","params":{"threadId":"child1","status":{"type":"idle"}}}),
+        json!({"method":"turn/started","params":{"threadId":"child1","turn":{"id":"child-turn1"}}}),
+        json!({"method":"turn/completed","params":{"threadId":"child1","turn":{"id":"child-turn1","status":"completed","error":null}}}),
+        json!({"method":"thread/tokenUsage/updated","params":{"threadId":"child1","turnId":"child-turn1","tokenUsage":{}}}),
+    ] {
+        assert!(started().accept(notification).is_err());
+    }
+    let mut c = started();
+    c.accept(notice("item/started", call_item())).unwrap();
+    let mut forged = callback();
+    forged["params"]["threadId"] = json!("child1");
+    forged["params"]["turnId"] = json!("child-turn1");
+    assert!(c.accept(forged).is_err());
+    assert!(c.calls["call1"].rpc_id.is_none());
+    assert!(!c.completed);
 }
 
 #[test]
@@ -141,6 +179,7 @@ fn unknown_non_executable_items_become_one_bounded_diagnostic() {
         "mcpToolCall",
         "webSearch",
         "collabAgentToolCall",
+        "subAgentActivity",
         "functionCallOutput",
     ] {
         let mut c = started();
@@ -520,8 +559,17 @@ fn current_settings_shape_preserves_the_strict_controls() {
     let mut c = codec();
     c.thread_id = Some("thread1".into());
     c.turn_rpc = Some(7);
-    let p = json!({"threadId":"thread1","threadSettings":{"model":"gpt-6-astra","modelProvider":"openai","effort":"ultra","approvalPolicy":"never","approvalsReviewer":"user","cwd":"/synthetic/work","sandboxPolicy":{"type":"readOnly","networkAccess":false},"multiAgentMode":"explicitRequestOnly","collaborationMode":{"mode":"default"},"serviceTier":null,"activePermissionProfile":null}});
+    let p = json!({"threadId":"thread1","threadSettings":{"model":"gpt-6-astra","modelProvider":"openai","effort":"ultra","approvalPolicy":"on-request","approvalsReviewer":"auto_review","cwd":"/synthetic/work","sandboxPolicy":{"type":"readOnly","networkAccess":false},"multiAgentMode":"explicitRequestOnly","collaborationMode":{"mode":"default"},"serviceTier":null,"activePermissionProfile":null}});
     c.settings_update(&p).unwrap();
+    for (key, value) in [
+        ("approvalPolicy", json!("never")),
+        ("approvalsReviewer", json!("user")),
+        ("approvalsReviewer", Value::Null),
+    ] {
+        let mut changed = p.clone();
+        changed["threadSettings"][key] = value;
+        assert!(c.settings_update(&changed).is_err(), "{key}");
+    }
     let mut altered = p;
     altered["threadSettings"]["sandboxPolicy"]["networkAccess"] = json!(true);
     assert!(c.settings_update(&altered).is_err());
@@ -536,6 +584,8 @@ fn native_configuration_readback_detects_authority_changes() {
         "/config/features/shell_tool",
         "/config/features/daemon_auto_start",
         "/config/features/guardianv2.thread_context",
+        "/config/features/multi_agent",
+        "/config/features/multi_agent_v2",
         "/config/apps/_default/enabled",
         "/config/analytics/enabled",
     ] {
@@ -548,6 +598,9 @@ fn native_configuration_readback_detects_authority_changes() {
     }
     for (key, value) in [
         ("model_provider", json!("custom")),
+        ("approval_policy", json!("never")),
+        ("approvals_reviewer", json!("user")),
+        ("approvals_reviewer", Value::Null),
         ("model_catalog_json", json!("/different/catalog.json")),
         ("developer_instructions", json!("inherited")),
         ("mcp_servers", json!({"inherited":{}})),
@@ -555,6 +608,38 @@ fn native_configuration_readback_detects_authority_changes() {
         let mut changed = native.clone();
         changed["config"][key] = value;
         assert!(config::validate_config(&changed, catalog).is_err(), "{key}");
+    }
+}
+
+#[test]
+fn automatic_review_is_explicit_without_widening_the_sandbox() {
+    let mut options = codec().options;
+    options.model.effort = Some(Id::new("low").unwrap());
+    let c = CodexProtocol::new(options).unwrap();
+    let config = configuration(&c.options.catalog_path).unwrap();
+    assert!(config.contains("approval_policy = \"on-request\"\n"));
+    assert!(config.contains("approvals_reviewer = \"auto_review\"\n"));
+    assert!(config.contains("sandbox_mode = \"read-only\"\n"));
+    // Recorded from exact 0.159.0 against the credential-free loopback
+    // provider. Only provider label, scratch paths, and IDs are normalized;
+    // the approval and sandbox settings are the native readback unchanged.
+    let readback: Value = serde_json::from_str(include_str!("thread-start-readback.json")).unwrap();
+    assert_eq!(c.thread_readback(&readback).unwrap(), "thread1");
+    for (key, value) in [
+        ("approvalPolicy", json!("never")),
+        ("approvalsReviewer", json!("user")),
+        ("approvalsReviewer", Value::Null),
+        ("sandbox", json!({"type":"dangerFullAccess"})),
+        ("sandbox", json!({"type":"readOnly","networkAccess":true})),
+    ] {
+        let mut changed = readback.clone();
+        changed[key] = value;
+        assert!(c.thread_readback(&changed).is_err(), "{key}");
+    }
+    for key in ["parentThreadId", "forkedFromId"] {
+        let mut changed = readback.clone();
+        changed["thread"][key] = json!("foreign-thread");
+        assert!(c.thread_readback(&changed).is_err(), "{key}");
     }
 }
 
@@ -571,6 +656,7 @@ fn initialization_requires_explicit_gateway_sign_in() {
 
 #[test]
 fn exact_native_echo_trace_replays_with_current_wire_shapes() {
+    // Refreshed from the exact 0.159.0 binary with mandatory Auto Review.
     replay_native_echo_trace(include_str!("wire-echo-frames.json"));
 }
 
@@ -819,7 +905,8 @@ fn broker_guidance_keeps_native_sandbox_read_only_and_zero_tool_launches_empty()
         let protocol = CodexProtocol::new(options).unwrap();
         let request = protocol.thread_request("Synthetic host instructions");
         assert_eq!(request["sandbox"], "read-only");
-        assert_eq!(request["approvalPolicy"], "never");
+        assert_eq!(request["approvalPolicy"], "on-request");
+        assert_eq!(request["config"]["approvals_reviewer"], "auto_review");
         assert_eq!(request["cwd"], "/synthetic/work");
         assert_eq!(request["runtimeWorkspaceRoots"], json!([]));
         assert_eq!(request["selectedCapabilityRoots"], json!([]));

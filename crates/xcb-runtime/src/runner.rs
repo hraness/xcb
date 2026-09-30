@@ -539,7 +539,7 @@ fn provider_args(model: &ModelChoice, tools: bool) -> Vec<String> {
         "--tools".into(),
         "".into(),
         "--permission-mode".into(),
-        "dontAsk".into(),
+        "auto".into(),
         "--permission-prompt-tool".into(),
         "stdio".into(),
         "--setting-sources".into(),
@@ -1595,7 +1595,7 @@ pub fn validate_init(value: &Value, cwd: &Path, model: &ModelChoice, tools: bool
             "effective runtime boundary mismatch: apiKeySource",
         ));
     }
-    if value.get("permissionMode").and_then(Value::as_str) != Some("dontAsk") {
+    if value.get("permissionMode").and_then(Value::as_str) != Some("auto") {
         return Err(Error::Protocol(
             "effective runtime boundary mismatch: permissionMode",
         ));
@@ -2459,22 +2459,6 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         }
                         return Ok((terminal, models));
                     }
-                    TurnEvent::Subagent {
-                        id,
-                        status,
-                        label,
-                        model,
-                    } if admitted => observer(Progress::Subagent(Subagent {
-                        id: Id::new(id)?,
-                        label,
-                        state: match status.as_str() {
-                            "working" | "running" => State::Working,
-                            "completed" => State::Idle,
-                            "failed" => State::Failed,
-                            _ => State::Uncertain,
-                        },
-                        model,
-                    })),
                     _ => {
                         return Err(Error::Protocol(
                             "provider work before effective-boundary admission",
@@ -3194,7 +3178,7 @@ mod tests {
                 "cwd": "/workspace",
                 "model": model,
                 "apiKeySource": "none",
-                "permissionMode": "dontAsk",
+                "permissionMode": "auto",
                 "tools": [],
                 "skills": [],
                 "plugins": [],
@@ -3242,7 +3226,7 @@ mod tests {
             "cwd": "/workspace",
             "model": "claude-fable-5-1",
             "apiKeySource": "none",
-            "permissionMode": "dontAsk",
+            "permissionMode": "auto",
             "tools": [],
             "skills": [],
             "plugins": [],
@@ -3272,10 +3256,12 @@ mod tests {
             message(good.clone(), "tools", json!(["Bash"])),
             "effective runtime boundary mismatch: tools"
         );
-        assert_eq!(
-            message(good.clone(), "permissionMode", json!("acceptEdits")),
-            "effective runtime boundary mismatch: permissionMode"
-        );
+        for mode in ["acceptEdits", "dontAsk", "bypassPermissions", "default"] {
+            assert_eq!(
+                message(good.clone(), "permissionMode", json!(mode)),
+                "effective runtime boundary mismatch: permissionMode"
+            );
+        }
         assert_eq!(
             message(good.clone(), "apiKeySource", json!("ANTHROPIC_API_KEY")),
             "effective runtime boundary mismatch: apiKeySource"
@@ -3307,7 +3293,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_settings_disable_builtin_plugins() {
+    fn launch_uses_auto_mode_with_broker_only_tools_and_disabled_extensions() {
         let choice = ModelChoice {
             provider: Provider::Claude,
             id: Id::new("opus[1m]").unwrap(),
@@ -3331,6 +3317,26 @@ mod tests {
             );
             assert_eq!(settings["disableAllHooks"], json!(true));
             assert_eq!(settings["disableBundledSkills"], json!(true));
+            assert_eq!(settings["disableSkillShellExecution"], json!(true));
+            assert_eq!(settings["disableClaudeAiConnectors"], json!(true));
+            assert_eq!(settings["enableWorkflows"], json!(false));
+            assert_eq!(settings["workflowKeywordTriggerEnabled"], json!(false));
+            let argument = |name: &str| {
+                let index = args.iter().position(|arg| arg == name).unwrap();
+                &args[index + 1]
+            };
+            assert_eq!(argument("--permission-mode"), "auto");
+            assert_eq!(argument("--permission-prompt-tool"), "stdio");
+            assert_eq!(argument("--tools"), "");
+            assert_eq!(argument("--setting-sources"), "");
+            assert!(args.iter().any(|arg| arg == "--strict-mcp-config"));
+            if tools {
+                assert!(
+                    argument("--allowedTools")
+                        .split(',')
+                        .all(|name| name.starts_with("mcp__xcb__"))
+                );
+            }
             assert_eq!(
                 args.iter().filter(|arg| *arg == "--allowedTools").count(),
                 usize::from(tools)

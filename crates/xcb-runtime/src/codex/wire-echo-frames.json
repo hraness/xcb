@@ -3,311 +3,311 @@
     "id": 7,
     "result": {
       "turn": {
+        "completedAt": null,
+        "durationMs": null,
+        "error": null,
         "id": "turn1",
         "items": [],
         "itemsView": "notLoaded",
-        "status": "inProgress",
-        "error": null,
         "startedAt": null,
-        "completedAt": null,
-        "durationMs": null
+        "status": "inProgress"
       }
     }
   },
   {
+    "emittedAtMs": 1790727762162,
     "method": "thread/status/changed",
     "params": {
-      "threadId": "thread1",
       "status": {
-        "type": "active",
-        "activeFlags": []
-      }
-    },
-    "emittedAtMs": 1790704283205
+        "activeFlags": [],
+        "type": "active"
+      },
+      "threadId": "thread1"
+    }
   },
   {
+    "emittedAtMs": 1790727762162,
     "method": "turn/started",
     "params": {
       "threadId": "thread1",
       "turn": {
+        "completedAt": null,
+        "durationMs": null,
+        "error": null,
         "id": "turn1",
         "items": [],
         "itemsView": "notLoaded",
-        "status": "inProgress",
-        "error": null,
-        "startedAt": 1790704283,
-        "completedAt": null,
-        "durationMs": null
-      }
-    },
-    "emittedAtMs": 1790704283205
-  },
-  {
-    "method": "item/started",
-    "params": {
-      "item": {
-        "type": "userMessage",
-        "id": "01a0ee4a-ee47-7a70-9232-629cf8034b9a",
-        "clientId": null,
-        "content": [
-          {
-            "type": "text",
-            "text": "Synthetic no-auth protocol test.",
-            "text_elements": []
-          }
-        ]
-      },
-      "threadId": "thread1",
-      "turnId": "turn1",
-      "startedAtMs": 1790704283207
-    },
-    "emittedAtMs": 1790704283207
-  },
-  {
-    "method": "item/completed",
-    "params": {
-      "item": {
-        "type": "userMessage",
-        "id": "01a0ee4a-ee47-7a70-9232-629cf8034b9a",
-        "clientId": null,
-        "content": [
-          {
-            "type": "text",
-            "text": "Synthetic no-auth protocol test.",
-            "text_elements": []
-          }
-        ]
-      },
-      "threadId": "thread1",
-      "turnId": "turn1",
-      "completedAtMs": 1790704283207
-    },
-    "emittedAtMs": 1790704283207
-  },
-  {
-    "method": "item/started",
-    "params": {
-      "item": {
-        "type": "dynamicToolCall",
-        "id": "call1",
-        "namespace": null,
-        "tool": "workspace_read",
-        "arguments": {
-          "path": "note.txt"
-        },
-        "status": "inProgress",
-        "contentItems": null,
-        "success": null,
-        "durationMs": null
-      },
-      "threadId": "thread1",
-      "turnId": "turn1",
-      "startedAtMs": 1790704283213
-    },
-    "emittedAtMs": 1790704283213
-  },
-  {
-    "method": "item/tool/call",
-    "id": 0,
-    "params": {
-      "threadId": "thread1",
-      "turnId": "turn1",
-      "callId": "call1",
-      "namespace": null,
-      "tool": "workspace_read",
-      "arguments": {
-        "path": "note.txt"
+        "startedAt": 1790727762,
+        "status": "inProgress"
       }
     }
   },
   {
-    "method": "item/completed",
-    "params": {
-      "item": {
-        "type": "dynamicToolCall",
-        "id": "call1",
-        "namespace": null,
-        "tool": "workspace_read",
-        "arguments": {
-          "path": "note.txt"
-        },
-        "status": "completed",
-        "contentItems": [
-          {
-            "type": "inputText",
-            "text": "{\"text\":\"broker-echo-ok\"}"
-          }
-        ],
-        "success": true,
-        "durationMs": 0
-      },
-      "threadId": "thread1",
-      "turnId": "turn1",
-      "completedAtMs": 1790704283213
-    },
-    "emittedAtMs": 1790704283214
-  },
-  {
-    "method": "thread/tokenUsage/updated",
-    "params": {
-      "threadId": "thread1",
-      "turnId": "turn1",
-      "tokenUsage": {
-        "total": {
-          "totalTokens": 2,
-          "inputTokens": 1,
-          "cachedInputTokens": 0,
-          "cacheWriteInputTokens": 0,
-          "outputTokens": 1,
-          "reasoningOutputTokens": 0
-        },
-        "last": {
-          "totalTokens": 2,
-          "inputTokens": 1,
-          "cachedInputTokens": 0,
-          "cacheWriteInputTokens": 0,
-          "outputTokens": 1,
-          "reasoningOutputTokens": 0
-        },
-        "modelContextWindow": 258400
-      }
-    },
-    "emittedAtMs": 1790704283214
-  },
-  {
-    "method": "account/rateLimits/updated",
-    "params": {
-      "rateLimits": {
-        "limitId": "codex",
-        "limitName": null,
-        "normalModelSlug": null,
-        "primary": null,
-        "secondary": null,
-        "credits": null,
-        "individualLimit": null,
-        "spendControlReached": null,
-        "planType": null,
-        "rateLimitReachedType": null
-      }
-    },
-    "emittedAtMs": 1790704283214
-  },
-  {
+    "emittedAtMs": 1790727762164,
     "method": "item/started",
     "params": {
       "item": {
-        "type": "agentMessage",
-        "id": "msg_1",
-        "text": "synthetic-complete",
-        "phase": "final_answer",
-        "memoryCitation": null,
-        "delivery": null,
-        "questions": null
+        "clientId": null,
+        "content": [
+          {
+            "text": "Synthetic no-auth protocol test.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "id": "user1",
+        "type": "userMessage"
       },
+      "startedAtMs": 1790727762163,
       "threadId": "thread1",
-      "turnId": "turn1",
-      "startedAtMs": 1790704283216
-    },
-    "emittedAtMs": 1790704283217
+      "turnId": "turn1"
+    }
   },
   {
+    "emittedAtMs": 1790727762164,
     "method": "item/completed",
     "params": {
+      "completedAtMs": 1790727762164,
       "item": {
-        "type": "agentMessage",
-        "id": "msg_1",
-        "text": "synthetic-complete",
-        "phase": "final_answer",
-        "memoryCitation": null,
-        "delivery": null,
-        "questions": null
+        "clientId": null,
+        "content": [
+          {
+            "text": "Synthetic no-auth protocol test.",
+            "text_elements": [],
+            "type": "text"
+          }
+        ],
+        "id": "user1",
+        "type": "userMessage"
       },
       "threadId": "thread1",
-      "turnId": "turn1",
-      "completedAtMs": 1790704283216
-    },
-    "emittedAtMs": 1790704283217
+      "turnId": "turn1"
+    }
   },
   {
+    "emittedAtMs": 1790727762171,
+    "method": "item/started",
+    "params": {
+      "item": {
+        "arguments": {
+          "path": "note.txt"
+        },
+        "contentItems": null,
+        "durationMs": null,
+        "id": "call1",
+        "namespace": null,
+        "status": "inProgress",
+        "success": null,
+        "tool": "workspace_read",
+        "type": "dynamicToolCall"
+      },
+      "startedAtMs": 1790727762170,
+      "threadId": "thread1",
+      "turnId": "turn1"
+    }
+  },
+  {
+    "id": 0,
+    "method": "item/tool/call",
+    "params": {
+      "arguments": {
+        "path": "note.txt"
+      },
+      "callId": "call1",
+      "namespace": null,
+      "threadId": "thread1",
+      "tool": "workspace_read",
+      "turnId": "turn1"
+    }
+  },
+  {
+    "emittedAtMs": 1790727762171,
+    "method": "item/completed",
+    "params": {
+      "completedAtMs": 1790727762171,
+      "item": {
+        "arguments": {
+          "path": "note.txt"
+        },
+        "contentItems": [
+          {
+            "text": "{\"text\":\"broker-echo-ok\"}",
+            "type": "inputText"
+          }
+        ],
+        "durationMs": 0,
+        "id": "call1",
+        "namespace": null,
+        "status": "completed",
+        "success": true,
+        "tool": "workspace_read",
+        "type": "dynamicToolCall"
+      },
+      "threadId": "thread1",
+      "turnId": "turn1"
+    }
+  },
+  {
+    "emittedAtMs": 1790727762171,
     "method": "thread/tokenUsage/updated",
     "params": {
       "threadId": "thread1",
-      "turnId": "turn1",
       "tokenUsage": {
-        "total": {
-          "totalTokens": 4,
-          "inputTokens": 2,
-          "cachedInputTokens": 0,
-          "cacheWriteInputTokens": 0,
-          "outputTokens": 2,
-          "reasoningOutputTokens": 0
-        },
         "last": {
-          "totalTokens": 2,
-          "inputTokens": 1,
-          "cachedInputTokens": 0,
           "cacheWriteInputTokens": 0,
+          "cachedInputTokens": 0,
+          "inputTokens": 1,
           "outputTokens": 1,
-          "reasoningOutputTokens": 0
+          "reasoningOutputTokens": 0,
+          "totalTokens": 2
         },
-        "modelContextWindow": 258400
-      }
-    },
-    "emittedAtMs": 1790704283217
+        "modelContextWindow": 258400,
+        "total": {
+          "cacheWriteInputTokens": 0,
+          "cachedInputTokens": 0,
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "reasoningOutputTokens": 0,
+          "totalTokens": 2
+        }
+      },
+      "turnId": "turn1"
+    }
   },
   {
+    "emittedAtMs": 1790727762171,
     "method": "account/rateLimits/updated",
     "params": {
       "rateLimits": {
+        "credits": null,
+        "individualLimit": null,
         "limitId": "codex",
         "limitName": null,
         "normalModelSlug": null,
-        "primary": null,
-        "secondary": null,
-        "credits": null,
-        "individualLimit": null,
-        "spendControlReached": null,
         "planType": null,
-        "rateLimitReachedType": null
+        "primary": null,
+        "rateLimitReachedType": null,
+        "secondary": null,
+        "spendControlReached": null
       }
-    },
-    "emittedAtMs": 1790704283217
+    }
   },
   {
-    "method": "thread/status/changed",
+    "emittedAtMs": 1790727762175,
+    "method": "item/started",
+    "params": {
+      "item": {
+        "delivery": null,
+        "id": "msg_1",
+        "memoryCitation": null,
+        "phase": "final_answer",
+        "questions": null,
+        "text": "synthetic-complete",
+        "type": "agentMessage"
+      },
+      "startedAtMs": 1790727762174,
+      "threadId": "thread1",
+      "turnId": "turn1"
+    }
+  },
+  {
+    "emittedAtMs": 1790727762175,
+    "method": "item/completed",
+    "params": {
+      "completedAtMs": 1790727762175,
+      "item": {
+        "delivery": null,
+        "id": "msg_1",
+        "memoryCitation": null,
+        "phase": "final_answer",
+        "questions": null,
+        "text": "synthetic-complete",
+        "type": "agentMessage"
+      },
+      "threadId": "thread1",
+      "turnId": "turn1"
+    }
+  },
+  {
+    "emittedAtMs": 1790727762175,
+    "method": "thread/tokenUsage/updated",
     "params": {
       "threadId": "thread1",
-      "status": {
-        "type": "idle"
-      }
-    },
-    "emittedAtMs": 1790704283217
+      "tokenUsage": {
+        "last": {
+          "cacheWriteInputTokens": 0,
+          "cachedInputTokens": 0,
+          "inputTokens": 1,
+          "outputTokens": 1,
+          "reasoningOutputTokens": 0,
+          "totalTokens": 2
+        },
+        "modelContextWindow": 258400,
+        "total": {
+          "cacheWriteInputTokens": 0,
+          "cachedInputTokens": 0,
+          "inputTokens": 2,
+          "outputTokens": 2,
+          "reasoningOutputTokens": 0,
+          "totalTokens": 4
+        }
+      },
+      "turnId": "turn1"
+    }
   },
   {
+    "emittedAtMs": 1790727762175,
+    "method": "account/rateLimits/updated",
+    "params": {
+      "rateLimits": {
+        "credits": null,
+        "individualLimit": null,
+        "limitId": "codex",
+        "limitName": null,
+        "normalModelSlug": null,
+        "planType": null,
+        "primary": null,
+        "rateLimitReachedType": null,
+        "secondary": null,
+        "spendControlReached": null
+      }
+    }
+  },
+  {
+    "emittedAtMs": 1790727762175,
+    "method": "thread/status/changed",
+    "params": {
+      "status": {
+        "type": "idle"
+      },
+      "threadId": "thread1"
+    }
+  },
+  {
+    "emittedAtMs": 1790727762175,
     "method": "turn/completed",
     "params": {
       "threadId": "thread1",
       "turn": {
+        "completedAt": 1790727762,
+        "durationMs": 14,
+        "error": null,
         "id": "turn1",
         "items": [
           {
-            "type": "agentMessage",
-            "id": "msg_1",
-            "text": "synthetic-complete",
-            "phase": "final_answer",
-            "memoryCitation": null,
             "delivery": null,
-            "questions": null
+            "id": "msg_1",
+            "memoryCitation": null,
+            "phase": "final_answer",
+            "questions": null,
+            "text": "synthetic-complete",
+            "type": "agentMessage"
           }
         ],
         "itemsView": "summary",
-        "status": "completed",
-        "error": null,
-        "startedAt": 1790704283,
-        "completedAt": 1790704283,
-        "durationMs": 12
+        "startedAt": 1790727762,
+        "status": "completed"
       }
-    },
-    "emittedAtMs": 1790704283217
+    }
   }
 ]

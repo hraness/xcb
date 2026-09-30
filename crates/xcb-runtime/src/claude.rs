@@ -112,6 +112,9 @@ pub enum Event {
         label: String,
         model: Option<String>,
     },
+    /// A structured provider permission decision, never inferred from prose.
+    /// The tool input and classifier explanation stay out of host diagnostics.
+    PermissionDenied,
     Notice,
 }
 fn string<'a>(value: &'a Value, key: &str, max: usize) -> Result<&'a str> {
@@ -183,11 +186,24 @@ pub fn parse_event(bytes: &[u8]) -> Result<Event> {
 /// Classify one already-parsed frame whose byte length was bounded by the
 /// reader; callers that need other fields of the same frame parse it once.
 pub fn parse_value(value: Value) -> Result<Event> {
+    // Native children have not qualified for xcb's broker. Their messages
+    // must never acquire root-turn authority through this root-only parser.
+    if value
+        .get("parent_tool_use_id")
+        .is_some_and(|parent| !parent.is_null())
+    {
+        return Err(Error::Protocol("Claude delegated turn is unqualified"));
+    }
     match string(&value, "type", 80)? {
         "control_request" => Ok(Event::Control(value)),
         "control_response" => Ok(Event::ControlResponse(value)),
         "system" => match value.get("subtype").and_then(Value::as_str) {
             Some("init") => Ok(Event::Initialize(value)),
+            Some("permission_denied") => {
+                string(&value, "tool_name", 256)?;
+                string(&value, "tool_use_id", 160)?;
+                Ok(Event::PermissionDenied)
+            }
             Some("task_started") => Ok(Event::Subagent {
                 id: string(&value, "task_id", 160)?.to_owned(),
                 status: "working".into(),
@@ -347,7 +363,7 @@ pub fn parse_value(value: Value) -> Result<Event> {
                 .get("is_error")
                 .and_then(Value::as_bool)
                 .ok_or(Error::Protocol("result status"))?;
-            let terminal = match (
+            let mut terminal = match (
                 subtype,
                 is_error,
                 value.get("stop_reason").and_then(Value::as_str),
@@ -389,8 +405,34 @@ pub fn parse_value(value: Value) -> Result<Event> {
                     models.push((id.to_owned(), counters(value)?));
                 }
             }
-            let failure = (is_error && terminal == Terminal::Failed && authentication_cue(&text))
-                .then_some(Failure::Authentication);
+            // The final denial list is authoritative even when the CLI calls
+            // the query a success. Older producers may omit the field. A
+            // malformed list fails closed rather than hiding a denial.
+            let denied = if let Some(denials) = value.get("permission_denials") {
+                let denials = denials
+                    .as_array()
+                    .ok_or(Error::Protocol("permission denial list"))?;
+                if denials.len() > 1024 {
+                    return Err(Error::Protocol("permission denial limit"));
+                }
+                for denial in denials {
+                    string(denial, "tool_name", 256)?;
+                    string(denial, "tool_use_id", 160)?;
+                    if !denial.get("tool_input").is_some_and(Value::is_object) {
+                        return Err(Error::Protocol("permission denial input"));
+                    }
+                }
+                !denials.is_empty()
+            } else {
+                false
+            };
+            let failure = if denied {
+                terminal = Terminal::Failed;
+                Some(Failure::Policy)
+            } else {
+                (is_error && terminal == Terminal::Failed && authentication_cue(&text))
+                    .then_some(Failure::Authentication)
+            };
             Ok(Event::Result {
                 terminal,
                 text: display_text(&text, MAX_TEXT_BYTES),

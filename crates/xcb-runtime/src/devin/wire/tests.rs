@@ -61,9 +61,10 @@ fn transition_state(p: &DevinProtocol) -> Value {
         "bridge": p.bridge.is_some(), "session": p.session,
         "nextId": p.next_id, "promptId": p.prompt_id, "instructions": p.instructions,
         "ready": p.ready, "announced": p.announced, "completed": p.completed,
+        "mode": p.mode, "modeConfirmed": p.mode_confirmed,
         "text": p.text, "outputTokens": p.output_tokens,
         "calls": p.calls.iter().map(|(id, c)| json!({"id": id, "name": c.name,
-            "arguments": c.arguments, "approved": c.approved, "bridged": c.bridged,
+            "arguments": c.arguments, "approved": c.approved, "denied": c.denied, "bridged": c.bridged,
             "replied": c.replied, "finished": c.finished})).collect::<Vec<_>>(),
         "pending": p.pending.iter().map(|(id, p)| json!({"id": id, "rpcId": p.rpc_id,
             "replyClosed": p.reply.is_closed()})).collect::<Vec<_>>(),
@@ -339,10 +340,19 @@ fn recognized_compaction_retains_validation_before_extension_fallback() {
 }
 
 #[test]
+fn permission_before_declaration_stops_the_protocol() {
+    let mut p = protocol();
+    assert!(matches!(
+        p.accept(permission("unknown", "orphan")),
+        Err(Error::Protocol("Devin permission before declaration"))
+    ));
+    assert!(p.calls.is_empty());
+    assert!(p.pending.is_empty());
+}
+
+#[test]
 fn only_an_exact_preceding_broker_declaration_receives_one_approval() {
     let mut p = protocol();
-    let (_, reply) = p.accept(permission("unknown", "orphan")).unwrap();
-    assert_eq!(reply[0]["result"]["outcome"], rejected());
     p.accept(declaration("call-1", "workspace_read", json!({"path":"a"})))
         .unwrap();
     let (_, reply) = p.accept(permission("permission-1", "call-1")).unwrap();
@@ -478,6 +488,98 @@ fn bridge_requires_unique_permission_and_matching_arguments() {
         p.accept(json!({"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}))
             .is_err()
     );
+}
+
+#[test]
+fn production_mode_requires_callback_approval_and_keeps_rejection_sticky() {
+    let mut p = protocol();
+    assert_eq!(p.target_mode(), "accept-edits");
+    let args = json!({"path":"a"});
+    p.accept(declaration("call-1", "workspace_read", args.clone()))
+        .unwrap();
+    assert!(p.mcp(mcp(1, "workspace_read", args.clone())).is_err());
+    let mut callback = permission("denial", "call-1");
+    callback["params"]["options"] = json!([{"optionId":"reject_once","kind":"reject_once"}]);
+    let (_, reply) = p.accept(callback).unwrap();
+    assert_eq!(reply[0]["result"]["outcome"], rejected());
+    let (_, retry) = p.accept(permission("retry", "call-1")).unwrap();
+    assert_eq!(retry[0]["result"]["outcome"], rejected());
+    assert!(p.calls["call-1"].denied);
+    assert!(p.mcp(mcp(2, "workspace_read", args)).is_err());
+}
+
+#[test]
+fn bypass_bridge_requires_one_live_exact_declaration_and_consumes_it_once() {
+    let mut p = protocol();
+    p.candidate_bypass = true;
+    p.mode = "bypass";
+    p.mode_confirmed = true;
+    let args = json!({"path":"a"});
+    assert!(p.mcp(mcp(1, "workspace_read", args.clone())).is_err());
+    p.accept(declaration("call-1", "workspace_read", args.clone()))
+        .unwrap();
+    assert!(
+        p.mcp(mcp(2, "workspace_read", json!({"path":"b"})))
+            .is_err()
+    );
+    assert!(p.mcp(mcp(3, "workspace_remove", args.clone())).is_err());
+    let events = p.mcp(mcp(4, "workspace_read", args.clone())).unwrap();
+    assert!(matches!(&events[..], [Event::Tool { id, name, arguments }]
+        if id == "call-1" && name == "workspace_read" && arguments == &args));
+    assert!(p.calls["call-1"].approved && p.calls["call-1"].bridged);
+    assert!(p.mcp(mcp(5, "workspace_read", args)).is_err());
+}
+
+#[test]
+fn bypass_bridge_rejects_denied_ambiguous_finished_and_unconfirmed_calls() {
+    for case in ["denied", "ambiguous", "finished", "unconfirmed"] {
+        let mut p = protocol();
+        p.candidate_bypass = true;
+        p.mode = "bypass";
+        p.mode_confirmed = true;
+        let args = json!({"path":"a"});
+        p.accept(declaration("call-1", "workspace_read", args.clone()))
+            .unwrap();
+        match case {
+            "denied" => {
+                let mut callback = permission("denial", "call-1");
+                callback["params"]["options"] =
+                    json!([{"optionId":"reject_once","kind":"reject_once"}]);
+                let (_, reply) = p.accept(callback).unwrap();
+                assert_eq!(reply[0]["result"]["outcome"], rejected());
+                assert!(p.calls["call-1"].denied);
+                let (_, retry) = p.accept(permission("retry", "call-1")).unwrap();
+                assert_eq!(retry[0]["result"]["outcome"], rejected());
+            }
+            "ambiguous" => {
+                p.accept(declaration("call-2", "workspace_read", args.clone()))
+                    .unwrap();
+            }
+            "finished" => p.calls.get_mut("call-1").unwrap().finished = true,
+            "unconfirmed" => p.mode_confirmed = false,
+            _ => unreachable!(),
+        }
+        assert!(p.mcp(mcp(1, "workspace_read", args)).is_err(), "{case}");
+    }
+}
+
+#[test]
+fn bypass_rejects_completed_native_effects_and_mode_drift() {
+    let mut p = protocol();
+    p.candidate_bypass = true;
+    p.mode = "bypass";
+    p.mode_confirmed = true;
+    let mut native = declaration(
+        "native",
+        "workspace_read",
+        json!({"url":"https://example.invalid"}),
+    );
+    native["params"]["update"]["_meta"] = json!({"cognition.ai/inferenceToolName":"webfetch"});
+    p.accept(native).unwrap();
+    assert!(p.accept(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"native","status":"completed"}}})).is_err());
+    for mode in ["accept-edits", "ask", "plan"] {
+        assert!(p.accept(json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"current_mode_update","currentModeId":mode}}})).is_err());
+    }
 }
 
 fn compaction(status: &str, summary: Option<&str>) -> Value {
@@ -636,7 +738,12 @@ async fn fresh_catalog_precedes_model_setter_and_preserves_exact_selection() {
     use std::time::Duration;
     use tokio::process::Command;
 
-    for offered in [false, true] {
+    for (offered, candidate_bypass, confirmed) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, true),
+        (true, true, false),
+    ] {
         let root = tempfile::tempdir().unwrap();
         let log = root.path().join("requests.jsonl");
         let script = root.path().join("fixture.sh");
@@ -656,28 +763,47 @@ async fn fresh_catalog_precedes_model_setter_and_preserves_exact_selection() {
             .arg(json!({"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentInfo":{"name":"affogato"}}}).to_string())
             .arg(json!({"jsonrpc":"2.0","id":2,"result":initial}).to_string());
         if offered {
+            let acknowledgement = json!({"jsonrpc":"2.0","id":4,"result":{}});
+            let reply = if confirmed {
+                format!(
+                    "{}\n{}",
+                    json!({"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fresh-session","update":{"sessionUpdate":"current_mode_update","currentModeId":"bypass"}}}),
+                    acknowledgement
+                )
+            } else {
+                acknowledgement.to_string()
+            };
             command
                 .arg(json!({"jsonrpc":"2.0","id":3,"result":options("swe-2-medium")}).to_string())
-                .arg(json!({"jsonrpc":"2.0","id":4,"result":{}}).to_string());
+                .arg(reply);
         }
         let mut process = StreamProcess::spawn(command).unwrap();
         let mut selected = protocol().options;
         selected.model.id = Id::new("swe-2-medium").unwrap();
         selected.tools = false;
         let mut codec = DevinProtocol::new(selected, None).unwrap();
+        codec.candidate_bypass = candidate_bypass;
         let result = tokio::time::timeout(
             Duration::from_secs(5),
             codec.initialize(&mut process, "fixture"),
         )
         .await;
         assert!(process.join().await);
-        let models = result.unwrap().unwrap();
-        assert_eq!(
-            models
-                .iter()
-                .any(|model| model.id.as_str() == "swe-2-medium"),
-            offered
-        );
+        let result = result.unwrap();
+        if offered && candidate_bypass && !confirmed {
+            assert!(matches!(
+                result,
+                Err(Error::Protocol("Devin mode acknowledgment"))
+            ));
+        } else {
+            let models = result.unwrap();
+            assert_eq!(
+                models
+                    .iter()
+                    .any(|model| model.id.as_str() == "swe-2-medium"),
+                offered
+            );
+        }
         assert!(!codec.ready);
         assert!(codec.prompt_id.is_none());
         let requests: Vec<Value> = std::fs::read_to_string(&log)
@@ -694,6 +820,15 @@ async fn fresh_catalog_precedes_model_setter_and_preserves_exact_selection() {
                 json!({"sessionId":"fresh-session","configId":"model","value":"swe-2-medium"})
             );
             assert_eq!(requests[3]["method"], "session/set_mode");
+            assert_eq!(
+                requests[3]["params"]["modeId"],
+                if candidate_bypass {
+                    "bypass"
+                } else {
+                    "accept-edits"
+                }
+            );
+            assert_eq!(codec.mode_confirmed, !candidate_bypass || confirmed);
         }
     }
 }

@@ -1,0 +1,178 @@
+{
+  "schema": 1,
+  "observed_at": "2026-09-30T00:36:49.433Z",
+  "credential_free": true,
+  "live_provider_qualification": false,
+  "provider_version": "3000.11.3",
+  "provider_sha256": "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff",
+  "receipt": "devin-bypass-3000.11.3-macos-arm64.json",
+  "receipt_sha256": "762178de67bd5a90c0f144711a18c98132268ddb571e931eb15ce662bc549fe2",
+  "qualified": false,
+  "production_permission_mode": "accept-edits",
+  "candidate_cli_permission_mode": "dangerous",
+  "candidate_acp_permission_mode": "bypass",
+  "assessment": "Bypass remains unqualified. The disabled_tools candidate still advertises skill and mcp_read_resource. The native skill list call completed despite the candidate deny and disable settings; the production protocol stopped on that completion. The positive broker sequence was interrupted by a disabled native call, so the receipt does not demonstrate successful broker operation in bypass. All 17 provider processes and broker bridges joined, and no request contained the synthetic protected canaries or invoked the synthetic webfetch endpoint. Production retains its previously qualified mode and configuration.",
+  "scenarios": [
+    {
+      "scenario": "broker",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "e8e633d37fb3f0d3c301e49b8bb190d51e2bc61e20190fd7716c0505a8d1d5ef",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "exec",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "b29bb3d3d1646629da3e6d802a18cf8c8c8edd6198dc6f98530d0527aed3707c",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "write",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "0e356b6f9787f920141631c9b53a3558211d51c8dd98e5e35afb4d7c21acc862",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "config_write",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "dc76655788f5184cb1f0b2ba1f8e16ad8c2eeeebeac5e3d9e9b468d6fb741c78",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "webfetch",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "cd20277aa26234220dc47fa246e4d196edea39de26ba3443e5f26ad02d3639c6",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "edit",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "c894f16954c5b11b69924bd03cffc2ed5395f50df924e5f7c9936cb7b5a6e200",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "find_file_by_name",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "02d9c9fc7e1c2cbb86988a563d2b4714c3be50b3db0d5f0ef8b9079ee02f53de",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "get_output",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "4cf911a9446b21f30ed42807115fb0e66ece54c8214bcf31bf6d3e41ed988c5d",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "grep",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "9188870c850a15644bd103348728850b25b7979eac2882aeaf6da9bc26518eec",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "kill_shell",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "54892ce1ef6c4eaf4cc35a7d2b65bd41850d75167f849cd7584c69a47c201c9c",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "mcp_read_resource",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin unsupported MCP method\")",
+      "diagnostics_sha256": "5c1d46ee1868c0f3fd07aaea84cb7acb95ef7f1fd39f3a6f037a90d4a218625e",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "notebook_edit",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "6c777c6a86d7d37aa34a95c9f936bb86a305f783cb98c2887ff9a562e5079303",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "request_scope",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "f8b6bb46075e2847f4a2956000e531ccd7b5c0a0eadec5623ae66fa4fd3b59bb",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "skill",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin native tool executed\")",
+      "diagnostics_sha256": "3585faac31753be037f1c0486479d41050a5a29b78831a35f2f2adab990f21fa",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "todo_write",
+      "protocol_status": "passed",
+      "failure": "native declaration missing",
+      "diagnostics_sha256": "7733dcef299fe890bf8c342be4c572ae8711073124e361fece7a056df12c97b8",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "write_to_process",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "11d3d4e2c9d81411a51f63889f342e7dd044c481756eba322407d7f5dfb4f255",
+      "process_joined": true,
+      "bridge_joined": true
+    },
+    {
+      "scenario": "compaction",
+      "protocol_status": "protocol_failed",
+      "failure": "native fixture protocol: Protocol(\"Devin orphan tool update\")",
+      "diagnostics_sha256": "3d0b95f4f57145ea6b74858bbeb74f8905df0e49f5d3eeebf74f637fb1de8232",
+      "process_joined": true,
+      "bridge_joined": true
+    }
+  ],
+  "documentation": [
+    {
+      "url": "https://docs.devin.ai/cli/reference/commands",
+      "finding": "dangerous, yolo, and bypass are permission-mode aliases."
+    },
+    {
+      "url": "https://docs.devin.ai/cli/reference/permissions",
+      "finding": "Bypass auto-approves all tool calls; organization rules remain active, but this is not a host-controlled disable boundary."
+    },
+    {
+      "url": "https://docs.devin.ai/cli/reference/configuration/config-file",
+      "finding": "No skill-tool disable switch is documented in the full configuration reference."
+    },
+    {
+      "url": "https://docs.devin.ai/cli/extensibility/skills/overview",
+      "finding": "Skills are callable through agent tools; this page does not document a global tool-disable setting."
+    }
+  ],
+  "earlier_original_inventory_probe": {
+    "receipt": "devin-bypass-3000.11.3-original-inventory-macos-arm64.json",
+    "receipt_sha256": "ca9c362265388be810b1ab33d024cfa52ff670da66b8dd61032b48c642a3ec24",
+    "observed_at": "2026-09-30T00:09:43.622Z",
+    "provider_sha256": "7ef3859e68d4eabc0115e51898fcd4eab1edde753c27a472349ef551180b38ff",
+    "finding": "With the original production deny settings and an explicit ACP bypass transition, native webfetch reached the synthetic loopback endpoint. The strict protocol then rejected its completed native effect; the provider and bridge joined. This candidate failed and was not activated."
+  }
+}

@@ -17,6 +17,10 @@ keeps its account and is never retried elsewhere. Failover has no time
 budget of its own: a long turn that then hits a limit still moves. It stops
 after sixteen routes in one task, or when you cancel.
 
+A provider's permission or safety denial stops the task. xcb does not move
+the denied action to another provider. See [provider approval modes](provider-permissions.md)
+for the automatic review settings and the decisions that need the owner.
+
 ## Which route it picks
 
 The candidates are the routes automatic routing would pick now: accounts

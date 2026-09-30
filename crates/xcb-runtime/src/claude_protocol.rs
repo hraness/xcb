@@ -15,6 +15,7 @@ pub(crate) struct ClaudeProtocol {
     pending: BTreeMap<String, Value>,
     completed_output: u64,
     current_output: u64,
+    permission_denied: bool,
 }
 impl ClaudeProtocol {
     pub(crate) fn new(tools: bool, cwd: PathBuf, model: ModelChoice) -> Self {
@@ -25,6 +26,7 @@ impl ClaudeProtocol {
             pending: BTreeMap::new(),
             completed_output: 0,
             current_output: 0,
+            permission_denied: false,
         }
     }
 }
@@ -37,6 +39,7 @@ impl Protocol for ClaudeProtocol {
         runner::handshake(process, self.tools, instructions).await
     }
     async fn start(&mut self, process: &mut StreamProcess, prompt: Prompt) -> Result<()> {
+        self.permission_denied = false;
         let mut content = vec![json!({"type":"text","text":prompt.text})];
         for image in prompt.images {
             content.push(json!({"type":"image","source":{"type":"base64","media_type":image.media_type,"data":image.base64}}));
@@ -111,11 +114,16 @@ impl Protocol for ClaudeProtocol {
                 }
             }
             claude::Event::Result {
-                terminal,
+                mut terminal,
                 text,
                 models,
-                failure,
+                mut failure,
             } => {
+                if failure == Some(xcb_core::policy::Failure::Policy) || self.permission_denied {
+                    self.record_denial(&mut events);
+                    terminal = xcb_core::policy::Terminal::Failed;
+                    failure = Some(xcb_core::policy::Failure::Policy);
+                }
                 // The classification precedes the result so the host settles
                 // the account (NeedsAction, not Failed) from the same batch.
                 if let Some(failure) = failure {
@@ -132,17 +140,21 @@ impl Protocol for ClaudeProtocol {
                     models,
                 });
             }
-            claude::Event::Subagent {
-                id,
-                status,
-                label,
-                model,
-            } => events.push(Event::Subagent {
-                id,
-                status,
-                label,
-                model,
-            }),
+            claude::Event::Subagent { .. } => {
+                return Err(Error::Protocol("Claude delegated turn is unqualified"));
+            }
+            claude::Event::PermissionDenied => {
+                if self.record_denial(&mut events) {
+                    // Preserve the policy fact even when the provider exits
+                    // before sending a result.
+                    events.push(Event::Quota {
+                        window: None,
+                        used_percent: None,
+                        resets_at_ms: None,
+                        failure: Some(xcb_core::policy::Failure::Policy),
+                    });
+                }
+            }
             claude::Event::Control(envelope) => {
                 let request = envelope
                     .get("request")
@@ -208,11 +220,75 @@ impl Protocol for ClaudeProtocol {
     }
 }
 
+impl ClaudeProtocol {
+    fn record_denial(&mut self, events: &mut Vec<Event>) -> bool {
+        if self.permission_denied {
+            return false;
+        }
+        events.push(Event::Diagnostic(runner::Diagnostic::notice(
+            "Claude denied a tool action; automatic continuation and provider switching are paused",
+        )));
+        events.push(Event::Attention);
+        self.permission_denied = true;
+        true
+    }
+}
+
 // Drives provider or command-runner fixtures, which Windows builds refuse.
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use xcb_core::{Id, Provider, models::Mode};
+    #[tokio::test]
+    async fn advisory_denial_is_sticky_and_final_list_cannot_clear_it() {
+        let model = ModelChoice {
+            provider: Provider::Claude,
+            id: Id::new("fixture-model").unwrap(),
+            label: "Fixture".into(),
+            mode: Mode::Fixed,
+            resolved: None,
+            effort: None,
+            observed_at_ms: 1,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let mut protocol = ClaudeProtocol::new(true, root.path().to_owned(), model);
+        let mut process = StreamProcess::spawn(tokio::process::Command::new("/bin/cat")).unwrap();
+        let denial = serde_json::to_vec(&json!({"type":"system","subtype":"permission_denied",
+            "tool_name":"workspace_write","tool_use_id":"denied-1",
+            "message":"SYNTHETIC_PRIVATE_DETAIL","decision_reason_type":"classifier"}))
+        .unwrap();
+        let events = protocol.receive(&mut process, &denial).await.unwrap();
+        assert!(
+            matches!(&events[..], [Event::Diagnostic(detail), Event::Attention,
+                Event::Quota {failure: Some(xcb_core::policy::Failure::Policy), ..}]
+            if !detail.as_str().contains("SYNTHETIC_PRIVATE_DETAIL"))
+        );
+        assert!(
+            protocol
+                .receive(&mut process, &denial)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let final_frame = serde_json::to_vec(&json!({"type":"result","subtype":"success",
+            "is_error":false,"result":"Continue the task.","permission_denials":[]}))
+        .unwrap();
+        let events = protocol.receive(&mut process, &final_frame).await.unwrap();
+        assert!(matches!(
+            &events[..],
+            [
+                Event::Quota {
+                    failure: Some(xcb_core::policy::Failure::Policy),
+                    ..
+                },
+                Event::Result {
+                    terminal: xcb_core::policy::Terminal::Failed,
+                    ..
+                }
+            ]
+        ));
+        assert!(process.join().await);
+    }
     #[tokio::test]
     async fn foreign_or_malformed_mcp_envelopes_never_emit_executable_tools() {
         let root = tempfile::tempdir().unwrap();

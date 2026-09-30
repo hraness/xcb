@@ -10,6 +10,25 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.14.4 - 2026-09-29
+
+Claude and Codex start with automatic approval review. xcb stops after a
+denied action, including when Claude reports the same turn as successful.
+
+- Claude starts in Auto mode, and Codex starts with its automatic approval
+  reviewer. xcb verifies the effective mode before allowing work and refuses
+  a provider that changes it. The private profiles, workspace tools, and
+  operating-system restrictions stay in force.
+- A structured Claude permission denial stops automatic continuation and
+  provider switching, including when the provider reports a successful
+  result. The notice does not copy denied tool inputs into diagnostics.
+- Devin verifies its effective approval mode and prevents a rejected tool
+  call from being approved later. Its existing automatic workspace approvals
+  remain in use; bypass did not pass the native tool-boundary checks.
+- Credential-free native probes check approval modes and delegated-agent
+  behavior against pinned provider builds. Native delegation remains disabled;
+  reported child activity cannot finish the root turn.
+
 ## 0.14.3 - 2026-09-30
 
 Claude and Devin account setup now guide you through browser sign-in in the
