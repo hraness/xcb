@@ -7,6 +7,14 @@ use xcb_core::{
 };
 use xcb_tui::{App, Modal, render};
 
+fn expected_color(color: ratatui::style::Color) -> ratatui::style::Color {
+    if render::no_color(&|name| std::env::var_os(name)) {
+        ratatui::style::Color::Reset
+    } else {
+        color
+    }
+}
+
 fn app() -> App {
     let mut app = App::default();
     app.view.session = Some(Session {
@@ -895,9 +903,9 @@ fn empty_global_conversation_has_quiet_dispatcher_chrome() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(contents.contains("global dispatcher"));
-    assert!(contents.contains("Describe work or ask about the running task swarm"));
-    assert!(contents.contains("Ask xcb to work on something"));
+    assert!(contents.contains("Ask xcb to do anything"));
+    assert!(!contents.contains("global dispatcher"));
+    assert!(!contents.contains("running task swarm"));
     assert!(!contents.contains("usage: unmeasured"));
 }
 
@@ -944,8 +952,7 @@ fn managed_work_does_not_advertise_direct_session_followups() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(contents.contains("Describe work"));
-    assert!(contents.contains("/steer"));
-    assert!(contents.contains("/attention"));
+    assert!(contents.contains("/attn"));
     assert!(!contents.contains("Type a follow-up"));
 }
 
@@ -1103,7 +1110,7 @@ fn hardware_cursor_tracks_the_composer_cell() {
     // The composer has a two-cell prompt gutter and remains above its footer.
     assert_eq!(
         terminal.get_cursor_position().unwrap(),
-        Position::new(7, 21)
+        Position::new(7, 20)
     );
     // Additional lines grow upward; the last line remains anchored.
     app.composer.set_text("ab\ncd");
@@ -1112,7 +1119,7 @@ fn hardware_cursor_tracks_the_composer_cell() {
         .unwrap();
     assert_eq!(
         terminal.get_cursor_position().unwrap(),
-        Position::new(4, 21)
+        Position::new(4, 20)
     );
 }
 
@@ -1325,7 +1332,7 @@ fn screen_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
 }
 
 #[test]
-fn quiet_chrome_uses_terminal_defaults_and_anchors_the_prompt() {
+fn quiet_chrome_keeps_default_footer_and_shades_the_anchored_prompt() {
     use ratatui::style::{Color, Modifier};
     for width in [24, 40, 80, 120] {
         let mut app = app();
@@ -1335,12 +1342,12 @@ fn quiet_chrome_uses_terminal_defaults_and_anchors_the_prompt() {
             .draw(|frame| render::draw(frame, &mut app, 0))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(0, 21)].symbol(), "›");
-        assert_eq!(buffer[(2, 21)].symbol(), "d");
+        assert_eq!(buffer[(0, 20)].symbol(), "›");
+        assert_eq!(buffer[(2, 20)].symbol(), "d");
         assert_eq!(buffer[(0, 22)].fg, Color::Reset);
         assert_eq!(buffer[(0, 22)].bg, Color::Reset);
         assert!(buffer[(0, 22)].modifier.contains(Modifier::DIM));
-        assert!(buffer.content.iter().all(|cell| cell.bg == Color::Reset));
+        assert_eq!(buffer[(0, 20)].bg, expected_color(Color::Rgb(40, 42, 46)));
         assert_eq!(terminal.get_cursor_position().unwrap().x, 7);
         assert!(
             !screen_rows(&terminal)
@@ -1388,7 +1395,7 @@ fn markdown_styles_are_visible_in_actual_transcript_cells() {
 
 #[test]
 fn wide_and_long_composer_text_keeps_hardware_cursor_on_the_painted_cursor() {
-    use ratatui::style::Modifier;
+    use ratatui::style::Color;
     for text in [
         "あ🙂e\u{301}".to_string(),
         "あ🙂".repeat(50),
@@ -1411,7 +1418,7 @@ fn wide_and_long_composer_text_keeps_hardware_cursor_on_the_painted_cursor() {
             " ",
             "end-of-text cursor must follow visible content: {cursor:?}"
         );
-        assert!(cell.modifier.contains(Modifier::REVERSED));
+        assert_eq!(cell.bg, expected_color(Color::Rgb(123, 194, 239)));
     }
 }
 
@@ -1545,6 +1552,59 @@ fn short_terminal_preserves_the_prompt_with_attachments_and_notice() {
 }
 
 #[test]
+fn long_draft_wraps_and_arrow_keys_follow_visible_rows() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::style::Color;
+    let mut app = app();
+    let draft = "abcdefghij".repeat(5);
+    app.composer.set_text(&draft);
+    let mut terminal = Terminal::new(TestBackend::new(24, 20)).unwrap();
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    let cursor = terminal.get_cursor_position().unwrap();
+    let (tx, rx) = std::sync::mpsc::sync_channel(4);
+    app.handle(
+        Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+        &tx,
+    );
+    terminal
+        .draw(|frame| render::draw(frame, &mut app, 0))
+        .unwrap();
+    assert_eq!(app.composer.textarea.cursor(), (0, 30));
+    assert_eq!(terminal.get_cursor_position().unwrap().y, cursor.y - 1);
+    assert_eq!(app.composer.text(), draft);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        terminal.backend().buffer()[(0, cursor.y)].bg,
+        expected_color(Color::Rgb(40, 42, 46))
+    );
+}
+
+#[test]
+fn local_session_chat_commands_retain_attachments_and_never_submit_work() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = app();
+    app.attachments.push(Attachment {
+        digest: "a".repeat(64),
+        media_type: "image/png".into(),
+        bytes: 1024,
+        width: 1,
+        height: 1,
+    });
+    let (tx, rx) = std::sync::mpsc::sync_channel(4);
+    for command in ["remove session 3", "show sessions", "/hide 3", "/show"] {
+        app.composer.set_text(command);
+        app.handle(
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &tx,
+        );
+        assert_eq!(app.attachments.len(), 1);
+        assert!(rx.try_recv().is_err());
+    }
+}
+
+#[test]
 fn same_length_replacements_never_leave_stale_cached_transcript_text() {
     let mut app = app();
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -1580,7 +1640,7 @@ fn same_length_replacements_never_leave_stale_cached_transcript_text() {
 
 #[test]
 fn cursor_inside_a_grapheme_is_normalized_before_paint_and_insertion() {
-    use ratatui::style::Modifier;
+    use ratatui::style::Color;
     use ratatui_textarea::CursorMove;
     for text in ["e\u{301}x", "👩‍💻x"] {
         let mut app = app();
@@ -1593,10 +1653,9 @@ fn cursor_inside_a_grapheme_is_normalized_before_paint_and_insertion() {
         assert_eq!(app.composer.textarea.cursor(), (0, 0));
         let cursor = terminal.get_cursor_position().unwrap();
         assert_eq!(cursor.x, 2);
-        assert!(
-            terminal.backend().buffer()[cursor]
-                .modifier
-                .contains(Modifier::REVERSED)
+        assert_eq!(
+            terminal.backend().buffer()[cursor].bg,
+            expected_color(Color::Rgb(123, 194, 239))
         );
         app.composer.textarea.insert_str("z");
         assert_eq!(app.composer.text(), format!("z{text}"));
@@ -1604,8 +1663,8 @@ fn cursor_inside_a_grapheme_is_normalized_before_paint_and_insertion() {
 }
 
 #[test]
-fn wide_cursor_glyph_scrolls_whole_into_view_at_the_right_edge() {
-    use ratatui::{layout::Position, style::Modifier};
+fn wide_cursor_glyph_wraps_whole_onto_the_next_row() {
+    use ratatui::style::Color;
     use ratatui_textarea::CursorMove;
     let mut app = app();
     app.composer.set_text(&format!("{}界z", "x".repeat(21)));
@@ -1615,10 +1674,10 @@ fn wide_cursor_glyph_scrolls_whole_into_view_at_the_right_edge() {
         .draw(|frame| render::draw(frame, &mut app, 0))
         .unwrap();
     let cursor = terminal.get_cursor_position().unwrap();
-    assert_eq!(cursor, Position::new(22, 11));
+    assert_eq!(cursor.x, 3);
     let cell = &terminal.backend().buffer()[cursor];
     assert_eq!(cell.symbol(), "界");
-    assert!(cell.modifier.contains(Modifier::REVERSED));
+    assert_eq!(cell.bg, expected_color(Color::Rgb(123, 194, 239)));
 }
 
 #[test]
@@ -1740,7 +1799,7 @@ fn thread_header_all_projects_and_focus() {
 }
 
 #[test]
-fn footer_counts_projects() {
+fn footer_shows_work_without_repeating_project_totals() {
     let mut app = app();
     thread_view(&mut app);
     app.view.tasks = vec![managed_task("t_run", "Build", "running", None, 1)];
@@ -1749,7 +1808,8 @@ fn footer_counts_projects() {
         .draw(|frame| render::draw(frame, &mut app, 0))
         .unwrap();
     let contents = buffer_text(&terminal);
-    assert!(contents.contains("· 3 projects"), "{contents}");
+    assert!(contents.contains("1 running"), "{contents}");
+    assert!(!contents.contains("· 3 projects"));
     assert!(!contents.contains("chats"));
 }
 

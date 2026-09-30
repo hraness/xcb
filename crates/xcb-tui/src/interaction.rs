@@ -878,8 +878,8 @@ impl App {
             "F2 / Alt-Down  Attention     Alt-Left/Right  Switch project focus in the thread, else conversation (empty draft)".into(),
             "F6  Focus agent grid; arrows/PgUp/PgDn browse, Enter adds a reference".into(),
             "In the grid: / or Ctrl-F filters; 1 all, 2 active, 3 needs attention".into(),
-            "/overview all|active|attention|filter <text>|clear|hide|show".into(),
-            "/mouse  Scroll panels and click session references".into(),
+            "/ovw recent|all|active|attn|next|prev|filter <text>".into(),
+            "/pick <number>  Select a pane     /hide <number>  Hide it     /show  Restore".into(),
             String::new(),
             "Commands".into(),
         ];

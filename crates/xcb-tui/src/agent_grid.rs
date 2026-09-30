@@ -6,7 +6,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use xcb_core::{
@@ -35,6 +35,7 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 enum Filter {
     #[default]
+    Recent,
     All,
     Active,
     Attention,
@@ -43,6 +44,7 @@ enum Filter {
 impl Filter {
     fn label(self) -> &'static str {
         match self {
+            Self::Recent => "recent",
             Self::All => "all",
             Self::Active => "active",
             Self::Attention => "attention",
@@ -70,6 +72,8 @@ pub(crate) struct AgentGrid {
     // Keep every session's position, including those hidden by a filter.
     order: Vec<CardKey>,
     displayed_order: Vec<CardKey>,
+    identities: Vec<CardKey>,
+    hidden: Vec<CardKey>,
     /// A thread card was opened; the terminal loop sends its focus.
     focus_request: Option<String>,
 }
@@ -78,7 +82,7 @@ impl Default for AgentGrid {
     fn default() -> Self {
         Self {
             visible: true,
-            filter: Filter::All,
+            filter: Filter::Recent,
             query: String::new(),
             filter_editing: false,
             focused: false,
@@ -90,12 +94,31 @@ impl Default for AgentGrid {
             cards: Vec::new(),
             order: Vec::new(),
             displayed_order: Vec::new(),
+            identities: Vec::new(),
+            hidden: Vec::new(),
             focus_request: None,
         }
     }
 }
 
 impl AgentGrid {
+    fn remember(&mut self, agents: &[AgentRow]) {
+        for row in agents.iter().take(MAX_AGENTS) {
+            let key = card_key(row);
+            if !self.identities.contains(&key) {
+                self.identities.push(key);
+            }
+        }
+    }
+
+    fn number(&self, row: &AgentRow) -> usize {
+        self.identities
+            .iter()
+            .position(|key| key == &card_key(row))
+            .unwrap_or(0)
+            + 1
+    }
+
     pub(crate) fn take_focus_request(&mut self) -> Option<String> {
         self.focus_request.take()
     }
@@ -148,11 +171,16 @@ fn all_rows_at(app: &App, now: u64) -> Vec<&AgentRow> {
 
 fn matches_filter(row: &AgentRow, grid: &AgentGrid, now: u64) -> bool {
     let mode_matches = match grid.filter {
+        Filter::Recent => {
+            row.state == State::Working
+                || recent_attention(row, now)
+                || now.saturating_sub(row.updated_at_ms) < 24 * 60 * 60 * 1_000
+        }
         Filter::All => true,
         Filter::Active => recent_attention(row, now) || row.state == State::Working,
         Filter::Attention => row.needs_attention(),
     };
-    if !mode_matches {
+    if grid.hidden.contains(&card_key(row)) || !mode_matches {
         return false;
     }
     let query = grid.query.trim().to_lowercase();
@@ -180,7 +208,13 @@ fn rows(app: &App) -> Vec<&AgentRow> {
     let now = crate::display_now_ms();
     all_rows_at(app, now)
         .into_iter()
-        .filter(|row| matches_filter(row, &app.agent_grid, now))
+        .filter(|row| {
+            !app.agent_grid.hidden.contains(&card_key(row))
+                && (app.agent_grid.filter == Filter::Recent
+                    && is_open(app, row)
+                    && app.agent_grid.query.is_empty()
+                    || matches_filter(row, &app.agent_grid, now))
+        })
         .collect()
 }
 
@@ -207,7 +241,14 @@ pub(crate) fn grid_height(app: &App, transcript: Rect, total_height: u16) -> u16
     if !app.agent_grid.visible || app.view.agents.is_empty() {
         return 0;
     }
-    let budget = (total_height / 2).min(transcript.height.saturating_sub(3));
+    // Keep three transcript lines. Tall windows can show a third card row
+    // instead of leaving most of the terminal blank beneath a two-row grid.
+    let share = if total_height < 30 {
+        total_height / 2
+    } else {
+        total_height.saturating_mul(3) / 5
+    };
+    let budget = share.min(transcript.height.saturating_sub(3));
     if budget == 0 {
         return 0;
     }
@@ -266,6 +307,97 @@ fn ellipsis(text: &str, width: u16) -> String {
     result
 }
 
+/// Choose each next hue as far as possible from earlier hues in perceptual
+/// Oklab space. The palette is computed once and repeats only after 128 panes.
+fn session_color(number: usize) -> Color {
+    static PALETTE: std::sync::OnceLock<Vec<Color>> = std::sync::OnceLock::new();
+    let palette = PALETTE.get_or_init(|| {
+        let mut candidates = Vec::new();
+        for hue in 0..72 {
+            for saturation in [0.55_f64, 0.8] {
+                for lightness in [0.57_f64, 0.7, 0.8] {
+                    let h = f64::from(hue) / 12.0;
+                    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+                    let x = chroma * (1.0 - (h % 2.0 - 1.0).abs());
+                    let (r, g, b) = match h as usize {
+                        0 => (chroma, x, 0.0),
+                        1 => (x, chroma, 0.0),
+                        2 => (0.0, chroma, x),
+                        3 => (0.0, x, chroma),
+                        4 => (x, 0.0, chroma),
+                        _ => (chroma, 0.0, x),
+                    };
+                    let m = lightness - chroma / 2.0;
+                    candidates.push(((r + m) * 255.0, (g + m) * 255.0, (b + m) * 255.0));
+                }
+            }
+        }
+        fn perceptual(rgb: (f64, f64, f64)) -> [f64; 3] {
+            fn linear(v: f64) -> f64 {
+                let v = v / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            }
+            let (r, g, b) = (linear(rgb.0), linear(rgb.1), linear(rgb.2));
+            let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
+            let m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b).cbrt();
+            let s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b).cbrt();
+            [
+                0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+                1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+                0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+            ]
+        }
+        let labs: Vec<_> = candidates.iter().copied().map(perceptual).collect();
+        let mut distances = vec![f64::INFINITY; candidates.len()];
+        let mut chosen = vec![false; candidates.len()];
+        let mut next = 36 * 6; // a calm cyan first
+        let mut palette = Vec::with_capacity(MAX_AGENTS);
+        for _ in 0..MAX_AGENTS {
+            chosen[next] = true;
+            let (r, g, b) = candidates[next];
+            palette.push(Color::Rgb(r as u8, g as u8, b as u8));
+            for index in 0..candidates.len() {
+                let distance: f64 = labs[index]
+                    .iter()
+                    .zip(labs[next])
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum();
+                distances[index] = distances[index].min(distance);
+            }
+            next = (0..candidates.len())
+                .filter(|index| !chosen[*index])
+                .max_by(|a, b| distances[*a].total_cmp(&distances[*b]))
+                .unwrap_or(0);
+        }
+        palette
+    });
+    palette[number.saturating_sub(1) % palette.len()]
+}
+
+fn border_color(row: &AgentRow, number: usize, ticks: u64, reduced_motion: bool) -> Color {
+    let color = session_color(number);
+    if reduced_motion
+        || row.state != State::Working
+        || row.activity.to_ascii_lowercase().starts_with("queued")
+    {
+        return color;
+    }
+    // One quiet breath every 3.2 seconds at the terminal's 50 ms tick.
+    let brightness = 0.78 + 0.22 * ((ticks % 64) as f64 * std::f64::consts::TAU / 64.0).cos();
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (f64::from(r) * brightness) as u8,
+            (f64::from(g) * brightness) as u8,
+            (f64::from(b) * brightness) as u8,
+        ),
+        _ => color,
+    }
+}
+
 fn category_color(row: &AgentRow) -> Color {
     match row.category.as_deref() {
         Some("done" | "idle") => return Color::Green,
@@ -317,14 +449,20 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
     if area.height == 0 || area.width == 0 || !app.agent_grid.visible {
         return;
     }
+    app.agent_grid.remember(&app.view.agents);
     let now = crate::display_now_ms();
     let all: Vec<_> = all_rows_at(app, now).into_iter().cloned().collect();
     let total = all.len();
     let attention = all.iter().filter(|row| recent_attention(row, now)).count();
-    let older = all.iter().filter(|row| row.stale_attention(now)).count();
     let items: Vec<_> = all
         .iter()
-        .filter(|row| matches_filter(row, &app.agent_grid, now))
+        .filter(|row| {
+            !app.agent_grid.hidden.contains(&card_key(row))
+                && (app.agent_grid.filter == Filter::Recent
+                    && is_open(app, row)
+                    && app.agent_grid.query.is_empty()
+                    || matches_filter(row, &app.agent_grid, now))
+        })
         .cloned()
         .collect();
     let count = items.len();
@@ -367,7 +505,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
     frame.render_widget(Clear, area);
     let range = if total_rows > page_rows {
         format!(
-            " · rows {}–{}/{} ↕",
+            " · rows {}–{}/{} · PgDn",
             grid.offset + 1,
             (grid.offset + page_rows).min(total_rows),
             total_rows
@@ -378,14 +516,20 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
     let control = if grid.filter_editing {
         "Enter done · Esc clear"
     } else if grid.focused {
-        "1 all · 2 active · 3 attention · / filter · Enter reference · Esc chat"
+        "↑↓ move · PgUp/PgDn · / filter · Enter pick · Esc chat"
     } else {
         "F6 browse"
     };
-    let summary = if area.width < 60 && (grid.filter_editing || !grid.query.is_empty()) {
-        format!("Sessions {} {count}/{total}", grid.filter.label())
+    let count_label = if count == total || (grid.filter == Filter::Recent && grid.query.is_empty())
+    {
+        count.to_string()
     } else {
-        format!("Sessions · {} · {count}/{total}", grid.filter.label())
+        format!("{count}/{total}")
+    };
+    let summary = if area.width < 60 && (grid.filter_editing || !grid.query.is_empty()) {
+        format!("Sessions {} {count_label}", grid.filter.label())
+    } else {
+        format!("Sessions · {} · {count_label}", grid.filter.label())
     };
     let filter = if grid.filter_editing || !grid.query.is_empty() {
         let prefix = if area.width < 60 {
@@ -401,14 +545,12 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
     } else {
         String::new()
     };
-    let need = if attention == 1 { "needs" } else { "need" };
-    let older = if older == 0 {
+    let urgency = if attention == 0 {
         String::new()
     } else {
-        format!(" ({older} older)")
+        format!(" · {attention} need you")
     };
-    let heading =
-        format!("{summary}{filter} · {attention} {need} attention{older}{range} · {control}");
+    let heading = format!("{summary}{filter}{urgency}{range} · {control}");
     let header = Rect::new(area.x, area.y, area.width, 1);
     frame.render_widget(
         Paragraph::new(heading).style(Style::default().add_modifier(if grid.focused {
@@ -456,14 +598,22 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
                 &status(row, ticks, app.view.reduced_motion),
                 (area.width / 3).max(7),
             );
+            let number = grid.number(row);
+            let number_label = format!("{number} ");
             let suffix = format!(" · {status} · F6");
-            let title_width = area
-                .width
-                .saturating_sub(prefix.cell_width() + suffix.cell_width());
+            let title_width = area.width.saturating_sub(
+                prefix.cell_width() + suffix.cell_width() + number_label.cell_width(),
+            );
             let title = ellipsis(&clean_line(&row.title, 160), title_width);
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::styled(prefix, Style::default().add_modifier(Modifier::DIM)),
+                    Span::styled(
+                        number_label,
+                        Style::default()
+                            .fg(session_color(number))
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(title),
                     Span::styled(suffix, Style::default().fg(state_color(row.state))),
                 ])),
@@ -497,17 +647,28 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
             CARD_HEIGHT,
         );
         let selected = grid.focused && grid.selected.as_ref() == Some(&card_key(row));
-        let border = if selected {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default().add_modifier(Modifier::DIM)
-        };
+        let number = grid.number(row);
+        let hue = session_color(number);
+        let border = Style::default().fg(border_color(row, number, ticks, app.view.reduced_motion));
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(border)
+            .border_type(if selected {
+                BorderType::Double
+            } else {
+                BorderType::Rounded
+            })
+            .border_style(if selected {
+                border.add_modifier(Modifier::BOLD)
+            } else {
+                border
+            })
             .title(Line::from(Span::styled(
-                clean_line(&row.title, 160),
+                ellipsis(&clean_line(&row.title, 160), width.saturating_sub(4)),
                 Style::default().add_modifier(Modifier::BOLD),
+            )))
+            .title_bottom(Line::from(Span::styled(
+                format!(" {number} "),
+                Style::default().fg(hue).add_modifier(Modifier::BOLD),
             )));
         let inner = block.inner(card);
         frame.render_widget(block, card);
@@ -526,7 +687,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
         if let Some(category) = row
             .category
             .as_deref()
-            .filter(|category| !category.is_empty())
+            .filter(|category| row.state != State::Working && !category.is_empty())
         {
             let category = match category {
                 "idle" | "done" => "completed".to_owned(),
@@ -544,7 +705,7 @@ pub(crate) fn render(frame: &mut Frame<'_>, app: &mut App, area: Rect, ticks: u6
             Rect::new(inner.x, inner.y + 1, inner.width, 1),
         );
         let response = if row.response.trim().is_empty() {
-            "No response yet".to_owned()
+            String::new()
         } else {
             clean_line(&row.response, 2048)
         };
@@ -585,6 +746,63 @@ fn reference(row: &AgentRow) -> String {
 }
 
 impl App {
+    /// Local pane commands never cancel work or remove provider history.
+    pub(crate) fn session_overview_command(&mut self, text: &str) -> bool {
+        let text = text.trim();
+        if matches!(text, "show sessions" | "/show") {
+            self.agent_grid.hidden.clear();
+            self.agent_grid.visible = true;
+            self.reset_overview_viewport();
+            self.notice = "Sessions restored.".into();
+            self.dirty = true;
+            return true;
+        }
+        let (action, number) = if let Some(value) = text
+            .strip_prefix("remove session ")
+            .or_else(|| text.strip_prefix("hide session "))
+            .or_else(|| text.strip_prefix("/hide "))
+        {
+            ("hide", value)
+        } else if let Some(value) = text.strip_prefix("/pick ") {
+            ("pick", value)
+        } else {
+            return false;
+        };
+        // Only exact positive pane numbers are local commands.
+        let Ok(number) = number.parse::<usize>() else {
+            return false;
+        };
+        self.agent_grid.remember(&self.view.agents);
+        let key = number
+            .checked_sub(1)
+            .and_then(|index| self.agent_grid.identities.get(index))
+            .cloned();
+        let row = key
+            .as_ref()
+            .and_then(|key| self.view.agents.iter().find(|row| card_key(row) == *key))
+            .cloned();
+        match (key, row) {
+            (Some(key), Some(_row)) if action == "hide" => {
+                if !self.agent_grid.hidden.contains(&key) {
+                    self.agent_grid.hidden.push(key);
+                }
+                self.reset_overview_viewport();
+                self.notice =
+                    format!("Session {number} hidden here. /show restores it. Work continues.");
+            }
+            (Some(key), Some(row)) => {
+                self.agent_grid.hidden.retain(|entry| entry != &key);
+                // A numbered pick can reference a card outside the current filter.
+                self.agent_grid.filter = Filter::All;
+                self.agent_grid.query.clear();
+                self.insert_agent_reference(row);
+            }
+            _ => self.notice = format!("No session {number}. Use a number shown on a pane."),
+        }
+        self.dirty = true;
+        true
+    }
+
     pub(crate) fn overview_focused(&self) -> bool {
         self.agent_grid.focused
     }
@@ -620,14 +838,27 @@ impl App {
                 self.agent_grid.filter_editing = false;
                 clear_geometry(self);
             }
-            "all" | "active" | "attention" => {
+            "recent" | "all" | "active" | "attention" | "attn" => {
                 self.agent_grid.filter = match argument {
                     "active" => Filter::Active,
-                    "attention" => Filter::Attention,
+                    "attention" | "attn" => Filter::Attention,
+                    "recent" => Filter::Recent,
                     _ => Filter::All,
                 };
                 self.agent_grid.visible = true;
                 self.reset_overview_viewport();
+            }
+            "next" | "prev" => {
+                let count = rows(self).len();
+                let grid = &mut self.agent_grid;
+                let maximum = count.div_ceil(grid.columns).saturating_sub(grid.page_rows);
+                grid.offset = if argument == "next" {
+                    (grid.offset + grid.page_rows).min(maximum)
+                } else {
+                    grid.offset.saturating_sub(grid.page_rows)
+                };
+                grid.focused = false;
+                grid.visible = true;
             }
             "clear" => self.set_overview_query(""),
             "filter" => {
@@ -641,7 +872,8 @@ impl App {
             }
             _ => {
                 self.notice =
-                    "/overview [all|active|attention|hide|show|filter <text>|clear]".into()
+                    "/ovw [recent|all|active|attention|next|prev|hide|show|filter <text>|clear]"
+                        .into()
             }
         }
         self.dirty = true;
@@ -925,6 +1157,7 @@ mod tests {
 
     fn fixture(count: usize) -> App {
         let mut app = App::default();
+        app.agent_grid.filter = Filter::All;
         app.view.conversation = Some(id("conversation_0"));
         app.view.conversations.push(ConversationRow {
             id: id("conversation_0"),
@@ -993,6 +1226,99 @@ mod tests {
     }
 
     #[test]
+    fn pane_numbers_survive_priority_filters_and_local_hiding() {
+        let mut app = fixture(4);
+        draw(&mut app, 100, 40);
+        let numbers: Vec<_> = app
+            .view
+            .agents
+            .iter()
+            .map(|row| app.agent_grid.number(row))
+            .collect();
+        app.view.agents[3].state = State::NeedsAnswer;
+        app.view.agents.reverse();
+        app.overview_command("attention");
+        draw(&mut app, 100, 40);
+        assert_eq!(app.agent_grid.number(&app.view.agents[0]), numbers[3]);
+        assert!(app.session_overview_command("remove session 4"));
+        assert!(rows(&app).is_empty());
+        assert!(app.notice.contains("/show"));
+        assert!(app.session_overview_command("/show"));
+        assert_eq!(rows(&app).len(), 1);
+        assert_eq!(app.agent_grid.number(rows(&app)[0]), 4);
+        assert!(!app.session_overview_command("remove session 4 and cancel it"));
+        assert!(app.session_overview_command("/pick 2"));
+        assert!(app.composer.text().contains("conversation_1"));
+    }
+
+    #[test]
+    fn thread_projects_have_distinct_numbers_even_with_shared_context() {
+        let mut app = thread_fixture();
+        draw(&mut app, 100, 40);
+        assert_eq!(app.agent_grid.number(&app.view.agents[0]), 1);
+        assert_eq!(app.agent_grid.number(&app.view.agents[1]), 2);
+        assert!(app.session_overview_command("hide session 1"));
+        assert_eq!(rows(&app).len(), 1);
+        assert_eq!(app.agent_grid.number(rows(&app)[0]), 2);
+    }
+
+    #[test]
+    fn recent_default_keeps_open_anchor_and_recent_work() {
+        let mut app = fixture(5);
+        app.agent_grid.filter = Filter::Recent;
+        let now = crate::display_now_ms();
+        for row in &mut app.view.agents {
+            row.updated_at_ms = now.saturating_sub(3 * 24 * 60 * 60 * 1_000);
+            row.state = State::Idle;
+        }
+        app.view.agents[1].state = State::Working;
+        app.view.agents[2].state = State::NeedsAnswer;
+        app.view.agents[3].updated_at_ms = now;
+        assert_eq!(
+            order(&app),
+            ["conversation_0", "conversation_1", "conversation_3"]
+        );
+        app.overview_command("all");
+        assert_eq!(rows(&app).len(), 5);
+    }
+
+    #[test]
+    fn palette_is_large_unique_and_borders_breathe_only_during_running_work() {
+        let palette: std::collections::HashSet<_> = (1..=128).map(session_color).collect();
+        assert_eq!(palette.len(), 128);
+        let mut app = fixture(1);
+        let row = &app.view.agents[0];
+        assert_ne!(
+            border_color(row, 1, 0, false),
+            border_color(row, 1, 16, false)
+        );
+        assert_eq!(
+            border_color(row, 1, 0, true),
+            border_color(row, 1, 16, true)
+        );
+        app.view.agents[0].activity = "queued".into();
+        let row = &app.view.agents[0];
+        assert_eq!(
+            border_color(row, 1, 0, false),
+            border_color(row, 1, 16, false)
+        );
+        app.view.agents[0].state = State::Idle;
+        let row = &app.view.agents[0];
+        assert_eq!(
+            border_color(row, 1, 0, false),
+            border_color(row, 1, 16, false)
+        );
+    }
+
+    #[test]
+    fn tall_two_column_grid_displays_all_six_cards() {
+        let mut app = fixture(6);
+        draw(&mut app, 90, 42);
+        assert_eq!(app.agent_grid.cards.len(), 6);
+        assert!(app.agent_grid.area.height >= 19);
+    }
+
+    #[test]
     fn grid_fits_half_the_terminal_preserves_input_and_grows_with_rows() {
         let mut one = fixture(1);
         draw(&mut one, 120, 40);
@@ -1001,7 +1327,7 @@ mod tests {
         many.composer
             .set_text("draft\nwith\nmany\nlines\nof\ninput");
         let terminal = draw(&mut many, 120, 40);
-        assert!(many.agent_grid.area.height <= 20);
+        assert!(many.agent_grid.area.height <= 24);
         assert!(many.viewport_height.get() >= 3);
         assert!(text(&terminal).contains("input"));
         assert!(text(&terminal).contains("rows 1–3/43"));
@@ -1022,7 +1348,7 @@ mod tests {
             let content = text(&terminal);
             assert!(!content.contains('\u{1b}'));
             assert!(!content.contains('\u{202e}'));
-            assert!(app.agent_grid.area.height <= height / 2);
+            assert!(app.agent_grid.area.height <= height * 3 / 5);
             if width < 24 || height < 7 {
                 assert!(app.agent_grid.cards.is_empty());
             }
@@ -1254,7 +1580,7 @@ mod tests {
             ]
         );
         let content = text(&screen);
-        assert!(content.contains("1 needs attention (2 older)"));
+        assert!(content.contains("1 need you"));
         assert!(content.contains("Astra · 3d 2h ago"));
         assert!(content.contains("Astra · 1d 0h ago"));
         assert!(content.contains("failed") && content.contains("usage limit"));
@@ -1338,12 +1664,12 @@ mod tests {
     fn browsing_freezes_priority_but_updates_status_and_attention_count() {
         let mut app = fixture(6);
         let screen = draw(&mut app, 120, 40);
-        assert!(text(&screen).contains("0 need attention"));
+        assert!(text(&screen).contains("Sessions · all"));
         app.overview_event(&key(KeyCode::F(6)));
         app.view.agents[4].state = State::NeedsAnswer;
         app.view.agents[4].activity = "needs answer".into();
         let screen = draw(&mut app, 120, 40);
-        assert!(text(&screen).contains("1 needs attention"));
+        assert!(text(&screen).contains("1 need you"));
         let mut new_row = app.view.agents[4].clone();
         new_row.context = TranscriptContext::Conversation(id("new_attention"));
         app.view.agents.insert(0, new_row);
@@ -1360,7 +1686,7 @@ mod tests {
                 "new_attention"
             ]
         );
-        assert!(text(&screen).contains("2 need attention"));
+        assert!(text(&screen).contains("2 need you"));
         assert!(text(&screen).contains("needs answer"));
         app.overview_event(&key(KeyCode::Esc));
         draw(&mut app, 120, 40);
@@ -1760,7 +2086,8 @@ mod tests {
             .draw(|frame| render(frame, &mut app, frame.area(), 12))
             .unwrap();
         let content = text(&screen);
-        assert!(content.contains("thinking · completed"));
+        assert!(content.contains("thinking"));
+        assert!(!content.contains("thinking · completed"));
         let state_cell = &screen.backend().buffer()[(1, 3)];
         assert_eq!(state_cell.fg, Color::Cyan);
         let response_cell = &screen.backend().buffer()[(1, 4)];

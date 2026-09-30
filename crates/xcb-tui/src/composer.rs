@@ -53,6 +53,45 @@ pub struct Composer {
     vim: Option<vim::Vim>,
 }
 impl Composer {
+    /// Arrow keys follow visible soft rows without changing the draft's newlines.
+    pub(crate) fn move_visual(&mut self, event: &Event, width: u16) -> bool {
+        let Event::Key(key) = event else {
+            return false;
+        };
+        if width == 0
+            || self.vim.is_some()
+            || key.kind == KeyEventKind::Release
+            || !key.modifiers.is_empty()
+            || self.textarea.is_selecting()
+            || !matches!(key.code, KeyCode::Up | KeyCode::Down)
+        {
+            return false;
+        }
+        let layout = crate::composer_layout::layout(&self.textarea, width);
+        let (row, x) = layout.cursor;
+        let next = if key.code == KeyCode::Up {
+            row.checked_sub(1)
+        } else {
+            (row + 1 < layout.rows.len()).then_some(row + 1)
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        if let Some(glyph) = layout.rows[next]
+            .iter()
+            .min_by_key(|glyph| glyph.x.abs_diff(x))
+        {
+            self.jump((
+                glyph.source.0,
+                self.line(glyph.source.0)
+                    .char_indices()
+                    .nth(glyph.source.1)
+                    .map_or(self.line(glyph.source.0).len(), |(byte, _)| byte),
+            ));
+        }
+        true
+    }
+
     /// The whole draft. Joining costs the full draft, so per-key paths use
     /// the cheaper accessors below instead.
     pub fn text(&self) -> String {
