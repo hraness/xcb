@@ -10,6 +10,23 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.14.3 - 2026-09-30
+
+Claude and Devin account setup now guide you through browser sign-in in the
+terminal. Sign-in links stay visible when the browser does not open.
+
+- Claude receives the terminal input its sign-in command requires. xcb opens
+  the sign-in page, displays the link, and accepts an optional browser code
+  without showing that code as you type.
+- `xcb accounts add devin`, `xcb setup devin --new`, and
+  `xcb accounts login <account>` use Devin's browser login in a private profile.
+  Setup stores the sign-in in the selected account and loads its models.
+- Devin setup offers the same existing-account and new-account choices as
+  Claude and Codex. Reconnecting an account with rejected credentials repairs
+  sign-in; an already connected account cannot silently change identity.
+- Cancellation waits for the sign-in process to stop before releasing the
+  account. Temporary login profiles are removed after confirmed cleanup.
+
 ## 0.14.2 - 2026-09-30
 
 Adding a Claude or Codex account in a terminal now takes you through sign-in

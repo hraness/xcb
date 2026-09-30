@@ -1,6 +1,8 @@
 mod application;
+mod claude_sign_in;
 mod context;
 mod device_sign_in;
+mod devin_sign_in;
 mod doctor;
 mod habitat;
 mod health;
@@ -1078,14 +1080,7 @@ impl PublicAccount<'_> {
             self.provider,
             self.id
         );
-        let next = if matches!(self.provider, Provider::Claude | Provider::Codex) {
-            format!("xcb accounts login {}", self.id)
-        } else {
-            format!(
-                "pipe a Devin token into xcb accounts token {}, or copy an existing sign-in with xcb accounts import-devin --source <path to credentials.toml>",
-                self.id
-            )
-        };
+        let next = format!("xcb accounts login {}", self.id);
         (added, next)
     }
 }
@@ -1243,7 +1238,7 @@ fn require_account_credentials(store: &Store, account: &xcb_runtime::store::Acco
             "connect this Codex account with xcb accounts login <account> or explicitly import auth.json with xcb accounts import-codex --source <path>"
         }
         Provider::Devin => {
-            "connect Devin by explicitly importing credentials.toml with xcb accounts import-devin --source <path>, or pipe a token into xcb accounts token <account>"
+            "connect this Devin account with xcb accounts login <account>, or explicitly import credentials.toml with xcb accounts import-devin --source <path>"
         }
     }))
 }
@@ -1766,26 +1761,41 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 }
                 Some(AccountCommand::Login { account }) => {
                     let account = store.resolve_account(&account)?;
-                    if account.provider == Provider::Devin {
-                        return Err(Error::Unavailable(
-                            "sign in with devin auth login, then use xcb accounts import-devin --source <absolute credentials.toml path>; to connect this account directly, pipe a token into xcb accounts token <account>",
-                        ));
-                    }
                     let pin = ensure_pin(store.root(), account.provider).await?;
                     match account.provider {
                         Provider::Claude => {
                             eprintln!(
-                                "{} Opening your browser to sign in to Claude for xcb. xcb keeps the token in its own state folder, never in your keychain.",
+                                "{} Starting Claude sign-in. xcb will show its sign-in page and keep the token in its own state folder.",
                                 ux::Style::stderr().symbol(ux::Symbol::Next)
                             );
                             let (cancel, receiver) = tokio::sync::watch::channel(false);
                             let mut stop = stop::Stop::install()?;
-                            let login =
-                                auth::login_with_cancel(&store, &account.id, &pin, receiver);
-                            tokio::pin!(login);
-                            tokio::select! {
-                                result = &mut login => result?,
-                                _ = stop.recv() => { let _ = cancel.send(true); login.await?; },
+                            if terminal_available() && !cli.json {
+                                let (events, prompts) = tokio::sync::mpsc::channel(8);
+                                let (codes, input) = tokio::sync::mpsc::channel(1);
+                                let login = auth::login_with_interaction(
+                                    &store,
+                                    &account.id,
+                                    &pin,
+                                    receiver,
+                                    events,
+                                    input,
+                                );
+                                let assistance = claude_sign_in::serve(prompts, codes);
+                                tokio::pin!(login, assistance);
+                                tokio::select! {
+                                    result = &mut login => result?,
+                                    complete = &mut assistance => {
+                                        if !complete { let _ = cancel.send(true); }
+                                        login.await?;
+                                    },
+                                    _ = stop.recv() => { let _ = cancel.send(true); login.await?; },
+                                }
+                            } else {
+                                return Err(Error::guided(
+                                    "Claude browser sign-in requires a terminal",
+                                    format!("xcb accounts login {}", account.id),
+                                ));
                             }
                         }
                         Provider::Codex => {
@@ -1815,7 +1825,15 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                                 runner::login_codex(&store, &account.id, &pin).await?;
                             }
                         }
-                        Provider::Devin => unreachable!("Devin sign-in is gated above"),
+                        Provider::Devin => {
+                            if !terminal_available() || cli.json {
+                                return Err(Error::guided(
+                                    "Devin browser sign-in requires a terminal",
+                                    format!("xcb accounts login {}", account.id),
+                                ));
+                            }
+                            devin_sign_in::login(&store, &account.id, &pin).await?;
+                        }
                     }
                     if cli.json {
                         print_json(json!({"version":1,"account":account.id,"stored":true}))?;
@@ -1959,10 +1977,7 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                     Some(selected)
                 } else if new {
                     None
-                } else if provider != Provider::Devin
-                    && !accounts.is_empty()
-                    && terminal_available()
-                {
+                } else if !accounts.is_empty() && terminal_available() {
                     match choose_setup_account(&accounts, provider)? {
                         SetupChoice::New => None,
                         SetupChoice::Existing(index) => Some(accounts[index].clone()),
@@ -2012,7 +2027,11 @@ async fn dispatch_inner(cli: Cli) -> Result<i32> {
                 }
                 let selected = match selected {
                     Some(account) => Some(account),
-                    None if provider == Provider::Devin => None,
+                    None if provider == Provider::Devin => {
+                        let pin = ensure_pin(store.root(), provider).await?;
+                        require_supported(store.root(), &pin)?;
+                        Some(add_setup_account(&store, provider, &plan)?)
+                    }
                     None => Some(add_setup_account(&store, provider, &plan)?),
                 };
                 let retry = selected
@@ -3790,8 +3809,8 @@ fn terminal_available() -> bool {
     io::stdin().is_terminal() && io::stdout().is_terminal()
 }
 
-fn interactive_account_add(json: bool, provider: Provider, terminal: bool) -> bool {
-    !json && terminal && provider != Provider::Devin
+fn interactive_account_add(json: bool, _provider: Provider, terminal: bool) -> bool {
+    !json && terminal
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3881,10 +3900,6 @@ async fn finish_account_setup(
         return Ok(0);
     };
     if account_needs_sign_in(store, &account)? {
-        if provider == Provider::Devin {
-            ux::next(&health::sign_in_step(provider, &account.id));
-            return Ok(0);
-        }
         let _held = ux::hold_next();
         Box::pin(dispatch(Cli {
             state: Some(store.root().to_path_buf()),
@@ -4751,16 +4766,11 @@ mod tests {
 
     #[test]
     fn account_add_interactive_policy_keeps_automation_create_only() {
-        for provider in [Provider::Claude, Provider::Codex] {
+        for provider in [Provider::Claude, Provider::Codex, Provider::Devin] {
             assert!(super::interactive_account_add(false, provider, true));
             assert!(!super::interactive_account_add(true, provider, true));
             assert!(!super::interactive_account_add(false, provider, false));
         }
-        assert!(!super::interactive_account_add(
-            false,
-            Provider::Devin,
-            true
-        ));
     }
 
     #[test]
@@ -5169,10 +5179,8 @@ mod tests {
             enabled: true,
         };
         let message = joined(account.added_message());
-        assert!(message.contains("xcb accounts token a_devin"));
-        assert!(message.contains("xcb accounts import-devin --source"));
-        assert!(!message.contains("metadata only"));
-        assert!(!message.contains("accounts login"));
+        assert!(message.contains("xcb accounts login a_devin"));
+        assert!(!message.contains("<path"));
     }
 
     #[test]

@@ -96,11 +96,8 @@ pub fn sort(accounts: &mut [Account]) {
 }
 
 /// The one command that signs an account in again.
-pub fn sign_in_step(provider: Provider, id: &Id) -> String {
-    match provider {
-        Provider::Claude | Provider::Codex => format!("xcb accounts login {id}"),
-        Provider::Devin => format!("pipe a Devin token into xcb accounts token {id}"),
-    }
+pub fn sign_in_step(_provider: Provider, id: &Id) -> String {
+    format!("xcb accounts login {id}")
 }
 
 /// How long until `until`: `~45m`, `~8h 15m`, `~2d`.
@@ -511,7 +508,7 @@ mod tests {
         let id = Id::new("a_devin").unwrap();
         assert_eq!(
             sign_in_step(Provider::Devin, &id),
-            "pipe a Devin token into xcb accounts token a_devin"
+            "xcb accounts login a_devin"
         );
         assert_eq!(
             sign_in_step(Provider::Codex, &id),
