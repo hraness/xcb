@@ -78,6 +78,7 @@ impl Diagnostic {
             Error::Io(_) => "local I/O failed".into(),
             Error::LaunchNotStarted(_) => "provider process could not start".into(),
             Error::CleanupUnproven => "provider cleanup is unproven; custody retained".into(),
+            Error::AuthUnproven(message) => (*message).into(),
             Error::Database(_) => "local database operation failed".into(),
             Error::Json(_) => "invalid local record".into(),
             Error::PrivateState => "local state failed private-file validation".into(),
@@ -212,13 +213,39 @@ async fn discard_failed_preparation(
 }
 
 fn settle_failed_preparation(store: &Store, run: Option<&RunRecord>, error: Error) -> Error {
-    if !matches!(error, Error::CleanupUnproven)
+    if !error.is_cleanup_unproven()
         && let Some(run) = run
-        && let Err(settlement) = store.settle(run, State::Failed, now_ms())
+        && let Err(settlement) = store
+            .require_settled_tools(run)
+            .and_then(|_| store.settle(run, State::Failed, now_ms()))
     {
         return settlement;
     }
     error
+}
+
+/// Cancellation can drop an async credential refresh before it returns.
+/// Only discard a never-started preparation whose effects are proven settled.
+struct PreparationCustody<'a> {
+    store: &'a Store,
+    run: Option<&'a RunRecord>,
+    active: bool,
+}
+
+impl Drop for PreparationCustody<'_> {
+    fn drop(&mut self) {
+        if self.active
+            && let Some(run) = self.run
+        {
+            let _ = self.store.require_settled_tools(run).and_then(|_| {
+                let current = self.store.run(&run.id)?.ok_or(Error::CleanupUnproven)?;
+                if current.phase != "prepared" || current.pid.is_some() {
+                    return Err(Error::CleanupUnproven);
+                }
+                self.store.settle(run, State::Failed, now_ms())
+            });
+        }
+    }
 }
 
 async fn spawn_process(
@@ -1408,7 +1435,7 @@ async fn login_codex_inner(
     let run = store.prepare_probe(account, None, now_ms())?;
     let mut plan = match auth::prepare_codex_login(store, &run, &snapshot_pin, &profile) {
         Ok(plan) => plan,
-        Err(error @ Error::CleanupUnproven) => {
+        Err(error) if error.is_cleanup_unproven() => {
             artifacts.retain_before_launch();
             return Err(error);
         }
@@ -1903,7 +1930,16 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
     let run = account
         .map(|id| store.prepare_probe(id, Some(model.clone()), now))
         .transpose()?;
+    let mut custody = PreparationCustody {
+        store,
+        run: run.as_ref(),
+        active: true,
+    };
     let prepared = async {
+        if let Some(run) = &run {
+            let (_keepalive, cancel) = watch::channel(false);
+            auth::refresh_claude_credentials(store, run, pin, cancel).await?;
+        }
         let token = account.map(|id| auth::token(store, id)).transpose()?;
         prepare(
             pin,
@@ -1915,6 +1951,8 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
         .await
     }
     .await;
+    custody.active = false;
+    drop(custody);
     let mut launch = match prepared {
         Ok(launch) => launch,
         Err(error) => return Err(settle_failed_preparation(store, run.as_ref(), error)),
@@ -2242,11 +2280,19 @@ pub async fn run(
     let pin = Pin::load(store.root(), Provider::Claude)?;
     let run = store.prepare_run(&session.id, session.revision, now_ms())?;
     let tools = !input.pane_generation;
+    let mut custody = PreparationCustody {
+        store: &store,
+        run: Some(&run),
+        active: true,
+    };
     let prepared = async {
+        auth::refresh_claude_credentials(&store, &run, &pin, cancel.clone()).await?;
         let credential = auth::token(&store, &session.account)?;
         prepare(&pin, store.root(), &session.model, Some(&credential), tools).await
     }
     .await;
+    custody.active = false;
+    drop(custody);
     let mut launch = match prepared {
         Ok(launch) => launch,
         Err(error) => return Err(settle_failed_preparation(&store, Some(&run), error)),
@@ -3198,6 +3244,64 @@ mod tests {
         let mut created = std::fs::File::create(path).unwrap();
         created.write_all(b"artifact").unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn claude_preparation_drop_does_not_discard_unsettled_refresh_receipts() {
+        for receipt in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let store =
+                Store::open(&xcb_core::canonical(directory.path()).unwrap().join("state")).unwrap();
+            let account = store
+                .add_account(Provider::Claude, "Test", 1, None)
+                .unwrap();
+            let run = store.prepare_probe(&account.id, None, 2).unwrap();
+            if receipt {
+                store
+                    .begin_tool(
+                        &run,
+                        "xcb_auth_runner_fixture",
+                        "host_auth_refresh",
+                        "fixture",
+                    )
+                    .unwrap();
+            }
+            drop(PreparationCustody {
+                store: &store,
+                run: Some(&run),
+                active: true,
+            });
+            assert_eq!(
+                store.run(&run.id).unwrap().unwrap().phase == "settled",
+                !receipt
+            );
+        }
+    }
+
+    #[test]
+    fn claude_auth_unproven_preparation_preserves_error_and_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            Store::open(&xcb_core::canonical(directory.path()).unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        let error = settle_failed_preparation(
+            &store,
+            Some(&run),
+            Error::AuthUnproven("safe static diagnosis"),
+        );
+        assert!(error.is_cleanup_unproven());
+        assert!(matches!(
+            error,
+            Error::AuthUnproven("safe static diagnosis")
+        ));
+        assert_eq!(
+            Diagnostic::from_error(&error).as_str(),
+            "safe static diagnosis"
+        );
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
     }
 
     #[tokio::test]

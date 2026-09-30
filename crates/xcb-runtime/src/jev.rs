@@ -221,7 +221,9 @@ impl SystemOne {
 
 /// Reads one bounded HTTP/1.1 response: status line, headers, then a body by
 /// Content-Length, chunked coding, or connection close (we request `close`).
-async fn read_response<S: AsyncReadExt + Unpin>(stream: &mut S) -> Result<(u16, Vec<u8>)> {
+pub(crate) async fn read_response<S: AsyncReadExt + Unpin>(
+    stream: &mut S,
+) -> Result<(u16, Vec<u8>)> {
     let mut buffer = Vec::with_capacity(16 * 1024);
     let header_end = loop {
         if buffer.len() > MAX_HEADER_BYTES {
@@ -333,7 +335,8 @@ async fn read_chunked<S: AsyncReadExt + Unpin>(
         if size == 0 {
             return Ok(output);
         }
-        if output.len() + size > MAX_RESPONSE_BYTES {
+        // Check before either addition below: an upstream size can be usize::MAX.
+        if size > MAX_RESPONSE_BYTES.saturating_sub(output.len()) {
             return Err(xcb_core::Error::Limit("judge response").into());
         }
         while body.len() < size + 2 {

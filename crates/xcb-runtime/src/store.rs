@@ -99,6 +99,10 @@ pub(crate) const AUTHENTICATION_REQUIRED: &str =
 #[path = "store_overview.rs"]
 mod overview;
 
+#[path = "store_claude_recovery.rs"]
+mod claude_recovery;
+pub use claude_recovery::ClaudeAuthRecoveryInfo;
+
 #[path = "host_contract.rs"]
 pub mod host_contract;
 
@@ -1338,6 +1342,24 @@ impl Store {
         let (current, _) = self.owned_run_from(&tx, run)?;
         if authentication_required_from(&tx, &current.account)? {
             return Err(Error::Unavailable(AUTHENTICATION_REQUIRED));
+        }
+        Ok(())
+    }
+
+    /// A never-started provider/bridge may still have changed credentials.
+    /// Callers releasing such a lease must prove its receipts are settled;
+    /// generic turn settlement intentionally has different effect semantics.
+    pub(crate) fn require_settled_tools(&self, run: &RunRecord) -> Result<()> {
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        self.owned_run_from(&tx, run)?;
+        let pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tool_effects WHERE run=?1 AND settled=0)",
+            [run.id.as_str()],
+            |row| row.get(0),
+        )?;
+        if pending {
+            return Err(Error::CleanupUnproven);
         }
         Ok(())
     }

@@ -368,9 +368,9 @@ fn settle(
         Ok(outcome) => outcome,
         Err(error) => {
             let code = match error {
+                error if error.is_cleanup_unproven() => RouteCode::CustodyUnproven,
                 _ if cancelled => RouteCode::Cancelled,
                 Error::Conflict(_) => RouteCode::Busy,
-                Error::CleanupUnproven => RouteCode::CustodyUnproven,
                 Error::LaunchNotStarted(_)
                 | Error::Protocol(_)
                 | Error::CodexRpc { .. }
@@ -520,21 +520,58 @@ mod tests {
         }
     }
 
-    fn settle_turn(outcome: Outcome) -> std::result::Result<RouteResponse, Box<RouteFailure>> {
-        let route = RouteTaken {
+    fn fixture_route() -> RouteTaken {
+        RouteTaken {
             provider: Provider::Devin,
             account: Id::new("a_fixture").unwrap(),
             model: "devin/swe-2-high".into(),
             label: "SWE-2".into(),
             reason: "fixture".into(),
-        };
+        }
+    }
+
+    fn settle_turn(outcome: Outcome) -> std::result::Result<RouteResponse, Box<RouteFailure>> {
         settle(
             &Id::new("route_fixture").unwrap(),
             Id::new("s_fixture").unwrap(),
-            route,
+            fixture_route(),
             Ok(outcome),
             false,
         )
+    }
+
+    #[test]
+    fn uncertain_authentication_custody_dominates_cancellation() {
+        for cancelled in [false, true] {
+            for error in [
+                Error::CleanupUnproven,
+                Error::AuthUnproven("Claude sign-in cancelled"),
+            ] {
+                let failure = settle(
+                    &Id::new("route_fixture").unwrap(),
+                    Id::new("s_fixture").unwrap(),
+                    fixture_route(),
+                    Err(error),
+                    cancelled,
+                )
+                .unwrap_err();
+                assert_eq!(failure.code, RouteCode::CustodyUnproven);
+                let wire = serde_json::to_value(&failure).unwrap();
+                assert_eq!(wire["code"], "custody_unproven");
+                assert_eq!(wire["session"], "s_fixture");
+                assert!(wire.get("joined").is_none());
+                assert!(wire.get("effects").is_none());
+            }
+        }
+        let failure = settle(
+            &Id::new("route_fixture").unwrap(),
+            Id::new("s_fixture").unwrap(),
+            fixture_route(),
+            Err(Error::Unavailable("Claude sign-in cancelled before launch")),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, RouteCode::Cancelled);
     }
 
     #[test]

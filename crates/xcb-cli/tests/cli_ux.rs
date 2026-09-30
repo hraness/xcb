@@ -643,6 +643,119 @@ fn setup_prefers_a_healthy_enabled_account_over_rejected_or_missing_credentials(
 }
 
 #[test]
+fn browser_setup_requests_an_account_only_when_none_or_several_are_enabled() {
+    let sandbox = Sandbox::new("browser-selection");
+    let config_path = sandbox.state().join("config.json");
+    assert!(!config_path.exists());
+    let empty = sandbox.run(&["--json", "tools", "setup-browser"], &[]);
+    assert_eq!(empty.status.code(), Some(1));
+    let empty: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert!(
+        empty["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("xcb setup claude"),
+        "{empty}"
+    );
+    assert!(!config_path.exists());
+    sandbox.add_claude();
+    sandbox.add_claude();
+    // Adding the first account saves its default selection before browser setup.
+    let config_before = std::fs::read(&config_path).unwrap();
+    let ambiguous = sandbox.run(&["--json", "tools", "setup-browser"], &[]);
+    assert_eq!(ambiguous.status.code(), Some(1));
+    let ambiguous: serde_json::Value = serde_json::from_slice(&ambiguous.stdout).unwrap();
+    assert!(
+        ambiguous["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("xcb tools setup-browser --account"),
+        "{ambiguous}"
+    );
+    let store = xcb_runtime::store::Store::open(&sandbox.state()).unwrap();
+    assert!(store.unsettled_runs().unwrap().is_empty());
+    assert!(!sandbox.state().join("providers").exists());
+    assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
+}
+
+#[test]
+fn browser_setup_selects_the_sole_enabled_account_before_any_provider_effect() {
+    for (case, token, rejected) in [
+        ("new", false, false),
+        ("model-only", true, false),
+        ("reauth", true, true),
+    ] {
+        let sandbox = Sandbox::new(&format!("browser-sole-{case}"));
+        let id = xcb_core::Id::new(sandbox.add_claude()).unwrap();
+        let disabled = xcb_core::Id::new(sandbox.add_claude()).unwrap();
+        sandbox.add(&["codex"]);
+        let config_path = sandbox.state().join("config.json");
+        let config_before = std::fs::read(&config_path).unwrap();
+        let store = xcb_runtime::store::Store::open(&sandbox.state()).unwrap();
+        store.set_account_enabled(&disabled, false).unwrap();
+        let token_path = store.account_root(&id).unwrap().join("subscription-token");
+        let credential = b"sk-ant-oat01-synthetic_fixture_credential";
+        if token {
+            xcb_runtime::private::create(&token_path, credential).unwrap();
+        }
+        if rejected {
+            let db = rusqlite::Connection::open(sandbox.state().join("xcb.sqlite")).unwrap();
+            db.execute(
+                "INSERT INTO account_auth_failures(account,generation,run) VALUES(?1,NULL,'r_fixture')",
+                [id.as_str()],
+            )
+            .unwrap();
+        }
+        for machine in [false, true] {
+            let args = if machine {
+                vec!["--json", "tools", "setup-browser"]
+            } else {
+                vec!["tools", "setup-browser"]
+            };
+            let output = sandbox.run(&args, &[]);
+            assert_eq!(output.status.code(), Some(1), "{case}: {output:?}");
+            let message = if machine {
+                let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                if cfg!(target_os = "macos") {
+                    assert_eq!(
+                        error["error"]["next"],
+                        format!("xcb accounts login {id} --browser"),
+                        "{case}: {error}"
+                    );
+                }
+                assert!(output.stderr.is_empty(), "{case}: {output:?}");
+                error["error"]["message"].as_str().unwrap().to_owned()
+            } else {
+                assert!(output.stdout.is_empty(), "{case}: {output:?}");
+                text(&output.stderr)
+            };
+            assert!(
+                message.contains(if cfg!(target_os = "macos") {
+                    "requires a terminal"
+                } else {
+                    "requires macOS Keychain"
+                }),
+                "{case}: {message}"
+            );
+            assert!(store.unsettled_runs().unwrap().is_empty());
+            assert_eq!(store.authentication_required(&id).unwrap(), rejected);
+            assert!(!sandbox.state().join("providers").exists());
+            assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
+            assert!(
+                !store
+                    .account_root(&id)
+                    .unwrap()
+                    .join("claude-oauth")
+                    .exists()
+            );
+            if token {
+                assert_eq!(std::fs::read(&token_path).unwrap(), credential);
+            }
+        }
+    }
+}
+
+#[test]
 fn doctor_marks_each_provider_and_names_one_next_step() {
     let sandbox = Sandbox::new("doctor");
     let output = sandbox.run(&["doctor"], &[("HRANESS_AUDIENCE", "human")]);
@@ -899,7 +1012,14 @@ fn json_upgrade_reports_the_installed_release_without_installer_output_on_stdout
     let share = xcb_runtime::private::directory(&sandbox.root.join("share/xcb")).unwrap();
     let installer = share.join("install-native.sh");
     let binary = sandbox.root.join("bin/xcb");
-    std::fs::copy(env!("CARGO_BIN_EXE_xcb"), &binary).unwrap();
+    let reset_binary = || {
+        // Replacing a previously executed Mach-O in place can leave macOS's
+        // code-signature cache invalid. Use a fresh inode, as the installer does.
+        let staged = sandbox.root.join("bin/xcb-fixture-reset");
+        std::fs::copy(env!("CARGO_BIN_EXE_xcb"), &staged).unwrap();
+        std::fs::rename(staged, &binary).unwrap();
+    };
+    reset_binary();
     let replacement = "#!/bin/sh\nprintf 'xcb 99.0.1\\n'\n";
     std::fs::write(sandbox.root.join("next-binary"), replacement).unwrap();
     sandbox.script(
@@ -980,7 +1100,7 @@ fn json_upgrade_reports_the_installed_release_without_installer_output_on_stdout
         &["--json", "upgrade", "99.0.1"][..],
         &["--json", "update", "install", "v99.0.1"],
     ] {
-        std::fs::copy(env!("CARGO_BIN_EXE_xcb"), &binary).unwrap();
+        reset_binary();
         let path = share.join("install.json");
         std::fs::write(&path, record.to_string()).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -1010,7 +1130,7 @@ fn json_upgrade_reports_the_installed_release_without_installer_output_on_stdout
         );
     }
     // A helper cannot claim success by changing only its install record.
-    std::fs::copy(env!("CARGO_BIN_EXE_xcb"), &binary).unwrap();
+    reset_binary();
     sandbox.script(&installer, "#!/bin/sh\n/bin/cp \"$XCB_INSTALL_PREFIX/lying-record\" \"$XCB_INSTALL_PREFIX/share/xcb/install.json\"\n");
     let mut original = record.clone();
     original["helperSha256"] =
@@ -1317,6 +1437,96 @@ fn a_shortened_id_from_the_table_resolves_and_login_checks_the_provider_first() 
         text(&dumb.stderr).starts_with("-> Checking Claude Code first"),
         "{dumb:?}"
     );
+}
+
+#[test]
+fn browser_sign_in_flag_rejects_other_providers_before_setup() {
+    let sandbox = Sandbox::new("browser-sign-in-provider");
+    for provider in ["codex", "devin"] {
+        let account = sandbox.add(&[provider]);
+        let output = sandbox.run(&["--json", "accounts", "login", &account, "--browser"], &[]);
+        assert_eq!(output.status.code(), Some(1));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            value["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("--browser is only supported for Claude sign-in"),
+            "{value}"
+        );
+        assert!(
+            !sandbox
+                .state()
+                .join("providers")
+                .join(format!("{provider}.json"))
+                .exists()
+        );
+    }
+    let help = text(&plain(&["accounts", "login", "--help"]).stdout);
+    assert!(help.contains("--browser"), "{help}");
+    assert!(help.contains("Keychain"), "{help}");
+}
+
+#[test]
+fn full_browser_sign_in_checks_context_before_provider_setup() {
+    let sandbox = Sandbox::new("browser-sign-in-context");
+    let id = xcb_core::Id::new(sandbox.add_claude()).unwrap();
+    let config_path = sandbox.state().join("config.json");
+    let config_before = std::fs::read(&config_path).unwrap();
+    let store = xcb_runtime::store::Store::open(&sandbox.state()).unwrap();
+    let token_path = store.account_root(&id).unwrap().join("subscription-token");
+    let credential = b"sk-ant-oat01-synthetic_fixture_credential";
+    xcb_runtime::private::create(&token_path, credential).unwrap();
+    let db = rusqlite::Connection::open(sandbox.state().join("xcb.sqlite")).unwrap();
+    db.execute(
+        "INSERT INTO account_auth_failures(account,generation,run) VALUES(?1,NULL,'r_fixture')",
+        [id.as_str()],
+    )
+    .unwrap();
+    drop(db);
+    for machine in [false, true] {
+        let mut args = vec!["accounts", "login", id.as_str(), "--browser"];
+        if machine {
+            args.insert(0, "--json");
+        }
+        let output = sandbox.run(&args, &[]);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let message = if machine {
+            let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            if cfg!(target_os = "macos") {
+                assert_eq!(
+                    error["error"]["next"],
+                    format!("xcb accounts login {id} --browser"),
+                    "{error}"
+                );
+            }
+            assert!(output.stderr.is_empty(), "{output:?}");
+            error["error"]["message"].as_str().unwrap().to_owned()
+        } else {
+            assert!(output.stdout.is_empty(), "{output:?}");
+            text(&output.stderr)
+        };
+        assert!(
+            message.contains(if cfg!(target_os = "macos") {
+                "requires a terminal"
+            } else {
+                "requires macOS Keychain"
+            }),
+            "{message}"
+        );
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert!(store.authentication_required(&id).unwrap());
+        assert!(!sandbox.state().join("providers").exists());
+        assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
+        assert!(
+            !store
+                .account_root(&id)
+                .unwrap()
+                .join("claude-oauth")
+                .exists()
+        );
+        assert_eq!(std::fs::read(&token_path).unwrap(), credential);
+    }
 }
 
 #[test]

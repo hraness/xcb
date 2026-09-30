@@ -10,6 +10,25 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.17.0 - 2026-09-30
+
+Chrome setup can authorize Claude browser access through full sign-in on
+macOS, with refresh credentials in a dedicated xcb Keychain entry.
+
+- Open full Claude sign-in from `xcb tools setup-browser` when needed, or
+  explicitly with `xcb accounts login NAME --browser`.
+- Refresh short-lived Claude credentials before use and preserve an existing
+  account's credentials until replacement sign-in is verified.
+- Recover interrupted full sign-ins after their processes have stopped,
+  retaining saved credentials and requiring sign-in again when needed.
+- Distinguish missing token scope, rejected credentials, provider outages, and
+  connection failures instead of a generic extension-connection message.
+- Preserve model credentials and existing tool configuration when browser
+  authorization fails, and release the setup account when cancelled before
+  the browser server starts.
+- Keep model-only Claude sign-in available for accounts without a shared
+  browser connection.
+
 ## 0.16.3 - 2026-09-30
 
 Verified native release installs and supported global compatibility installs

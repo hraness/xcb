@@ -8,6 +8,8 @@ use xcb_runtime::{
     store::Store,
 };
 
+const BROWSER_CREDENTIALS_REQUIRED: &str = "add a Claude account with xcb setup claude, then run xcb tools setup-browser to authorize its browser connection";
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Show tools configured for every provider and installed computer-use support.
@@ -15,8 +17,11 @@ pub enum Commands {
     /// Connect the installed desktop browser and computer tools with automatic review.
     SetupComputer,
     /// Connect Claude's Chrome extension to Codex, Claude, and Devin.
+    ///
+    /// Opens full Claude sign-in if needed and requires a signed-in extension.
+    /// On macOS, refresh credentials use a dedicated xcb Keychain entry.
     SetupBrowser {
-        /// Claude account to use for the browser connection. Selected automatically when only one is signed in.
+        /// Claude account to connect. Selected automatically when only one is enabled.
         #[arg(long)]
         account: Option<String>,
     },
@@ -124,24 +129,21 @@ pub async fn execute(store: &Store, command: Commands, machine: bool) -> Result<
                 None => {
                     let mut accounts = Vec::new();
                     for account in store.accounts()? {
-                        if account.provider == xcb_core::Provider::Claude
-                            && account.enabled
-                            && !store.authentication_required(&account.id)?
-                            && xcb_runtime::auth::has_credentials(store, &account.id)?
-                        {
+                        if account.provider == xcb_core::Provider::Claude && account.enabled {
                             accounts.push(account);
                         }
                     }
                     if accounts.len() != 1 {
                         return Err(Error::Unavailable(if accounts.is_empty() {
-                            "sign in to a Claude account with xcb setup claude before connecting its browser extension"
+                            BROWSER_CREDENTIALS_REQUIRED
                         } else {
                             "choose the Claude account for your browser: xcb tools setup-browser --account <name>"
                         }));
                     }
-                    accounts.into_iter().next().ok_or(Error::Unavailable(
-                        "sign in to a Claude account with xcb setup claude before connecting its browser extension",
-                    ))?
+                    accounts
+                        .into_iter()
+                        .next()
+                        .ok_or(Error::Unavailable(BROWSER_CREDENTIALS_REQUIRED))?
                 }
             };
             if account.provider != xcb_core::Provider::Claude || !account.enabled {
@@ -149,13 +151,17 @@ pub async fn execute(store: &Store, command: Commands, machine: bool) -> Result<
                     "the browser connection needs an enabled Claude account",
                 ));
             }
-            store.require_authenticated_account(&account.id)?;
-            if !xcb_runtime::auth::has_credentials(store, &account.id)? {
-                return Err(Error::Unavailable(
-                    "sign in to the selected Claude account first",
-                ));
+            let needs_login =
+                !xcb_runtime::auth::has_claude_browser_credentials(store, &account.id)?
+                    || store.authentication_required(&account.id)?;
+            if needs_login {
+                crate::claude_sign_in::check_login_context(&account.id, true, machine)?;
             }
-            let pin = xcb_runtime::process::Pin::load(store.root(), xcb_core::Provider::Claude)?;
+            let pin = crate::ensure_pin(store.root(), xcb_core::Provider::Claude).await?;
+            if needs_login {
+                crate::claude_sign_in::login(store, &account.id, &pin, true, machine).await?;
+            }
+            store.require_authenticated_account(&account.id)?;
             let workspace = xcb_core::canonical(&std::env::current_dir()?)?;
             let mut server = xcb_runtime::chrome_connector::registration(&pin, &workspace)?;
             server.credential_account = Some(account.id);

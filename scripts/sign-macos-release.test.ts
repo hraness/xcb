@@ -22,8 +22,9 @@ test("Developer ID signing helper rejects unsafe inputs, cleans credentials, and
   const result = spawnSync("python3", ["-I", new URL("./sign-macos-release.test.py", import.meta.url).pathname], {
     encoding: "utf8", timeout: 30_000, maxBuffer: 128 * 1024,
   });
+  expect(result.error, result.error?.message).toBeUndefined();
   expect({ status: result.status, stderr: result.stderr }).toEqual({ status: 0, stderr: expect.stringContaining("OK") });
-});
+}, 60_000);
 
 test("release signing credentials stay out of build jobs and unsigned assets cannot be published", () => {
   const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");

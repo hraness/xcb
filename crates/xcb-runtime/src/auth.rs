@@ -10,6 +10,11 @@ use tokio::{process::Command, sync::watch};
 use xcb_core::{Id, Provider};
 use zeroize::Zeroizing;
 
+mod claude_oauth;
+pub(crate) use claude_oauth::recovery as claude_recovery;
+pub(crate) use claude_oauth::refresh_claude_credentials;
+pub use claude_oauth::{has_claude_browser_credentials, login_claude_browser_with_interaction};
+
 pub fn valid_token(text: &str) -> bool {
     static TOKEN: OnceLock<Regex> = OnceLock::new();
     TOKEN
@@ -44,6 +49,12 @@ struct ClaudeTokenPublication {
 fn claude_token_publication(store: &Store, run: &RunRecord) -> Result<ClaudeTokenPublication> {
     if store.account(&run.account)?.provider != Provider::Claude {
         return Err(Error::Conflict("subscription token provider mismatch"));
+    }
+    if has_claude_browser_credentials(store, &run.account)? {
+        return Err(Error::guided(
+            "this account uses full Claude sign-in; reconnect it to replace its credentials",
+            format!("xcb accounts login {} --browser", run.account),
+        ));
     }
     let path = store.account_root(&run.account)?.join("subscription-token");
     let revision = match private::read(&path, 2048) {
@@ -117,6 +128,9 @@ pub(crate) fn token(store: &Store, id: &Id) -> Result<Zeroizing<String>> {
     if store.account(id)?.provider != Provider::Claude {
         return Err(Error::Conflict("subscription token provider mismatch"));
     }
+    if let Some(token) = claude_oauth::cached_token(store, id)? {
+        return Ok(token);
+    }
     let bytes = Zeroizing::new(private::read(
         &store.account_root(id)?.join("subscription-token"),
         2048,
@@ -135,6 +149,9 @@ pub(crate) fn token(store: &Store, id: &Id) -> Result<Zeroizing<String>> {
 pub fn has_token(store: &Store, id: &Id) -> Result<bool> {
     if store.account(id)?.provider != Provider::Claude {
         return Ok(false);
+    }
+    if has_claude_browser_credentials(store, id)? {
+        return Ok(true);
     }
     let path = store.account_root(id)?.join("subscription-token");
     match private::read(&path, 2048) {

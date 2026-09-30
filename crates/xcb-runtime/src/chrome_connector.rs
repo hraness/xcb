@@ -10,6 +10,8 @@ use crate::{
 use serde_json::Value;
 use std::{collections::BTreeMap, path::Path};
 
+mod preflight;
+
 /// Explicit connection setup intentionally preserves the existing browser
 /// group, or the initial blank tab created for that persistent connection.
 /// Browser context is inspected only for success and is never returned.
@@ -17,8 +19,24 @@ pub async fn setup(
     state_root: &Path,
     server: CapabilityServer,
     workspace: &Path,
-    mut cancel: tokio::sync::watch::Receiver<bool>,
+    cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
+    setup_with_preflight(state_root, server, workspace, cancel, preflight::check).await
+}
+
+// This private seam keeps synthetic setup tests off the network. Production
+// always uses the closed canonical credential check above.
+async fn setup_with_preflight<F, Fut>(
+    state_root: &Path,
+    server: CapabilityServer,
+    workspace: &Path,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+    check: F,
+) -> Result<()>
+where
+    F: FnOnce(zeroize::Zeroizing<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     if *cancel.borrow() {
         return Err(Error::Unavailable("browser setup cancelled"));
     }
@@ -37,6 +55,31 @@ pub async fn setup(
         ));
     }
     let run = store.prepare_probe(&account, None, crate::now_ms())?;
+    let mut preflight = SetupPreflight {
+        store: &store,
+        run: &run,
+        active: true,
+    };
+    let refresh_cancel = cancel.clone();
+    let result = tokio::select! {
+        biased;
+        _=async {while !*cancel.borrow() {if cancel.changed().await.is_err(){break;}}}=>Err(Error::Unavailable("browser setup cancelled")),
+        result=async {
+            store.require_authenticated_run(&run)?;
+            let pin = crate::process::Pin::load(store.root(), xcb_core::Provider::Claude)?;
+            crate::auth::refresh_claude_credentials(&store, &run, &pin, refresh_cancel).await?;
+            let token = crate::auth::token(&store, &account)?;
+            check(token).await
+        }=>result,
+    };
+    if let Err(error) = result {
+        if error.is_cleanup_unproven() {
+            preflight.active = false;
+            return Err(error);
+        }
+        preflight.settle()?;
+        return Err(error);
+    }
     let manager = crate::capabilities::CapabilityManager::new(
         crate::capabilities::CapabilityConfig {
             servers: vec![server],
@@ -48,10 +91,13 @@ pub async fn setup(
     let mut manager = match manager {
         Ok(manager) => manager,
         Err(error) => {
-            store.settle(&run, xcb_core::session::State::Idle, crate::now_ms())?;
+            preflight.settle()?;
             return Err(error);
         }
     };
+    // No await separates successful construction from the ownership transfer.
+    preflight.active = false;
+    drop(preflight);
     let result = tokio::select! {
         biased;
         _=async {while !*cancel.borrow() {if cancel.changed().await.is_err(){break;}}}=>Err(Error::Unavailable("browser setup cancelled")),
@@ -59,6 +105,49 @@ pub async fn setup(
     };
     manager.finish_chrome_setup().await?;
     result
+}
+
+/// Owns the setup lease before browser launch. A dropped check can release
+/// only this account and only with no pending credential-refresh effect or
+/// child custody. Once browser work can begin, CapabilityManager owns cleanup.
+struct SetupPreflight<'a> {
+    store: &'a crate::store::Store,
+    run: &'a crate::store::RunRecord,
+    active: bool,
+}
+
+impl SetupPreflight<'_> {
+    fn settle(&mut self) -> Result<()> {
+        self.active = false;
+        self.store.require_settled_tools(self.run)?;
+        self.store
+            .settle(self.run, xcb_core::session::State::Idle, crate::now_ms())
+            .map_err(|_| Error::CleanupUnproven)
+    }
+}
+
+impl Drop for SetupPreflight<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            // A database failure leaves the probe held for normal recovery.
+            let _ = self.settle();
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn setup_with_test_preflight<F, Fut>(
+    state_root: &Path,
+    server: CapabilityServer,
+    workspace: &Path,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    check: F,
+) -> Result<()>
+where
+    F: FnOnce(zeroize::Zeroizing<String>) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    setup_with_preflight(state_root, server, workspace, cancel, check).await
 }
 
 pub(crate) fn setup_succeeded(result: &Value) -> bool {
@@ -292,7 +381,49 @@ pub(crate) fn closed_tab(result: &Value, id: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Store;
     use serde_json::json;
+
+    #[test]
+    fn chrome_setup_preflight_drop_preserves_pending_auth_receipts_and_helper_custody() {
+        for (receipt, marker) in [(false, false), (true, false), (false, true), (true, true)] {
+            let directory = tempfile::tempdir().unwrap();
+            let store =
+                Store::open(&xcb_core::canonical(directory.path()).unwrap().join("state")).unwrap();
+            let account = store
+                .add_account(xcb_core::Provider::Claude, "Test", 1, None)
+                .unwrap();
+            let run = store.prepare_probe(&account.id, None, 2).unwrap();
+            if receipt {
+                store
+                    .begin_tool(
+                        &run,
+                        "xcb_auth_setup_fixture",
+                        "host_auth_refresh",
+                        "fixture",
+                    )
+                    .unwrap();
+            }
+            if marker {
+                store
+                    .mark_capability_starting(&run, "claude_oauth_auth")
+                    .unwrap();
+            }
+            drop(SetupPreflight {
+                store: &store,
+                run: &run,
+                active: true,
+            });
+            assert_eq!(
+                store.run(&run.id).unwrap().unwrap().phase == "settled",
+                !receipt && !marker
+            );
+            assert_eq!(
+                store.unsettled_runs().unwrap().len(),
+                usize::from(receipt || marker)
+            );
+        }
+    }
     #[test]
     fn denial_requires_error_from_trusted_bridge_not_successful_page_content() {
         for prefix in [

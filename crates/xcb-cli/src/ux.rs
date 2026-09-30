@@ -110,6 +110,7 @@ pub fn sentence(error: &Error) -> String {
 pub fn next_step(error: &Error) -> Option<String> {
     match error {
         Error::Guided { next, .. } => next.clone(),
+        Error::AuthUnproven(_) => Some("xcb recover".into()),
         _ => None,
     }
 }
@@ -120,7 +121,7 @@ pub fn code(error: &Error) -> &'static str {
         Error::Core(_) => "invalid-input",
         Error::Io(_) => "local-io",
         Error::LaunchNotStarted(_) => "provider-not-started",
-        Error::CleanupUnproven => "cleanup-unproven",
+        Error::CleanupUnproven | Error::AuthUnproven(_) => "cleanup-unproven",
         Error::Database(_) => "local-database",
         Error::Json(_) => "invalid-record",
         Error::PrivateState => "private-state",
