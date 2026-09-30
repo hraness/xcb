@@ -87,6 +87,11 @@ trait Effects {
 
 struct SystemEffects;
 
+/// URLs passed here are validated provider login events, never task output.
+pub(crate) async fn open_browser(url: &str) -> bool {
+    SystemEffects.open_url(url).await
+}
+
 /// An OS helper may fail or stall; sign-in still works with the printed URL.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn run_helper(executable: &str, args: &[&str], input: Option<&str>) -> bool {

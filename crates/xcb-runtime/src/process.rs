@@ -1004,15 +1004,15 @@ struct Drained {
 /// child joins before it runs on Windows.
 #[cfg(unix)]
 #[derive(Clone)]
-struct Group(Pid);
+pub(crate) struct Group(Pid);
 #[cfg(windows)]
 #[derive(Clone)]
-struct Group(std::sync::Arc<xcb_platform::Job>, u32);
+pub(crate) struct Group(std::sync::Arc<xcb_platform::Job>, u32);
 
 impl Group {
     /// Make `command` start its child as the leader of a new group (Unix) or
     /// suspended, so it can join a job before it runs (Windows).
-    fn prepare(command: &mut Command) {
+    pub(crate) fn prepare(command: &mut Command) {
         #[cfg(unix)]
         command.as_std_mut().process_group(0);
         #[cfg(windows)]
@@ -1022,7 +1022,7 @@ impl Group {
     /// The group of a child spawned after [`Group::prepare`]. On Windows this
     /// assigns the child to a new job and resumes it; a child that cannot
     /// join is killed.
-    fn adopt(child: &mut Child) -> Option<Self> {
+    pub(crate) fn adopt(child: &mut Child) -> Option<Self> {
         let pid = child.id().filter(|pid| *pid > 1)?;
         #[cfg(unix)]
         {
@@ -1048,7 +1048,7 @@ impl Group {
         }
     }
 
-    fn pid(&self) -> u32 {
+    pub(crate) fn pid(&self) -> u32 {
         #[cfg(unix)]
         {
             self.0.as_raw_nonzero().get() as u32
@@ -1060,7 +1060,7 @@ impl Group {
     }
 
     /// `killpg(SIGKILL)` / `TerminateJobObject`.
-    fn kill(&self) -> bool {
+    pub(crate) fn kill(&self) -> bool {
         #[cfg(unix)]
         {
             kill_process_group(self.0, Signal::KILL).is_ok()
@@ -1073,7 +1073,7 @@ impl Group {
 
     /// No member remains: `ESRCH` from a group probe, or a job with no
     /// active process.
-    fn empty(&self) -> Option<bool> {
+    pub(crate) fn empty(&self) -> Option<bool> {
         #[cfg(unix)]
         {
             match test_kill_process_group(self.0) {
@@ -1394,11 +1394,57 @@ impl Drop for CaptureGroup {
 /// is signalled, never implemented by dropping the cleanup future. Drop only
 /// attempts a stop; the caller must retain its durable lease in that case.
 pub(crate) async fn capture_supervised(
+    command: Command,
+    max: usize,
+    deadline: Duration,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    started: impl FnOnce(u32) -> Result<()>,
+) -> CaptureOutcome {
+    capture_supervised_interactive(command, max, deadline, cancel, started, None).await
+}
+
+type LoginOutputObserver = Box<dyn FnMut(&[u8]) -> Result<()> + Send>;
+
+pub(crate) struct LoginInteraction {
+    pub observer: LoginOutputObserver,
+    #[cfg(unix)]
+    pub terminal: tokio::io::unix::AsyncFd<std::fs::File>,
+    pub codes: tokio::sync::mpsc::Receiver<zeroize::Zeroizing<String>>,
+    pub stdin: Stdio,
+}
+
+#[cfg(unix)]
+pub(crate) fn login_terminal() -> std::io::Result<(Stdio, tokio::io::unix::AsyncFd<std::fs::File>)>
+{
+    use rustix::{fs, pty, termios};
+    let master = pty::openpt(pty::OpenptFlags::RDWR | pty::OpenptFlags::NOCTTY)?;
+    pty::grantpt(&master)?;
+    pty::unlockpt(&master)?;
+    let name = pty::ptsname(&master, Vec::new())?;
+    let slave = fs::open(
+        name.as_c_str(),
+        fs::OFlags::RDWR | fs::OFlags::NOCTTY | fs::OFlags::CLOEXEC,
+        fs::Mode::empty(),
+    )?;
+    let mut settings = termios::tcgetattr(&slave)?;
+    settings.local_modes.remove(termios::LocalModes::ECHO);
+    termios::tcsetattr(&slave, termios::OptionalActions::Now, &settings)?;
+    let flags = fs::fcntl_getfl(&master)?;
+    fs::fcntl_setfl(&master, flags | fs::OFlags::NONBLOCK)?;
+    rustix::io::fcntl_setfd(&master, rustix::io::FdFlags::CLOEXEC)?;
+    Ok((
+        Stdio::from(std::fs::File::from(slave)),
+        tokio::io::unix::AsyncFd::new(std::fs::File::from(master))?,
+    ))
+}
+
+pub(crate) async fn capture_supervised_interactive(
     mut command: Command,
     max: usize,
     deadline: Duration,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     started: impl FnOnce(u32) -> Result<()>,
+    mut interaction: Option<LoginInteraction>,
 ) -> CaptureOutcome {
     if max == 0 || max > 64 * 1024 || deadline.is_zero() || deadline > Duration::from_secs(600) {
         return CaptureOutcome::NeverStarted(Error::Unavailable(
@@ -1409,7 +1455,12 @@ pub(crate) async fn capture_supervised(
         return CaptureOutcome::NeverStarted(Error::Unavailable("sign-in cancelled before launch"));
     }
     command
-        .stdin(Stdio::null())
+        .stdin(
+            interaction
+                .as_mut()
+                .map(|i| std::mem::replace(&mut i.stdin, Stdio::null()))
+                .unwrap_or_else(Stdio::null),
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -1434,19 +1485,55 @@ pub(crate) async fn capture_supervised(
         Err(error) => Err(error),
         Ok(()) => {
             let execution = async {
-                let output = async {
-                    let mut bytes = zeroize::Zeroizing::new(Vec::new());
-                    (&mut stdout)
-                        .take(max as u64 + 1)
-                        .read_to_end(&mut bytes)
-                        .await?;
-                    if bytes.len() > max {
-                        return Err(Error::Protocol("login output limit"));
+                let mut bytes = zeroize::Zeroizing::new(Vec::new());
+                let mut out_closed = false;
+                let mut err_closed = false;
+                let mut out_buf = zeroize::Zeroizing::new([0u8; 4096]);
+                let mut err_buf = zeroize::Zeroizing::new([0u8; 4096]);
+                let mut stderr_count = 0usize;
+                loop {
+                    if out_closed && err_closed {
+                        return Ok(bytes);
                     }
-                    Ok(bytes)
-                };
-                let (bytes, _) = tokio::try_join!(output, drain(&mut stderr, 1024 * 1024))?;
-                Ok(bytes)
+                    tokio::select! {
+                        read = stdout.read(&mut *out_buf), if !out_closed => {
+                            let n = read?;
+                            out_closed = n == 0;
+                            if bytes.len() + n > max { return Err(Error::Protocol("login output limit")); }
+                            if let Some(i) = interaction.as_mut() { (i.observer)(&out_buf[..n])?; }
+                            bytes.extend_from_slice(&out_buf[..n]);
+                        }
+                        read = stderr.read(&mut *err_buf), if !err_closed => {
+                            let n = read?;
+                            err_closed = n == 0;
+                            stderr_count += n;
+                            if stderr_count > 1024 * 1024 { return Err(Error::Protocol("login error output limit")); }
+                            if let Some(i) = interaction.as_mut() { (i.observer)(&err_buf[..n])?; }
+                        }
+                        code = async {
+                            if let Some(i) = interaction.as_mut() { i.codes.recv().await } else { std::future::pending().await }
+                        } => {
+                            let Some(mut code) = code else { return Err(Error::Unavailable("sign-in input closed")); };
+                            if code.is_empty() || code.len() > 4096 || code.chars().any(char::is_control) {
+                                return Err(Error::Protocol("invalid sign-in code"));
+                            }
+                            code.push('\r');
+                            #[cfg(unix)]
+                            if let Some(i) = interaction.as_mut() {
+                                let mut written = 0;
+                                while written < code.len() {
+                                    let mut ready = i.terminal.writable().await?;
+                                    match ready.try_io(|fd| rustix::io::write(fd.get_ref(), &code.as_bytes()[written..]).map_err(std::io::Error::from)) {
+                                        Ok(Ok(0)) => return Err(Error::Protocol("sign-in input stalled")),
+                                        Ok(Ok(n)) => written += n,
+                                        Ok(Err(error)) => return Err(error.into()),
+                                        Err(_) => {},
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             };
             tokio::select! {
                 biased;
@@ -2584,5 +2671,90 @@ mod tests {
         assert!(process.frame().await.unwrap().is_some());
         assert!(process.join().await);
         assert!(process.stderr_overflow().is_none());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod login_interaction_tests {
+    use super::*;
+    #[tokio::test]
+    async fn terminal_login_cancellation_proves_process_group_exit() {
+        let (stdin, terminal) = login_terminal().unwrap();
+        let (_tx, codes) = tokio::sync::mpsc::channel(1);
+        let interaction = LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(|_| Ok(())),
+        };
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let login = tokio::spawn(capture_supervised_interactive(
+            command,
+            1024,
+            Duration::from_secs(5),
+            receiver,
+            move |pid| {
+                let _ = started_tx.send(pid);
+                Ok(())
+            },
+            Some(interaction),
+        ));
+        let pid = started_rx.await.unwrap();
+        cancel.send(true).unwrap();
+        assert!(matches!(
+            login.await.unwrap(),
+            CaptureOutcome::Joined(Err(_))
+        ));
+        assert!(
+            rustix::process::test_kill_process_group(
+                rustix::process::Pid::from_raw(pid as i32).unwrap()
+            )
+            .is_err()
+        );
+    }
+    #[tokio::test]
+    async fn terminal_input_is_private_and_supervised() {
+        let (stdin, terminal) = login_terminal().unwrap();
+        let (tx, codes) = tokio::sync::mpsc::channel(1);
+        tx.send(zeroize::Zeroizing::new("manual-code".into()))
+            .await
+            .unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observer_seen = seen.clone();
+        let interaction = LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(move |bytes| {
+                observer_seen.lock().unwrap().extend_from_slice(bytes);
+                Ok(())
+            }),
+        };
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "test -t 0 || exit 2; printf 'ready\n'; IFS= read -r code; test \"$code\" = manual-code || exit 3; printf 'synthetic-token\n'"]);
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        let result = capture_supervised_interactive(
+            command,
+            1024,
+            Duration::from_secs(5),
+            receiver,
+            |_| Ok(()),
+            Some(interaction),
+        )
+        .await;
+        let CaptureOutcome::Joined(Ok(bytes)) = result else {
+            panic!("interactive child did not join");
+        };
+        assert_eq!(&*bytes, b"ready\nsynthetic-token\n");
+        assert!(
+            !seen
+                .lock()
+                .unwrap()
+                .windows(11)
+                .any(|s| s == b"manual-code")
+        );
     }
 }
