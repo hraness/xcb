@@ -179,6 +179,7 @@ jobs:
         run: |
           python3 -I qualification/application-prerequisites.py --self-test
           python3 -I scripts/application-renewal.test.py
+          python3 -I scripts/unattended-maintenance.test.py
           python3 -I crates/xcb-runtime/src/command/test_guest.py
           python3 -I crates/xcb-runtime/src/command/test_git_projection.py
           python3 -I crates/xcb-runtime/src/command/test_public_cache.py

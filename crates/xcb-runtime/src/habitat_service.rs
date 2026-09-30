@@ -1,6 +1,7 @@
 //! Opt-in login startup for an exact native habitat state root: a
 //! LaunchAgent on macOS, a systemd user unit on Linux.
 //! Service removal never signals an active managed supervisor.
+pub use crate::managed_supervisor::{HealthState, SupervisorHealth};
 use crate::{Error, Result, digest, private, systemd};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -31,9 +32,16 @@ pub struct Status {
     pub installed: bool,
     pub registered: bool,
     pub supervisor_running: bool,
+    pub supervisor_health: SupervisorHealth,
+    /// False for an older declaration; installing again preserves it until
+    /// the owner uninstalls the idle service and installs the current one.
+    pub watchdog_enabled: bool,
+    /// A running supervisor reports a live, locked watchdog parent. Kept
+    /// separate from installation: an older directly started owner can remain.
+    pub supervisor_watched: bool,
     pub service: Option<Service>,
-    /// Where the supervisor's output goes; `None` for a service installed
-    /// before 0.8.14, which discards it.
+    /// Where the supervisor's output goes; current services retain at most
+    /// three 2 MiB files. `None` for the oldest declaration, which discards it.
     pub log: Option<PathBuf>,
     /// An unresolved remote-relay failure, independent of local worker faults.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -118,6 +126,15 @@ impl Service {
 
     pub fn render(&self) -> Result<String> {
         if SYSTEMD {
+            return self.render_unit_mode(true);
+        }
+        self.render_with_command("/dev/null", "service-run")
+    }
+
+    /// The previous direct-daemon declaration with unbounded service-manager
+    /// output. Preserve exact recognition for status and guarded uninstall.
+    fn render_previous(&self) -> Result<String> {
+        if SYSTEMD {
             return self.render_unit();
         }
         let log = self
@@ -134,6 +151,10 @@ impl Service {
     /// `KillMode=process` keeps a stop from signalling anything but the
     /// supervisor process itself.
     fn render_unit(&self) -> Result<String> {
+        self.render_unit_mode(false)
+    }
+
+    fn render_unit_mode(&self, watchdog: bool) -> Result<String> {
         let coordination = self
             .coordination_root
             .as_ref()
@@ -141,7 +162,16 @@ impl Service {
             .transpose()?
             .map(|line| format!("{line}\n"))
             .unwrap_or_default();
-        let log = systemd::path(&self.log_path())?;
+        let output = if watchdog {
+            "null".to_owned()
+        } else {
+            format!("append:{}", systemd::path(&self.log_path())?)
+        };
+        let command = if watchdog {
+            "service-run"
+        } else {
+            "managed-daemon"
+        };
         Ok(format!(
             "# Written by xcb service install for one xcb state folder.\n\
              # xcb service uninstall removes it; xcb leaves an edited copy alone.\n\
@@ -150,14 +180,14 @@ impl Service {
              \n\
              [Service]\n\
              Type=exec\n\
-             ExecStart={} --state {} managed-daemon\n\
+             ExecStart={} --state {} {command}\n\
              {}\n\
              {coordination}\
              Restart=always\n\
              RestartSec=60\n\
              KillMode=process\n\
-             StandardOutput=append:{log}\n\
-             StandardError=append:{log}\n\
+             StandardOutput={output}\n\
+             StandardError={output}\n\
              \n\
              [Install]\n\
              WantedBy=default.target\n",
@@ -178,6 +208,8 @@ impl Service {
     /// the log path it writes to.
     fn recognize(&self, bytes: &[u8]) -> Result<Option<Option<PathBuf>>> {
         if bytes == self.render()?.as_bytes() {
+            Ok(Some(Some(crate::service_watchdog::log_path(&self.state))))
+        } else if bytes == self.render_previous()?.as_bytes() {
             Ok(Some(Some(self.log_path())))
         } else if !SYSTEMD && bytes == self.render_legacy()?.as_bytes() {
             Ok(Some(None))
@@ -187,6 +219,10 @@ impl Service {
     }
 
     fn render_with_output(&self, output: &str) -> Result<String> {
+        self.render_with_command(output, "managed-daemon")
+    }
+
+    fn render_with_command(&self, output: &str, command: &str) -> Result<String> {
         let path = |p: &Path| p.to_str().map(xml).ok_or(Error::PrivateState);
         let coordination = self
             .coordination_root
@@ -199,7 +235,7 @@ impl Service {
             .transpose()?
             .unwrap_or_default();
         Ok(format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>Label</key><string>{}</string><key>ProgramArguments</key><array><string>{}</string><string>--state</string><string>{}</string><string>managed-daemon</string></array><key>EnvironmentVariables</key><dict><key>HOME</key><string>{}</string>{coordination}</dict><key>RunAtLoad</key><true/><key>StartInterval</key><integer>60</integer><key>ProcessType</key><string>Background</string><key>StandardOutPath</key><string>{output}</string><key>StandardErrorPath</key><string>{output}</string></dict></plist>\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict><key>Label</key><string>{}</string><key>ProgramArguments</key><array><string>{}</string><string>--state</string><string>{}</string><string>{command}</string></array><key>EnvironmentVariables</key><dict><key>HOME</key><string>{}</string>{coordination}</dict><key>RunAtLoad</key><true/><key>StartInterval</key><integer>60</integer><key>ProcessType</key><string>Background</string><key>StandardOutPath</key><string>{output}</string><key>StandardErrorPath</key><string>{output}</string></dict></plist>\n",
             xml(&self.label),
             path(&self.executable)?,
             path(&self.state)?,
@@ -304,6 +340,37 @@ fn load(root: &Path, home: &Path) -> Result<Option<Service>> {
     }
 }
 
+/// Clients launching a new daemon honor the exact installed declaration.
+/// This is a local-file check, not an invocation of the service manager.
+pub(crate) fn watchdog_installed(root: &Path, executable: &Path) -> Result<bool> {
+    let bytes = match private::read(&root.join(RECORD), LIMIT) {
+        Ok(bytes) => bytes,
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let service: Service = serde_json::from_slice(&bytes)?;
+    service.verify(root, &service.home)?;
+    let bytes = match read_manifest(&service.manifest) {
+        Ok(bytes) => bytes,
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if service.recognize(&bytes)?.is_none() {
+        return Err(Error::Conflict(
+            "habitat service manifest changed; foreign contents preserved",
+        ));
+    }
+    if bytes != service.render()?.as_bytes() {
+        return Ok(false);
+    }
+    if xcb_core::canonical(&service.executable)? != xcb_core::canonical(executable)? {
+        return Err(Error::Unavailable(
+            "the installed service uses another xcb executable; refresh the idle service before starting this build",
+        ));
+    }
+    Ok(true)
+}
+
 fn lock(root: &Path, name: &str) -> Result<private::ExclusiveLock> {
     let dir = private::directory(&root.join("managed"))?;
     let mut options = OpenOptions::new();
@@ -311,9 +378,15 @@ fn lock(root: &Path, name: &str) -> Result<private::ExclusiveLock> {
     let file =
         crate::os::no_follow(crate::os::owner_only(&mut options), true).open(dir.join(name))?;
     private::check_file(&file, 4096)?;
-    file.try_lock().map_err(|_| {
-        Error::Conflict("habitat service or supervisor is active; pause schedules and project grants, let work settle, then retry")
-    })?;
+    match file.try_lock() {
+        Ok(()) => (),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return Err(Error::Conflict(
+                "habitat service or supervisor is active; pause schedules and project grants, let work settle, then retry",
+            ));
+        }
+        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+    }
     Ok(private::ExclusiveLock::held(file))
 }
 
@@ -380,20 +453,20 @@ pub fn stops_at_logout() -> Option<bool> {
 pub fn status(root: &Path, home: &Path) -> Result<Status> {
     supported()?;
     let service = load(root, home)?;
-    let (installed, log) = match &service {
+    let (installed, log, watchdog_enabled) = match &service {
         Some(s) => match read_manifest(&s.manifest) {
             Ok(bytes) => match s.recognize(&bytes)? {
-                Some(log) => (true, log),
+                Some(log) => (true, log, bytes == s.render()?.as_bytes()),
                 None => {
                     return Err(Error::Conflict(
                         "habitat service manifest changed; foreign contents preserved",
                     ));
                 }
             },
-            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => (false, None),
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => (false, None, false),
             Err(e) => return Err(e),
         },
-        None => (false, None),
+        None => (false, None, false),
     };
     let registered = match &service {
         Some(s) => registered(s)?,
@@ -408,6 +481,9 @@ pub fn status(root: &Path, home: &Path) -> Result<Status> {
         installed,
         registered,
         supervisor_running,
+        supervisor_health: crate::managed_supervisor::health(root, supervisor_running),
+        watchdog_enabled,
+        supervisor_watched: supervisor_running && crate::managed_supervisor::watched(root),
         service,
         log,
         relay_fault: crate::managed::relay_fault(&root.join("managed")),
@@ -684,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_logs_to_a_file_and_legacy_manifests_stay_recognized() {
+    fn manifest_uses_watchdog_and_legacy_manifests_stay_recognized() {
         if SYSTEMD {
             return;
         }
@@ -702,12 +778,18 @@ mod tests {
                     .join("Library/Logs/xcb")
             )
         );
-        assert!(text.contains(&format!(
-            "<key>StandardErrorPath</key><string>{}</string>",
-            log.display()
-        )));
-        assert!(!text.contains("/dev/null"));
-        assert_eq!(service.recognize(text.as_bytes()).unwrap(), Some(Some(log)));
+        assert!(text.contains("<string>service-run</string>"));
+        assert!(text.contains("<key>StandardErrorPath</key><string>/dev/null</string>"));
+        assert_eq!(
+            service.recognize(text.as_bytes()).unwrap(),
+            Some(Some(crate::service_watchdog::log_path(&state)))
+        );
+        let previous = service.render_previous().unwrap();
+        assert!(previous.contains("<string>managed-daemon</string>"));
+        assert_eq!(
+            service.recognize(previous.as_bytes()).unwrap(),
+            Some(Some(log))
+        );
         let legacy = service.render_legacy().unwrap();
         assert!(legacy.contains("<string>/dev/null</string>"));
         assert_eq!(service.recognize(legacy.as_bytes()).unwrap(), Some(None));
@@ -890,12 +972,16 @@ mod tests {
             home.join(format!(".local/state/xcb/{}.log", service.label))
         );
         let text = service.render().unwrap();
-        assert!(text.contains(&format!(
-            "StandardOutput=append:{}\n",
-            service.log_path().display()
-        )));
+        assert!(text.contains("StandardOutput=null\n"));
+        assert!(text.contains(" service-run\n"));
         assert_eq!(
             service.recognize(text.as_bytes()).unwrap(),
+            Some(Some(crate::service_watchdog::log_path(&state)))
+        );
+        assert_eq!(
+            service
+                .recognize(service.render_previous().unwrap().as_bytes())
+                .unwrap(),
             Some(Some(service.log_path()))
         );
         // A plist or an edited unit is foreign; there is no legacy unit.

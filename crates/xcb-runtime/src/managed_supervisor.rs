@@ -41,6 +41,12 @@ struct Record {
     executable: PathBuf,
     sha256: String,
     package_version: String,
+    /// One service-run invocation's random value. It binds that parent's
+    /// progress observations to its own unreaped child, never to a PID alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    service_instance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    service_parent_pid: Option<u32>,
 }
 
 impl Record {
@@ -59,6 +65,11 @@ impl Record {
                 .package_version
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(&byte))
+            || self
+                .service_instance
+                .as_ref()
+                .is_some_and(|value| uuid::Uuid::parse_str(value).is_err())
+            || self.service_parent_pid == Some(0)
         {
             return Err(Error::Unavailable(
                 "managed supervisor identity is invalid; inspect its private state before restarting it",
@@ -183,6 +194,10 @@ impl SupervisorIdentity {
             executable,
             sha256,
             package_version: env!("CARGO_PKG_VERSION").into(),
+            service_instance: std::env::var("XCB_SERVICE_INSTANCE").ok(),
+            service_parent_pid: std::env::var("XCB_SERVICE_PARENT")
+                .ok()
+                .and_then(|value| value.parse().ok()),
         })
     }
 
@@ -255,17 +270,147 @@ fn touch_heartbeat(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-/// How long ago the owner last refreshed its heartbeat; `None` when there is
-/// no readable heartbeat to judge by.
-fn heartbeat_age(directory: &Path) -> Option<Duration> {
+/// The verified file's modification marker; its changes can be observed
+/// independently of the current wall clock.
+fn heartbeat_modified(directory: &Path) -> Option<SystemTime> {
     let file = private::open_file(&directory.join(HEARTBEAT_NAME), 0).ok()?;
-    let modified = file.metadata().ok()?.modified().ok()?;
-    // A heartbeat from the future (clock stepped back) counts as fresh.
-    Some(
-        SystemTime::now()
-            .duration_since(modified)
-            .unwrap_or_default(),
-    )
+    file.metadata().ok()?.modified().ok()
+}
+
+fn heartbeat_age(directory: &Path) -> Option<Duration> {
+    // Clock rollback leaves an unknown age until the owner refreshes. It must
+    // not make an old observation look freshly written indefinitely.
+    let modified = heartbeat_modified(directory)?;
+    SystemTime::now().duration_since(modified).ok()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthState {
+    Fresh,
+    Stale,
+    Missing,
+    Stopped,
+}
+
+/// Progress is separate from lock ownership. A held lock with no readable
+/// heartbeat is unknown health, never an assertion that the loop is healthy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SupervisorHealth {
+    pub state: HealthState,
+    pub heartbeat_age_seconds: Option<u64>,
+}
+
+pub(crate) fn health(root: &Path, running: bool) -> SupervisorHealth {
+    let age = if running {
+        private::check_directory(&root.join("managed"))
+            .ok()
+            .and_then(|directory| {
+                let bytes = private::read(&directory.join(RECORD_NAME), MAX_RECORD).ok()?;
+                let record: Record = serde_json::from_slice(&bytes).ok()?;
+                record.validate().ok()?;
+                owner_alive(record.pid).ok()?;
+                heartbeat_age(&directory)
+            })
+    } else {
+        None
+    };
+    SupervisorHealth {
+        state: match (running, age) {
+            (false, _) => HealthState::Stopped,
+            (true, None) => HealthState::Missing,
+            (true, Some(age)) if age > UNRESPONSIVE_AFTER => HealthState::Stale,
+            (true, Some(_)) => HealthState::Fresh,
+        },
+        heartbeat_age_seconds: age.map(|duration| duration.as_secs()),
+    }
+}
+
+/// Read progress only while the identity still names this watchdog's own
+/// child. The caller holds the Child handle; these bytes alone never give
+/// anyone permission to signal a process. `None` also covers old supervisors.
+pub(crate) fn service_child_progress(
+    root: &Path,
+    child_pid: u32,
+    instance: &str,
+    executable_sha256: &str,
+) -> Result<Option<Option<SystemTime>>> {
+    let directory = private::check_directory(&root.join("managed"))?;
+    let path = directory.join(RECORD_NAME);
+    let bytes = match private::read(&path, MAX_RECORD) {
+        Ok(bytes) => bytes,
+        Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let record: Record = serde_json::from_slice(&bytes)?;
+    record.validate()?;
+    if record.pid != child_pid
+        || record.service_instance.as_deref() != Some(instance)
+        || record.sha256 != executable_sha256
+        || record.package_version != env!("CARGO_PKG_VERSION")
+    {
+        return Ok(None);
+    }
+    let modified = heartbeat_modified(&directory);
+    // A successor publishing while the heartbeat is read invalidates this
+    // observation, including when the successor uses the same executable.
+    if private::read(&path, MAX_RECORD)? != bytes {
+        return Ok(None);
+    }
+    Ok(Some(modified))
+}
+
+pub(crate) fn registered_service_child(root: &Path, parent_pid: u32, instance: &str) -> bool {
+    let Ok((_, sha256)) = process::host_identity() else {
+        return false;
+    };
+    let Ok(directory) = private::check_directory(&root.join("managed")) else {
+        return false;
+    };
+    let Some(record) = private::read(&directory.join(RECORD_NAME), MAX_RECORD)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+    else {
+        return false;
+    };
+    record.validate().is_ok()
+        && record.service_parent_pid == Some(parent_pid)
+        && record.service_instance.as_deref() == Some(instance)
+        && record.sha256 == sha256
+        && record.package_version == env!("CARGO_PKG_VERSION")
+        && owner_alive(record.pid).is_ok()
+        && heartbeat_age(&directory).is_some_and(|age| age <= UNRESPONSIVE_AFTER)
+}
+
+/// Status hint only: a matching watchdog parent still exists and its private
+/// lock is held. This deliberately grants no process-signalling authority.
+pub(crate) fn watched(root: &Path) -> bool {
+    let Ok(directory) = private::check_directory(&root.join("managed")) else {
+        return false;
+    };
+    let Some(record) = private::read(&directory.join(RECORD_NAME), MAX_RECORD)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Record>(&bytes).ok())
+    else {
+        return false;
+    };
+    if record.validate().is_err()
+        || record.service_instance.is_none()
+        || owner_alive(record.pid).is_err()
+        || record
+            .service_parent_pid
+            .is_none_or(|pid| owner_alive(pid).is_err())
+    {
+        return false;
+    }
+    let path = directory.join("service-watchdog.lock");
+    let Ok(file) = private::open_file(&path, 0) else {
+        return false;
+    };
+    if private::same_file(&path, &file).is_err() {
+        return false;
+    }
+    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
 }
 
 /// Whether the published owner record names `pid`: the confirmation a
@@ -378,10 +523,9 @@ fn owner_alive(pid: u32) -> Result<()> {
     }
 }
 
-/// A live owner whose heartbeat stopped moving has a wedged loop: it holds
-/// the lock but dispatches nothing. xcb never signals it; the person running
-/// xcb gets the process number and the one safe way to replace it. Work it
-/// was running stays held and asks for recovery at the next start.
+/// A live owner whose heartbeat stopped moving has a wedged loop. This
+/// client reports it but never turns a persisted PID into a kill command.
+/// A service watchdog can restart only the child it directly launched.
 fn check_progress(directory: &Path, pid: u32) -> Result<()> {
     let recheck = Instant::now() + UNRESPONSIVE_RECHECK;
     loop {
@@ -394,7 +538,7 @@ fn check_progress(directory: &Path, pid: u32) -> Result<()> {
     }
     Err(Error::Guided {
         message: format!(
-            "xcb's background supervisor (process {pid}) has not responded for more than {} minutes. Stop it with `kill -9 {pid}`, then reopen xcb; tasks it was running will ask you to recover them",
+            "xcb's background supervisor (process {pid}) has not responded for more than {} minutes. Its service watchdog can restart it if it launched this supervisor; otherwise inspect the live process before stopping it. Tasks it was running retain their recovery requirements",
             UNRESPONSIVE_AFTER.as_secs() / 60
         ),
         next: None,
@@ -420,6 +564,8 @@ mod tests {
                 sha256: process::executable_digest(&executable).unwrap(),
                 executable,
                 package_version: env!("CARGO_PKG_VERSION").into(),
+                service_instance: None,
+                service_parent_pid: None,
             },
         )
         .unwrap();
@@ -551,8 +697,12 @@ mod tests {
         );
         assert!(error.contains("has not responded"), "{error}");
         assert!(
-            error.contains(&format!("kill -9 {}", std::process::id())),
+            error.contains(&format!("process {}", std::process::id())),
             "{error}"
+        );
+        assert!(
+            !error.contains("kill -9"),
+            "stored PIDs are not signal authority"
         );
         // A heartbeat inside the bound, or none at all, never blocks a client.
         age_heartbeat(&root, UNRESPONSIVE_AFTER - Duration::from_secs(10));
@@ -592,5 +742,69 @@ mod tests {
         assert_eq!(identity.record.sha256, sha256);
         assert_eq!(identity.record.pid, std::process::id());
         assert!(check_running(&root, &path).is_ok());
+    }
+
+    #[test]
+    fn health_separates_held_lock_from_progress_and_reports_age() {
+        let (_directory, root, _identity) = fixture();
+        assert_eq!(health(&root, false).state, HealthState::Stopped);
+        assert_eq!(health(&root, true).state, HealthState::Fresh);
+        age_heartbeat(&root, UNRESPONSIVE_AFTER + Duration::from_secs(10));
+        let stale = health(&root, true);
+        assert_eq!(stale.state, HealthState::Stale);
+        assert!(stale.heartbeat_age_seconds.unwrap() >= 130);
+        fs::File::options()
+            .write(true)
+            .open(root.join("managed").join(HEARTBEAT_NAME))
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(3600))
+            .unwrap();
+        assert_eq!(health(&root, true).state, HealthState::Missing);
+        assert_eq!(health(&root, true).heartbeat_age_seconds, None);
+        fs::remove_file(root.join("managed").join(HEARTBEAT_NAME)).unwrap();
+        assert_eq!(health(&root, true).state, HealthState::Missing);
+        assert_eq!(health(&root, true).heartbeat_age_seconds, None);
+    }
+
+    #[test]
+    fn service_confirmation_binds_parent_nonce_and_current_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        let mut prepared = SupervisorIdentity::prepare().unwrap();
+        let instance = uuid::Uuid::new_v4().to_string();
+        prepared.record.service_instance = Some(instance.clone());
+        prepared.record.service_parent_pid = Some(std::process::id());
+        prepared.publish(&root).unwrap();
+        assert!(registered_service_child(
+            &root,
+            std::process::id(),
+            &instance
+        ));
+        assert!(!registered_service_child(
+            &root,
+            std::process::id(),
+            &uuid::Uuid::new_v4().to_string()
+        ));
+        assert!(!registered_service_child(
+            &root,
+            std::process::id().saturating_add(1),
+            &instance
+        ));
+        assert!(
+            !watched(&root),
+            "identity alone does not prove a running watcher"
+        );
+        let path = root.join("managed/service-watchdog.lock");
+        private::create(&path, &[]).unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        lock.try_lock().unwrap();
+        let lock = private::ExclusiveLock::held(lock);
+        assert!(watched(&root));
+        drop(lock);
+        assert!(!watched(&root));
     }
 }

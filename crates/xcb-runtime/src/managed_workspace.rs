@@ -845,14 +845,40 @@ fn is_git_toplevel(dir: &Path) -> bool {
 }
 
 fn bounded_read(path: &Path, max: u64) -> Option<String> {
-    let file = fs::File::open(path).ok()?;
+    let named = crate::os::lstat(path).ok()?;
+    if !named.file || named.len > max {
+        return None;
+    }
+    read_metadata_file(path, max, named)
+}
+
+fn read_metadata_file(path: &Path, max: u64, named: crate::os::Stamp) -> Option<String> {
+    let file = crate::os::no_follow(OpenOptions::new().read(true), true)
+        .open(path)
+        .ok()?;
+    // Validate the opened object, not an earlier path lookup. A renamed FIFO
+    // cannot block open, and symlinks or special handles never reach read.
+    let facts = crate::os::fstat(&file).ok()?;
+    if !facts.file || facts != named || facts.len > max {
+        return None;
+    }
     let mut bytes = Vec::new();
-    file.take(max + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > max {
+    (&file)
+        .take(max.checked_add(1)?)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > max
+        || crate::os::fstat(&file).ok()? != facts
+        || crate::os::lstat(path).ok()? != facts
+    {
         return None;
     }
     String::from_utf8(bytes).ok()
 }
+
+#[cfg(test)]
+#[path = "managed_workspace_metadata_tests.rs"]
+mod metadata_tests;
 
 /// `owner/name` of the repository's `origin` remote, read from `.git/config`
 /// or a linked worktree's common directory. Bounded; no subprocess. Only
@@ -1384,12 +1410,11 @@ impl ManagedStore {
             }
             if row.repo.is_none()
                 && due(format!("repo\0{}", row.path))
+                && let Ok(directory) = crate::os::lstat(Path::new(&row.path))
+                && directory.dir
                 && let Some(repo) = repo_identity(Path::new(&row.path))
             {
-                self.write_db()?.execute(
-                    "UPDATE workspaces SET repo=?1 WHERE path=?2 AND repo IS NULL",
-                    params![repo, row.path],
-                )?;
+                self.save_repo_identity(row, directory, &repo)?;
             }
         }
         let open = self.migration_conflicts(true)?;
@@ -1414,6 +1439,37 @@ impl ManagedStore {
                 ),
             );
         }
+        Ok(())
+    }
+
+    fn save_repo_identity(
+        &self,
+        row: &RegistryRow,
+        directory: crate::os::Stamp,
+        repo: &str,
+    ) -> Result<()> {
+        // A slow probe must not annotate a removed/replaced directory or a
+        // registry entry changed while it ran. Filesystem checks happen before
+        // the database lock; all saved row fields participate in the update.
+        let Ok(current) = crate::os::lstat(Path::new(&row.path)) else {
+            return Ok(());
+        };
+        if !current.dir || current.dev != directory.dev || current.ino != directory.ino {
+            return Ok(());
+        }
+        self.write_db()?.execute(
+            "UPDATE workspaces SET repo=?1 WHERE path=?2 AND repo IS NULL AND hidden=0
+             AND name=?3 AND admitted_by=?4 AND first_seen=?5 AND last_used=?6 AND task_count=?7",
+            params![
+                repo,
+                row.path,
+                row.name,
+                row.admitted_by,
+                sql(row.first_seen)?,
+                sql(row.last_used)?,
+                sql(row.task_count)?
+            ],
+        )?;
         Ok(())
     }
 

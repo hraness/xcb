@@ -35,7 +35,7 @@ tokio = { version = "=1.47.1", features = ["rt-multi-thread", "macros", "process
 tokio-rustls = { version = "=0.26.5", default-features = false, features = ["ring", "tls12"] }
 uuid = { version = "=1.26.1", features = ["v4", "v7", "serde"] }
 webpki-roots = "=1.0.9"
-xcb-core = { version = "0.14.4", path = "../xcb-core" }
+xcb-core = { version = "0.15.1", path = "../xcb-core" }
 zeroize = "=1.9.0"
 
 [target.'cfg(unix)'.dependencies]
@@ -45,4 +45,4 @@ local-custody = { git = "https://github.com/hraness/local-custody", rev = "4fd65
 rustix = { version = "=1.1.5", features = ["fs", "process", "pty", "termios"] }
 
 [target.'cfg(windows)'.dependencies]
-xcb-platform = { version = "0.14.4", path = "../xcb-platform" }
+xcb-platform = { version = "0.15.1", path = "../xcb-platform" }

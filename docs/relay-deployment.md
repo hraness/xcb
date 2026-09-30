@@ -29,3 +29,7 @@ Set the relay's environment with `npx convex env set <KEY> <value>`:
   `webhook` needs `XCB_OTP_WEBHOOK_URL` and `XCB_OTP_WEBHOOK_TOKEN`. With
   `log`, codes are printed to the function log, which you read from an
   authenticated Convex session with `npx convex logs`.
+
+The same deployment can optionally receive two anonymous laptop heartbeats for
+an external status page. [Host availability](host-status.md) describes its
+separate credential configuration, fixed public fields and receipt expiry.
