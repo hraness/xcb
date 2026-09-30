@@ -160,42 +160,17 @@ def private_file(path, data):
         output.write(data)
 
 
-def keychain_search_list():
-    entries = shlex.split(run(["/usr/bin/security", "list-keychains", "-d", "user"]))
-    require(all(Path(entry).is_absolute() for entry in entries), "invalid keychain search list")
-    return entries
-
-
-def participate_keychain(keychain, present):
-    # This release job owns its runner. Read the current list on every change:
-    # cleanup removes only our path, preserving additions made since startup.
-    # security has no atomic compare-and-set; do not run beside another writer.
-    current = keychain_search_list()
-    owned = str(keychain)
-    desired = [entry for entry in current if entry != owned]
-    if present:
-        desired.append(owned)
-    if desired != current:
-        run(["/usr/bin/security", "list-keychains", "-d", "user", "-s", *desired])
-    observed = keychain_search_list()
-    require((owned in observed) == present and all(entry in observed for entry in desired),
-            "keychain search list update was not retained")
-
-
 def cleanup_credentials(work):
     credentials = work / "credentials"
     if not credentials.exists():
         return
     require(credentials.is_dir() and not credentials.is_symlink(), "unsafe credential directory")
     keychain = credentials / "signing.keychain-db"
-    # Remove only the owned keychain from the current search list, then delete
-    # through the supported API before removing the exact private directory.
+    # Supported deletion also removes this owned keychain from the search
+    # list without replacing any other entries with an older snapshot.
     try:
         if keychain.exists():
-            try:
-                participate_keychain(keychain, False)
-            finally:
-                run(["/usr/bin/security", "delete-keychain", keychain])
+            run(["/usr/bin/security", "delete-keychain", keychain])
     finally:
         shutil.rmtree(credentials)
 
@@ -264,7 +239,15 @@ def sign(archive, version, output, work):
                  "-P", values["APPLE_DEVELOPER_ID_P12_PASSWORD"], "-T", "/usr/bin/codesign", "-T", "/usr/bin/security"])
             run(["/usr/bin/security", "set-key-partition-list", "-S", "apple-tool:,apple:,codesign:",
                  "-s", "-k", password, keychain])
-            participate_keychain(keychain, True)
+            # Trust evaluation searches the user's keychain list for issuers,
+            # even when identity lookup names this keychain explicitly. Keep
+            # every existing entry; deleting our keychain also removes it from
+            # that list without restoring a stale snapshot over others' edits.
+            search_list = shlex.split(run(["/usr/bin/security", "list-keychains", "-d", "user"]))
+            require(len(search_list) <= 128 and all(path.startswith("/") for path in search_list),
+                    "invalid user keychain search list")
+            if str(keychain) not in search_list:
+                run(["/usr/bin/security", "list-keychains", "-d", "user", "-s", *search_list, keychain])
             identities = run(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning", keychain])
             matches = re.findall(r'\b([0-9A-Fa-f]{40}) "Developer ID Application: [^"\n]+ \(' + TEAM_ID + r'\)"', identities)
             require(len(matches) == 1, "keychain must contain exactly one expected Developer ID Application identity")

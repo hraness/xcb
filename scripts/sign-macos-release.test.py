@@ -10,6 +10,7 @@ from pathlib import Path
 import stat
 import struct
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -35,7 +36,8 @@ class SigningTests(unittest.TestCase):
         self.binary = struct.pack("<IIIIIIII", 0xFEEDFACF, 0x0100000C, 0, 2, 0, 0, 0, 0) + b"not executable"
         self.native_archive()
         self.calls = []
-        self.keychains = [str(self.root / "login.keychain-db")]
+        self.original_search_list = [str(self.root / "existing user.keychain-db")]
+        self.search_list = self.original_search_list.copy()
         self.status = "Accepted"
         self.wait_id = UUID
         self.metadata = ("Identifier=dev.hraness.xcb\nTeamIdentifier=" + TEAM + "\n"
@@ -75,21 +77,22 @@ class SigningTests(unittest.TestCase):
         self.assertFalse(any(name in os.environ for name in signing.SECRET_NAMES))
         if self.tool_failure and self.tool_failure in args:
             raise signing.SigningError("mock Apple rejection")
-        if "list-keychains" in args:
-            if "-s" in args:
-                self.keychains = args[args.index("-s") + 1:]
-            return "\n".join(json.dumps(entry) for entry in self.keychains)
-        if "--sign" in args:
-            self.assertIn(str(self.work / "credentials" / "signing.keychain-db"), self.keychains)
-            self.assertTrue(args[args.index("--requirements") + 1].startswith("=designated => "))
-        if "--test-requirement" in args:
-            self.assertEqual(args[args.index("--test-requirement") + 1], "=" + signing.apple_requirement())
         if "create-keychain" in args:
             Path(args[-1]).touch(mode=0o600)
             for path in (self.work / "credentials").iterdir():
                 self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         if "find-identity" in args:
+            self.assertIn(args[-1], self.search_list)
             return f'  1) {"A" * 40} "Developer ID Application: Example ({self.identity_team})"\n'
+        if "list-keychains" in args:
+            if "-s" in args:
+                self.search_list = args[args.index("-s") + 1:]
+            return "\n".join(json.dumps(path) for path in self.search_list)
+        if "delete-keychain" in args:
+            self.search_list = [path for path in self.search_list if path != args[-1]]
+        for option in ("--requirements", "--test-requirement"):
+            if option in args:
+                self.assertTrue(args[args.index(option) + 1].startswith("="))
         if "--display" in args:
             return self.metadata
         if "notarytool" in args:
@@ -124,6 +127,7 @@ class SigningTests(unittest.TestCase):
         removed = next(i for i, args in enumerate(self.calls) if "delete-keychain" in args)
         self.assertLess(notarized, removed)
         self.assertFalse(self.work.exists())
+        self.assertEqual(self.search_list, self.original_search_list)
         self.assertTrue(all(args[0] in ("/usr/bin/security", "/usr/bin/codesign", "/usr/bin/xcrun") for args in self.calls))
         receipt = json.loads((self.root / "xcb-apple-notarization.json").read_text())
         self.assertEqual(receipt["submissionId"], UUID)
@@ -137,35 +141,24 @@ class SigningTests(unittest.TestCase):
             self.sign()
         self.assertFalse(self.output.exists())
         self.assertFalse(self.work.exists())
+        self.assertEqual(self.search_list, self.original_search_list)
         self.assertTrue(any("delete-keychain" in args for args in self.calls))
         receipt = json.loads((self.root / "xcb-apple-notarization.json").read_text())
         self.assertEqual(receipt["submissionId"], UUID)
         self.assertEqual(receipt["status"], "Invalid")
 
     def test_cleanup_preserves_keychains_added_during_signing(self):
-        original = self.tool
-        added = str(self.root / "another.keychain-db")
-        def tool(args, timeout=60):
-            if "--sign" in args:
-                self.keychains.append(added)
-            return original(args, timeout)
-        with patch.object(signing, "run", tool):
-            self.sign()
-        self.assertEqual(self.keychains, [str(self.root / "login.keychain-db"), added])
+        added = str(self.root / "another user.keychain-db")
 
-    def test_search_list_cleanup_failure_blocks_publication(self):
-        original = self.tool
-        owned = str(self.work / "credentials" / "signing.keychain-db")
-        def tool(args, timeout=60):
-            if "list-keychains" in args and "-s" in args and owned not in map(str, args):
-                raise signing.SigningError("search list cleanup rejected")
-            return original(args, timeout)
-        with patch.object(signing, "run", tool):
-            with self.assertRaisesRegex(signing.SigningError, "search list cleanup rejected"):
-                self.sign()
-        self.assertFalse(self.output.exists())
-        self.assertFalse(self.work.exists())
-        self.assertTrue(any("delete-keychain" in args for args in self.calls))
+        def add_during_signing(args, timeout=60):
+            if "--sign" in args:
+                self.search_list.append(added)
+            return self.tool(args, timeout)
+
+        with patch.object(signing, "run", add_during_signing):
+            self.sign()
+        self.assertEqual(self.search_list, [*self.original_search_list, added])
+        self.assertTrue(self.output.exists())
 
     def test_incomplete_notary_status_is_not_success(self):
         self.status = "In Progress"
@@ -396,6 +389,40 @@ class ToolBoundaryTests(unittest.TestCase):
         with patch.object(signing.subprocess, "run", return_value=result):
             with self.assertRaisesRegex(signing.SigningError, "^Apple tool failed: security$"):
                 signing.run(["/usr/bin/security", "-p", "private"])
+
+
+@unittest.skipUnless(sys.platform == "darwin", "requires Apple's actual requirement parser")
+class NativeRequirementTests(unittest.TestCase):
+    def test_literal_source_is_parsed_and_wrong_publisher_is_rejected(self):
+        with tempfile.TemporaryDirectory(prefix="xcb-native-requirement-") as directory:
+            root = Path(directory)
+            source = root / "fixture.c"
+            binary = root / "fixture"
+            source.write_text("int main(void) { return 0; }\n")
+            subprocess.run(["/usr/bin/xcrun", "clang", str(source), "-o", str(binary)],
+                           check=True, capture_output=True, timeout=30)
+            requirement = 'identifier "dev.hraness.xcb"'
+            signed = subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-",
+                                     "--identifier", "dev.hraness.xcb", "--requirements",
+                                     "=designated => " + requirement, str(binary)],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(signed.returncode, 0, signed.stderr)
+            for predicate, expected in ((requirement, 0), (signing.apple_requirement(), 1)):
+                verified = subprocess.run(["/usr/bin/codesign", "--verify", "--strict",
+                                           "--test-requirement", "=" + predicate, str(binary)],
+                                          capture_output=True, text=True, timeout=30)
+                if expected == 0:
+                    self.assertEqual(verified.returncode, 0, verified.stderr)
+                else:
+                    self.assertNotEqual(verified.returncode, 0)
+                    self.assertIn("failed to satisfy specified code requirement", verified.stderr.lower())
+                self.assertNotIn("No such file", verified.stderr)
+            # Without '=', codesign treats source as a filename. This is the
+            # native failure that the mocked verifier used to conceal.
+            filename = subprocess.run(["/usr/bin/codesign", "--verify", "--test-requirement",
+                                       requirement, str(binary)], capture_output=True,
+                                      text=True, timeout=30)
+            self.assertNotEqual(filename.returncode, 0)
 
 
 if __name__ == "__main__":

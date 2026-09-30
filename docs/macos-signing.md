@@ -30,6 +30,9 @@ The expected Apple Team ID is a reviewed source constant, rather than a value
 accepted from the downloaded binary. Use a Developer ID Application
 certificate belonging to that team. An Apple Development, Apple Distribution,
 Developer ID Installer, or locally self-signed certificate does not qualify.
+Include Apple's issuing intermediate certificate in the PKCS#12 bundle so a
+clean runner can build the certificate chain. A Developer-role App Store
+Connect team API key is sufficient for notarization; Admin is unnecessary.
 
 Keep private keys outside the repository, logs, and build artifacts. Transfer
 them directly into the environment's encrypted secrets. Retain a protected
@@ -46,14 +49,19 @@ and checks its digest before extracting the single executable.
 
 The signing job imports the certificate into a temporary Keychain on its isolated
 runner and temporarily includes that Keychain in the user search list. Cleanup
-reads the current list and removes only its own path, preserving other entries
-and additions made during signing. Apple’s search-list API has no atomic update;
-this job must not share its runner with another search-list writer. It signs the
+uses Apple’s supported deletion command to remove its Keychain and search-list
+entry, preserving other entries and additions made during signing. The initial
+search-list update is not atomic, so the job must not share its runner with
+another search-list writer. It signs the
 executable with hardened runtime and a secure timestamp, and checks its Apple
 certificate chain, Team ID, and application identifier. It submits the signed
 executable to Apple's notary service and requires an `Accepted` result and a
 successful notarization check. Credential cleanup runs on failure as well as
 success.
+The temporary Keychain is appended to the existing user search list so macOS
+can discover its issuer certificate. Deleting that owned Keychain removes its
+search-list entry while preserving the other entries. Native regression tests
+exercise Apple's requirement parser as well as the mocked release workflow.
 
 The job records Apple's submission ID and the input and signed-file hashes
 before waiting up to 15 minutes for notarization. This small diagnostic remains
