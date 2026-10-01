@@ -3261,11 +3261,14 @@ pub fn run_with_options(
         ));
     }
     enable_raw_mode()?;
+    let mut restore = Restore {
+        keyboard_enhanced: false,
+    };
     // Only terminals that answer the kitty protocol query get the enhancement
     // flags pushed; elsewhere pushing them is a no-op at best and Shift-Enter
     // is indistinguishable from Enter, which the help text reflects.
     let keyboard_enhanced = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
-    let _restore = Restore { keyboard_enhanced };
+    restore.keyboard_enhanced = keyboard_enhanced;
     // Wheel scrolling is available immediately; `/mouse` releases capture
     // for the terminal's native text selection.
     execute!(

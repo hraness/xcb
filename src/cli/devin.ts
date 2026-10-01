@@ -7,6 +7,7 @@ import { DEVIN_ACP_PROTOCOL_VERSION } from "../devin-acp.ts";
 import { boundedText } from "../validation.ts";
 import type { CliBinaryInspection } from "./binaries.ts";
 import { providerAuthDirs } from "./auth.ts";
+import { waitForAuthChild, withAuthTerminal } from "./auth-terminal.ts";
 
 const fail = (code: string): never => { throw new Error(code); };
 
@@ -92,21 +93,22 @@ export async function devinAuthStatus(stateRoot: string, inspection: CliBinaryIn
  * `--force-manual-token-flow`. */
 export async function devinLogin(stateRoot: string, inspection: CliBinaryInspection): Promise<void> {
   const { env } = await managedAuthContext(stateRoot);
-  const code = await new Promise<number>((resolve) => {
+  const result = await withAuthTerminal(async () => {
     const child = spawn(inspection.executablePath, ["auth", "login"], { stdio: "inherit", env: { ...env }, detached: false });
-    child.on("error", () => resolve(1));
-    child.on("exit", (status) => resolve(status ?? 1));
+    return waitForAuthChild(child, 600_000);
   });
-  if (code !== 0) fail("DEVIN_LOGIN_FAILED");
+  if (result.cancelled) fail("DEVIN_LOGIN_CANCELLED");
+  if (result.code !== 0) fail("DEVIN_LOGIN_FAILED");
 }
 
 /** Remove the managed credential via Devin's own logout. Idempotent — a
  * signed-out or absent credential still reports signed out afterwards. */
 export async function devinLogout(stateRoot: string, inspection: CliBinaryInspection): Promise<void> {
   const { env } = await managedAuthContext(stateRoot);
-  await new Promise<number>((resolve) => {
+  const result = await withAuthTerminal(async () => {
     const child = spawn(inspection.executablePath, ["auth", "logout"], { stdio: "inherit", env: { ...env }, detached: false });
-    child.on("error", () => resolve(0));
-    child.on("exit", (status) => resolve(status ?? 0));
+    return waitForAuthChild(child, 30_000);
   });
+  if (result.cancelled) fail("DEVIN_LOGOUT_CANCELLED");
+  if (result.timedOut) fail("DEVIN_LOGOUT_FAILED");
 }

@@ -1,7 +1,7 @@
 //! Terminal assistance for Codex's one-time device sign-in challenge.
 //! Reusable provider credentials never reach this module.
 use std::io::{self, Write};
-#[cfg(any(unix, test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 use std::time::Duration;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -26,58 +26,23 @@ fn valid_prompt(prompt: &DeviceLoginPrompt) -> bool {
     prompt.url == DEVICE_URL && (digits || letters)
 }
 
-#[cfg(unix)]
 async fn wait_for_enter() -> bool {
-    use rustix::{
-        event::{PollFd, PollFlags, Timespec, poll},
-        io::{Errno, read},
-    };
-    let stdin = io::stdin();
-    let mut line = Vec::with_capacity(128);
+    let mut retry = false;
     loop {
-        // Device auth never reads stdin. The CLI is its only reader, and
-        // canonical tty input becomes readable only after a line or EOF.
-        // Polling preserves cancellation without a blocking reader thread.
-        let mut fds = [PollFd::new(&stdin, PollFlags::IN)];
-        match poll(&mut fds, Some(&Timespec::default())) {
-            Ok(0) | Err(Errno::INTR) => {}
-            Ok(_) if fds[0].revents().contains(PollFlags::IN) => {
-                let mut bytes = [0; 1024];
-                match read(&stdin, &mut bytes) {
-                    Ok(0) => return false,
-                    Ok(length) => {
-                        for byte in &bytes[..length] {
-                            if *byte == b'\n' || *byte == b'\r' {
-                                if line.is_empty() {
-                                    return true;
-                                }
-                                if line.as_slice() == b"skip" {
-                                    return false;
-                                }
-                                line.clear();
-                                eprint!("Press Enter to open the sign-in page: ");
-                                let _ = io::stderr().flush();
-                            } else {
-                                if line.len() >= 1024 {
-                                    return false;
-                                }
-                                line.push(*byte);
-                            }
-                        }
-                    }
-                    Err(Errno::INTR | Errno::AGAIN) => {}
-                    Err(_) => return false,
-                }
-            }
-            Ok(_) | Err(_) => return false,
+        let Ok(mut reader) = crate::terminal_input::Reader::new(false, 1024) else {
+            return false;
+        };
+        if retry {
+            eprint!("Press Enter to open the sign-in page: ");
+            let _ = io::stderr().flush();
         }
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        match reader.read_line().await {
+            Ok(Some(line)) if line.is_empty() => return true,
+            Ok(Some(line)) if line.as_str() == "skip" => return false,
+            Ok(Some(_)) => retry = true,
+            Ok(None) | Err(_) => return false,
+        }
     }
-}
-
-#[cfg(not(unix))]
-async fn wait_for_enter() -> bool {
-    false
 }
 
 trait Effects {

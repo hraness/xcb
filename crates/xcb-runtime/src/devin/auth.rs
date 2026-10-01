@@ -283,15 +283,180 @@ pub async fn login_with_cancel(
     login_inner(store, account, pin, cancel).await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DevinLoginEvent {
+    AuthorizationUrl(String),
+    CodeRequested,
+}
+
+/// Keep the operator's terminal in xcb's foreground group. Only a bounded
+/// manually entered code reaches the provider's separate private terminal.
+pub async fn login_with_interaction(
+    store: &Store,
+    account: &Id,
+    pin: &crate::process::Pin,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    events: tokio::sync::mpsc::Sender<DevinLoginEvent>,
+    codes: tokio::sync::mpsc::Receiver<Zeroizing<String>>,
+) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (store, account, pin, cancel, events, codes);
+        Err(Error::providers_unsupported())
+    }
+    #[cfg(unix)]
+    {
+        super::runtime_admitted(pin)?;
+        let interaction = login_interaction(Some(events), codes)?;
+        login_interactive_inner(store, account, pin, cancel, interaction).await
+    }
+}
+
+#[cfg(unix)]
+fn login_interaction(
+    events: Option<tokio::sync::mpsc::Sender<DevinLoginEvent>>,
+    codes: tokio::sync::mpsc::Receiver<Zeroizing<String>>,
+) -> Result<crate::process::LoginInteraction> {
+    let (stdin, terminal) = crate::process::login_terminal()?;
+    let mut observer = DevinLoginObserver::default();
+    Ok(crate::process::LoginInteraction {
+        stdin,
+        terminal,
+        codes,
+        observer: Box::new(move |bytes| {
+            let observed = observer.observe(bytes)?;
+            if let Some(events) = &events {
+                for event in observed {
+                    events
+                        .try_send(event)
+                        .map_err(|_| Error::Unavailable("Devin sign-in interaction closed"))?;
+                }
+            } else if observer.url_sent || observer.prompt_seen {
+                return Err(Error::Unavailable(
+                    "Devin sign-in needs an interactive terminal to paste its code",
+                ));
+            }
+            Ok(())
+        }),
+    })
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct DevinLoginObserver {
+    bytes: Zeroizing<Vec<u8>>,
+    url_sent: bool,
+    prompt_seen: bool,
+    prompt_sent: bool,
+}
+
+#[cfg(unix)]
+impl DevinLoginObserver {
+    fn observe(&mut self, bytes: &[u8]) -> Result<Vec<DevinLoginEvent>> {
+        use regex::Regex;
+        use std::sync::OnceLock;
+        if self.bytes.len() + bytes.len() > 128 * 1024 {
+            return Err(Error::Protocol("Devin sign-in output limit"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        static ANSI: OnceLock<Regex> = OnceLock::new();
+        static OSC: OnceLock<Regex> = OnceLock::new();
+        static URL: OnceLock<Regex> = OnceLock::new();
+        let raw = Zeroizing::new(String::from_utf8_lossy(&self.bytes).into_owned());
+        let without_osc = Zeroizing::new(
+            OSC.get_or_init(|| Regex::new(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)").unwrap())
+                .replace_all(&raw, "")
+                .into_owned(),
+        );
+        let text = Zeroizing::new(
+            ANSI.get_or_init(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap())
+                .replace_all(&without_osc, "")
+                .into_owned(),
+        );
+        let mut events = Vec::new();
+        if !self.url_sent {
+            let urls = URL.get_or_init(|| {
+                Regex::new(r"https://app\.devin\.ai/auth/cli/continue\?[A-Za-z0-9_~%=&.+:/-]+[\s]")
+                    .unwrap()
+            });
+            for matched in urls.find_iter(&text) {
+                let url = matched.as_str().trim();
+                if admitted_login_url(url) {
+                    self.url_sent = true;
+                    events.push(DevinLoginEvent::AuthorizationUrl(url.into()));
+                    break;
+                }
+            }
+        }
+        self.prompt_seen |= text.contains("then copy the code and paste it below")
+            || text.contains("copy the sign-in code and paste it here");
+        if self.url_sent && self.prompt_seen && !self.prompt_sent {
+            self.prompt_sent = true;
+            events.push(DevinLoginEvent::CodeRequested);
+        }
+        Ok(events)
+    }
+}
+
+#[cfg(unix)]
+fn admitted_login_url(url: &str) -> bool {
+    let Some(query) = url.strip_prefix("https://app.devin.ai/auth/cli/continue?") else {
+        return false;
+    };
+    if url.len() > 8192 {
+        return false;
+    }
+    // Only the native PKCE handoff's known public fields leave capture. Reject
+    // extra fields rather than accidentally printing credential-bearing URLs.
+    let mut fields = BTreeMap::new();
+    for field in query.split('&') {
+        let Some((key, value)) = field.split_once('=') else {
+            return false;
+        };
+        let valid = match key {
+            "state" => !value.is_empty() && value.len() <= 128,
+            "code_challenge" => value.len() == 43,
+            "prompt" => value == "select_account",
+            "cli_pkce_marker" => value == "1",
+            "code_challenge_method" => value == "S256",
+            _ => false,
+        };
+        if !valid
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+            || fields.insert(key, value).is_some()
+        {
+            return false;
+        }
+    }
+    fields.contains_key("state")
+        && fields.contains_key("code_challenge")
+        && fields.get("cli_pkce_marker") == Some(&"1")
+}
+
 #[cfg(unix)]
 async fn login_inner(
     store: &Store,
     account: &Id,
     pin: &crate::process::Pin,
-    mut cancel: tokio::sync::watch::Receiver<bool>,
+    cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    use crate::process::Group;
-    use std::{os::fd::AsFd, process::Stdio, time::Duration};
+    let (_codes_open, codes) = tokio::sync::mpsc::channel(1);
+    let interaction = login_interaction(None, codes)?;
+    login_interactive_inner(store, account, pin, cancel, interaction).await
+}
+
+#[cfg(unix)]
+async fn login_interactive_inner(
+    store: &Store,
+    account: &Id,
+    pin: &crate::process::Pin,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    interaction: crate::process::LoginInteraction,
+) -> Result<()> {
+    use crate::process::CaptureOutcome;
+    use std::time::Duration;
     use tokio::process::Command;
     use xcb_core::policy::EffectState;
 
@@ -331,15 +496,10 @@ async fn login_inner(
             .args(["auth", "login", "--force-manual-token-flow"])
             .env_clear()
             .envs(env)
-            .current_dir(&home)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::from(std::io::stderr().as_fd().try_clone_to_owned()?))
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
-        Group::prepare(&mut command);
+            .current_dir(&home);
         Ok::<_, Error>((command, source))
     })();
-    let (mut command, source) = match prepared {
+    let (command, source) = match prepared {
         Ok(value) => value,
         Err(error) => {
             store.settle(&run, State::Failed, crate::now_ms())?;
@@ -351,57 +511,24 @@ async fn login_inner(
         return Err(Error::Unavailable("Devin sign-in cancelled before launch"));
     }
     artifacts.retain_before_launch();
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
+    let outcome = crate::process::capture_supervised_interactive(
+        command,
+        64 * 1024,
+        Duration::from_secs(600),
+        cancel,
+        |pid| store.mark_spawned(&run, pid).map(|_| ()),
+        Some(interaction),
+    )
+    .await;
+    let result = match outcome {
+        CaptureOutcome::NeverStarted(error) => {
             store.settle(&run, State::Failed, crate::now_ms())?;
             artifacts.release_after_join(true, EffectState::None);
-            return Err(Error::LaunchNotStarted(error));
+            return Err(error);
         }
+        CaptureOutcome::Unproven => return Err(Error::CleanupUnproven),
+        CaptureOutcome::Joined(output) => output.map(|_| ()),
     };
-    let group = Group::adopt(&mut child).ok_or(Error::CleanupUnproven)?;
-    let pid = group.pid();
-    struct Custody(Option<Group>);
-    impl Drop for Custody {
-        fn drop(&mut self) {
-            if let Some(group) = &self.0 {
-                let _ = group.kill();
-            }
-        }
-    }
-    let mut custody = Custody(Some(group.clone()));
-    let result = match store.mark_spawned(&run, pid) {
-        Err(error) => Err(error),
-        Ok(_) => tokio::select! {
-            _ = async { while !*cancel.borrow() { if cancel.changed().await.is_err() { std::future::pending::<()>().await; } } } => Err(Error::Unavailable("Devin sign-in cancelled")),
-            _ = tokio::time::sleep(Duration::from_secs(600)) => Err(Error::Unavailable("Devin sign-in timed out")),
-            status = child.wait() => match status {
-                Ok(status) if status.success() => Ok(()),
-                Ok(_) => Err(Error::Unavailable("Devin sign-in did not complete")),
-                Err(error) => Err(error.into()),
-            },
-        },
-    };
-    if child.id() == Some(pid) {
-        let _ = group.kill();
-    }
-    custody.0 = None;
-    let joined = tokio::time::timeout(Duration::from_secs(5), async {
-        if child.wait().await.is_err() {
-            return false;
-        }
-        loop {
-            if group.empty() == Some(true) {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or(false);
-    if !joined {
-        return Err(Error::CleanupUnproven);
-    }
     artifacts.release_after_join(true, EffectState::None);
     if let Err(error) = result {
         // The account was never exposed. Failed login files stay private and
@@ -503,6 +630,112 @@ mod login_tests {
     }
 
     const WRITE_TOKEN: &str = "test \"$1 $2\" = 'auth login' || exit 8\ntest \"$3\" = '--force-manual-token-flow' || exit 10\ntest -n \"$TERM\" || exit 11\ntest \"$XDG_DATA_HOME\" = \"$HOME/.local/share\" || exit 9\nmkdir -p \"$XDG_DATA_HOME/devin\"\ncat > \"$XDG_DATA_HOME/devin/credentials.toml\" <<'CREDENTIAL'\nwindsurf_api_key = \"synthetic-native-login\"\napi_server_url = \"https://server.codeium.com\"\ndevin_webapp_host = \"https://app.devin.ai\"\ndevin_api_url = \"https://api.devin.ai\"\nCREDENTIAL";
+    const TEST_URL: &str = "https://app.devin.ai/auth/cli/continue?state=synthetic-state&prompt=select_account&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&cli_pkce_marker=1";
+
+    #[tokio::test]
+    async fn operator_terminal_login_child() {
+        if std::env::var_os("XCB_DEVIN_OPERATOR_TTY_CHILD").is_none() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let pin = fixture(
+            &base,
+            &format!("printf 'Visit {TEST_URL} to sign in, then copy the code and paste it below.\\n'\nIFS= read -r code\ntest \"$code\" = manual-code || exit 12\n{WRITE_TOKEN}"),
+        )
+        .await;
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
+        let (sender, cancel) = tokio::sync::watch::channel(false);
+        let (events, mut observed) = tokio::sync::mpsc::channel(4);
+        let (codes, input) = tokio::sync::mpsc::channel(1);
+        let interaction = login_interaction(Some(events), input).unwrap();
+        let login = login_interactive_inner(&store, &account.id, &pin, cancel, interaction);
+        let handoff = async {
+            while let Some(event) = observed.recv().await {
+                if event != DevinLoginEvent::CodeRequested {
+                    continue;
+                }
+                eprintln!("DEVIN_CODE_READY");
+                let stdin = std::io::stdin();
+                loop {
+                    if rustix::io::ioctl_fionread(&stdin).unwrap() > 0 {
+                        let mut bytes = [0u8; 32];
+                        let length = rustix::io::read(&stdin, &mut bytes).unwrap();
+                        assert_eq!(&bytes[..length], b"manual-code\n");
+                        codes
+                            .send(Zeroizing::new("manual-code".into()))
+                            .await
+                            .unwrap();
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        };
+        let request = async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let _ = sender.send(true);
+        };
+        let (result, (), ()) = tokio::join!(login, request, handoff);
+        result.expect("provider could not read sign-in code under operator terminal custody");
+        assert_eq!(
+            &*token(&store, &account.id).unwrap(),
+            "synthetic-native-login"
+        );
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        eprintln!("DEVIN_OPERATOR_TTY_JOINED");
+    }
+
+    #[test]
+    fn operator_foreground_terminal_sign_in_joins_without_stopped_provider() {
+        let python = ["/usr/bin/python3", "/usr/local/bin/python3"]
+            .into_iter()
+            .find(|path| Path::new(path).is_file())
+            .expect("Python 3 is required for terminal regression tests");
+        let script = r#"
+import fcntl, os, pty, select, subprocess, sys, termios, time
+master, slave = pty.openpty()
+def foreground_session():
+    os.setsid()
+    fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+    os.tcsetpgrp(slave, os.getpgrp())
+child = subprocess.Popen([sys.argv[1], '--exact', 'devin::auth::login_tests::operator_terminal_login_child', '--nocapture'], stdin=slave, stdout=slave, stderr=slave, preexec_fn=foreground_session)
+data = bytearray()
+try:
+    deadline = time.monotonic() + 10
+    sent = False
+    while child.poll() is None and time.monotonic() < deadline:
+        if select.select([master], [], [], .02)[0]:
+            chunk = os.read(master, 65536)
+            if not chunk:
+                break
+            data.extend(chunk)
+        if b'DEVIN_CODE_READY' in data and not sent:
+            os.write(master, b'manual-code\n')
+            sent = True
+    child.wait(timeout=2)
+    assert sent, data
+    assert child.returncode == 0 and b'DEVIN_OPERATOR_TTY_JOINED' in data, data
+finally:
+    os.close(master)
+    os.close(slave)
+    if child.poll() is None:
+        child.kill()
+        child.wait(timeout=2)
+"#;
+        let output = std::process::Command::new(python)
+            .args(["-c", script])
+            .arg(std::env::current_exe().unwrap())
+            .env("XCB_DEVIN_OPERATOR_TTY_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[tokio::test]
     async fn native_login_publishes_only_selected_account_after_join_and_cleans_profile() {
@@ -622,7 +855,7 @@ mod login_tests {
         let base = xcb_core::canonical(directory.path()).unwrap();
         let pin = fixture(
             &base,
-            &format!("{WRITE_TOKEN}\necho 'Visit https://app.devin.ai/auth/cli/continue?state=synthetic-state to sign in, then copy the code and paste it below.'\necho synthetic-login-progress"),
+            &format!("{WRITE_TOKEN}\necho 'private-native-output synthetic-native-login'\necho 'https://untrusted.example/private?token=synthetic-secret' >&2"),
         )
         .await;
         let store = Store::open(&base.join("state")).unwrap();
@@ -634,7 +867,7 @@ mod login_tests {
     }
 
     #[test]
-    fn native_login_progress_preserves_machine_readable_stdout() {
+    fn native_login_output_is_private_on_both_operator_streams() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -648,10 +881,127 @@ mod login_tests {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(String::from_utf8_lossy(&output.stderr).contains("synthetic-login-progress"));
-        let url = "https://app.devin.ai/auth/cli/continue?state=synthetic-state";
-        assert!(String::from_utf8_lossy(&output.stderr).contains(url));
-        assert!(!String::from_utf8_lossy(&output.stdout).contains(url));
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-login-progress"));
+        for stream in [&output.stdout, &output.stderr] {
+            let text = String::from_utf8_lossy(stream);
+            for secret in [
+                "private-native-output",
+                "synthetic-native-login",
+                "untrusted.example",
+                "synthetic-secret",
+            ] {
+                assert!(
+                    !text.contains(secret),
+                    "provider output escaped private capture"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_login_without_input_fails_promptly_and_cleans_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let pin = fixture(&base, &format!("printf 'Visit {TEST_URL} to sign in, then copy the code and paste it below.\\n'\nIFS= read -r code\n{WRITE_TOKEN}")).await;
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            login_inner(&store, &account.id, &pin, cancel),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            result,
+            Err(Error::Unavailable(
+                "Devin sign-in needs an interactive terminal to paste its code"
+            ))
+        ));
+        assert!(!has_credentials(&store, &account.id).unwrap());
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_dir(store.root().join("runs"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn login_events_only_expose_complete_native_pkce_url_and_fixed_prompt() {
+        let output = format!(
+            "private-native-output synthetic-native-login\n\x1b]8;;{TEST_URL}\x07{TEST_URL}\x1b]8;;\x1b\\\nthen copy the code and paste it below."
+        );
+        for split in 0..=output.len() {
+            let mut observer = DevinLoginObserver::default();
+            let mut events = observer.observe(&output.as_bytes()[..split]).unwrap();
+            events.extend(observer.observe(&output.as_bytes()[split..]).unwrap());
+            assert_eq!(
+                events,
+                vec![
+                    DevinLoginEvent::AuthorizationUrl(TEST_URL.into()),
+                    DevinLoginEvent::CodeRequested
+                ],
+                "split {split}"
+            );
+        }
+        let mut observer = DevinLoginObserver::default();
+        assert!(
+            observer
+                .observe(b"then copy the code and paste it below.")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            observer
+                .observe(format!("\n{TEST_URL}\n").as_bytes())
+                .unwrap(),
+            vec![
+                DevinLoginEvent::AuthorizationUrl(TEST_URL.into()),
+                DevinLoginEvent::CodeRequested
+            ]
+        );
+        assert!(
+            observer
+                .observe(format!("{TEST_URL}\nthen copy the code and paste it below.").as_bytes())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn login_events_reject_untrusted_links_secret_fields_and_unbounded_output() {
+        for url in [
+            TEST_URL.replace("app.devin.ai", "app.devin.ai.evil"),
+            TEST_URL.replace("/continue?", "/continue/evil?"),
+            TEST_URL.replace(
+                "code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&",
+                "",
+            ),
+            format!("{TEST_URL}&token=synthetic-secret"),
+            format!("{TEST_URL}&state=other"),
+            TEST_URL.replace("state=synthetic-state", "state=bad%0Avalue"),
+        ] {
+            assert!(
+                DevinLoginObserver::default()
+                    .observe(format!("{url}\nthen copy the code and paste it below.").as_bytes())
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        let hidden = format!(
+            "\x1b]8;;{TEST_URL}\x07Sign in\x1b]8;;\x07\nthen copy the code and paste it below."
+        );
+        assert!(
+            DevinLoginObserver::default()
+                .observe(hidden.as_bytes())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            DevinLoginObserver::default()
+                .observe(&vec![b'x'; 128 * 1024 + 1])
+                .is_err()
+        );
     }
 }
