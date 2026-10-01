@@ -1259,6 +1259,7 @@ fn broker_guidance_keeps_native_sandbox_read_only_and_zero_tool_launches_empty()
                     "xcb_tools_image",
                     "xcb_require_capability",
                     "xcb_swarm_status",
+                    "xcb_context_query",
                     "xcb_message_list",
                     "xcb_message_send",
                     "xcb_backlog_list",

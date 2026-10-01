@@ -88,6 +88,23 @@ An uncertain child stays held until xcb can establish how its process ended.
 The program does not retry it. Preparation and offline replay do not require a
 signed-in provider; execution requires an eligible, supported provider build.
 
+While a child runs, its `xcb_context_query` tool can retrieve its saved
+instructions and declared input context, including earlier reports passed to it
+by the program. Start with `{"op":"inspect","offset":0,"limit":16}` to list entries,
+then use `{"op":"read","index":0}` to read an entry. Larger entries remain
+available through UTF-8 byte slices, such as
+`{"op":"slice","index":0,"startByte":0,"endByte":256}`. Literal search uses
+`{"op":"search","query":"process exit"}` and returns byte ranges.
+
+The tool reads the snapshot assigned to the current child, including after a
+restart. Each read or slice returns at most 32 KiB; search examines at most
+32 KiB and returns at most 32 matches. The saved call record preserves source
+text and request identity. The tool keeps each program cell's existing view:
+hidden inputs and other children's reports are unavailable unless the program
+passed them to this child. Direct sessions and older
+children without a saved snapshot do not have this tool's context. Historical
+reports still need fresh checks before relying on changing facts.
+
 Replay uses the completed task's original results and checks its final record.
 For experiments, `--results results.json` accepts an array of `requestDigest` and
 `summary` objects instead. These supplied results are evidence of deterministic

@@ -85,16 +85,19 @@ dependencies = [
 [[package]]
 name = "algal"
 version = "0.2.0"
-source = "git+https://github.com/hraness/algal?rev=0f73388df2093c52291687a9fccb6d170bdf2928#0f73388df2093c52291687a9fccb6d170bdf2928"
+source = "git+https://github.com/hraness/algal?rev=14915465c3d7c5ee2c55e2977e36ee03f6bcbff0#14915465c3d7c5ee2c55e2977e36ee03f6bcbff0"
 dependencies = [
  "algal-expr",
+ "anyhow",
  "apple-foundation",
  "clap",
  "getrandom 0.3.4",
  "hraness-cli-kit",
+ "hraness-cli-update",
  "libc",
  "reqwest",
  "rusqlite",
+ "rustix",
  "ryu-js",
  "serde",
  "serde_json",
@@ -105,7 +108,7 @@ dependencies = [
 [[package]]
 name = "algal-expr"
 version = "0.2.0"
-source = "git+https://github.com/hraness/algal?rev=0f73388df2093c52291687a9fccb6d170bdf2928#0f73388df2093c52291687a9fccb6d170bdf2928"
+source = "git+https://github.com/hraness/algal?rev=14915465c3d7c5ee2c55e2977e36ee03f6bcbff0#14915465c3d7c5ee2c55e2977e36ee03f6bcbff0"
 dependencies = [
  "ryu-js",
  "serde_json",
@@ -1076,6 +1079,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1369,6 +1382,19 @@ version = "0.8.1"
 source = "git+https://github.com/hraness/desktop-foundation?tag=v0.8.1#6040606576167e4e8d0163a564463f04fa238be4"
 dependencies = [
  "clap",
+]
+
+[[package]]
+name = "hraness-cli-update"
+version = "0.1.0"
+source = "git+https://github.com/hraness/cli-update?tag=v0.1.0#e1e44d49b2ed21ca7a59cc0cb4f4a91209edd8ee"
+dependencies = [
+ "fs2",
+ "libc",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -3049,6 +3075,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "serde"
