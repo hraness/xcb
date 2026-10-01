@@ -2225,13 +2225,16 @@ mod tests {
             .unwrap()
             .set_modified(std::time::SystemTime::now() - Duration::from_secs(60))
             .unwrap();
-        Pin::load(&root, Provider::Codex).unwrap();
+        pin.verify_bytes().unwrap();
         assert_eq!(digested_executables(&pin.executable) - digested, 1);
+        Pin::load(&root, Provider::Codex).unwrap();
+        let digested = digested_executables(&pin.executable);
         // A size change re-hashes and the changed bytes fail verification.
         fs::write(&pin.executable, b"#!/bin/sh\necho changed\n").unwrap();
         fs::set_permissions(&pin.executable, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(pin.verify_bytes().is_err());
+        assert_eq!(digested_executables(&pin.executable) - digested, 1);
         assert!(Pin::load(&root, Provider::Codex).is_err());
-        assert_eq!(digested_executables(&pin.executable) - digested, 2);
     }
 
     #[test]
@@ -2249,8 +2252,12 @@ mod tests {
         fs::write(&replacement, b"#!/bin/sh\necho no\n").unwrap();
         fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
         fs::rename(&replacement, &pin.executable).unwrap();
-        assert!(Pin::load(&root, Provider::Codex).is_err());
+        // Observe one verification directly. Pin::load retries failed byte
+        // verification, and parallel tests can evict the shared cache between
+        // those attempts, legitimately performing a second digest.
+        assert!(pin.verify_bytes().is_err());
         assert_eq!(digested_executables(&pin.executable) - digested, 1);
+        assert!(Pin::load(&root, Provider::Codex).is_err());
     }
 
     fn claude_pin(root: &Path, executable: &Path, version: &str) -> Pin {
