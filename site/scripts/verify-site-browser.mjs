@@ -80,7 +80,7 @@ try {
   browserIdentity = await verifyOwnedChromium(browser, executablePath, definition.expectedVersion);
   console.log(`Verification browser: ${browserIdentity.browserVersion}; executable: ${browserIdentity.executable}; source: pinned Playwright`);
   for (const width of [360, 390, 1440]) for (const theme of ["light", "dark"]) {
-    const context = await browser.newContext({ viewport: { width, height: width === 360 ? 740 : width === 390 ? 844 : 900 }, colorScheme: theme });
+    const context = await browser.newContext({ viewport: { width, height: width === 360 ? 740 : width === 390 ? 844 : 900 }, colorScheme: theme, isMobile: width <= 600, hasTouch: width <= 600 });
     try {
       const page = await context.newPage();
       const errors = [];
@@ -89,6 +89,7 @@ try {
       for (const route of routes) {
         const response = await page.goto(origin + route);
         assert.equal(response?.status(), 200, route);
+        assert.equal(await page.evaluate(() => matchMedia("(pointer: coarse)").matches), width <= 600, `${route}: pointer matches viewport fixture`);
         await page.locator("main").waitFor();
         await page.evaluate(() => document.fonts.ready);
         const state = await page.evaluate(() => {
