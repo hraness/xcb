@@ -18,19 +18,19 @@ export function BeatVisual({ beat }: Readonly<{ beat: LaunchBeat }>) {
   const id = visual.id as BeatMockupId;
   switch (id) {
     case "thread":
-      return <ThreadView height={260} mode={modeOf(visual.state)} />;
+      return <ThreadView mode={modeOf(visual.state)} />;
     case "accounts":
       return <AccountsBoard mode={modeOf(visual.state)} />;
     case "tasks":
-      return <TasksView height={250} mode={modeOf(visual.state)} />;
+      return <TasksView mode={modeOf(visual.state)} />;
     case "fleet":
-      return <FleetView height={240} />;
+      return <FleetView />;
     case "run":
       return <RunDiagram focus={visual.state["focus"] === "limits" ? "limits" : "all"} />;
     case "route":
       return <RouteSplit />;
     case "install":
-      return <InstallView height={150} />;
+      return <InstallView />;
   }
   throw new Error(`Beat ${beat.id} names an unknown mockup ${JSON.stringify(visual.id)}.`);
 }
