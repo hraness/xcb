@@ -21,7 +21,9 @@ use std::{
 };
 use tokio::{io::AsyncWriteExt, net::TcpStream, process::Command, sync::watch};
 use tokio_rustls::TlsConnector;
-use xcb_core::{Id, Provider, policy::EffectState, session::State};
+#[cfg(any(unix, test))]
+use xcb_core::session::State;
+use xcb_core::{Id, Provider, policy::EffectState};
 use zeroize::{Zeroize, Zeroizing};
 
 pub(crate) mod recovery;
@@ -264,6 +266,7 @@ impl Generation {
         })
     }
 
+    #[cfg(any(unix, test))]
     fn create(store: &Store, run: &RunRecord) -> Result<Self> {
         let generation = Self::resolve(store, &run.account, &uuid::Uuid::new_v4().to_string())?;
         private::directory(&generation.root)?;
@@ -752,12 +755,14 @@ fn active_record(
     }
 }
 
+#[cfg(any(unix, test))]
 struct LoginCustody<'a> {
     store: &'a Store,
     run: &'a RunRecord,
     active: bool,
 }
 
+#[cfg(any(unix, test))]
 impl Drop for LoginCustody<'_> {
     fn drop(&mut self) {
         if self.active {

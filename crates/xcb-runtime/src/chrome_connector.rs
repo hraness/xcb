@@ -135,7 +135,7 @@ impl Drop for SetupPreflight<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) async fn setup_with_test_preflight<F, Fut>(
     state_root: &Path,
     server: CapabilityServer,
