@@ -13,7 +13,12 @@ use crate::{
 use icu_normalizer::ComposingNormalizer;
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{io::AsyncWriteExt, net::TcpStream, process::Command, sync::watch};
 use tokio_rustls::TlsConnector;
 use xcb_core::{Id, Provider, policy::EffectState, session::State};
@@ -346,13 +351,15 @@ async fn command_capture(
         store.clear_capability_custody(run, custody)?;
         return Err(error);
     }
-    let outcome = crate::process::capture_supervised_interactive(
+    let outcome = crate::process::capture_supervised_interactive_diagnosed(
         command,
         MAX_RECORD,
         deadline,
         cancel,
         |pid| store.mark_capability_spawned(run, custody, pid),
         interaction,
+        (custody == AUTH_CUSTODY)
+            .then_some(super::claude_auth_failure as fn(&[u8], &[u8]) -> &'static str),
     )
     .await;
     match outcome {
@@ -390,6 +397,115 @@ fn finish_effect(store: &Store, run: &RunRecord, call: &str) -> Result<()> {
         .map_err(|_| Error::CleanupUnproven)
 }
 
+fn caller_keychain_unavailable() -> Error {
+    Error::Unavailable(
+        "Claude sign-in cannot access the default Keychain under the caller's HOME; run xcb from your normal macOS terminal before signing in",
+    )
+}
+
+/// Apple's security helper resolves user Keychain preferences through HOME.
+/// Honor the caller's selected home, including intentional isolation; never
+/// discover another home or broaden the provider/model process environment.
+fn helper_environment(generation: &Generation) -> Result<BTreeMap<String, String>> {
+    helper_environment_at(generation, xcb_core::home_dir().as_deref())
+}
+
+fn helper_environment_at(
+    generation: &Generation,
+    caller_home: Option<&Path>,
+) -> Result<BTreeMap<String, String>> {
+    let home = caller_home
+        .filter(|home| home.is_absolute())
+        .ok_or_else(caller_keychain_unavailable)?;
+    let home = xcb_core::canonical(home).map_err(|_| caller_keychain_unavailable())?;
+    if !home.is_dir() {
+        return Err(caller_keychain_unavailable());
+    }
+    let home = home.to_str().ok_or_else(caller_keychain_unavailable)?;
+    let mut env = environment(&generation.home);
+    env.insert("HOME".into(), home.into());
+    env.insert(
+        "CLAUDE_CONFIG_DIR".into(),
+        generation.profile.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
+        generation.profile.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "ANTHROPIC_CONFIG_DIR".into(),
+        generation
+            .home
+            .join(".config/anthropic")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    env.insert("USER".into(), generation.username.clone());
+    Ok(env)
+}
+
+fn keychain_preflight_command(generation: &Generation, env: &BTreeMap<String, String>) -> Command {
+    let mut command = Command::new("/usr/bin/security");
+    command
+        .args(["default-keychain", "-d", "user"])
+        .env_clear()
+        .envs(env)
+        .current_dir(&generation.home);
+    command
+}
+
+fn official_auth_command(
+    executable: &Path,
+    generation: &Generation,
+    env: BTreeMap<String, String>,
+) -> Command {
+    let mut command = Command::new(executable);
+    // Official 2.1.285's hidden global option is parsed before auth preAction:
+    // it confines both project and local settings during auth initialization.
+    command
+        .arg("--project-config-root")
+        .arg(&generation.home)
+        .args(["auth", "login", "--claudeai"])
+        .env_clear()
+        .envs(env)
+        .env("BROWSER", "/usr/bin/true")
+        .env("COLUMNS", "4096")
+        .current_dir(&generation.home);
+    command
+}
+
+async fn keychain_preflight(
+    store: &Store,
+    run: &RunRecord,
+    generation: &Generation,
+    cancel: watch::Receiver<bool>,
+    command: Command,
+) -> Result<()> {
+    // This reads only default-Keychain metadata. It does not unlock or alter
+    // preferences, inspect an account credential, or start provider login.
+    let effect = effect_intent(store, run, generation, "keychain-preflight", None)?;
+    let result = command_capture(
+        store,
+        run,
+        command,
+        KEYCHAIN_CUSTODY,
+        Some(&effect),
+        cancel.clone(),
+        Duration::from_secs(15),
+        None,
+    )
+    .await;
+    match result {
+        Err(error) if error.is_cleanup_unproven() => Err(error),
+        Err(_) => {
+            cancelled(&cancel)?;
+            Err(caller_keychain_unavailable())
+        }
+        Ok(bytes) if bytes.iter().any(|byte| !byte.is_ascii_whitespace()) => Ok(()),
+        Ok(_) => Err(caller_keychain_unavailable()),
+    }
+}
+
 async fn official_auth(
     store: &Store,
     run: &RunRecord,
@@ -400,26 +516,18 @@ async fn official_auth(
     interaction: Option<LoginInteraction>,
 ) -> Result<String> {
     generation.check()?;
+    let env = helper_environment(generation)?;
+    keychain_preflight(
+        store,
+        run,
+        generation,
+        cancel.clone(),
+        keychain_preflight_command(generation, &env),
+    )
+    .await?;
     let mut artifacts = LaunchArtifacts::create(store.root())?;
     let executable = pin.snapshot(artifacts.path())?;
-    let mut env = environment(&generation.home);
-    env.insert(
-        "CLAUDE_CONFIG_DIR".into(),
-        generation.profile.to_string_lossy().into_owned(),
-    );
-    env.insert(
-        "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
-        generation.profile.to_string_lossy().into_owned(),
-    );
-    env.insert("USER".into(), generation.username.clone());
-    let mut command = Command::new(executable);
-    command
-        .args(["auth", "login", "--claudeai"])
-        .env_clear()
-        .envs(env)
-        .env("BROWSER", "/usr/bin/true")
-        .env("COLUMNS", "4096")
-        .current_dir(&generation.home);
+    let mut command = official_auth_command(&executable, generation, env);
     if let Some(bundle) = refresh {
         command
             .env("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", bundle.refresh_token)
@@ -516,7 +624,7 @@ async fn keychain(
             &generation.service,
         ])
         .env_clear()
-        .envs(environment(&generation.home))
+        .envs(helper_environment(generation)?)
         .current_dir(&generation.home);
     let effect = effect_intent(store, run, generation, "keychain-read", None)?;
     command_capture(

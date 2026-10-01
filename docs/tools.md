@@ -44,8 +44,10 @@ automatically. Use the same Claude account as the extension.
 Full sign-in requires a dedicated xcb Keychain entry for its refresh
 credential. xcb caches the short-lived access token in its private state
 folder and refreshes it before use when needed. If Claude cannot save the
-refresh credential to Keychain, xcb refuses to
-activate that sign-in. Your usual Claude Code sign-in is separate. To
+refresh credential to Keychain, xcb refuses to activate that sign-in. Before
+opening sign-in, xcb checks that macOS can find your default Keychain. Run
+xcb from your normal terminal environment if that check fails. Your usual
+Claude Code sign-in is separate. To
 authorize the account explicitly, use
 `xcb accounts login NAME --browser`. Subsequent sign-ins keep that account's
 full sign-in mode.

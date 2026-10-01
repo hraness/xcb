@@ -297,6 +297,100 @@ pub enum ClaudeLoginEvent {
     CodeRequested,
 }
 
+/// Pinned Claude `auth login` failures are classified only after the helper
+/// stops. Never return captured text: errors can contain tokens, URLs or PII.
+pub(crate) fn claude_auth_failure(stdout: &[u8], stderr: &[u8]) -> &'static str {
+    const UNKNOWN: &str =
+        "Claude sign-in stopped with an error; saved credentials need verification";
+    for bytes in [stderr, stdout] {
+        if bytes.len() > 64 * 1024 {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            continue;
+        };
+        for line in text.lines().map(str::trim) {
+            if matches!(
+                line,
+                "Managed settings on this machine configure a Cloud gateway sign-in; run interactive /login to authenticate."
+                    | "Unable to read managed policy settings."
+                    | "Unable to read managed policy settings, which may restrict the API providers this machine may use (allowedProviders). Contact your administrator."
+                    | "forceLoginOrgUUID in managed settings is set to an empty array."
+            ) {
+                return "Claude sign-in stopped: managed policy blocked authentication; saved credentials need verification";
+            }
+            let Some(reason) = line.strip_prefix("Login failed: ") else {
+                continue;
+            };
+            let message = match reason {
+                "Authentication failed: Invalid authorization code" => Some(
+                    "Claude sign-in stopped: the authorization code was rejected; saved credentials need verification",
+                ),
+                "Invalid state parameter" => Some(
+                    "Claude sign-in stopped: the authorization state did not match this attempt; saved credentials need verification",
+                ),
+                "No authorization code received" => Some(
+                    "Claude sign-in stopped: no authorization code was received; saved credentials need verification",
+                ),
+                "Couldn't save your login. Try logging in again."
+                | "Couldn't save your login. If your Mac's keychain is locked, unlock it and log in again." => {
+                    Some(
+                        "Claude sign-in stopped: Claude could not save its credentials; check Keychain access and recover this sign-in",
+                    )
+                }
+                "socket hang up" | "Network Error" => Some(
+                    "Claude sign-in stopped: its network connection failed; saved credentials need verification",
+                ),
+                "Request failed with status code 400" => Some(
+                    "Claude sign-in stopped: the service rejected the request (HTTP 400); saved credentials need verification",
+                ),
+                "Request failed with status code 401" => Some(
+                    "Claude sign-in stopped: the service rejected authorization (HTTP 401); saved credentials need verification",
+                ),
+                "Request failed with status code 403" => Some(
+                    "Claude sign-in stopped: the service refused access (HTTP 403); saved credentials need verification",
+                ),
+                "Request failed with status code 429" => Some(
+                    "Claude sign-in stopped: the service limited requests (HTTP 429); saved credentials need verification",
+                ),
+                _ => None,
+            };
+            if let Some(message) = message {
+                return message;
+            }
+            if [
+                "getaddrinfo ENOTFOUND ",
+                "getaddrinfo EAI_AGAIN ",
+                "connect ECONNREFUSED ",
+                "connect ETIMEDOUT ",
+                "read ECONNRESET",
+            ]
+            .iter()
+            .any(|prefix| reason.starts_with(prefix))
+                || reason
+                    .strip_prefix("timeout of ")
+                    .and_then(|value| value.strip_suffix("ms exceeded"))
+                    .is_some_and(|value| {
+                        !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+            {
+                return "Claude sign-in stopped: its network connection failed; saved credentials need verification";
+            }
+            if reason
+                .strip_prefix("Request failed with status code ")
+                .filter(|status| {
+                    status.len() == 3 && status.bytes().all(|byte| byte.is_ascii_digit())
+                })
+                .and_then(|status| status.parse::<u16>().ok())
+                .is_some_and(|status| (500..=599).contains(&status))
+            {
+                return "Claude sign-in stopped: the service returned an error (HTTP 5xx); saved credentials need verification";
+            }
+        }
+    }
+    UNKNOWN
+}
+
 pub async fn login_with_interaction(
     store: &Store,
     id: &Id,
@@ -1186,6 +1280,115 @@ mod claude_login_observer_tests {
     use super::*;
     const TEST_URL: &str =
         "https://claude.com/cai/oauth/authorize?client_id=test&state=test&code_challenge=test";
+
+    #[test]
+    fn official_auth_failures_use_static_diagnostics_without_private_output() {
+        let poison = "sk-ant-oat01-private-sentinel secret@example.test https://private.test/code?secret=sentinel";
+        for (line, expected) in [
+            (
+                "Login failed: Invalid state parameter",
+                "authorization state",
+            ),
+            (
+                "Login failed: No authorization code received",
+                "no authorization code",
+            ),
+            (
+                "Login failed: Authentication failed: Invalid authorization code",
+                "authorization code was rejected",
+            ),
+            (
+                "Login failed: Couldn't save your login. Try logging in again.",
+                "could not save its credentials",
+            ),
+            (
+                "Login failed: Couldn't save your login. If your Mac's keychain is locked, unlock it and log in again.",
+                "could not save its credentials",
+            ),
+            (
+                "Login failed: timeout of 30000ms exceeded",
+                "network connection failed",
+            ),
+            ("Login failed: Network Error", "network connection failed"),
+            (
+                "Login failed: getaddrinfo ENOTFOUND private.test",
+                "network connection failed",
+            ),
+            (
+                "Login failed: Request failed with status code 400",
+                "request (HTTP 400)",
+            ),
+            (
+                "Login failed: Request failed with status code 401",
+                "authorization (HTTP 401)",
+            ),
+            (
+                "Login failed: Request failed with status code 403",
+                "access (HTTP 403)",
+            ),
+            (
+                "Login failed: Request failed with status code 429",
+                "requests (HTTP 429)",
+            ),
+            (
+                "Login failed: Request failed with status code 503",
+                "error (HTTP 5xx)",
+            ),
+            (
+                "Unable to read managed policy settings.",
+                "managed policy blocked",
+            ),
+            (
+                "Managed settings on this machine configure a Cloud gateway sign-in; run interactive /login to authenticate.",
+                "managed policy blocked",
+            ),
+        ] {
+            let output = Zeroizing::new(format!("{line}\n{poison}\n"));
+            for (stdout, stderr) in [(output.as_bytes(), &[][..]), (&[][..], output.as_bytes())] {
+                let message = claude_auth_failure(stdout, stderr);
+                assert!(message.contains(expected), "{line}: {message}");
+                let error = Error::AuthUnproven(message);
+                let rendered = format!("{error} {error:?}");
+                for secret in [
+                    "sk-ant-",
+                    "secret@example.test",
+                    "https://",
+                    "private.test",
+                    "sentinel",
+                ] {
+                    assert!(!rendered.contains(secret));
+                }
+                assert!(error.is_cleanup_unproven());
+            }
+        }
+    }
+
+    #[test]
+    fn official_auth_unknown_partial_or_oversize_output_stays_generic() {
+        let generic = claude_auth_failure(&[], &[]);
+        for output in [
+            "Login failed: confidential sk-ant-oat01-private example@example.test https://private.test",
+            "provider body says Login failed: Request failed with status code 403",
+            "Login failed: Request failed with status code 400 confidential",
+            "Login failed: timeout of privatems exceeded",
+            "Invalid code. Please make sure the full code was copied.",
+            "Login failed: Request failed with status code 5999",
+            "Login failed: Request failed with status code +503",
+            "Login failed: Request failed with status code 4",
+        ] {
+            assert_eq!(claude_auth_failure(&[], output.as_bytes()), generic);
+        }
+        let oversized = format!(
+            "Login failed: Invalid state parameter\n{}",
+            "x".repeat(64 * 1024)
+        );
+        assert_eq!(claude_auth_failure(&[], oversized.as_bytes()), generic);
+        assert_eq!(claude_auth_failure(&[], &[0xff]), generic);
+        assert!(
+            !claude_auth_failure(&[], b"Login failed: Request failed with status code 400")
+                .contains("code was rejected")
+        );
+    }
 
     #[test]
     fn native_osc_hyperlinks_emit_visible_oauth_link_before_prompt() {

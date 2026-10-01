@@ -303,6 +303,7 @@ mod tests {
         for (running, operation, active) in [
             (false, "login", ActiveGeneration::None),
             (true, "keychain-read", ActiveGeneration::Pending),
+            (true, "keychain-preflight", ActiveGeneration::Pending),
         ] {
             let (_dir, store, run) = fixture();
             let evidence = fixtures::evidence(&store, &run, active, operation);
@@ -534,6 +535,7 @@ mod tests {
         for (operation, marker) in [
             ("login", "claude_oauth_auth"),
             ("keychain-read", "claude_oauth_keychain"),
+            ("keychain-preflight", "claude_oauth_keychain"),
         ] {
             let (_dir, store, run) = fixture();
             let evidence = fixtures::evidence(&store, &run, ActiveGeneration::Previous, operation);

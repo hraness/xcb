@@ -14,6 +14,147 @@ fn fixture() -> (tempfile::TempDir, Store, Id) {
     (dir, store, id)
 }
 
+#[test]
+fn helper_home_is_explicit_while_every_provider_config_root_stays_private() {
+    let (root, store, account) = fixture();
+    let run = store.prepare_probe(&account, None, 2).unwrap();
+    let generation = Generation::create(&store, &run).unwrap();
+    let caller_home = xcb_core::canonical(root.path()).unwrap();
+    let env = helper_environment_at(&generation, Some(&caller_home)).unwrap();
+    assert_eq!(env["HOME"], caller_home.to_str().unwrap());
+    for key in ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"] {
+        assert_eq!(env[key], generation.profile.to_str().unwrap());
+    }
+    assert_eq!(env["USER"], generation.username);
+    for key in [
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "TMPDIR",
+        "ANTHROPIC_CONFIG_DIR",
+    ] {
+        assert!(Path::new(&env[key]).starts_with(&generation.home), "{key}");
+    }
+    // Missing/relative/non-directory homes must not silently select the OS
+    // user's home or enter a mutating authentication phase.
+    let file = root.path().join("not-a-home");
+    std::fs::write(&file, b"fixture").unwrap();
+    for home in [
+        None,
+        Some(Path::new("relative")),
+        Some(file.as_path()),
+        Some(root.path().join("absent").as_path()),
+    ] {
+        let error = helper_environment_at(&generation, home).unwrap_err();
+        assert!(error.to_string().contains("caller's HOME"));
+        assert!(!error.is_cleanup_unproven());
+    }
+    assert_eq!(
+        environment(&generation.home)["HOME"],
+        generation.home.to_str().unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn official_auth_command_obeys_pinned_cli_argument_and_environment_contract() {
+    use std::os::unix::fs::PermissionsExt;
+    let (root, store, account) = fixture();
+    let run = store.prepare_probe(&account, None, 2).unwrap();
+    let generation = Generation::create(&store, &run).unwrap();
+    let caller_home = xcb_core::canonical(root.path()).unwrap();
+    let env = helper_environment_at(&generation, Some(&caller_home)).unwrap();
+    let helper = root.path().join("claude-fixture");
+    std::fs::write(
+        &helper,
+        br#"#!/bin/sh
+set -eu
+[ "$#" = 5 ]
+[ "$1" = --project-config-root ]
+[ "$2" = "$PWD" ]
+[ "$3" = auth ] && [ "$4" = login ] && [ "$5" = --claudeai ]
+[ "$CLAUDE_CONFIG_DIR" = "$CLAUDE_SECURESTORAGE_CONFIG_DIR" ]
+[ "$HOME" != "$PWD" ]
+[ "$TMPDIR" = "$PWD/tmp" ]
+[ "$XDG_CONFIG_HOME" = "$PWD/.config" ]
+[ "$ANTHROPIC_CONFIG_DIR" = "$PWD/.config/anthropic" ]
+[ "$BROWSER" = /usr/bin/true ]
+[ "$NO_COLOR" = 1 ]
+case "$USER" in xcb-*) ;; *) exit 8 ;; esac
+printf contract-ok
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let command = official_auth_command(&helper, &generation, env);
+    let (_sender, cancel) = watch::channel(false);
+    let outcome =
+        crate::process::capture_supervised(command, 1024, Duration::from_secs(10), cancel, |_| {
+            Ok(())
+        })
+        .await;
+    assert!(matches!(outcome, CaptureOutcome::Joined(Ok(bytes)) if &**bytes == b"contract-ok"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn keychain_preflight_failure_releases_only_the_never_started_login() {
+    for script in ["printf 'private-home-path' >&2; exit 44", "exit 0"] {
+        let (_dir, store, account) = fixture();
+        super::super::store_token(&store, &account, OLD.as_bytes()).unwrap();
+        let other = store
+            .add_account(Provider::Claude, "Other", 1, None)
+            .unwrap()
+            .id;
+        let held = store.prepare_probe(&other, None, 2).unwrap();
+        let run = store.prepare_probe(&account, None, 2).unwrap();
+        let generation = Generation::create(&store, &run).unwrap();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", script]);
+        let (_sender, cancel) = watch::channel(false);
+        let error = keychain_preflight(&store, &run, &generation, cancel, command)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("caller's HOME"));
+        assert!(!error.to_string().contains("private-home-path"));
+        assert!(!error.is_cleanup_unproven());
+        store.require_settled_tools(&run).unwrap();
+        assert!(
+            store
+                .run(&run.id)
+                .unwrap()
+                .unwrap()
+                .capability_processes
+                .is_empty()
+        );
+        drop(LoginCustody {
+            store: &store,
+            run: &run,
+            active: true,
+        });
+        assert_eq!(
+            store
+                .unsettled_runs()
+                .unwrap()
+                .iter()
+                .map(|run| &run.id)
+                .collect::<Vec<_>>(),
+            vec![&held.id]
+        );
+        assert_eq!(super::super::token(&store, &account).unwrap().as_str(), OLD);
+        assert!(read_active(&store, &account).unwrap().is_none());
+        let intent_files: Vec<_> = std::fs::read_dir(generation.root.join("effects"))
+            .unwrap()
+            .collect();
+        assert_eq!(intent_files.len(), 1);
+        let intent: EffectIntent = serde_json::from_slice(
+            &private::read(&intent_files[0].as_ref().unwrap().path(), MAX_RECORD).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(intent.operation, "keychain-preflight");
+    }
+}
+
 fn wire(token: &str, expiry: u64) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({"claudeAiOauth": {
         "accessToken": token, "refreshToken": "private-refresh-sentinel",

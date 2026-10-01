@@ -1462,12 +1462,38 @@ pub(crate) fn login_terminal() -> std::io::Result<(Stdio, tokio::io::unix::Async
 }
 
 pub(crate) async fn capture_supervised_interactive(
+    command: Command,
+    max: usize,
+    deadline: Duration,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    started: impl FnOnce(u32) -> Result<()>,
+    interaction: Option<LoginInteraction>,
+) -> CaptureOutcome {
+    capture_supervised_interactive_diagnosed(
+        command,
+        max,
+        deadline,
+        cancel,
+        started,
+        interaction,
+        None,
+    )
+    .await
+}
+
+type CaptureDiagnostic = fn(&[u8], &[u8]) -> &'static str;
+
+/// A diagnostic may classify private output only after a nonzero exit and a
+/// proven join. It cannot stop the helper, change custody, or return raw text.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn capture_supervised_interactive_diagnosed(
     mut command: Command,
     max: usize,
     deadline: Duration,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     started: impl FnOnce(u32) -> Result<()>,
     mut interaction: Option<LoginInteraction>,
+    diagnose: Option<CaptureDiagnostic>,
 ) -> CaptureOutcome {
     if max == 0 || max > 64 * 1024 || deadline.is_zero() || deadline > Duration::from_secs(600) {
         return CaptureOutcome::NeverStarted(Error::Unavailable(
@@ -1504,11 +1530,19 @@ pub(crate) async fn capture_supervised_interactive(
     let Some(mut stderr) = child.stderr.take() else {
         return CaptureOutcome::Unproven;
     };
+    // Reserve the full bound so a reallocation cannot leave an unwiped copy
+    // of credential-bearing provider output in a freed allocation.
+    let mut diagnostic_bytes = zeroize::Zeroizing::new(Vec::with_capacity(if diagnose.is_some() {
+        64 * 1024
+    } else {
+        0
+    }));
+    let mut diagnostic_complete = true;
     let result = match recorded {
         Err(error) => Err(error),
         Ok(()) => {
             let execution = async {
-                let mut bytes = zeroize::Zeroizing::new(Vec::new());
+                let mut bytes = zeroize::Zeroizing::new(Vec::with_capacity(max));
                 let mut out_closed = false;
                 let mut err_closed = false;
                 let mut out_buf = zeroize::Zeroizing::new([0u8; 4096]);
@@ -1531,6 +1565,11 @@ pub(crate) async fn capture_supervised_interactive(
                             err_closed = n == 0;
                             stderr_count += n;
                             if stderr_count > 1024 * 1024 { return Err(Error::Protocol("login error output limit")); }
+                            if diagnose.is_some() {
+                                let retained = n.min((64 * 1024usize).saturating_sub(diagnostic_bytes.len()));
+                                diagnostic_bytes.extend_from_slice(&err_buf[..retained]);
+                                diagnostic_complete &= retained == n;
+                            }
                             if let Some(i) = interaction.as_mut() { (i.observer)(&err_buf[..n])?; }
                         }
                         code = async {
@@ -1596,8 +1635,23 @@ pub(crate) async fn capture_supervised_interactive(
     if !group_absent(&group).await {
         return CaptureOutcome::Unproven;
     }
-    if !status.success() && result.is_ok() {
-        return CaptureOutcome::Joined(Err(Error::Unavailable("sign-in did not complete")));
+    if !status.success()
+        && let Ok(stdout) = &result
+    {
+        return CaptureOutcome::Joined(Err(Error::Unavailable(
+            diagnose
+                .map(|diagnose| {
+                    diagnose(
+                        stdout,
+                        if diagnostic_complete {
+                            &diagnostic_bytes
+                        } else {
+                            &[]
+                        },
+                    )
+                })
+                .unwrap_or("sign-in did not complete"),
+        )));
     }
     CaptureOutcome::Joined(result)
 }
@@ -1720,6 +1774,154 @@ mod tests {
             }
             assert!(prove_process_group_absent(pid).is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn supervised_auth_diagnostic_requires_nonzero_exit_and_complete_output() {
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        for script in [
+            "printf 'Login failed: Request failed with status code 403\\nprivate-token private@example.test https://private.test\\n' >&2; exit 7",
+            "printf 'Login failed: Request failed with status code 403\\nprivate-token private@example.test https://private.test\\n'; exit 7",
+            "printf 'Login failed: Request failed ' >&2; sleep 0.02; printf 'with status code 403\\nprivate-token\\n' >&2; exit 7",
+        ] {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", script]);
+            let mut pid = 0;
+            let outcome = capture_supervised_interactive_diagnosed(
+                command,
+                1024,
+                Duration::from_secs(10),
+                cancel.clone(),
+                |started| {
+                    pid = started;
+                    Ok(())
+                },
+                None,
+                Some(crate::auth::claude_auth_failure),
+            )
+            .await;
+            let CaptureOutcome::Joined(Err(error)) = outcome else {
+                panic!("nonzero helper did not join");
+            };
+            assert!(prove_process_group_absent(pid).is_ok());
+            let message = format!("{error} {error:?}");
+            assert!(message.contains("HTTP 403"));
+            assert!(!message.contains("private"));
+            assert!(!message.contains("https://"));
+        }
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'Login failed: private-token\\n' >&2; printf success",
+        ]);
+        let outcome = capture_supervised_interactive_diagnosed(
+            command,
+            1024,
+            Duration::from_secs(10),
+            cancel,
+            |_| Ok(()),
+            None,
+            Some(|_, _| panic!("successful helper was diagnosed as a failure")),
+        )
+        .await;
+        assert!(matches!(outcome, CaptureOutcome::Joined(Ok(bytes)) if &**bytes == b"success"));
+    }
+
+    #[tokio::test]
+    async fn supervised_auth_diagnostic_preserves_unproven_group_custody() {
+        use std::os::unix::process::CommandExt;
+        struct OwnedMember(Option<std::process::Child>);
+        impl Drop for OwnedMember {
+            fn drop(&mut self) {
+                if let Some(mut child) = self.0.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("member-ready");
+        let mut member = OwnedMember(None);
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "while [ ! -f \"$1\" ]; do sleep 0.01; done; printf 'Login failed: private-token\\n' >&2; exit 7", "fixture"]).arg(&ready);
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        let outcome = capture_supervised_interactive_diagnosed(
+            command,
+            1024,
+            Duration::from_secs(10),
+            cancel,
+            |pid| {
+                // This independently owned child holds the same group after
+                // the helper exits; its handle owns cleanup even on a panic.
+                member.0 = Some(
+                    std::process::Command::new("/bin/sleep")
+                        .arg("30")
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .process_group(pid as i32)
+                        .spawn()?,
+                );
+                std::fs::write(&ready, b"ready")?;
+                Ok(())
+            },
+            None,
+            Some(|_, _| panic!("unproven group was classified as stopped")),
+        )
+        .await;
+        assert!(matches!(outcome, CaptureOutcome::Unproven));
+    }
+
+    #[tokio::test]
+    async fn supervised_auth_diagnostic_does_not_replace_deadline_failure() {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'Login failed: private-token\\n' >&2; exec sleep 30",
+        ]);
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        let outcome = capture_supervised_interactive_diagnosed(
+            command,
+            1024,
+            Duration::from_millis(25),
+            cancel,
+            |_| Ok(()),
+            None,
+            Some(|_, _| panic!("deadline failure was reclassified")),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            CaptureOutcome::Joined(Err(Error::Unavailable("sign-in timed out")))
+        ));
+    }
+
+    #[tokio::test]
+    async fn supervised_auth_diagnostic_discards_truncated_stderr() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("stderr");
+        let mut bytes = b"Login failed: Request failed with status code 403\n".to_vec();
+        bytes.resize(64 * 1024 + 1, b'x');
+        fs::write(&output, bytes).unwrap();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "cat \"$1\" >&2; exit 7", "fixture"])
+            .arg(output);
+        let (_sender, cancel) = tokio::sync::watch::channel(false);
+        let outcome = capture_supervised_interactive_diagnosed(
+            command,
+            1024,
+            Duration::from_secs(10),
+            cancel,
+            |_| Ok(()),
+            None,
+            Some(crate::auth::claude_auth_failure),
+        )
+        .await;
+        let CaptureOutcome::Joined(Err(Error::Unavailable(message))) = outcome else {
+            panic!("oversize diagnostic changed helper cleanup");
+        };
+        assert_eq!(message, crate::auth::claude_auth_failure(&[], &[]));
     }
 
     #[tokio::test]

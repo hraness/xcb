@@ -91,7 +91,7 @@ pub(crate) fn inspect(
             return Err(refusal());
         }
         let mutating = match (operation.as_str(), intent.operation.as_str()) {
-            ("host_auth_claude_oauth", "keychain-read") => {
+            ("host_auth_claude_oauth", "keychain-read" | "keychain-preflight") => {
                 if intent.publication_revision.is_some() {
                     return Err(refusal());
                 }
@@ -304,7 +304,7 @@ pub(crate) mod fixtures {
         store
             .begin_tool(run, &effect.call, host_operation, &effect.digest)
             .unwrap();
-        let marker = if operation == "keychain-read" {
+        let marker = if matches!(operation, "keychain-read" | "keychain-preflight") {
             KEYCHAIN_CUSTODY
         } else {
             AUTH_CUSTODY
