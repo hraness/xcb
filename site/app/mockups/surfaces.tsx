@@ -86,7 +86,7 @@ export function ThreadView({ height, mode, theme }: SurfaceProps) {
   const describe = mode === "reset"
     ? "Illustration of an xcb thread: you type a task, xcb names the project it picked, runs the task on a Claude account, and shows the answer."
     : "Illustration of an xcb thread: the task stops at a usage limit on one Claude account, continues on another, and finishes.";
-  return <TerminalFrame describe={describe} height={height} lines={lines} prompt="›" theme={theme} title="xcb" />;
+  return <TerminalFrame density="presentation" describe={describe} height={height} lines={lines} prompt="›" theme={theme} title="xcb" />;
 }
 
 /** `xcb tasks` and `xcb attention` in one terminal. */
@@ -99,6 +99,7 @@ export function TasksView({ height, mode, theme }: SurfaceProps) {
   ];
   return (
     <TerminalFrame
+      density="presentation"
       describe="Illustration of xcb tasks and xcb attention: three made-up tasks, one running, one waiting for your answer, one done, and the question that needs you."
       height={height}
       lines={lines}
@@ -118,6 +119,7 @@ export function FleetView({ height, theme }: Omit<SurfaceProps, "mode">) {
   ];
   return (
     <TerminalFrame
+      density="presentation"
       describe="Illustration of xcb fleet on a laptop: three made-up linked machines, one offline, and a task sent to the desktop at home."
       height={height}
       lines={lines}
@@ -217,6 +219,7 @@ export function InstallView({ height, theme }: Readonly<{ height?: number; theme
   ];
   return (
     <TerminalFrame
+      density="presentation"
       describe="Illustration of installing xcb: the one-line installer, connecting a Claude account, and opening your thread."
       height={height}
       lines={lines}

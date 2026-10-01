@@ -29,7 +29,7 @@ export function RouterShowcase({ className }: Readonly<{ className?: string }> =
       className={className}
       height={340}
       label={(surface) => `Illustration of xcb: ${surface.label.toLowerCase()}`}
-      minWidth={560}
+      fit="fill"
       modeLabel="Show"
       modes={modes}
       surfaces={surfaces}
