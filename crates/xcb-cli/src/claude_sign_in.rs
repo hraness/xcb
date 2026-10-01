@@ -1,5 +1,6 @@
 //! Claude's browser handoff and optional code entry. Provider output and the
 //! reusable token stay in the runtime; this terminal receives only login events.
+use super::code_sign_in::read_code;
 use tokio::sync::mpsc;
 use xcb_runtime::auth::ClaudeLoginEvent;
 use zeroize::Zeroizing;
@@ -10,6 +11,8 @@ pub async fn login(
     pin: &xcb_runtime::process::Pin,
     browser: bool,
     machine: bool,
+    cancel: tokio::sync::watch::Sender<bool>,
+    receiver: tokio::sync::watch::Receiver<bool>,
 ) -> xcb_runtime::Result<()> {
     use xcb_runtime::auth;
     check_login_context(account, browser, machine)?;
@@ -22,8 +25,6 @@ pub async fn login(
         "{} {message}",
         crate::ux::Style::stderr().symbol(crate::ux::Symbol::Next)
     );
-    let (cancel, receiver) = tokio::sync::watch::channel(false);
-    let mut stop = crate::stop::Stop::install()?;
     let (events, prompts) = mpsc::channel(8);
     let (codes, input) = mpsc::channel(1);
     let login = async {
@@ -44,7 +45,6 @@ pub async fn login(
             if !complete { let _ = cancel.send(true); }
             login.await
         },
-        _ = stop.recv() => { let _ = cancel.send(true); login.await },
     }
 }
 
@@ -71,83 +71,12 @@ pub fn check_login_context(
     Ok(())
 }
 
-#[cfg(unix)]
-async fn read_code() -> Option<Zeroizing<String>> {
-    use rustix::{
-        event::{PollFd, PollFlags, Timespec, poll},
-        io::{Errno, read},
-        termios::{LocalModes, OptionalActions, Termios, tcgetattr, tcsetattr},
-    };
-    use std::{
-        io::{self, Write},
-        time::Duration,
-    };
-
-    // Dropping this future on successful browser sign-in or cancellation also
-    // restores echo. No blocking input thread survives the login.
-    struct Echo(Termios);
-    impl Drop for Echo {
-        fn drop(&mut self) {
-            let _ = tcsetattr(io::stdin(), OptionalActions::Now, &self.0);
-        }
-    }
-    let stdin = io::stdin();
-    let original = tcgetattr(&stdin).ok()?;
-    let mut hidden = original.clone();
-    hidden.local_modes.remove(LocalModes::ECHO);
-    tcsetattr(&stdin, OptionalActions::Now, &hidden).ok()?;
-    let _echo = Echo(original);
-    let mut code = Zeroizing::new(Vec::new());
-    loop {
-        let mut fds = [PollFd::new(&stdin, PollFlags::IN)];
-        match poll(&mut fds, Some(&Timespec::default())) {
-            Ok(0) | Err(Errno::INTR) => {}
-            Ok(_) if fds[0].revents().contains(PollFlags::IN) => {
-                let mut bytes = Zeroizing::new([0_u8; 1024]);
-                match read(&stdin, &mut *bytes) {
-                    Ok(0) => return None,
-                    Ok(length) => {
-                        for byte in &bytes[..length] {
-                            if matches!(*byte, b'\n' | b'\r') {
-                                eprintln!();
-                                if code.is_empty() {
-                                    eprint!(
-                                        "Waiting for browser sign-in. Paste a code if one is shown: "
-                                    );
-                                    let _ = io::stderr().flush();
-                                    continue;
-                                }
-                                return String::from_utf8(code.to_vec()).ok().map(Zeroizing::new);
-                            }
-                            if !byte.is_ascii_graphic() || code.len() >= 4096 {
-                                return None;
-                            }
-                            code.push(*byte);
-                        }
-                    }
-                    Err(Errno::INTR | Errno::AGAIN) => {}
-                    Err(_) => return None,
-                }
-            }
-            Ok(_) | Err(_) => return None,
-        }
-        tokio::time::sleep(Duration::from_millis(30)).await;
-    }
-}
-
-#[cfg(not(unix))]
-async fn read_code() -> Option<Zeroizing<String>> {
-    None
-}
-
 /// False means input ended before sign-in; the owner must request cancellation
 /// and await the supervised login's physical cleanup.
 pub async fn serve(
     mut events: mpsc::Receiver<ClaudeLoginEvent>,
     codes: mpsc::Sender<Zeroizing<String>>,
 ) -> bool {
-    use std::io::{self, Write};
-
     while let Some(event) = events.recv().await {
         match event {
             ClaudeLoginEvent::AuthorizationUrl(url) => {
@@ -162,16 +91,13 @@ pub async fn serve(
             }
             ClaudeLoginEvent::CodeRequested => {
                 eprintln!("Finish signing in in your browser.");
-                eprint!(
-                    "If Claude shows a code, paste it here and press Enter (input hidden; Ctrl+C cancels): "
-                );
-                let _ = io::stderr().flush();
                 let Some(code) = read_code().await else {
                     return false;
                 };
                 if codes.send(code).await.is_err() {
                     return true;
                 }
+                eprintln!("Code submitted. Finishing Claude sign-in; Ctrl+C cancels.");
             }
         }
     }

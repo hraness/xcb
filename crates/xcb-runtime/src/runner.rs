@@ -1392,7 +1392,7 @@ pub async fn login_codex(_store: &Store, _account: &Id, _pin: &Pin) -> Result<()
 
 #[cfg(unix)]
 pub async fn login_codex(store: &Store, account: &Id, pin: &Pin) -> Result<()> {
-    login_codex_inner(store, account, pin, None).await
+    login_codex_inner(store, account, pin, None, None).await
 }
 
 #[cfg(windows)]
@@ -1412,7 +1412,82 @@ pub async fn login_codex_with_prompt(
     pin: &Pin,
     sender: tokio::sync::mpsc::Sender<DeviceLoginPrompt>,
 ) -> Result<()> {
-    login_codex_inner(store, account, pin, Some(sender)).await
+    login_codex_inner(store, account, pin, Some(sender), None).await
+}
+
+/// A command-lifetime cancellation request also covers the preparation phase,
+/// before the login's own Unix signal receivers have been installed.
+pub async fn login_codex_with_cancel(
+    store: &Store,
+    account: &Id,
+    pin: &Pin,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let _ = (store, account, pin, cancel);
+        Err(Error::providers_unsupported())
+    }
+    #[cfg(unix)]
+    {
+        login_codex_inner(store, account, pin, None, Some(cancel)).await
+    }
+}
+
+/// Keep the device prompt and prelaunch cancellation in the caller's command.
+pub async fn login_codex_with_prompt_and_cancel(
+    store: &Store,
+    account: &Id,
+    pin: &Pin,
+    sender: tokio::sync::mpsc::Sender<DeviceLoginPrompt>,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<()> {
+    #[cfg(windows)]
+    {
+        let _ = (store, account, pin, sender, cancel);
+        Err(Error::providers_unsupported())
+    }
+    #[cfg(unix)]
+    {
+        login_codex_inner(store, account, pin, Some(sender), Some(cancel)).await
+    }
+}
+
+#[cfg(unix)]
+struct CodexLoginSignals {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl CodexLoginSignals {
+    fn register() -> std::io::Result<Self> {
+        use tokio::signal::unix::{SignalKind, signal};
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            terminate: signal(SignalKind::terminate())?,
+        })
+    }
+
+    async fn cancelled(&mut self) {
+        tokio::select! {
+            _ = self.interrupt.recv() => {},
+            _ = self.terminate.recv() => {},
+        }
+    }
+}
+
+#[cfg(unix)]
+fn settle_unstarted_codex_login(
+    store: &Store,
+    run: &RunRecord,
+    artifacts: &mut LaunchArtifacts,
+) -> Result<()> {
+    artifacts.retain_before_launch();
+    auth::discard_unstarted_codex_auth(store, run, true)?;
+    store.settle(run, State::Failed, now_ms())?;
+    artifacts.release_after_join(true, EffectState::None);
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1421,9 +1496,19 @@ async fn login_codex_inner(
     account: &Id,
     pin: &Pin,
     sender: Option<tokio::sync::mpsc::Sender<DeviceLoginPrompt>>,
+    mut cancel: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> Result<()> {
     use rustix::process::{Pid, Signal, kill_process_group};
     use std::{os::fd::AsFd, process::Stdio};
+    // Register before launch so a command-wide signal handler cannot consume
+    // SIGTERM while the account-owned provider continues running unattended.
+    let mut stop = CodexLoginSignals::register()?;
+    if cancel
+        .as_ref()
+        .is_some_and(|cancel| *cancel.borrow() || cancel.has_changed().is_err())
+    {
+        return Err(Error::Unavailable("Codex sign-in cancelled before launch"));
+    }
     crate::codex::runtime_admitted(pin)?;
     let status_output = std::io::stderr().as_fd().try_clone_to_owned()?;
     let mut artifacts = LaunchArtifacts::create(store.root())?;
@@ -1433,6 +1518,9 @@ async fn login_codex_inner(
     };
     let profile = private::directory(&artifacts.directory.join("profile"))?;
     let run = store.prepare_probe(account, None, now_ms())?;
+    // Preparation creates recovery metadata referencing this profile. Keep
+    // it through every fallible unstarted receipt/account settlement step.
+    artifacts.retain_before_launch();
     let mut plan = match auth::prepare_codex_login(store, &run, &snapshot_pin, &profile) {
         Ok(plan) => plan,
         Err(error) if error.is_cleanup_unproven() => {
@@ -1440,15 +1528,14 @@ async fn login_codex_inner(
             return Err(error);
         }
         Err(error) => {
-            auth::discard_unstarted_codex_auth(store, &run, true)?;
-            store.settle(&run, State::Failed, now_ms())?;
+            settle_unstarted_codex_login(store, &run, &mut artifacts)?;
             return Err(error);
         }
     };
     // Keep stdout available for the CLI's final JSON acknowledgement.
     if sender.is_some() {
-        // The assisted UI owns Enter; device authorization itself uses no
-        // terminal input. Legacy manual login keeps its inherited stdin.
+        // The assisted UI owns Enter; neither browser authorization path
+        // gives the provider access to the operator's terminal input.
         plan.command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1456,13 +1543,18 @@ async fn login_codex_inner(
     } else {
         plan.command.stdout(Stdio::from(status_output));
     }
+    if cancel
+        .as_ref()
+        .is_some_and(|cancel| *cancel.borrow() || cancel.has_changed().is_err())
+    {
+        settle_unstarted_codex_login(store, &run, &mut artifacts)?;
+        return Err(Error::Unavailable("Codex sign-in cancelled before launch"));
+    }
     artifacts.retain_before_launch();
     let mut child = match plan.command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            auth::discard_unstarted_codex_auth(store, &run, true)?;
-            store.settle(&run, State::Failed, now_ms())?;
-            artifacts.release_after_join(true, EffectState::None);
+            settle_unstarted_codex_login(store, &run, &mut artifacts)?;
             return Err(Error::LaunchNotStarted(error));
         }
     };
@@ -1504,7 +1596,16 @@ async fn login_codex_inner(
         tokio::pin!(deadline);
         loop {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => break Err(Error::Unavailable("Codex sign-in cancelled")),
+                _ = stop.cancelled() => break Err(Error::Unavailable("Codex sign-in cancelled")),
+                _ = async {
+                    if let Some(cancel) = cancel.as_mut() {
+                        while !*cancel.borrow() {
+                            if cancel.changed().await.is_err() { break; }
+                        }
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => break Err(Error::Unavailable("Codex sign-in cancelled")),
                 _ = &mut deadline => break Err(Error::Unavailable("Codex sign-in timed out")),
                 output = &mut bridge, if !bridge_done => {
                     bridge_done = true;
@@ -1587,6 +1688,224 @@ async fn login_codex_inner(
         return Err(Error::Unavailable("Codex sign-in returned no credential"));
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod login_cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn unstarted_codex_login_keeps_recovery_profile_until_all_settlement_succeeds() {
+        use std::os::unix::fs::PermissionsExt;
+        for failure in ["none", "receipt", "account"] {
+            let directory = tempfile::tempdir().unwrap();
+            let base = xcb_core::canonical(directory.path()).unwrap();
+            let store = Store::open(&base.join("state")).unwrap();
+            let account = store
+                .add_account(Provider::Codex, "Synthetic", 1, None)
+                .unwrap();
+            let run = store.prepare_probe(&account.id, None, now_ms()).unwrap();
+            let fixture = private::directory(&base.join("fixture")).unwrap();
+            let executable = fixture.join("synthetic-codex-never-launched");
+            private::create(&executable, b"#!/bin/sh\nexit 99\n").unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let pin = Pin {
+                provider: Provider::Codex,
+                sha256: crate::process::executable_digest(&executable).unwrap(),
+                executable,
+                version: "synthetic-unadmitted".into(),
+                host_sha256: crate::process::executable_digest(
+                    &xcb_core::canonical(std::env::current_exe().unwrap()).unwrap(),
+                )
+                .unwrap(),
+                observed_at_ms: 1,
+            };
+            let mut artifacts = LaunchArtifacts::create(store.root()).unwrap();
+            let path = artifacts.path().to_owned();
+            artifacts.retain_before_launch();
+            let profile = private::directory(&path.join("profile")).unwrap();
+            // Build the real preparation/recovery record without executing
+            // or admitting this deliberately synthetic provider image.
+            let _plan = auth::prepare_codex_login(&store, &run, &pin, &profile).unwrap();
+            let db = rusqlite::Connection::open(store.root().join("xcb.sqlite")).unwrap();
+            match failure {
+                "receipt" => db.execute_batch("CREATE TRIGGER fail_unstarted_receipt BEFORE UPDATE OF settled ON tool_effects WHEN OLD.call='xcb_auth_snapshot' BEGIN SELECT RAISE(ABORT,'synthetic receipt failure'); END;").unwrap(),
+                "account" => db.execute_batch("CREATE TRIGGER fail_unstarted_account BEFORE UPDATE OF phase ON runs WHEN NEW.phase='settled' BEGIN SELECT RAISE(ABORT,'synthetic account failure'); END;").unwrap(),
+                _ => {},
+            }
+            let result = settle_unstarted_codex_login(&store, &run, &mut artifacts);
+            let failed = failure != "none";
+            assert_eq!(result.is_err(), failed, "{failure}");
+            drop(artifacts);
+            assert_eq!(path.exists(), failed, "{failure}");
+            assert_eq!(store.unsettled_runs().unwrap().len(), usize::from(failed));
+            if failed {
+                assert!(profile.is_dir());
+                let receipt = store
+                    .root()
+                    .join("runs")
+                    .join(format!("{}.codex-auth-recovery.json", run.id));
+                let metadata: Value =
+                    serde_json::from_slice(&private::read(&receipt, 64 * 1024).unwrap()).unwrap();
+                assert_eq!(metadata["profile"].as_str(), profile.to_str());
+                assert!(store.prepare_probe(&account.id, None, now_ms()).is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_login_prelaunch_cancel_creates_no_provider_artifacts_or_account_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Synthetic", 1, None)
+            .unwrap();
+        let pin = Pin {
+            provider: Provider::Codex,
+            executable: base.join("must-not-be-inspected-or-launched"),
+            sha256: "0".repeat(64),
+            host_sha256: "0".repeat(64),
+            version: "synthetic-unadmitted".into(),
+            observed_at_ms: 1,
+        };
+        let runs_before = store.root().join("runs").exists();
+        for closed in [false, true] {
+            let (request, cancel) = tokio::sync::watch::channel(!closed);
+            let _request = if closed {
+                drop(request);
+                None
+            } else {
+                Some(request)
+            };
+            for assisted in [false, true] {
+                let (events, _observed) = tokio::sync::mpsc::channel(1);
+                let result = if assisted {
+                    login_codex_with_prompt_and_cancel(
+                        &store,
+                        &account.id,
+                        &pin,
+                        events,
+                        cancel.clone(),
+                    )
+                    .await
+                } else {
+                    login_codex_with_cancel(&store, &account.id, &pin, cancel.clone()).await
+                };
+                assert!(matches!(
+                    result,
+                    Err(Error::Unavailable("Codex sign-in cancelled before launch"))
+                ));
+                assert!(store.unsettled_runs().unwrap().is_empty());
+                assert_eq!(store.root().join("runs").exists(), runs_before);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn signal_login_child() {
+        if std::env::var_os("XCB_CODEX_LOGIN_SIGNAL_CHILD").is_none() {
+            return;
+        }
+        let mut stop = CodexLoginSignals::register().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let store = Store::open(&base.join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Synthetic", 1, None)
+            .unwrap();
+        let run = store.prepare_probe(&account.id, None, now_ms()).unwrap();
+        let mut artifacts = LaunchArtifacts::create(store.root()).unwrap();
+        let launch_path = artifacts.path().to_owned();
+        artifacts.retain_before_launch();
+        let mut command = Command::new("/bin/sh");
+        // A failed subprocess harness also lets its synthetic descendants
+        // exit on parent loss instead of leaving a long-lived fixture behind.
+        command
+            .env_clear()
+            .env("XCB_TEST_PARENT_PID", std::process::id().to_string())
+            .args([
+                "-c",
+                "while kill -0 \"$XCB_TEST_PARENT_PID\" 2>/dev/null; do /bin/sleep 0.05; done",
+            ]);
+        let (request, cancel) = tokio::sync::watch::channel(false);
+        let login = crate::process::capture_supervised(
+            command,
+            1024,
+            Duration::from_secs(10),
+            cancel,
+            |pid| {
+                use std::io::Write;
+                store.mark_spawned(&run, pid)?;
+                println!("SIGNAL_LOGIN_READY");
+                std::io::stdout().flush()?;
+                Ok(())
+            },
+        );
+        tokio::pin!(login);
+        let outcome = tokio::select! {
+            result = &mut login => panic!("login ended before cancellation: {}", matches!(result, crate::process::CaptureOutcome::Joined(_))),
+            _ = stop.cancelled() => {
+                request.send(true).unwrap();
+                login.await
+            },
+        };
+        assert!(matches!(
+            outcome,
+            crate::process::CaptureOutcome::Joined(Err(_))
+        ));
+        let pid = store.unsettled_runs().unwrap()[0].pid.unwrap();
+        crate::process::prove_process_group_absent(pid).unwrap();
+        store.settle(&run, State::Failed, now_ms()).unwrap();
+        artifacts.release_after_join(true, EffectState::None);
+        drop(artifacts);
+        assert!(store.unsettled_runs().unwrap().is_empty());
+        assert!(!launch_path.exists());
+        println!("SIGNAL_LOGIN_JOINED");
+    }
+
+    #[test]
+    fn login_interrupt_and_termination_join_owned_group_before_account_release() {
+        use std::path::Path;
+        let python = ["/usr/bin/python3", "/usr/local/bin/python3"]
+            .into_iter()
+            .find(|path| Path::new(path).is_file())
+            .expect("Python 3 is required for signal regression tests");
+        let script = r#"
+import os, select, signal, subprocess, sys, time
+for cancel in [signal.SIGINT, signal.SIGTERM]:
+    child = subprocess.Popen([sys.argv[1], '--exact', 'runner::login_cancellation_tests::signal_login_child', '--nocapture'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    data = bytearray()
+    try:
+        deadline = time.monotonic() + 8
+        while b'SIGNAL_LOGIN_READY' not in data and time.monotonic() < deadline:
+            if select.select([child.stdout], [], [], .02)[0]:
+                chunk = os.read(child.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                data.extend(chunk)
+        assert b'SIGNAL_LOGIN_READY' in data, data
+        child.send_signal(cancel)
+        stdout, stderr = child.communicate(timeout=8)
+        data.extend(stdout)
+        assert child.returncode == 0 and b'SIGNAL_LOGIN_JOINED' in data, (cancel, data, stderr)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=2)
+"#;
+        let output = std::process::Command::new(python)
+            .args(["-c", script])
+            .arg(std::env::current_exe().unwrap())
+            .env("XCB_CODEX_LOGIN_SIGNAL_CHILD", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 fn initialize(tools: bool, system: &str) -> Value {

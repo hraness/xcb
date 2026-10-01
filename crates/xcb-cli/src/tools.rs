@@ -157,20 +157,32 @@ pub async fn execute(store: &Store, command: Commands, machine: bool) -> Result<
             if needs_login {
                 crate::claude_sign_in::check_login_context(&account.id, true, machine)?;
             }
-            let pin = crate::ensure_pin(store.root(), xcb_core::Provider::Claude).await?;
+            let mut stop = crate::stop::Stop::install()?;
+            let pin = stop
+                .settle(crate::ensure_pin(store.root(), xcb_core::Provider::Claude))
+                .await?;
+            let (cancel, cancelled) = tokio::sync::watch::channel(false);
+            let signal_cancel = cancel.clone();
+            let _interrupt = crate::AbortOnDrop(tokio::spawn(async move {
+                stop.recv().await;
+                let _ = signal_cancel.send(true);
+            }));
             if needs_login {
-                crate::claude_sign_in::login(store, &account.id, &pin, true, machine).await?;
+                crate::claude_sign_in::login(
+                    store,
+                    &account.id,
+                    &pin,
+                    true,
+                    machine,
+                    cancel,
+                    cancelled.clone(),
+                )
+                .await?;
             }
             store.require_authenticated_account(&account.id)?;
             let workspace = xcb_core::canonical(&std::env::current_dir()?)?;
             let mut server = xcb_runtime::chrome_connector::registration(&pin, &workspace)?;
             server.credential_account = Some(account.id);
-            let (cancel, cancelled) = tokio::sync::watch::channel(false);
-            let mut stop = crate::stop::Stop::install()?;
-            let _interrupt = crate::AbortOnDrop(tokio::spawn(async move {
-                stop.recv().await;
-                let _ = cancel.send(true);
-            }));
             xcb_runtime::chrome_connector::setup(
                 store.root(),
                 server.clone(),
