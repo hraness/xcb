@@ -85,11 +85,14 @@ export default function Home() {
             backdrop={false}
             className="xcb-hero"
             frame={<RouterShowcase className="xcb-home-showcase" />}
-            name={productName}
+            name=""
             heading={heading}
             headingId="hero-title"
             summary={summary}
-            actions={[{ href: "/install", label: productMessaging.hero.primaryAction }, { href: "#use", label: productMessaging.hero.secondaryAction }]}
+            install={publishedRelease === null
+              ? <CodeBlock code={"git clone https://github.com/hraness/xcb.git && cd xcb\n./scripts/install-native.sh"} copyLabel="Copy commands" />
+              : <PlatformInstall id="hero-install" platforms={installPlatforms(publishedRelease)} />}
+            actions={[{ href: "/install", label: "Install guide", emphasis: "secondary" }, { href: "#use", label: productMessaging.hero.secondaryAction, emphasis: "secondary" }]}
             boundary={`Free and open source · ${releaseStatusLabel(publishedRelease)}`}
           />
 
@@ -99,6 +102,7 @@ export default function Home() {
             <MarketingPillars
               ariaLabel="How xcb uses your subscriptions"
               columns={3}
+              presentation="benefits"
               pillars={[
                 { label: "Keep work moving", summary: "When an account reaches a known limit, xcb can continue your task on another account that has room. If none can take it, the task waits for a reset." },
                 { label: "Use the capacity you have", summary: "Give work to accounts with quota to spare when their next reset is close. xcb takes weekly limits into account too." },
@@ -134,11 +138,10 @@ export default function Home() {
 
           <MarketingSection id="install" heading={productMessaging.headings["home-install"]} headingId="install-title" summary={publishedRelease === null ? "No release is published yet; build from source with Git and Rust 1.97.1." : "Install the latest release, connect your Claude account, and open your thread."}>
             {publishedRelease === null
-              ? <CodeBlock code={"git clone https://github.com/hraness/xcb.git && cd xcb\n./scripts/install-native.sh"} copyLabel="Copy commands" />
+              ? <p>Build xcb with the command above, then follow the <a href="/install">installation guide</a> to connect your first provider.</p>
               : (
                 <>
                   <PlatformBadges platforms={runsOnPlatforms(publishedRelease)} />
-                  <PlatformInstall platforms={installPlatforms(publishedRelease)} />
                   <p>Then connect your Claude account and open your thread. On Linux, Claude needs the <a href="/docs/providers#claude-on-linux">sandbox setup</a> before your first task. On Windows, providers run in WSL2.</p>
                   <CodeBlock code={"xcb setup claude\nxcb"} copyLabel="Copy commands" />
                 </>

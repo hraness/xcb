@@ -1,4 +1,5 @@
 import { AskAiAboutThis } from "@hraness/ui";
+import { MarketingComparison } from "@hraness/design-kit/react/server";
 import { PageHeader, PageSection } from "../page-header";
 import { SiteHeader } from "../site-header";
 import { comparisonHeading, type Comparison } from "./comparisons";
@@ -12,8 +13,6 @@ export function formatDate(isoDate: string): string {
 
 /** The calm template every "xcb vs <tool>" page renders from its record. */
 export function ComparisonPage({ entry }: Readonly<{ entry: Comparison }>) {
-  const captionId = `${entry.slug}-comparison-caption`;
-  const scrollHintId = `${entry.slug}-scroll-hint`;
   return (
     <div data-hraness-marketing-preset="minimal" className="xcb-compare-page">
       <SiteHeader active="compare" />
@@ -25,6 +24,25 @@ export function ComparisonPage({ entry }: Readonly<{ entry: Comparison }>) {
           lead={<RichText text={entry.lead} />}
           meta={<>Updated <time dateTime={entry.updated}>{formatDate(entry.updated)}</time>. Sources are listed below.</>}
         />
+        <PageSection id="table" title="Side by side" wide>
+          <MarketingComparison
+            caption={`${entry.tool} and xcb at a glance`}
+            highlight={1}
+            note={entry.note === undefined ? undefined : <RichText text={entry.note} />}
+            options={[{ name: entry.tool }, { name: "xcb", mark: "/marks/xcb.svg" }]}
+            rows={entry.glance}
+          />
+          <details className="xcb-comparison-details">
+            <summary>Read the full comparison</summary>
+            <dl>
+              {entry.rows.map((row) => <div key={row.aspect}>
+                <dt>{row.aspect}</dt>
+                <dd><strong>{entry.tool}</strong> <RichText text={row.tool} /></dd>
+                <dd><strong>xcb</strong> <RichText text={row.xcb} /></dd>
+              </div>)}
+            </dl>
+          </details>
+        </PageSection>
         <PageSection id="picks" title="Which one to pick">
           <div className="xcb-picks">
             <div>
@@ -36,21 +54,6 @@ export function ComparisonPage({ entry }: Readonly<{ entry: Comparison }>) {
               <ul>{entry.picks.xcb.map((line) => <li key={line}><RichText text={line} /></li>)}</ul>
             </div>
           </div>
-        </PageSection>
-        <PageSection id="table" title="Side by side" wide>
-          <p className="xcb-compare-scroll-hint" id={scrollHintId}>Scroll horizontally to compare both tools.</p>
-          <div className="xcb-comparison-scroll" role="region" aria-labelledby={captionId} aria-describedby={scrollHintId} tabIndex={0}>
-            <table className="xcb-comparison-table">
-              <caption id={captionId}>{entry.tool} and xcb at a glance</caption>
-              <thead><tr><th scope="col">Aspect</th><th scope="col">{entry.tool}</th><th scope="col">xcb</th></tr></thead>
-              <tbody>
-                {entry.rows.map((row) => (
-                  <tr key={row.aspect}><th scope="row">{row.aspect}</th><td><RichText text={row.tool} /></td><td><RichText text={row.xcb} /></td></tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {entry.note === undefined ? null : <p className="xcb-page-meta"><RichText text={entry.note} /></p>}
         </PageSection>
         {(entry.sections ?? []).map((section) => (
           <PageSection key={section.id} id={section.id} title={section.title}>

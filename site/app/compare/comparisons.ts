@@ -1,3 +1,4 @@
+import type { MarketingComparisonRow } from "@hraness/design-kit/react/server";
 import type { ArticleIsoDate } from "@hraness/design-kit";
 
 /**
@@ -49,6 +50,8 @@ export interface Comparison {
   /** The day the other product's sources were last read and the page last changed. */
   readonly updated: ArticleIsoDate;
   readonly picks: Readonly<{ tool: readonly string[]; xcb: readonly string[] }>;
+  /** Compact, qualified overview; detailed source-backed rows follow in a disclosure. */
+  readonly glance: readonly MarketingComparisonRow[];
   /** Five to eight rows. */
   readonly rows: readonly ComparisonRow[];
   /** Shown under the table. */
@@ -65,9 +68,15 @@ export const devinStatus = "Devin support covers specific Devin CLI builds on ma
 
 /** Table cells that state the same xcb fact on several pages. */
 export const xcbFacts = {
-  platforms: "macOS ARM64 and Linux x86_64, with no Windows build; Codex and Devin need macOS, and Claude on Linux isn’t confirmed",
+  platforms: "Mac ARM64, Linux x86_64/ARM64, Windows x86_64; Windows provider work needs WSL2; Codex and Devin need macOS",
   sandbox: "Every provider run is sandboxed; commands run in an offline Linux VM on macOS ARM64",
   route: "`xcb --json route` takes one task and returns the result, the account and model used, and how the run ended",
+} as const;
+
+const xcbPlatforms = {
+  status: "partial",
+  label: "Mac, Linux, Windows",
+  detail: "Mac ARM64; Linux x86_64/ARM64; Windows x86_64. Claude on Linux needs sandbox setup. Windows provider work uses WSL2; Codex and Devin need Mac.",
 } as const;
 
 const checkedOn: ArticleIsoDate = "2026-09-27";
@@ -82,6 +91,14 @@ const xcbClaudeSignIn = "xcb runs the unmodified Claude Code binary, signed in t
 export const comparisons: readonly Comparison[] = [
   {
     slug: "herdr",
+    glance: [
+      { label: "Focus", values: ["Terminal workspaces", "Task and account routing"] },
+      { label: "Agents", values: ["22 agent CLIs", "Claude Code, Codex, Devin"] },
+      { label: "After disconnect", values: [{ status: "yes", label: "Background server" }, { status: "yes", label: "Task supervisor" }] },
+      { label: "Run isolation", values: [{ status: "depends", label: "Agent permissions", detail: "Plugin code is not sandboxed." }, { status: "yes", label: "Sandboxed provider runs", detail: "Commands use an offline VM on Mac ARM64." }] },
+      { label: "Platforms", values: ["Mac, Linux, Windows", xcbPlatforms] },
+      { label: "License", values: ["Apache 2.0 · free", "MIT · free"] },
+    ],
     tool: "herdr",
     title: "xcb vs herdr: where agents live, and which account runs a task",
     description: "herdr keeps coding agents running in terminals you can reattach to from any machine. xcb picks the account for each task and can run in a herdr pane.",
@@ -132,6 +149,14 @@ export const comparisons: readonly Comparison[] = [
   },
   {
     slug: "pi",
+    glance: [
+      { label: "Focus", values: ["Extensible coding agent", "Router around provider agents"] },
+      { label: "Model access", values: ["15+ providers; keys or OAuth", "Claude, Codex, Devin plans"] },
+      { label: "Extensions", values: ["Tools, prompts, and interface", "Panes, hooks, and reflexes"] },
+      { label: "Run isolation", values: [{ status: "optional", label: "Bring your own container" }, { status: "yes", label: "Sandboxed provider runs", detail: "Commands use an offline VM on Mac ARM64." }] },
+      { label: "Platforms", values: ["Mac, Linux, Windows", xcbPlatforms] },
+      { label: "License", values: ["MIT", "MIT"] },
+    ],
     tool: "pi",
     heading: "xcb and pi",
     title: "xcb and pi: two coding harnesses you can reshape",
@@ -192,6 +217,14 @@ export const comparisons: readonly Comparison[] = [
   },
   {
     slug: "claude-code",
+    glance: [
+      { label: "Model access", values: ["Claude plan, API, or cloud", "Existing provider subscriptions"] },
+      { label: "Accounts", values: ["One account per sign-in", "Route among available accounts"] },
+      { label: "Sandboxing", values: [{ status: "optional", label: "OS shell sandbox" }, { status: "yes", label: "Whole-process sandbox" }] },
+      { label: "Worker Git writes", values: [{ status: "yes", label: "Commit and push" }, { status: "no", label: "Read-only Git" }] },
+      { label: "After closing", values: [{ status: "depends", label: "Cloud sessions only" }, { status: "yes", label: "Local task supervisor" }] },
+      { label: "Platforms", values: ["Mac, Linux, WSL, Windows", xcbPlatforms] },
+    ],
     tool: "Claude Code",
     heading: "xcb vs Claude Code and Codex",
     title: "xcb vs Claude Code and Codex: when to add a router",
@@ -220,7 +253,7 @@ export const comparisons: readonly Comparison[] = [
       { aspect: "Commands and Git", tool: "Runs commands on your machine and can commit and push", xcb: "Commands run in an offline Linux VM on macOS ARM64; Git is read-only for workers" },
       { aspect: "After you close it", tool: "A local session ends; cloud sessions and routines run in Anthropic’s cloud", xcb: "Managed tasks keep running under a background supervisor on your machine" },
       { aspect: "For other programs", tool: "`claude -p` and the Agent SDK", xcb: xcbFacts.route },
-      { aspect: "Platforms", tool: "macOS, Linux, WSL, and Windows", xcb: "Claude runs on macOS ARM64; Claude on Linux x86_64 isn’t confirmed, and there is no Windows build" },
+      { aspect: "Platforms", tool: "macOS, Linux, WSL, and Windows", xcb: "Claude runs on Mac ARM64 and on Linux after sandbox setup; Windows provider work uses WSL2" },
     ],
     note: devinStatus,
     sections: [
@@ -258,6 +291,14 @@ export const comparisons: readonly Comparison[] = [
   },
   {
     slug: "conductor",
+    glance: [
+      { label: "Focus", values: ["Mac workspaces for agents", "Task and account routing"] },
+      { label: "Parallel work", values: ["Git worktrees in one repository", "Different projects; one task per project"] },
+      { label: "Sandboxed runs", values: [{ status: "no", label: "Local agents run directly" }, { status: "yes", label: "Sandboxed provider runs", detail: "Commands use an offline VM on Mac ARM64." }] },
+      { label: "After closing", values: [{ status: "depends", label: "Paid cloud workspaces" }, { status: "yes", label: "Local task supervisor" }] },
+      { label: "Review and merge", values: [{ status: "yes", label: "In the app" }, { status: "no", label: "Read-only worker Git" }] },
+      { label: "Price", values: ["Free; Pro $50/month", "Free · MIT"] },
+    ],
     tool: "Conductor",
     title: "xcb vs Conductor and other parallel-agent workspaces",
     description: "Conductor and similar apps give each agent its own worktree, diff, and merge flow. xcb sends each task to one of your accounts and sandboxes the run.",
@@ -312,6 +353,14 @@ export const comparisons: readonly Comparison[] = [
   },
   {
     slug: "claude-code-router",
+    glance: [
+      { label: "Routes", values: ["Individual API requests", "Coding tasks"] },
+      { label: "Credentials", values: ["API keys; some subscription imports", "Claude, Codex, Devin sign-ins"] },
+      { label: "Retry or fallback", values: [{ status: "yes", label: "API requests" }, { status: "depends", label: "Managed usage-limit recovery", detail: "Route calls run once." }] },
+      { label: "Run isolation", values: [{ status: "depends", label: "Controlled by your agent" }, { status: "yes", label: "Sandboxed provider runs" }] },
+      { label: "Integration", values: ["Local model API endpoint", "JSON task result via CLI"] },
+      { label: "Platforms", values: ["Mac, Linux, Windows", xcbPlatforms] },
+    ],
     tool: "Claude Code Router",
     title: "xcb vs Claude Code Router and subscription proxies",
     description: "Claude Code Router sends each API request from your agent to a provider you choose. xcb never touches API traffic and hands whole tasks to your own accounts.",
@@ -368,6 +417,14 @@ export const comparisons: readonly Comparison[] = [
   },
   {
     slug: "opencode",
+    glance: [
+      { label: "Focus", values: ["Terminal, IDE, desktop agent", "Router around provider agents"] },
+      { label: "Model access", values: ["75+ API providers; local models", "Claude, Codex, Devin plans"] },
+      { label: "Worker plugins", values: [{ status: "yes", label: "Plugins and MCP" }, { status: "no", label: "Fixed xcb tool boundary" }] },
+      { label: "Permissions", values: ["Allow, ask, or deny rules", { status: "yes", label: "Sandboxed provider runs", detail: "Commands use an offline VM on Mac ARM64." }] },
+      { label: "Platforms", values: ["Mac, Linux, Windows", xcbPlatforms] },
+      { label: "License", values: ["MIT", "MIT"] },
+    ],
     tool: "OpenCode",
     title: "xcb vs OpenCode: an open agent or a router for your subscriptions",
     description: "OpenCode is an open agent for 75+ providers and no longer bundles Claude Pro/Max plugins. xcb uses your Claude plan through Claude Code, plus Codex and Devin.",
@@ -418,6 +475,13 @@ export const comparisons: readonly Comparison[] = [
   },
   {
     slug: "openrouter",
+    glance: [
+      { label: "Routes", values: ["Model API requests", "Coding tasks"] },
+      { label: "Credentials", values: ["OpenRouter or provider API keys", "Existing subscription sign-ins"] },
+      { label: "Hosted endpoint", values: [{ status: "yes", label: "OpenRouter service" }, { status: "no", label: "Local provider CLIs", detail: "Mac ARM64; Claude also runs on Linux after sandbox setup, including in WSL2 on Windows." }] },
+      { label: "Cost", values: ["Per-token rates + credit purchase fee", "Free; subscription limits apply"] },
+      { label: "Retry or fallback", values: [{ status: "yes", label: "Model and provider chains" }, { status: "depends", label: "Managed usage-limit recovery", detail: "Route calls run once." }] },
+    ],
     tool: "OpenRouter",
     title: "xcb vs OpenRouter: your subscriptions or a per-token API",
     description: "OpenRouter bills per token for API calls to hundreds of models. xcb sends each coding task to a Claude, Codex, or Devin plan you already pay for.",
@@ -439,7 +503,7 @@ export const comparisons: readonly Comparison[] = [
     rows: [
       { aspect: "What it routes", tool: "One API request: a prompt in, a model’s answer out", xcb: "One coding task; each route call runs one provider turn on one model" },
       { aspect: "What you bring", tool: "An OpenRouter API key, or your own provider keys through BYOK", xcb: "Claude, Codex, or Devin subscriptions you already pay for, signed in on your machine" },
-      { aspect: "Where it runs", tool: "OpenRouter’s hosted service; requests leave your machine for its endpoint", xcb: "Your machine: macOS ARM64 for all three providers; Claude on Linux x86_64 isn’t confirmed" },
+      { aspect: "Where it runs", tool: "OpenRouter’s hosted service; requests leave your machine for its endpoint", xcb: "Your machine: all three providers on Mac ARM64; Claude on Linux after sandbox setup, or through WSL2 on Windows" },
       { aspect: "How you pay", tool: "Per token at the provider’s price, plus a 5.5% fee when you buy credits on the Standard plan", xcb: "xcb is free; usage draws on each subscription’s own limits" },
       { aspect: "Choosing the model", tool: "The model field on each request, or the `openrouter/auto` router", xcb: "xcb picks from models recently seen on accounts that can take the task now" },
       { aspect: "Choosing the provider", tool: "Provider order, price ceilings, and region limits on each request", xcb: "The provider of the chosen account; each turn runs on one account" },

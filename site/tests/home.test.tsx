@@ -144,15 +144,18 @@ test("the shared header keeps a named home link and exact-artwork foil fallback"
   }
 });
 
-test("keeps help output out of the hero and shows highlighted commands in terminal frames", () => {
+test("keeps the hero code limited to installation and highlights terminal examples", () => {
   const html = renderToStaticMarkup(<Home />);
   const heroCode: string[] = [];
+  const heroInstallCode: string[] = [];
   const terminalCode: string[] = [];
   new HTMLRewriter()
-    .on('header[aria-labelledby="hero-title"] pre', { element(element) { heroCode.push(element.tagName); } })
+    .on('header[aria-labelledby="hero-title"] pre', { text(chunk) { heroCode.push(chunk.text); } })
+    .on('header[aria-labelledby="hero-title"] .hraness-marketing-hero__install pre', { text(chunk) { heroInstallCode.push(chunk.text); } })
     .on('.xcb-code--terminal code.syntax-code', { element(element) { terminalCode.push(element.getAttribute("data-language") ?? ""); } })
     .transform(html);
-  expect(heroCode).toEqual([]);
+  expect(heroCode.join("")).toBe(heroInstallCode.join(""));
+  expect(heroInstallCode.join("")).not.toBe("");
   expect(terminalCode).toContain("shell");
   expect(html).toContain("hraness-marketing-proof-frame__chrome");
   expect(html).not.toContain("--help");

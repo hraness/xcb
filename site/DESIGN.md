@@ -16,6 +16,9 @@ immutable GitHub Release; compare the published SHA-256 (61b10c093d29474e162ed41
 run `xcb --version` and `xcb models route --help`. The excerpt keeps the
 warning that the configured judge may run and selection can change.
 
-Shared design-kit 0.30.2 (install commands use its PlatformInstall), site-footer 0.20.0 and immutable 3df4 snapshots.
+Package versions live in `package.json`; keep design-kit, site-footer and the immutable snapshots pinned.
+The hero offers the copyable platform installer, followed by quiet links to the
+install guide and CLI. Benefits use the shared rows; comparison pages use
+the shared concise table with the product mark. Prose links use dotted underlines.
 Keep keyboard focus, saved appearance, visible phone navigation and local
 code scrolling. Desktop/phone light/dark visual checks remain required.

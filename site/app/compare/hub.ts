@@ -120,6 +120,6 @@ export const hubGroups: readonly HubGroup[] = [
 export const hubElsewhere: readonly string[] = [
   "You pay for one subscription and want every native feature: use that provider’s own tool.",
   "The agent needs to commit, push, or build for macOS: in xcb, Git is read-only for workers, and commands run in an offline Linux VM on macOS ARM64.",
-  "You need Windows, or Codex or Devin on Linux: xcb runs Codex and the Devin CLI on macOS only and has no Windows build.",
+  "You need providers to run natively on Windows, or Codex or Devin on Linux: Windows provider work requires xcb’s Linux build in WSL2, and Codex and Devin need macOS.",
   "You want web search, MCP servers, or plugins inside the agent: xcb turns those off in its runs, so use the provider’s tool or an open agent.",
 ];

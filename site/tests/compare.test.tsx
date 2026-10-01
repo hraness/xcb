@@ -29,7 +29,9 @@ describe("the comparison pages", () => {
       expect(html).toContain("Pick xcb when");
       expect(entry.rows.length).toBeGreaterThanOrEqual(5);
       expect(entry.rows.length).toBeLessThanOrEqual(8);
-      expect(html.match(/<tr>/gu)?.length).toBe(entry.rows.length + 1);
+      expect(html.match(/<tr>/gu)?.length).toBe(entry.glance.length + 1);
+      expect(html).toContain("Read the full comparison");
+      expect(html).toContain("data-comparison-status=");
       expect(entry.sources.length).toBeGreaterThan(0);
       for (const source of entry.sources) {
         expect(html).toContain(`href="${source.href}"`);
