@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { verifySettledConsentFlow } from "./verify-settled-consent.mjs";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -92,6 +93,7 @@ try {
         assert.equal(await page.evaluate(() => matchMedia("(pointer: coarse)").matches), width <= 600, `${route}: pointer matches viewport fixture`);
         await page.locator("main").waitFor();
         await page.evaluate(() => document.fonts.ready);
+        const settledConsent = route === "/" ? await verifySettledConsentFlow(page) : undefined;
         await page.mouse.move(0, 0);
         const state = await page.evaluate(() => {
           const footer = document.querySelector("#hraness-site-footer");
@@ -112,7 +114,7 @@ try {
         const name = `${width}-${theme}-${route === "/" ? "home" : route.slice(1).replaceAll("/", "_")}`;
         const screenshot = await page.screenshot({ path: resolve(artifacts, `${name}.png`), fullPage: true, animations: "disabled" });
         state.screenshotWidth = screenshot.readUInt32BE(16);
-        await writeFile(resolve(artifacts, `${name}.json`), JSON.stringify({ route, state, errors }, null, 2));
+        await writeFile(resolve(artifacts, `${name}.json`), JSON.stringify({ route, state, errors, settledConsent }, null, 2));
         assert.ok(!state.overflow, `${route}: horizontal overflow at ${width}`);
         assert.equal(state.screenshotWidth, width, `${route}: full-page capture exceeds viewport`);
         assert.ok(state.heading, `${route}: missing heading`);
