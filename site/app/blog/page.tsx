@@ -43,7 +43,7 @@ export default function Blog() {
             eyebrow: entry.eyebrow,
           }))}
         />
-        <p className="xcb-blog-feed"><a href={blogFeedPath}>Atom feed</a></p>
+        <p className="xcb-blog-feed"><a className="hraness-text-link" href={blogFeedPath}>Atom feed</a></p>
       </main>
       <JsonLdScript data={jsonLd} id="blog-json-ld" />
     </div>

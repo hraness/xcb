@@ -14,7 +14,7 @@ assert.ok(process.argv.slice(2).every(argument => argument === "--production" ||
 const localOriginArguments = process.argv.slice(2).filter(argument => argument.startsWith("--local-origin="));
 assert.ok(localOriginArguments.length <= 1, "Use at most one local verification origin.");
 const localOrigin = localVerificationOrigin(localOriginArguments[0]?.slice("--local-origin=".length), production);
-const routes = ["/", "/docs", "/install", "/download", "/compare", "/reflexes", "/blog"];
+const routes = ["/", "/docs", "/install", "/download", "/compare", "/reflexes", "/blog", "/blog/introducing-excalibur", "/blog/one-agent-for-all-your-ai-plans"];
 const artifacts = resolve(process.env.SITE_BROWSER_ARTIFACTS ?? "/tmp/xcb-site-browser");
 await mkdir(artifacts, { recursive: true });
 let origin = localOrigin ?? "https://xcb.sh";
@@ -92,12 +92,19 @@ try {
         assert.equal(await page.evaluate(() => matchMedia("(pointer: coarse)").matches), width <= 600, `${route}: pointer matches viewport fixture`);
         await page.locator("main").waitFor();
         await page.evaluate(() => document.fonts.ready);
+        await page.mouse.move(0, 0);
         const state = await page.evaluate(() => {
           const footer = document.querySelector("#hraness-site-footer");
           return {
             overflow: Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) > innerWidth,
             heading: document.querySelector("h1")?.textContent?.trim(),
             theme: document.documentElement.dataset.theme,
+            publicationSourceCount: document.querySelectorAll(".plain-publication__sources a").length,
+            publicationUtilityCount: document.querySelectorAll(".xcb-blog-feed a, .xcb-blog-back a").length,
+            publicationLinks: [...document.querySelectorAll(".plain-publication__sources a, .xcb-blog-feed a, .xcb-blog-back a")].map(element => {
+              const style = getComputedStyle(element);
+              return { label: element.textContent?.trim(), decoration: style.textDecorationLine, style: style.textDecorationStyle, color: style.color, decorationColor: style.textDecorationColor };
+            }),
             footerPositions: [footer, footer?.querySelector(".hraness-site-footer__inner")].map(element => element ? getComputedStyle(element).position : null),
             smallHeaderTargets: innerWidth > 600 ? [] : [...document.querySelectorAll("header a, header button, header summary")].filter(element => { const box = element.getBoundingClientRect(); return box.width > 0 && box.height > 0 && (box.width < 43.5 || box.height < 43.5); }).map(element => ({ label: element.textContent?.trim() || element.getAttribute("aria-label"), width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height })),
           };
@@ -110,6 +117,11 @@ try {
         assert.equal(state.screenshotWidth, width, `${route}: full-page capture exceeds viewport`);
         assert.ok(state.heading, `${route}: missing heading`);
         assert.equal(state.theme, theme, `${route}: system appearance`);
+        if (route.startsWith("/blog")) {
+          assert.ok(state.publicationUtilityCount > 0, `${route}: missing publication utility link`);
+          if (route !== "/blog") assert.ok(state.publicationSourceCount > 0, `${route}: missing publication sources`);
+          assert.ok(state.publicationLinks.every(link => link.decoration.includes("underline") && link.style === "dotted" && link.color !== link.decorationColor), `${route}: publication links lack a muted dotted underline: ${JSON.stringify(state.publicationLinks)}`);
+        }
         assert.ok(state.footerPositions.every(position => position === "static" || position === "relative"), `${route}: footer not in normal flow`);
         assert.deepEqual(state.smallHeaderTargets, [], `${route}: phone targets below 44px`);
         assert.deepEqual(errors, [], `${route}: browser errors`);
