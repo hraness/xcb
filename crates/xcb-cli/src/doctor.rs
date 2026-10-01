@@ -19,6 +19,7 @@ enum Build {
         version: String,
         native: bool,
         stale: bool,
+        skipped_version: Option<String>,
     },
     /// No build; the sentence says why.
     Missing(String),
@@ -204,9 +205,32 @@ pub async fn run(
     for provider in only.map_or_else(|| health::PROVIDERS.to_vec(), |provider| vec![provider]) {
         match process::inspect(provider, executable, &home).await {
             Ok(mut pin) => {
-                pin.save(root)?;
-                let native = runner::provider_admitted(store.root(), &pin);
-                reports.push(json!({"provider":provider,"version":pin.version,"sha256":pin.sha256,"nativeCandidate":native,"detail":build_detail(provider, native)}));
+                let mut native = runner::provider_admitted(store.root(), &pin);
+                let mut skipped = None;
+                // Checking a newer build must not disable a working provider.
+                // Even an explicit selection keeps the admitted saved bytes
+                // until the replacement passes the same admission checks.
+                if !native
+                    && let Ok(saved) = process::Pin::load(root, provider)
+                    && runner::provider_admitted(root, &saved)
+                {
+                    skipped = Some(pin);
+                    pin = saved;
+                    native = true;
+                } else {
+                    pin.save(root)?;
+                }
+                let mut report = json!({"provider":provider,"version":pin.version,"sha256":pin.sha256,"nativeCandidate":native,"detail":build_detail(provider, native)});
+                if let Some(skipped) = &skipped {
+                    report["storedPin"] = json!(true);
+                    report["skippedBuild"] = json!({
+                        "version": skipped.version,
+                        "sha256": skipped.sha256,
+                        "nativeCandidate": false,
+                        "source": if executable.is_some() { "explicit" } else { "discovered" },
+                    });
+                }
+                reports.push(report);
                 let version = pin.version.clone();
                 builds.push((
                     provider,
@@ -214,6 +238,7 @@ pub async fn run(
                         version,
                         native,
                         stale: false,
+                        skipped_version: skipped.map(|pin| pin.version),
                     },
                     Some(pin),
                 ));
@@ -228,6 +253,7 @@ pub async fn run(
                             version: pin.version,
                             native,
                             stale: true,
+                            skipped_version: None,
                         },
                         None,
                     ));
@@ -266,6 +292,7 @@ pub async fn run(
                 version,
                 native: true,
                 stale,
+                skipped_version,
             } => {
                 say(&format!(
                     "{} {provider} {version}: ready{}",
@@ -281,6 +308,19 @@ pub async fn run(
                 ));
                 tally.passed += 1;
                 first_ready.get_or_insert(provider);
+                if let Some(skipped) = skipped_version {
+                    say(&format!(
+                        "  {} {} {} {skipped}, but xcb can't run it yet; keeping {version}",
+                        style.symbol(ux::Symbol::Warn),
+                        if executable.is_some() {
+                            "selected"
+                        } else {
+                            "found"
+                        },
+                        provider_name(provider),
+                    ));
+                    tally.warnings += 1;
+                }
             }
             Build::Pinned { version, stale, .. } => {
                 say(&format!(
