@@ -52,6 +52,8 @@ export const analyticsSite = {
       "captureSlug": true
     }
   ],
+  // Private account routes suppress events, not just campaign attribution.
+  "excludedPaths": [{ "match": "prefix", "path": "/account" }],
   "sensitivePaths": [
     {
       "match": "prefix",
