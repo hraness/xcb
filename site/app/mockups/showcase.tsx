@@ -2,7 +2,7 @@
 
 import { ModeShowcase, type ShowcaseChoice, type ShowcaseSurface } from "@hraness/design-kit/mockups/client";
 
-import { boardNote, type RouterMode } from "./fixtures";
+import type { RouterMode } from "./fixtures";
 import { AccountsBoard, TasksView, ThreadView } from "./surfaces";
 
 type Surface = "accounts" | "thread" | "tasks";
@@ -14,8 +14,8 @@ const surfaces: readonly ShowcaseSurface<Surface, RouterMode>[] = [
 ];
 
 const modes: readonly ShowcaseChoice<RouterMode>[] = [
-  { id: "reset", label: "Quota about to reset", hint: "xcb gives the task to the account whose unused quota resets soonest." },
-  { id: "limit", label: "Account hits its limit", hint: "The task stops on a reported limit and continues on another account." },
+  { id: "reset", label: "Quota about to reset" },
+  { id: "limit", label: "Account hits its limit" },
 ];
 
 /**
@@ -32,7 +32,6 @@ export function RouterShowcase({ className }: Readonly<{ className?: string }> =
       minWidth={560}
       modeLabel="Show"
       modes={modes}
-      status={({ mode }) => boardNote[mode]}
       surfaces={surfaces}
     />
   );
