@@ -32,8 +32,8 @@ const questions = [
   { question: "Can I use the subscriptions I already have?", answer: "Yes. You sign in to your own Claude, Codex, and Devin accounts through each provider’s own tool, and xcb routes work among them. It has no model access of its own and does not lift provider usage limits; each provider’s pricing and terms still apply." },
   { question: "What happens when an account hits its limit?", answer: "When a provider reports an exhausted usage window for an account, xcb skips that account and sends the next task to another account that can take it. A task from your thread that stops on a reported limit can move to another account with its original instructions. If no account can take it, the task waits for the reset. xcb never falls back to an API key." },
   { question: "How is xcb different from claude-swap, Claude Code Router, or herdr?", answer: "claude-swap changes which login Claude Code uses and keeps every Claude Code feature; xcb picks an account for each task across Claude, Codex, and Devin and sandboxes each run. Claude Code Router sends each API request to a provider you configure; xcb never touches API traffic and runs whole tasks on your subscriptions. herdr keeps many agent terminals alive and visible, and xcb can run inside a herdr pane. The comparison pages cover these and more." },
-  { question: "What stays on my computer?", answer: "Accounts, credentials, sessions, and settings stay on your computer, outside your projects. Model requests go to the provider that runs the task. The optional judge, which is off by default, sends limited task context to TypeSafe’s System One service." },
-  { question: "Can xcb run my tests and builds?", answer: "On macOS with Apple silicon, commands run offline in a Linux VM with public dependencies you prepare in advance. Git is read-only there, so you review and commit the changes yourself. Native macOS builds cannot run. Source builds can also use registered host MCP tools; native provider shells remain unavailable." },
+  { question: "What stays on my computer?", answer: "xcb stores accounts, credentials, sessions, and settings on your computer, outside your projects. Model requests go to the provider that runs the task. The optional judge sends limited task context to TypeSafe’s System One service; linked remote devices exchange encrypted task content through your relay." },
+  { question: "Can xcb run my tests and builds?", answer: "On macOS with Apple silicon, commands run offline in a Linux VM with public dependencies you prepare in advance. Git is read-only there, so you review and commit the changes yourself. Native macOS builds cannot run. Registered host MCP tools can provide additional capabilities; native provider shells remain unavailable." },
   { question: "What does it cost?", answer: "xcb is free and MIT licensed. You pay only for your provider subscriptions and any services you choose to use." },
 ] as const;
 
@@ -142,7 +142,7 @@ export default function Home() {
               : (
                 <>
                   <PlatformBadges platforms={runsOnPlatforms(publishedRelease)} />
-                  <p>Then connect your Claude account and open your thread. On Linux, Claude needs the <a href="/docs/providers#claude-on-linux">sandbox setup</a> before your first task. On Windows, providers run in WSL2.</p>
+                  <p>Then connect your Claude account and open your thread. On Linux, Claude needs the <a href="/docs/providers#claude-on-linux">sandbox setup</a> before your first task. On Windows, Claude runs in WSL2.</p>
                   <CodeBlock code={"xcb setup claude\nxcb"} copyLabel="Copy commands" />
                 </>
               )}

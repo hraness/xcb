@@ -29,6 +29,7 @@ export function blogArticleDiscovery(entry: BlogPost): ArticleDiscovery {
     title: entry.title,
     description: entry.dek,
     publishedTime: blogTimestamp(entry.published),
+    ...(entry.updated === undefined ? {} : { modifiedTime: blogTimestamp(entry.updated) }),
     authors: [blogPublisher],
     publisher: blogPublisher,
     section: entry.eyebrow,

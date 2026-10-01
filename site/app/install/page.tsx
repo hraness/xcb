@@ -35,7 +35,7 @@ xcb`;
 const routeExample = `echo '{"version":1,"workspace":"'"$PWD"'","task":"Fix the failing parser test","dryRun":true}' \\
   | xcb --json route`;
 
-const uninstall = `xcb service uninstall   # macOS: stop starting the supervisor at login
+const uninstall = `xcb service uninstall   # macOS/Linux: stop starting the supervisor at login
 xcb update disable      # stop the daily update check
 rm ~/.local/bin/xcb`;
 
@@ -111,7 +111,7 @@ export default function Install() {
         <PageSection id="update" title="Update and uninstall">
           <p><code>xcb upgrade</code> installs the newest release the same way the installer did. To remove xcb, let running tasks finish, then run:</p>
           <CodeBlock code={uninstall} />
-          <p>Your accounts, credentials, and history stay in <code>~/.local/share/xcb</code> until you delete that folder. <a href="/docs/upgrade-and-uninstall">Upgrade and uninstall</a> lists everything xcb creates.</p>
+          <p>The state folder <code>~/.local/share/xcb</code> remains until you delete it. Full Claude browser sign-in also leaves dedicated macOS Keychain entries. <a href="/docs/upgrade-and-uninstall">Upgrade and uninstall</a> lists everything xcb creates.</p>
         </PageSection>
 
         <PageSection id="source" title="Build from source">

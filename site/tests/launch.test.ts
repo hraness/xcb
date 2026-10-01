@@ -42,13 +42,14 @@ describe("xcb launch facts", () => {
     expect(launchStatusFor({ version: "1.2.3" } as never)).toBe("Latest release: v1.2.3");
     expect(LAUNCH_STATUS).toBe(launchStatusFor(publishedRelease));
     const status = launchBeats.find(({ id }) => id === "status");
-    expect(status?.post).toContain(LAUNCH_STATUS);
+    expect(status?.socialPost).toContain(LAUNCH_STATUS);
+    expect(status?.post).not.toContain(LAUNCH_STATUS);
   });
 
   test("the post is an indexable beats post with an independent review", () => {
     const post = findBlogPost(launchPostSlug);
     expect(post?.format).toBe("beats");
-    expect(post?.admission.review).toMatchObject({ reviewerType: "ai", reviewedOn: "2026-09-30" });
+    expect(post?.admission.review).toMatchObject({ reviewerType: "ai", reviewedOn: "2026-10-01" });
     expect(post?.admission.lifecycle).toBe("indexable");
     const scores: number[] = Object.values(post?.admission.scores ?? {});
     expect(scores.every((score) => score > 0)).toBe(true);

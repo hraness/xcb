@@ -5,7 +5,7 @@
  * that the facts module does not hold.
  */
 import { launchMessaging } from "../site/app/launch/beats.ts";
-import { LAUNCH_STATUS, launchFacts } from "../site/app/launch/facts.ts";
+import { launchFacts } from "../site/app/launch/facts.ts";
 import type { FilmCopy } from "./timeline.ts";
 
 const WORDS: Readonly<Record<string, number>> = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
@@ -42,7 +42,7 @@ export const filmCopy: FilmCopy = {
     },
     {
       heading: "Moves on at a limit",
-      body: "A limit mid-task? xcb continues it on another account.",
+      body: "At a reported usage limit, xcb can continue on an available account.",
       focus: "thread-limit",
       target: "thread-limit/thread-2",
       highlight: "thread-limit/thread-3",
@@ -73,5 +73,5 @@ export const filmCopy: FilmCopy = {
     heading: "What it doesn't do",
     body: "xcb doesn't raise any usage limit. It spends the quota you already have, in a better order.",
   },
-  end: { line: `Free for Apple silicon Macs and Linux. ${LAUNCH_STATUS}.` },
+  end: { line: `Free for Apple silicon Macs and Linux.` },
 };

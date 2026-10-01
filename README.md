@@ -52,9 +52,9 @@ not self-update; rerun the release installer to create a supported install.
 
 ### Windows
 
-Claude Code, Codex, and Devin run only in the Linux build of xcb: on Windows,
-install it inside [WSL2](https://learn.microsoft.com/windows/wsl/install) with
-the command above. Releases also carry a native
+To run Claude Code on Windows, install the Linux build of xcb inside [WSL2](https://learn.microsoft.com/windows/wsl/install) with
+the command above. Claude is the supported provider on Linux; Codex and Devin
+require macOS. Releases also carry a native
 Windows x86_64 build that runs everything except the providers (the thread,
 `xcb doctor`, accounts, remote control, and `xcb route`, which refuses provider
 work with those WSL2 steps). Install it from PowerShell:
