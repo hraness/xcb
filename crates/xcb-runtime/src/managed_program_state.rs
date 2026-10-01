@@ -6,6 +6,51 @@ use crate::managed_program::{
     ProgramCall, ProgramCallResult, ProgramSlice, ProgramSliceOutcome,
 };
 use crate::workspace_infer::BindingOrigin;
+use algal::agent_context::{
+    AgentContextEntryInput, AgentContextHost, AgentContextKind, AgentContextRef, put_agent_context,
+};
+
+const MAX_CONTEXT_SOURCE_BYTES: usize = 32 * 1024;
+const MAX_CALL_RECORD_BYTES: usize = 128 * 1024;
+const CONTEXT_LIMITS: &str = r#"{"maxReadBytes":32768,"maxScanBytes":32768,"maxSearchResults":32}"#;
+
+/// Exact sources live inside the existing digest-protected call record. The
+/// reconstructed ALGAL CAS is read-only to the worker and shared identities are
+/// verified again after a restart. No provider transcript or account is copied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProgramContext {
+    reference: AgentContextRef,
+    entries: Vec<AgentContextEntryInput>,
+}
+impl ProgramContext {
+    fn store(&self) -> Result<algal::store::Store> {
+        if self.entries.len() > 5
+            || self
+                .entries
+                .iter()
+                .map(|entry| entry.text.len())
+                .sum::<usize>()
+                > MAX_CONTEXT_SOURCE_BYTES
+        {
+            return Err(Error::Conflict("program context source bound exceeded"));
+        }
+        let mut store = algal::store::Store::default();
+        let snapshot = put_agent_context(&mut store, &self.entries)
+            .map_err(|_| Error::Conflict("program context sources changed"))?;
+        let reference = AgentContextHost::new(&store)
+            .grant(
+                &snapshot,
+                None,
+                Some(&serde_json::from_str(CONTEXT_LIMITS)?),
+            )
+            .map_err(|_| Error::Conflict("program context permission changed"))?;
+        if reference != self.reference {
+            return Err(Error::Conflict("program context snapshot changed"));
+        }
+        Ok(store)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -15,11 +60,17 @@ pub struct ProgramChild {
     pub request_digest: String,
     pub generation: Id,
     pub required_provider: Option<Provider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<AgentContextRef>,
 }
 impl ProgramChild {
     pub(super) fn validate(&self) -> Result<()> {
         if self.call == 0 || self.call > MAX_MANAGED_CALLS || !valid_digest(&self.request_digest) {
             return Err(Error::Conflict("invalid managed program child"));
+        }
+        if let Some(reference) = &self.context {
+            algal::agent_context::parse_agent_context_ref(&serde_json::to_value(reference)?)
+                .map_err(|_| Error::Conflict("invalid managed program context"))?;
         }
         Ok(())
     }
@@ -53,6 +104,8 @@ pub(super) struct Call {
     request: ProgramCall,
     child: Id,
     result: Option<Settlement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context: Option<ProgramContext>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +124,7 @@ pub(super) struct ChildPublication {
     user: Message,
     ack: Message,
     policy: ProjectPolicy,
+    context: ProgramContext,
 }
 pub(super) enum Change {
     Publish {
@@ -135,13 +189,16 @@ fn read_execution(db: &Connection, parent: &Id) -> Result<Option<Execution>> {
 }
 fn read_call(db: &Connection, parent: &Id, index: u8) -> Result<Call> {
     let (child, hash, payload): (String, String, String) = db.query_row(
-        "SELECT child,digest,substr(payload,1,131073) FROM program_calls WHERE parent=?1 AND call_index=?2",
-        params![parent.as_str(), index], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        "SELECT child,digest,CAST(substr(CAST(payload AS BLOB),1,?3) AS TEXT) FROM program_calls WHERE parent=?1 AND call_index=?2",
+        params![parent.as_str(), index, (MAX_CALL_RECORD_BYTES + 1) as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ).optional()?.ok_or(Error::Conflict("program call evidence is missing"))?;
-    if payload.len() > 131072 || digest(&payload) != hash {
+    if payload.len() > MAX_CALL_RECORD_BYTES || digest(&payload) != hash {
         return Err(Error::Conflict("program call integrity failed"));
     }
     let call: Call = decode(&payload)?;
+    if call.request.request.is_some() {
+        crate::managed_program::retained_request(&call.request)?;
+    }
     if call.parent != *parent
         || call.index != index
         || call.child.as_str() != child
@@ -160,6 +217,20 @@ fn read_call(db: &Connection, parent: &Id, index: u8) -> Result<Call> {
     {
         return Err(Error::Conflict("invalid program call evidence"));
     }
+    if let Some(context) = &call.context {
+        // Read only the parent's immutable digest fields; its hidden source
+        // text must never become part of this child's reconstructed context.
+        let (manifest, inputs): (String, String) = db.query_row(
+            "SELECT substr(json_extract(payload,'$.program.manifestDigest'),1,72),substr(json_extract(payload,'$.program.inputsDigest'),1,72) FROM tasks WHERE id=?1",
+            [parent.as_str()], |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if context.entries != context_entries(parent, &call.request, index, &manifest, &inputs)? {
+            return Err(Error::Conflict(
+                "program context differs from exact effect source",
+            ));
+        }
+        context.store()?;
+    }
     Ok(call)
 }
 fn write_execution(tx: &Transaction<'_>, execution: &Execution) -> Result<()> {
@@ -175,7 +246,7 @@ fn write_execution(tx: &Transaction<'_>, execution: &Execution) -> Result<()> {
 }
 fn write_call(tx: &Transaction<'_>, call: &Call) -> Result<()> {
     let payload = serde_json::to_string(call)?;
-    bounded_text(&payload, 131072)?;
+    bounded_text(&payload, MAX_CALL_RECORD_BYTES)?;
     tx.execute("INSERT INTO program_calls(parent,call_index,child,digest,payload) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(parent,call_index) DO UPDATE SET digest=excluded.digest,payload=excluded.payload",
         params![call.parent.as_str(), call.index, call.child.as_str(), digest(&payload), payload])?;
     Ok(())
@@ -262,6 +333,7 @@ pub(super) fn check_dispatch(db: &Connection, task: &ManagedTask, now: u64) -> R
             || call.child != task.id
             || call.result.is_some()
             || call.request.digest != link.request_digest
+            || call.context.as_ref().map(|context| &context.reference) != link.context.as_ref()
             || policy.required_provider != link.required_provider
             || (link.required_provider.is_some()
                 && (!task.provider_required || task.provider_preference != link.required_provider))
@@ -312,6 +384,12 @@ pub(super) fn transition(
                 || call.child != child.task.id
                 || call.index != previous.as_ref().map_or(1, |e| e.calls + 1)
                 || call.index > expected.program.as_ref().map_or(0, |p| p.managed_calls)
+                || call.context.as_ref().map(|context| &context.reference)
+                    != child
+                        .task
+                        .program_child
+                        .as_ref()
+                        .and_then(|link| link.context.as_ref())
             {
                 return Err(Error::Conflict("program call publication changed"));
             }
@@ -414,7 +492,211 @@ pub(super) fn retain_task(tx: &Transaction<'_>, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn context_entries(
+    parent: &Id,
+    call: &ProgramCall,
+    index: u8,
+    manifest_digest: &str,
+    inputs_digest: &str,
+) -> Result<Vec<AgentContextEntryInput>> {
+    if !valid_digest(manifest_digest) || !valid_digest(inputs_digest) {
+        return Err(Error::Conflict("program context lineage changed"));
+    }
+    let canonical = |value: &Value| {
+        algal::canonical::canonical(value)
+            .map_err(|_| Error::Conflict("program context source is invalid"))
+    };
+    let request = crate::managed_program::retained_request(call)?;
+    // A project/task grant does not widen an ALGAL cell's declared view.
+    // Never add the full parent program, hidden inputs or sibling reports.
+    Ok(vec![
+        AgentContextEntryInput {
+            kind: AgentContextKind::Instruction,
+            label: "effect-instructions".into(),
+            text: request["prompt"]
+                .as_str()
+                .ok_or(Error::Conflict("program effect instruction missing"))?
+                .to_owned(),
+        },
+        AgentContextEntryInput {
+            kind: AgentContextKind::Input,
+            label: "effect-context".into(),
+            text: canonical(&request["context"])?,
+        },
+        AgentContextEntryInput {
+            kind: AgentContextKind::Observation,
+            label: "effect-request".into(),
+            text: canonical(request)?,
+        },
+        AgentContextEntryInput {
+            kind: AgentContextKind::Instruction,
+            label: "current-call".into(),
+            text: call.prompt.clone(),
+        },
+        AgentContextEntryInput {
+            kind: AgentContextKind::Observation,
+            label: "current-lineage".into(),
+            text: canonical(
+                &json!({"parent":parent,"call":index,"cellId":request["cellId"],"requestDigest":call.digest,"manifestDigest":manifest_digest,"inputsDigest":inputs_digest}),
+            )?,
+        },
+    ])
+}
+
 impl ManagedStore {
+    fn capture_program_context(
+        &self,
+        parent: &ManagedTask,
+        call: &ProgramCall,
+        index: u8,
+    ) -> Result<ProgramContext> {
+        let program = parent
+            .program
+            .as_ref()
+            .ok_or(Error::Conflict("program source missing"))?;
+        program.verify()?;
+        let entries = context_entries(
+            &parent.id,
+            call,
+            index,
+            &program.manifest_digest,
+            &program.inputs_digest,
+        )?;
+        let mut store = algal::store::Store::default();
+        let snapshot = put_agent_context(&mut store, &entries)
+            .map_err(|_| Error::Conflict("program context source bound exceeded"))?;
+        let reference = AgentContextHost::new(&store)
+            .grant(
+                &snapshot,
+                None,
+                Some(&serde_json::from_str(CONTEXT_LIMITS)?),
+            )
+            .map_err(|_| Error::Conflict("program context permission failed"))?;
+        let context = ProgramContext { reference, entries };
+        context.store()?;
+        Ok(context)
+    }
+
+    /// Called only after worker_call derives the current task from its active
+    /// session. The request cannot name another task, call, snapshot or grant.
+    pub(super) fn program_context_query(
+        &self,
+        source: &ManagedTask,
+        input: &Value,
+    ) -> Result<Value> {
+        #[derive(Deserialize)]
+        #[serde(tag = "op", rename_all = "lowercase", deny_unknown_fields)]
+        enum Query {
+            Inspect {
+                #[serde(default)]
+                offset: usize,
+                #[serde(default = "page_limit")]
+                limit: usize,
+            },
+            Read {
+                index: usize,
+            },
+            Slice {
+                index: usize,
+                #[serde(rename = "startByte")]
+                start_byte: usize,
+                #[serde(rename = "endByte")]
+                end_byte: usize,
+            },
+            Search {
+                query: String,
+                #[serde(default, rename = "maxResults")]
+                max_results: Option<usize>,
+                #[serde(default, rename = "maxScanBytes")]
+                max_scan_bytes: Option<usize>,
+            },
+        }
+        fn page_limit() -> usize {
+            16
+        }
+        if serde_json::to_vec(input)?.len() > 8192 {
+            return Err(xcb_core::Error::Limit("context query bytes").into());
+        }
+        for key in ["maxResults", "maxScanBytes"] {
+            if input.get(key).is_some_and(|value| value.as_u64().is_none()) {
+                return Err(xcb_core::Error::Invalid("context query limit").into());
+            }
+        }
+        let query: Query = serde_json::from_value(input.clone())?;
+        let link = source.program_child.as_ref().ok_or(Error::Unavailable(
+            "exact context requires a managed program child",
+        ))?;
+        let reference = link.context.as_ref().ok_or(Error::Unavailable(
+            "this older program child has no retained exact context",
+        ))?;
+        let db = self.db()?;
+        check_dispatch(&db, source, now_ms())?;
+        let call = read_call(&db, &link.parent, link.call)?;
+        if call.child != source.id || call.request.digest != link.request_digest {
+            return Err(Error::Conflict("program context task ownership changed"));
+        }
+        let context = call
+            .context
+            .as_ref()
+            .ok_or(Error::Conflict("program context record missing"))?;
+        if &context.reference != reference {
+            return Err(Error::Conflict("program context reference changed"));
+        }
+        let store = context.store()?;
+        let mut host = AgentContextHost::new(&store);
+        let granted = host
+            .grant(
+                &reference.snapshot,
+                None,
+                Some(&serde_json::from_str(CONTEXT_LIMITS)?),
+            )
+            .map_err(|_| Error::Conflict("program context permission failed"))?;
+        if &granted != reference {
+            return Err(Error::Conflict("program context scope changed"));
+        }
+        let context_error = |_| Error::Conflict("context query exceeds its scope or limits");
+        let result = match query {
+            Query::Inspect { offset, limit } => {
+                if offset > 5 || !(1..=32).contains(&limit) {
+                    return Err(xcb_core::Error::Invalid("context catalog page").into());
+                }
+                let catalog = host.inspect(&granted).map_err(context_error)?;
+                let total = catalog.entries.len();
+                json!({"snapshot":catalog.snapshot,"entries":catalog.entries.into_iter().skip(offset).take(limit).collect::<Vec<_>>(),"offset":offset,"totalEntries":total,"nextOffset":(offset + limit < total).then_some(offset + limit)})
+            }
+            Query::Read { index } => {
+                serde_json::to_value(host.read(&granted, index).map_err(context_error)?)?
+            }
+            Query::Slice {
+                index,
+                start_byte,
+                end_byte,
+            } => json!(
+                host.slice(&granted, index, start_byte, end_byte)
+                    .map_err(context_error)?
+            ),
+            Query::Search {
+                query,
+                max_results,
+                max_scan_bytes,
+            } => {
+                if query.len() > 4096 {
+                    return Err(xcb_core::Error::Limit("context query text").into());
+                }
+                let mut options = json!({"query":query});
+                if let Some(limit) = max_results {
+                    options["maxResults"] = json!(limit);
+                }
+                if let Some(limit) = max_scan_bytes {
+                    options["maxScanBytes"] = json!(limit);
+                }
+                serde_json::to_value(host.search(&granted, &options).map_err(context_error)?)?
+            }
+        };
+        bounded_text(&serde_json::to_string(&result)?, xcb_core::MAX_TEXT_BYTES)?;
+        Ok(result)
+    }
+
     /// Shim: run a program in a project view's directory.
     pub async fn enqueue_program(
         &self,
@@ -613,6 +895,7 @@ impl ManagedStore {
         {
             return Err(Error::Conflict("invalid program worker request"));
         }
+        let context = self.capture_program_context(parent, call, index)?;
         let source = Id::new(format!(
             "m_{}",
             digest(format!(
@@ -645,7 +928,7 @@ impl ManagedStore {
             tried_routes: vec![], failed_accounts: vec![], state: if routing_question { TaskState::NeedsInput } else { TaskState::Queued },
             deferred: false, priority: parent.priority, attention: routing_question.then_some(State::NeedsAnswer), backlog_prompt: None,
             project_proposal: None, routing_question, program: None, program_generation: None, program_receipt: None, program_waiting: false,
-            program_child: Some(ProgramChild { parent: parent.id.clone(), call: index, request_digest: call.digest.clone(), generation: policy.generation.clone(), required_provider: policy.required_provider }), daemon_child: None,
+            program_child: Some(ProgramChild { parent: parent.id.clone(), call: index, request_digest: call.digest.clone(), generation: policy.generation.clone(), required_provider: policy.required_provider, context: Some(context.reference.clone()) }), daemon_child: None,
             schedule: None, binding: habitat::inherited_binding(&parent.conversation, BindingOrigin::Program, format!("from {}", parent.id)), hold_until_ms: None, moved_from: None, detail: if routing_question { "This program request conflicts with the project provider requirement. Reply to this child with revised work for the required provider, or cancel it." } else { "managed program child; waiting for an eligible worker" }.into(),
             settle: None, acted: None, inbox_continuation: false, attempts: 0, max_attempts: MAX_TASK_ATTEMPTS, message_count_before: 0,
             cancel_requested: false, last_output: None, policy_digest: parent.policy_digest.clone(), last_receipt: "sha256:pending".into(), revision: 1, created_at_ms: now, updated_at_ms: now,
@@ -679,6 +962,7 @@ impl ManagedStore {
             user,
             ack,
             policy,
+            context,
         })
     }
     pub(super) async fn finish_program_slice(
@@ -813,6 +1097,7 @@ impl ManagedStore {
                     request: call.clone(),
                     child: child.task.id.clone(),
                     result: None,
+                    context: Some(child.context.clone()),
                 };
                 next.state = TaskState::Queued;
                 next.program_waiting = true;

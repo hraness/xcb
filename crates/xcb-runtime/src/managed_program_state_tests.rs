@@ -177,6 +177,419 @@ async fn settle_child(f: &Fixture, child: &ManagedTask, text: &str) -> ManagedTa
         .unwrap()
 }
 
+async fn context_worker(f: &Fixture, child: &ManagedTask) -> ManagedTask {
+    use xcb_core::models::{Mode, ModelChoice};
+    let account = f
+        .store
+        .add_account(Provider::Codex, "Context fixture", now_ms(), None)
+        .unwrap();
+    let session = f
+        .store
+        .create_session(
+            &account.id,
+            ModelChoice {
+                provider: Provider::Codex,
+                id: Id::new("context-fixture").unwrap(),
+                label: "Context fixture".into(),
+                mode: Mode::Fixed,
+                resolved: None,
+                effort: None,
+                observed_at_ms: now_ms(),
+            },
+            &f.workspace,
+            now_ms(),
+        )
+        .unwrap();
+    f.managed
+        .prepare(
+            child,
+            session.id,
+            "fixture".into(),
+            "fixture".into(),
+            0,
+            String::new(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn exact_context_is_available_through_the_worker_broker_after_restart() {
+    let f = fixture().await;
+    let exact = "Original input 🐚\nKeep these exact bytes.\u{feff}";
+    let mut manifest = program(1).manifest;
+    manifest["cells"][0]["inputs"] = json!({"request":"text"});
+    manifest["cells"].as_array_mut().unwrap().insert(
+        0,
+        json!({"id":"original","kind":"input","outputs":{"value":{"type":"text"}}}),
+    );
+    manifest["edges"] = json!([{"from":{"cell":"original","port":"value"},"to":{"cell":"worker0","port":"request"}}]);
+    manifest["interface"]["inputs"] = json!({"request":{"cell":"original","port":"value"}});
+    let program = AdmittedProgram::admit_managed(manifest, json!({"request":exact}), 1).unwrap();
+    let task = f
+        .managed
+        .enqueue_program(
+            &f.conversation,
+            new_id("m"),
+            "Exact original task".into(),
+            program.clone(),
+        )
+        .await
+        .unwrap();
+    let (running, slice) = run_slice(&f, &task).await;
+    let parent = f
+        .managed
+        .finish_program_slice(&running.id, running.revision, &Ok(slice))
+        .await
+        .unwrap();
+    let id = f
+        .managed
+        .program_status(&parent.id)
+        .unwrap()
+        .unwrap()
+        .child
+        .unwrap();
+    let child = f.managed.task(&id).unwrap().unwrap();
+    let child = context_worker(&f, &child).await;
+    let reference = child
+        .program_child
+        .as_ref()
+        .unwrap()
+        .context
+        .as_ref()
+        .unwrap();
+    assert!(worker_prompt(&child, &[], &[], false).contains(&reference.snapshot));
+    assert!(worker_prompt(&child, &[], &[], true).contains("xcb_context_query"));
+    let reopened = ManagedStore::open(&f.state).unwrap();
+    let (catalog, effects) = reopened
+        .worker_call(
+            &f.store,
+            child.session.as_ref().unwrap(),
+            "context-inspect",
+            "xcb_context_query",
+            &json!({"op":"inspect"}),
+        )
+        .await;
+    assert_eq!(effects, EffectState::None);
+    let catalog = catalog.unwrap();
+    assert_eq!(catalog["snapshot"], reference.snapshot);
+    let input = catalog["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["label"] == "effect-context")
+        .unwrap()["index"]
+        .as_u64()
+        .unwrap();
+    let (read, effects) = reopened
+        .worker_call(
+            &f.store,
+            child.session.as_ref().unwrap(),
+            "context-read",
+            "xcb_context_query",
+            &json!({"op":"read","index":input}),
+        )
+        .await;
+    assert_eq!(effects, EffectState::None);
+    assert_eq!(
+        read.unwrap()["text"],
+        algal::canonical::canonical(&json!({"inputs":program.inputs,"turn":0})).unwrap()
+    );
+    let (search, _) = reopened
+        .worker_call(
+            &f.store,
+            child.session.as_ref().unwrap(),
+            "context-search",
+            "xcb_context_query",
+            &json!({"op":"search","query":"🐚"}),
+        )
+        .await;
+    assert!(!search.unwrap()["matches"].as_array().unwrap().is_empty());
+    for query in [
+        json!({"op":"read","index":95}),
+        json!({"op":"inspect","taskId":parent.id}),
+        json!({"op":"inspect","snapshot":reference.snapshot}),
+        json!({"op":"search","query":"x","maxResults":33}),
+        json!({"op":"search","query":"x","maxResults":null}),
+    ] {
+        assert!(
+            reopened
+                .worker_call(
+                    &f.store,
+                    child.session.as_ref().unwrap(),
+                    "context-invalid",
+                    "xcb_context_query",
+                    &query
+                )
+                .await
+                .0
+                .is_err()
+        );
+    }
+    assert!(
+        reopened
+            .worker_call(
+                &f.store,
+                &new_id("unbound"),
+                "context-other",
+                "xcb_context_query",
+                &json!({"op":"inspect"})
+            )
+            .await
+            .0
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn next_child_retains_exact_declared_history_and_request_lineage() {
+    let f = fixture().await;
+    let (parent, first) = waiting(&f, 2).await;
+    let exact = "First child exact result é🐚\nEvidence stays here.";
+    let first = settle_child(&f, &first, exact).await;
+    f.managed.tick_programs(&f.store, true).await.unwrap();
+    let parent = f.managed.task(&parent.id).unwrap().unwrap();
+    let (running, slice) = run_slice(&f, &parent).await;
+    let parent = f
+        .managed
+        .finish_program_slice(&running.id, running.revision, &Ok(slice))
+        .await
+        .unwrap();
+    let id = f
+        .managed
+        .program_status(&parent.id)
+        .unwrap()
+        .unwrap()
+        .child
+        .unwrap();
+    let second = f.managed.task(&id).unwrap().unwrap();
+    let second = context_worker(&f, &second).await;
+    let catalog = f
+        .managed
+        .program_context_query(&second, &json!({"op":"inspect"}))
+        .unwrap();
+    let rows = catalog["entries"].as_array().unwrap();
+    let result = rows
+        .iter()
+        .find(|entry| entry["label"] == "effect-context")
+        .unwrap()["index"]
+        .as_u64()
+        .unwrap();
+    let context = f
+        .managed
+        .program_context_query(&second, &json!({"op":"read","index":result}))
+        .unwrap();
+    let context: Value = serde_json::from_str(context["text"].as_str().unwrap()).unwrap();
+    assert_eq!(context["inputs"]["report"], exact);
+    let lineage = rows
+        .iter()
+        .find(|entry| entry["label"] == "current-lineage")
+        .unwrap()["index"]
+        .as_u64()
+        .unwrap();
+    let metadata = f
+        .managed
+        .program_context_query(&second, &json!({"op":"read","index":lineage}))
+        .unwrap();
+    let metadata: Value = serde_json::from_str(metadata["text"].as_str().unwrap()).unwrap();
+    assert_eq!(metadata["parent"], parent.id.as_str());
+    assert_eq!(metadata["call"], 2);
+    assert_eq!(metadata["cellId"], "worker1");
+    assert_eq!(
+        metadata["requestDigest"],
+        second.program_child.as_ref().unwrap().request_digest
+    );
+    // An old session and another child's copied reference cannot select this history.
+    assert!(
+        f.managed
+            .worker_call(
+                &f.store,
+                first.session.as_ref().unwrap(),
+                "old-session",
+                "xcb_context_query",
+                &json!({"op":"inspect"})
+            )
+            .await
+            .0
+            .is_err()
+    );
+    let mut forged = second.clone();
+    forged.program_child.as_mut().unwrap().context = first.program_child.unwrap().context;
+    assert!(
+        f.managed
+            .program_context_query(&forged, &json!({"op":"inspect"}))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn legacy_children_remain_dispatchable_without_inventing_context() {
+    let f = fixture().await;
+    let (parent, child) = waiting(&f, 1).await;
+    let mut old_child = serde_json::to_value(&child).unwrap();
+    old_child["program_child"]
+        .as_object_mut()
+        .unwrap()
+        .remove("context");
+    let old_child: ManagedTask = serde_json::from_value(old_child).unwrap();
+    old_child.validate().unwrap();
+    let mut db = f.managed.db().unwrap();
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
+    let mut call = read_call(&tx, &parent.id, 1).unwrap();
+    call.context = None;
+    call.request.request = None;
+    write_call(&tx, &call).unwrap();
+    tx.execute(
+        "UPDATE tasks SET payload=?1 WHERE id=?2",
+        params![
+            serde_json::to_string(&old_child).unwrap(),
+            old_child.id.as_str()
+        ],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    drop(db);
+    check_dispatch(&f.managed.db().unwrap(), &old_child, now_ms()).unwrap();
+    assert!(!worker_prompt(&old_child, &[], &[], false).contains("xcb_context_query"));
+    assert!(matches!(
+        f.managed
+            .program_context_query(&old_child, &json!({"op":"inspect"})),
+        Err(Error::Unavailable(
+            "this older program child has no retained exact context"
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn exact_context_preserves_same_program_hidden_input_and_private_sibling_scope() {
+    let f = fixture().await;
+    let secret = "PRIVATE-HOLDOUT-INPUT-should-stay-hidden";
+    let private_report = "PRIVATE-SIBLING-OUTPUT-should-stay-hidden";
+    let private_goal = "PRIVATE-PARENT-GOAL-should-stay-hidden";
+    let mut manifest = program(2).manifest;
+    manifest["cells"][0]["prompt"] = json!("Private sibling instruction");
+    manifest["cells"][0]["inputs"] = json!({"secret":"text"});
+    manifest["cells"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("inputs");
+    manifest["cells"].as_array_mut().unwrap().insert(
+        0,
+        json!({"id":"hidden","kind":"input","outputs":{"value":{"type":"text"}}}),
+    );
+    manifest["edges"] =
+        json!([{"from":{"cell":"hidden","port":"value"},"to":{"cell":"worker0","port":"secret"}}]);
+    manifest["interface"]["inputs"] = json!({"secret":{"cell":"hidden","port":"value"}});
+    let program = AdmittedProgram::admit_managed(manifest, json!({"secret":secret}), 2).unwrap();
+    let parent = f
+        .managed
+        .enqueue_program(&f.conversation, new_id("m"), private_goal.into(), program)
+        .await
+        .unwrap();
+    let (running, slice) = run_slice(&f, &parent).await;
+    let parent = f
+        .managed
+        .finish_program_slice(&running.id, running.revision, &Ok(slice))
+        .await
+        .unwrap();
+    let first_id = f
+        .managed
+        .program_status(&parent.id)
+        .unwrap()
+        .unwrap()
+        .child
+        .unwrap();
+    let first = f.managed.task(&first_id).unwrap().unwrap();
+    assert!(first.goal.contains(secret));
+    settle_child(&f, &first, private_report).await;
+    f.managed.tick_programs(&f.store, true).await.unwrap();
+    let parent = f.managed.task(&parent.id).unwrap().unwrap();
+    let (running, slice) = run_slice(&f, &parent).await;
+    let parent = f
+        .managed
+        .finish_program_slice(&running.id, running.revision, &Ok(slice))
+        .await
+        .unwrap();
+    let second_id = f
+        .managed
+        .program_status(&parent.id)
+        .unwrap()
+        .unwrap()
+        .child
+        .unwrap();
+    let second = f.managed.task(&second_id).unwrap().unwrap();
+    let second = context_worker(&f, &second).await;
+    let catalog = f
+        .managed
+        .program_context_query(&second, &json!({"op":"inspect"}))
+        .unwrap();
+    for row in catalog["entries"].as_array().unwrap() {
+        let value = f
+            .managed
+            .program_context_query(&second, &json!({"op":"read","index":row["index"]}))
+            .unwrap();
+        let text = value["text"].as_str().unwrap();
+        for hidden in [
+            secret,
+            private_report,
+            private_goal,
+            "Private sibling instruction",
+        ] {
+            assert!(
+                !text.contains(hidden),
+                "hidden program data crossed a cell view"
+            );
+        }
+    }
+    let found = f
+        .managed
+        .program_context_query(&second, &json!({"op":"search","query":"PRIVATE"}))
+        .unwrap();
+    assert!(found["matches"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn self_consistent_substituted_context_fails_even_with_recomputed_snapshot_and_row_hashes() {
+    let f = fixture().await;
+    let (parent, child) = waiting(&f, 1).await;
+    let child = context_worker(&f, &child).await;
+    let db = f.managed.db().unwrap();
+    let mut call = read_call(&db, &parent.id, 1).unwrap();
+    let context = call.context.as_mut().unwrap();
+    context.entries[0].text = "tampered instruction".into();
+    let mut substituted = algal::store::Store::default();
+    let snapshot = put_agent_context(&mut substituted, &context.entries).unwrap();
+    context.reference = AgentContextHost::new(&substituted)
+        .grant(
+            &snapshot,
+            None,
+            Some(&serde_json::from_str(CONTEXT_LIMITS).unwrap()),
+        )
+        .unwrap();
+    context.store().unwrap(); // Internally valid CAS is not proof of this call's source.
+    let payload = serde_json::to_string(&call).unwrap();
+    db.execute(
+        "UPDATE program_calls SET payload=?1,digest=?2 WHERE parent=?3 AND call_index=1",
+        params![payload, digest(&payload), parent.id.as_str()],
+    )
+    .unwrap();
+    assert!(matches!(
+        read_call(&db, &parent.id, 1),
+        Err(Error::Conflict(
+            "program context differs from exact effect source"
+        ))
+    ));
+    drop(db);
+    assert!(
+        f.managed
+            .program_context_query(&child, &json!({"op":"inspect"}))
+            .is_err()
+    );
+    assert!(f.managed.task(&parent.id).unwrap().unwrap().program_waiting);
+}
+
 #[tokio::test]
 async fn publication_is_atomic_replayed_once_and_budgeted() {
     let f = fixture().await;

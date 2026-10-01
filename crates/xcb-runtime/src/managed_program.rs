@@ -63,6 +63,10 @@ pub struct ProgramReport {
 pub struct ProgramCall {
     pub digest: String,
     pub prompt: String,
+    /// Exact already-scoped effect request, before the provider prompt wrapper.
+    /// Older durable calls lack it and do not receive a reconstructed history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -479,6 +483,23 @@ pub(crate) fn managed_prompt(request: &Value) -> algal::Result<String> {
     Ok(prompt)
 }
 
+pub(crate) fn retained_request(call: &ProgramCall) -> Result<&Value> {
+    let request = call
+        .request
+        .as_ref()
+        .ok_or(Error::Conflict("program call has no exact effect source"))?;
+    if request["contract"] != "algal.effect.v1"
+        || request["kind"] != "agent"
+        || !request["prompt"].is_string()
+        || !request["context"].is_object()
+        || canonical::digest(request).map_err(|_| invalid())? != call.digest
+        || managed_prompt(request).map_err(|_| invalid())? != call.prompt
+    {
+        return Err(Error::Conflict("program call effect source changed"));
+    }
+    Ok(request)
+}
+
 impl HostExecutor for ManagedExecutor {
     fn configuration_digest(&self) -> String {
         executor_digest()
@@ -509,7 +530,11 @@ impl HostExecutor for ManagedExecutor {
             return bind_output(&request["output"], json!(response.summary));
         }
         let prompt = managed_prompt(request)?;
-        state.pending = Some(ProgramCall { digest, prompt });
+        state.pending = Some(ProgramCall {
+            digest,
+            prompt,
+            request: Some(request.clone()),
+        });
         Err(algal::Error::new(
             "EFFECT_SUSPENDED",
             "waiting for a managed child result",
