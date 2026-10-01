@@ -55,7 +55,7 @@ export default async function BlogPost({ params }: { params: Promise<{ slug: str
             <>
               <ArticleSources showDates={false} sources={entry.sources} />
               {related.length === 0 ? null : <ArticleRelatedProducts items={related} />}
-              <p className="xcb-blog-back"><a href="/blog">← All posts</a></p>
+              <p className="xcb-blog-back"><a className="hraness-text-link" href="/blog">← All posts</a></p>
             </>
           )}
         >

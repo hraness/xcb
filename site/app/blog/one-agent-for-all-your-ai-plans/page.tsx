@@ -63,7 +63,7 @@ export default function IntroducingExcalibur() {
             <>
               <ArticleSources showDates={false} sources={post.sources} />
               {related.length === 0 ? null : <ArticleRelatedProducts items={related} />}
-              <p className="xcb-blog-back"><a href="/blog">← All posts</a></p>
+              <p className="xcb-blog-back"><a className="hraness-text-link" href="/blog">← All posts</a></p>
             </>
           )}
         >
