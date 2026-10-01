@@ -1,7 +1,7 @@
 import { ctaClickedProperties } from "@hraness/posthog/event";
 import { expect, test } from "bun:test";
 import { classifyAnalyticsRoute } from "@hraness/posthog";
-import { checkPostHogContract } from "@hraness/posthog/testing";
+import { checkPostHogContract, runPostHogHarness } from "@hraness/posthog/testing";
 import { analyticsSite, analyticsCtaForUrl } from "./analytics-site";
 
 test("real SDK enforces the shared privacy and event contract", () => {
@@ -21,4 +21,33 @@ test("CTA identifiers describe known destinations and satisfy the bounded event 
     expect(cta).toBe(expected!);
     expect(ctaClickedProperties({ cta, placement: "nav" })).not.toBeNull();
   }
+});
+
+
+test("real SDK redacts encoded identifiers before sending paths and exceptions", () => {
+  const encodedAddress = "encodedprivacycanary%2540example.com";
+  const origin = `https://${analyticsSite.canonicalDomain}`;
+  const result = runPostHogHarness({
+    site: analyticsSite,
+    scenarios: [
+      {
+        href: `${origin}/`,
+        referrer: "",
+        captures: [
+          { event: "$pageview" },
+          { event: "$exception", error: { name: "TypeError", message: `Failed for ${encodedAddress}, +@a.aa, %2B%40a.aa` } },
+        ],
+      },
+      {
+        href: `${origin}/docs/${encodedAddress}`,
+        referrer: "",
+        captures: [{ event: "$pageview" }],
+      },
+    ],
+  });
+  expect(result.sent.some((event) => event.event === "$pageview")).toBe(true);
+  expect(result.sent.some((event) => event.event === "$exception")).toBe(true);
+  expect(JSON.stringify(result.sent)).not.toContain("encodedprivacycanary");
+  expect(JSON.stringify(result.sent)).not.toContain("+@a.aa");
+  expect(JSON.stringify(result.sent)).not.toContain("%2B%40a.aa");
 });
