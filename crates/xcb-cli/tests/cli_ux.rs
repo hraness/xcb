@@ -849,6 +849,161 @@ fn doctor_reports_accounts_under_their_provider_and_exits_nonzero() {
     assert_eq!(report["checks"]["problems"], 3, "{report}");
 }
 
+// Exact-artifact providers run only on macOS. These catalog entries belong
+// solely to the private fixture; Devin avoids doctor starting a model probe.
+#[cfg(target_os = "macos")]
+fn admit_doctor_devin(sandbox: &Sandbox, version: &str) -> String {
+    let sha256 = xcb_runtime::digest(std::fs::read(sandbox.root.join("bin/devin")).unwrap());
+    let directory = xcb_runtime::private::directory(&sandbox.state().join("providers")).unwrap();
+    let path = directory.join("catalog.json");
+    let catalog = serde_json::json!({
+        "version": 1,
+        "devin": [{"version": version, "sha256": sha256}],
+    });
+    if path.exists() {
+        std::fs::write(path, catalog.to_string()).unwrap();
+    } else {
+        xcb_runtime::private::create(&path, catalog.to_string().as_bytes()).unwrap();
+    }
+    sha256
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn doctor_preserves_a_supported_pin_when_discovery_or_explicit_selection_is_unsupported() {
+    for explicit in [false, true] {
+        let sandbox = Sandbox::new(&format!("doctor-retained-{explicit}"));
+        sandbox.fake_provider("devin", "devin 3000.11.3 (fixture)");
+        let saved_sha = admit_doctor_devin(&sandbox, "3000.11.3");
+        let initial = sandbox.run(&["--json", "doctor", "--provider", "devin"], &[]);
+        let initial: serde_json::Value = serde_json::from_slice(&initial.stdout).unwrap();
+        assert_eq!(
+            initial["providers"][0]["nativeCandidate"], true,
+            "{initial}"
+        );
+        let pin_path = sandbox.state().join("providers/devin.json");
+        let saved_pin = std::fs::read(&pin_path).unwrap();
+
+        let selected = if explicit {
+            sandbox.root.join("selected-devin")
+        } else {
+            sandbox.root.join("bin/devin")
+        };
+        sandbox.script(&selected, "#!/bin/sh\necho 'devin 3000.99.0 (fixture)'\n");
+        let skipped_sha = xcb_runtime::digest(std::fs::read(&selected).unwrap());
+        let mut args = vec!["doctor", "--provider", "devin"];
+        if explicit {
+            args.extend(["--executable", selected.to_str().unwrap()]);
+        }
+        let output = sandbox.run(&args, &[("HRANESS_AUDIENCE", "human")]);
+        let stdout = text(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(stdout.contains("devin 3000.11.3: ready"), "{stdout}");
+        assert!(
+            stdout.contains("Devin 3000.99.0, but xcb can't run it yet; keeping 3000.11.3"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(if explicit {
+                "selected Devin"
+            } else {
+                "found Devin"
+            }),
+            "{stdout}"
+        );
+        assert_eq!(std::fs::read(&pin_path).unwrap(), saved_pin);
+
+        args.insert(0, "--json");
+        let output = sandbox.run(&args, &[]);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let provider = &report["providers"][0];
+        assert_eq!(provider["version"], "3000.11.3", "{report}");
+        assert_eq!(provider["sha256"], saved_sha, "{report}");
+        assert_eq!(provider["nativeCandidate"], true, "{report}");
+        assert_eq!(provider["storedPin"], true, "{report}");
+        assert_eq!(
+            provider["skippedBuild"],
+            serde_json::json!({
+                "version": "3000.99.0", "sha256": skipped_sha,
+                "nativeCandidate": false,
+                "source": if explicit { "explicit" } else { "discovered" },
+            }),
+            "{report}"
+        );
+        assert!(
+            report["checks"]["warnings"].as_u64().unwrap() > 0,
+            "{report}"
+        );
+        assert_eq!(std::fs::read(&pin_path).unwrap(), saved_pin);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn doctor_never_retains_a_changed_or_denied_saved_pin() {
+    for denied in [false, true] {
+        let sandbox = Sandbox::new(&format!("doctor-invalid-saved-{denied}"));
+        sandbox.fake_provider("devin", "devin 3000.11.3 (fixture)");
+        let saved_sha = admit_doctor_devin(&sandbox, "3000.11.3");
+        let initial = sandbox.run(&["--json", "doctor", "--provider", "devin"], &[]);
+        let initial: serde_json::Value = serde_json::from_slice(&initial.stdout).unwrap();
+        assert_eq!(
+            initial["providers"][0]["nativeCandidate"], true,
+            "{initial}"
+        );
+        if denied {
+            let catalog = serde_json::json!({
+                "version": 1,
+                "devin": [{"version": "3000.11.3", "sha256": saved_sha}],
+                "deny": {"devin": [saved_sha]},
+            });
+            std::fs::write(
+                sandbox.state().join("providers/catalog.json"),
+                catalog.to_string(),
+            )
+            .unwrap();
+        } else {
+            let saved: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(sandbox.state().join("providers/devin.json")).unwrap(),
+            )
+            .unwrap();
+            std::fs::remove_file(saved["executable"].as_str().unwrap()).unwrap();
+            sandbox.script(
+                Path::new(saved["executable"].as_str().unwrap()),
+                "#!/bin/sh\nexit 9\n",
+            );
+        }
+        sandbox.fake_provider("devin", "devin 3000.99.0 (fixture)");
+        let output = sandbox.run(&["--json", "doctor", "--provider", "devin"], &[]);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let provider = &report["providers"][0];
+        assert_eq!(provider["version"], "3000.99.0", "{report}");
+        assert_eq!(provider["nativeCandidate"], false, "{report}");
+        assert!(provider["skippedBuild"].is_null(), "{report}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn doctor_adopts_a_new_supported_build() {
+    let sandbox = Sandbox::new("doctor-supported-replacement");
+    for version in ["3000.11.3", "3000.99.0"] {
+        sandbox.fake_provider("devin", &format!("devin {version} (fixture)"));
+        let sha = admit_doctor_devin(&sandbox, version);
+        let output = sandbox.run(&["--json", "doctor", "--provider", "devin"], &[]);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let provider = &report["providers"][0];
+        assert_eq!(provider["version"], version, "{report}");
+        assert_eq!(provider["nativeCandidate"], true, "{report}");
+        assert!(provider["skippedBuild"].is_null(), "{report}");
+        let saved: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(sandbox.state().join("providers/devin.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(saved["sha256"], sha);
+    }
+}
+
 #[test]
 fn accounts_table_lines_up_and_names_the_account_to_sign_in() {
     let sandbox = Sandbox::new("accounts-table");
