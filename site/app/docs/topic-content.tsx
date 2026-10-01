@@ -62,7 +62,7 @@ xcb --version`}</Code>
         </>}
       <h2 id="connect">2. Connect Claude</h2>
       <Code>{`xcb setup claude`}</Code>
-      <p><code>xcb setup</code> lets you choose an existing account or add another, checks your Claude Code build, opens browser sign-in, and loads the account’s models. It ends with “Claude Code is set up.” xcb keeps this sign-in in its own state folder, so your usual Claude Code login is unaffected.</p>
+      <p><code>xcb setup</code> lets you choose an existing account or add another, checks your Claude Code build, opens browser sign-in, and loads the account’s models. New Claude accounts keep a model-only token in xcb’s state folder. Accounts connected for shared browser access use a dedicated xcb Keychain entry on macOS. Both are separate from your usual Claude Code login.</p>
       <h2 id="practice-project">3. Make a practice project</h2>
       <Code>{`mkdir -p ~/xcb-tutorial && cd ~/xcb-tutorial
 git init -q
@@ -350,7 +350,7 @@ cd xcb
       </ul>
       <p>The <Ext href={`${repositoryDocs}/command-runner.md`}>command runner reference</Ext> lists every limit.</p>
       <h3>Browser and computer tools</h3>
-      <p><code>xcb tools setup-computer</code> connects an installed desktop computer-use plugin to Codex on macOS. <code>xcb tools setup-browser</code> connects Claude’s Chrome extension to Codex, Claude, and Devin. Use <code>xcb tools list</code> to see registered connections, or add another shared MCP server with <code>xcb tools add</code>. Use <code>xcb run --signed-in-browser</code> when a task needs your existing signed-in browser. Ordinary Playwright verification uses normal routing. The <Ext href={`${repositoryDocs}/tools.md`}>tool setup guide</Ext> covers account setup, access, and provider handoffs.</p>
+      <p><code>xcb tools setup-computer</code> connects an installed desktop computer-use plugin to Codex on macOS. <code>xcb tools setup-browser</code> shares Claude’s Chrome extension across providers. On macOS it opens full Claude sign-in when needed and stores refresh credentials in a dedicated xcb Keychain entry. Sign in with the same Claude account as the extension. Use <code>xcb tools list</code> to see registered connections, or add another shared MCP server with <code>xcb tools add</code>. Use <code>xcb run --signed-in-browser</code> when a task needs your existing signed-in browser. Ordinary Playwright verification uses normal routing. The <Ext href={`${repositoryDocs}/tools.md`}>tool setup guide</Ext> covers account setup, access, and provider handoffs.</p>
       <h2 id="refresh">After an upgrade or VM restart</h2>
       <p>The runner is bound to the exact files it tested. After you upgrade xcb, stop running commands, check out the matching source version, and run setup again with <code>--refresh</code>. Refresh doesn’t clear a command whose result is uncertain; resolve it with <code>xcb recover</code> first, and don’t delete lock files or job records. <code>xcb command prune --yes</code> archives old finished jobs.</p>
     </>
@@ -470,13 +470,14 @@ xcb update disable`}</Code>
       <Code>{`xcb service uninstall   # stop starting the supervisor at login
 xcb update disable      # stop the daily update check
 rm ~/.local/bin/xcb`}</Code>
-      <p>Your accounts, credentials, and history stay in <code>~/.local/share/xcb</code> until you delete that folder. The table lists everything xcb creates.</p>
+      <p>Your accounts, cached credentials, and history stay in <code>~/.local/share/xcb</code> until you delete that folder. Full Claude browser sign-in also creates dedicated macOS Keychain entries. Those entries remain when you remove xcb or its state folder, including entries from replaced or interrupted sign-ins.</p>
       <h2 id="manual-removal">What xcb creates</h2>
       <p>Paths assume the default <code>~/.local</code> prefix.</p>
-      <Table label="Files xcb creates" head={["What", "Where", "Notes"]} rows={[
+      <Table label="Files and credentials xcb creates" head={["What", "Where", "Notes"]} rows={[
         ["Binary", <code key="b">~/.local/bin/xcb</code>, <>Also <code>~/.local/bin/xcb.previous.*</code> backups.</>],
         ["Installer record", <code key="i">~/.local/share/xcb/install.json</code>, <>With <code>install-native.sh</code> beside it, inside the state folder.</>],
         ["State folder", <code key="s">~/.local/share/xcb</code>, <>Accounts, credentials, conversations, tasks, settings. Or the folder in <code>XCB_STATE</code>.</>],
+        ["Claude browser credentials (macOS)", <>macOS Keychain</>, <>Dedicated to xcb full sign-in; retained after uninstall. Ordinary model-only Claude sign-in stays in the state folder.</>],
         ["Update check (macOS)", <code key="u">~/Library/LaunchAgents/dev.hraness.xcb.update.plist</code>, <>Run <code>xcb update disable</code> first, or unload it with <code>launchctl bootout</code>.</>],
         ["Login service (macOS)", <code key="h">~/Library/LaunchAgents/dev.hraness.xcb.habitat.*.plist</code>, <>Run <code>xcb service uninstall</code> while idle. Its log is in <code>~/Library/Logs/xcb</code>.</>],
         ["Update check (Linux)", <code key="ul">~/.config/systemd/user/xcb-update.timer</code>, <>And <code>xcb-update.service</code>. Run <code>xcb update disable</code> first, or <code>systemctl --user disable --now xcb-update.timer</code>.</>],

@@ -1,5 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { afterEach, expect, setDefaultTimeout, test } from "bun:test";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync,
@@ -10,10 +10,25 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { fixtureRequirement, withMacosVerifierFixture } from "./macos-signature-fixture";
 
+// Shell/hash/archive fixtures can exceed Bun's 5s default on a busy host.
+// These harness budgets do not change the installer's guards or deadlines.
+setDefaultTimeout(30_000);
+
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const hash = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const binary = (version: string, label = "candidate") => `#!/bin/sh\n[ -z "\${FIXTURE_EXECUTION_LOG:-}" ] || printf 'executed\\n' >> "$FIXTURE_EXECUTION_LOG"\n[ "$#" = 1 ] && [ "$1" = --version ] || exit 17\nprintf 'xcb ${version}\\n'\n# ${label}\n`;
+
+function completed(result: SpawnSyncReturns<string>): SpawnSyncReturns<string> {
+  const detail = JSON.stringify({
+    error: result.error?.message, status: result.status, signal: result.signal, stderr: result.stderr,
+  });
+  // The installer's TERM trap exits 1, so status alone can hide ETIMEDOUT
+  // or let a timed-out process satisfy an expected refusal.
+  expect(result.error, detail).toBeUndefined();
+  expect(result.signal, detail).toBeNull();
+  return result;
+}
 
 /** `uname` reporting FIXTURE_UNAME_S / FIXTURE_UNAME_M when set, so one host
  * can exercise every platform's archive selection. */
@@ -113,8 +128,8 @@ fi
     writeFileSync(checksum, (corruptChecksum ? "0".repeat(64) : hash(bytes)) + "\n");
   }
   function run(fromRelease = false, extra: Record<string, string> = {}) {
-    return spawnSync("/bin/sh", [join(repository, "scripts/install-native.sh")], {
-      cwd: repository, encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024,
+    return completed(spawnSync("/bin/sh", [join(repository, "scripts/install-native.sh")], {
+      cwd: repository, encoding: "utf8", timeout: 20_000, maxBuffer: 64 * 1024,
       env: {
         PATH: `${stubs}:/usr/bin:/bin`, HOME: join(root, "home"), LC_ALL: "C",
         CARGO: join(stubs, "cargo"), XCB_INSTALL_PREFIX: prefix, XCB_VERSION: fromRelease ? "v0.4.0" : "", XCB_ADD_PATH: "ask",
@@ -122,7 +137,7 @@ fi
         FIXTURE_ARCHIVE: archivePath, FIXTURE_CHECKSUM: checksum, FIXTURE_EXTRACT_LOG: join(root, "extract.log"),
         FIXTURE_CURL_LOG: join(root, "curl.log"), ...extra,
       },
-    });
+    }));
   }
   function unchanged() {
     expect(readFileSync(destination, "utf8")).toBe(previous);
@@ -532,15 +547,15 @@ printf '%s %s\\n' "$head" "$url" >> "$FIXTURE_CURL_LOG"
 if [ "$head" = yes ]; then printf '%s' "$FIXTURE_ASSET_STATUS"; exit 0; fi
 printf '#!/bin/sh\\n# Install native xcb stand-in\\nprintf "%%s\\\\n" "$XCB_VERSION" > "$FIXTURE_INSTALLER_LOG"\\n' > "$out"
 `, { mode: 0o755 });
-  const result = spawnSync("/bin/sh", [new URL("./install.sh", import.meta.url).pathname], {
-    encoding: "utf8", timeout: 10_000, maxBuffer: 64 * 1024,
+  const result = completed(spawnSync("/bin/sh", [new URL("./install.sh", import.meta.url).pathname], {
+    encoding: "utf8", timeout: 20_000, maxBuffer: 64 * 1024,
     env: {
       PATH: `${stubs}:/usr/bin:/bin`, HOME: join(root, "home"), LC_ALL: "C", TMPDIR: root,
       XCB_VERSION: "0.4.0", XCB_INSTALL_PREFIX: join(root, "prefix"),
       FIXTURE_UNAME_S: system, FIXTURE_UNAME_M: machine, FIXTURE_ASSET_STATUS: assetStatus,
       FIXTURE_CURL_LOG: join(root, "curl.log"), FIXTURE_INSTALLER_LOG: join(root, "installer.log"),
     },
-  });
+  }));
   const read = (name: string) => existsSync(join(root, name)) ? readFileSync(join(root, name), "utf8") : null;
   return { result, curl: read("curl.log"), installer: read("installer.log") };
 }

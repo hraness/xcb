@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -13,6 +13,10 @@ import {
   parseRemoteSnapshot,
   verifyReleaseRefAuthority,
 } from "./release-ref-authority";
+
+// Local Git fixtures launch several subprocesses; leave room for their
+// existing 30s child limits and failure diagnostics on a busy host.
+setDefaultTimeout(60_000);
 
 const repositoryUrl = "https://github.com/hraness/xcb.git";
 const temporaryRoots: string[] = [];
@@ -30,8 +34,8 @@ function git(cwd: string, arguments_: readonly string[]): Uint8Array {
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 30_000,
   });
-  if (result.status !== 0) {
-    throw new Error(`git ${arguments_.join(" ")} failed: ${result.stderr.toString("utf8")}`);
+  if (result.error || result.status !== 0) {
+    throw new Error(`git ${arguments_.join(" ")} failed: ${result.error?.message ?? ""}; ${result.stderr.toString("utf8")}`);
   }
   return new Uint8Array(result.stdout);
 }
@@ -168,6 +172,7 @@ function runnerFor(
         stdio: ["ignore", "pipe", "pipe"],
         timeout: 30_000,
       });
+      if (result.error) throw new Error(`fixture git failed: ${result.error.message}; ${result.stderr.toString("utf8")}`);
       const value: GitCommandResult = Object.freeze({
         exitCode: result.status ?? 127,
         stderr: new Uint8Array(result.stderr),

@@ -92,8 +92,10 @@ xcb
 ```
 
 `xcb setup` lets you choose an existing account or add another, checks the
-Claude Code build, opens browser sign-in, and loads the account's models. xcb keeps that sign-in in its own
-state folder, apart from your usual Claude Code login. `xcb setup codex`
+Claude Code build, opens browser sign-in, and loads the account's models. New
+Claude accounts keep a model-only token in xcb's state folder. Accounts connected
+for shared browser access use a dedicated xcb Keychain entry on macOS. Both are
+separate from your usual Claude Code login. `xcb setup codex`
 works the same way; Devin connects by importing the Devin CLI's sign-in
 ([accounts and models](https://xcb.sh/docs/providers)).
 
@@ -183,8 +185,10 @@ stay with Codex and prefer Astra, including after a retry or handoff. Use
 `xcb run --signed-in-browser` or `xcb run --desktop` to state that requirement.
 Claude and Devin can hand these tasks to Codex after their current run ends
 safely. `xcb tools setup-computer` connects the installed desktop computer-use
-plugin on macOS. `xcb tools setup-browser` connects Claude's Chrome extension
-for Codex, Claude, and Devin. See [browser and shared tools](docs/tools.md).
+plugin on macOS. `xcb tools setup-browser` shares Claude's Chrome extension
+across providers and opens full Claude sign-in when needed. This sign-in uses
+a dedicated xcb Keychain entry on macOS. See
+[browser and shared tools](docs/tools.md).
 
 ## Everyday commands
 

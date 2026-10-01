@@ -28,21 +28,54 @@ not a nested desktop-tool session inside Claude or Devin.
 An approval denial does not grant permission to try the same action through
 another provider.
 
-## Connect Chrome for every provider
+## Share Claude's Chrome connection
 
-With the official Claude Chrome extension installed and signed in:
+On macOS, install the official Claude Chrome extension and sign in to it.
+Then connect the matching Claude account in xcb:
 
 ```sh
 xcb tools setup-browser
 ```
 
+Setup opens full Claude sign-in if the account still uses a model-only token.
+It always prints the sign-in link, including when the browser opens
+automatically. Use the same Claude account as the extension.
+
+Full sign-in requires a dedicated xcb Keychain entry for its refresh
+credential. xcb caches the short-lived access token in its private state
+folder and refreshes it before use when needed. If Claude cannot save the
+refresh credential to Keychain, xcb refuses to activate that sign-in. Before
+opening sign-in, xcb checks that macOS can find your default Keychain. Run
+xcb from your normal terminal environment if that check fails. Your usual
+Claude Code sign-in is separate. To
+authorize the account explicitly, use
+`xcb accounts login NAME --browser`. Subsequent sign-ins keep that account's
+full sign-in mode.
+
+Ordinary `xcb setup claude` still uses a model-only token until you connect
+the browser. Signing in to the extension again cannot add browser permission
+to that token. Full Claude browser sign-in is currently available on macOS;
+use the Codex browser connector on other platforms when available.
+
 This connection supports screenshots, page reading, navigation, clicks, and
 form input for Codex, Claude, and Devin. It uses the checked Claude Code
-2.1.285 browser server. If several Claude accounts are signed in to xcb, use
+2.1.285 browser server. If several Claude accounts are enabled in xcb, use
 `xcb tools setup-browser --account NAME` to select the account matching your
 extension. xcb holds that account while its browser server runs; the other
 providers never receive its credentials. The extension still controls browser
 access and permission prompts.
+
+Setup checks the account's browser authorization before starting the browser
+server. A failed sign-in preserves the previous account credentials. A failed
+connection leaves existing tool configuration intact. Setup saves the
+connection only after the extension responds successfully.
+
+If sign-in or refresh is interrupted and xcb keeps the account held, run
+`xcb recover` to find the affected run, then `xcb recover RUN_ID` to preview
+recovery. Recovery requires proof that the owning xcb process and its sign-in
+helpers have stopped. `xcb recover RUN_ID --yes` keeps the saved credentials
+and frees a recoverable account; if its active sign-in may have changed, xcb
+requires a new `xcb accounts login NAME --browser` before using it again.
 
 Setup prepares the extension's browser group and leaves it open between
 tasks. It preserves an existing group, or leaves the new group's initial blank

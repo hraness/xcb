@@ -85,6 +85,10 @@ pub enum Error {
     /// A preparation helper failed to prove shutdown; retain account custody.
     #[error("provider preparation cleanup is unproven; account custody retained")]
     CleanupUnproven,
+    /// Static authentication diagnostics with the same custody requirement as
+    /// CleanupUnproven. Never embed provider output or credential contents.
+    #[error("{0}; account custody retained until sign-in recovery is proven")]
+    AuthUnproven(&'static str),
     #[error("local database operation failed: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("invalid local record")]
@@ -138,6 +142,10 @@ pub enum Error {
 pub const PROVIDERS_UNSUPPORTED: &str = "xcb can't run or sign in to Claude Code, Codex, or Devin on Windows: their sandbox needs macOS or Linux. Install the Linux build of xcb inside WSL2 and run providers there.";
 
 impl Error {
+    pub fn is_cleanup_unproven(&self) -> bool {
+        matches!(self, Self::CleanupUnproven | Self::AuthUnproven(_))
+    }
+
     /// The refusal every provider launch and sign-in returns on Windows.
     pub fn providers_unsupported() -> Self {
         Self::guided(PROVIDERS_UNSUPPORTED, "wsl --install")

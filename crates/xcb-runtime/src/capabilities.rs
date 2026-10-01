@@ -285,7 +285,16 @@ pub struct CapabilityManager {
     policy_denied: bool,
     chrome_tabs: std::collections::BTreeSet<u64>,
     credential_runs: Vec<Option<RunRecord>>,
+    credential_preparing: Vec<bool>,
+    #[cfg(test)]
+    credential_refresh_fixture: Option<CredentialRefreshFixture>,
     browser_bootstrap: bool,
+}
+
+#[cfg(test)]
+struct CredentialRefreshFixture {
+    started: tokio::sync::oneshot::Sender<RunRecord>,
+    mutated: bool,
 }
 
 impl CapabilityManager {
@@ -298,6 +307,7 @@ impl CapabilityManager {
         config.validate()?;
         let servers = (0..config.servers.len()).map(|_| None).collect();
         let credential_runs = (0..config.servers.len()).map(|_| None).collect();
+        let credential_preparing = vec![false; config.servers.len()];
         Ok(Self {
             config,
             store,
@@ -309,16 +319,25 @@ impl CapabilityManager {
             policy_denied: false,
             chrome_tabs: Default::default(),
             credential_runs,
+            credential_preparing,
+            #[cfg(test)]
+            credential_refresh_fixture: None,
             browser_bootstrap: false,
         })
     }
 
     pub fn effects(&self) -> EffectState {
-        if self
-            .servers
-            .iter()
-            .flatten()
-            .any(|server| server.pending_call || !server.native_pending.is_empty())
+        if self.credential_preparing.iter().any(|preparing| *preparing)
+            || self
+                .credential_runs
+                .iter()
+                .enumerate()
+                .any(|(index, run)| run.is_some() && self.servers[index].is_none())
+            || self
+                .servers
+                .iter()
+                .flatten()
+                .any(|server| server.pending_call || !server.native_pending.is_empty())
         {
             EffectState::Uncertain
         } else {
@@ -358,18 +377,21 @@ impl CapabilityManager {
             }
             return Ok(());
         }
-        self.launch_server(index)?;
+        self.launch_server(index).await?;
         self.initialize_server(index).await
     }
 
-    fn launch_server(&mut self, index: usize) -> Result<()> {
-        if self.servers[index].is_some() || self.credential_runs[index].is_some() {
+    async fn launch_server(&mut self, index: usize) -> Result<()> {
+        if self.servers[index].is_some()
+            || self.credential_runs[index].is_some()
+            || self.credential_preparing[index]
+        {
             return Err(Error::Conflict("host tool server already started"));
         }
-        let config = &self.config.servers[index];
+        let config = self.config.servers[index].clone();
         // Registered server code/config cannot be supplied by the workspace
         // whose contents the provider can edit. Resolve existing symlinks too.
-        reject_workspace_paths(config, &self.workspace)?;
+        reject_workspace_paths(&config, &self.workspace)?;
         for bundle in &config.bundles {
             crate::capability_bundle::verify(
                 &bundle.root,
@@ -421,7 +443,7 @@ impl CapabilityManager {
                     "select an authenticated xcb Claude account for the browser connector",
                 ))?;
             crate::chrome_connector::verify_credential_target(
-                config,
+                &config,
                 &self.store,
                 &self.workspace,
             )?;
@@ -434,25 +456,28 @@ impl CapabilityManager {
                 self.credential_runs[index] =
                     Some(self.store.prepare_probe(account, None, crate::now_ms())?);
             }
-            let lease = self.credential_runs[index].as_ref().unwrap_or(&self.run);
-            let token = (|| {
+            self.credential_preparing[index] = true;
+            let token = async {
+                let lease = self.credential_runs[index].as_ref().unwrap_or(&self.run);
                 self.store.require_authenticated_run(lease)?;
+                let pin = crate::process::Pin::load(self.store.root(), xcb_core::Provider::Claude)?;
+                self.refresh_browser_credentials(index, &pin).await?;
                 crate::auth::token(&self.store, account)
-            })();
+            }
+            .await;
             match token {
                 Ok(token) => {
+                    self.credential_preparing[index] = false;
                     command
                         .env("CLAUDE_CODE_OAUTH_TOKEN", token.as_str())
                         .env("CLAUDE_CONFIG_DIR", &home);
                 }
                 Err(error) => {
-                    if let Some(probe) = self.credential_runs[index].take() {
-                        self.store.settle(
-                            &probe,
-                            xcb_core::session::State::Idle,
-                            crate::now_ms(),
-                        )?;
+                    if error.is_cleanup_unproven() {
+                        return Err(error);
                     }
+                    self.release_unstarted_credential(index)?;
+                    self.credential_preparing[index] = false;
                     return Err(error);
                 }
             }
@@ -463,10 +488,12 @@ impl CapabilityManager {
         // Persist a starting marker first: a crash between spawn and pid
         // publication must never make recovery mistake this for no process.
         if let Err(error) = self.store.mark_capability_starting(&self.run, &config.name) {
-            if let Some(probe) = self.credential_runs[index].take() {
-                self.store.clear_capability_custody(&probe, &config.name)?;
+            if let Some(probe) = &self.credential_runs[index] {
+                self.store.clear_capability_custody(probe, &config.name)?;
+                self.store.require_settled_tools(probe)?;
                 self.store
-                    .settle(&probe, xcb_core::session::State::Idle, crate::now_ms())?;
+                    .settle(probe, xcb_core::session::State::Idle, crate::now_ms())?;
+                self.credential_runs[index] = None;
             }
             return Err(error);
         }
@@ -476,10 +503,12 @@ impl CapabilityManager {
             Err(error @ Error::LaunchNotStarted(_)) => {
                 self.store
                     .clear_capability_custody(&self.run, &config.name)?;
-                if let Some(probe) = self.credential_runs[index].take() {
-                    self.store.clear_capability_custody(&probe, &config.name)?;
+                if let Some(probe) = &self.credential_runs[index] {
+                    self.store.clear_capability_custody(probe, &config.name)?;
+                    self.store.require_settled_tools(probe)?;
                     self.store
-                        .settle(&probe, xcb_core::session::State::Idle, crate::now_ms())?;
+                        .settle(probe, xcb_core::session::State::Idle, crate::now_ms())?;
+                    self.credential_runs[index] = None;
                 }
                 artifacts.release_after_join(true, EffectState::None);
                 return Err(error);
@@ -513,6 +542,54 @@ impl CapabilityManager {
                 .mark_capability_spawned(probe, &config.name, pid)?;
             self.credential_runs[index] = Some(self.store.mark_spawned(probe, pid)?);
         }
+        Ok(())
+    }
+
+    async fn refresh_browser_credentials(
+        &mut self,
+        index: usize,
+        pin: &crate::process::Pin,
+    ) -> Result<()> {
+        let lease = self.credential_runs[index].as_ref().unwrap_or(&self.run);
+        #[cfg(test)]
+        if let Some(fixture) = self.credential_refresh_fixture.take() {
+            if fixture.mutated {
+                self.store.begin_tool(
+                    lease,
+                    "xcb_auth_browser_refresh_fixture",
+                    "host_auth_refresh",
+                    "fixture",
+                )?;
+                self.store
+                    .mark_capability_starting(lease, "claude_oauth_auth")?;
+            }
+            let _ = fixture.started.send(lease.clone());
+            return std::future::pending().await;
+        }
+        // Dropping this future retains the helper's durable markers/receipts
+        // and our recorded lease; cancellation cannot imply joined cleanup.
+        let (_keepalive, cancel) = tokio::sync::watch::channel(false);
+        crate::auth::refresh_claude_credentials(&self.store, lease, pin, cancel).await
+    }
+
+    fn release_unstarted_credential(&mut self, index: usize) -> Result<()> {
+        if let Some(probe) = &self.credential_runs[index] {
+            self.store.require_settled_tools(probe)?;
+            self.store
+                .settle(probe, xcb_core::session::State::Idle, crate::now_ms())
+                .map_err(|_| Error::CleanupUnproven)?;
+            self.credential_runs[index] = None;
+        } else if self.credential_preparing[index] {
+            self.store.require_settled_tools(&self.run)?;
+            let current = self
+                .store
+                .run(&self.run.id)?
+                .ok_or(Error::CleanupUnproven)?;
+            if !current.capability_processes.is_empty() {
+                return Err(Error::CleanupUnproven);
+            }
+        }
+        self.credential_preparing[index] = false;
         Ok(())
     }
 
@@ -587,7 +664,7 @@ impl CapabilityManager {
     #[cfg(unix)]
     pub(crate) async fn native_open(&mut self, name: &str) -> Result<()> {
         let index = self.native_index(name)?;
-        self.launch_server(index)
+        self.launch_server(index).await
     }
 
     #[cfg(unix)]
@@ -1053,9 +1130,13 @@ impl CapabilityManager {
         }
         if succeeded {
             Ok(())
+        } else if crate::chrome_connector::policy_denied(&result) {
+            Err(Error::Unavailable(
+                "browser setup was refused by the browser permission policy; xcb did not retry",
+            ))
         } else {
             Err(Error::Unavailable(
-                "browser setup did not connect; open Chrome with the Claude extension signed in to the selected account and retry",
+                "browser setup could not establish a connection with the selected Claude account and extension",
             ))
         }
     }
@@ -1076,6 +1157,10 @@ impl CapabilityManager {
         if self.stopped {
             return self.servers.iter().all(Option::is_none)
                 && self.credential_runs.iter().all(Option::is_none)
+                && self
+                    .credential_preparing
+                    .iter()
+                    .all(|preparing| !*preparing)
                 && self.chrome_tabs.is_empty();
         }
         let mut all_joined = true;
@@ -1197,7 +1282,11 @@ impl CapabilityManager {
             if cleared && let Some(probe) = &self.credential_runs[index] {
                 cleared = self
                     .store
-                    .clear_capability_custody(probe, &self.config.servers[index].name)
+                    .require_settled_tools(probe)
+                    .and_then(|_| {
+                        self.store
+                            .clear_capability_custody(probe, &self.config.servers[index].name)
+                    })
                     .and_then(|_| {
                         self.store
                             .settle(probe, xcb_core::session::State::Idle, crate::now_ms())
@@ -1213,9 +1302,32 @@ impl CapabilityManager {
                 *state = None;
             }
         }
+        // A credential refresh can stop before a bridge process exists. Those
+        // leases are still ours; release only proven no-effect preparations.
+        for index in 0..self.servers.len() {
+            if self.servers[index].is_none() && self.release_unstarted_credential(index).is_err() {
+                all_joined = false;
+            }
+        }
         all_joined
             && self.credential_runs.iter().all(Option::is_none)
+            && self
+                .credential_preparing
+                .iter()
+                .all(|preparing| !*preparing)
             && self.chrome_tabs.is_empty()
+    }
+}
+
+impl Drop for CapabilityManager {
+    fn drop(&mut self) {
+        // Never signal or clear a started server here. A caller dropping an
+        // unstarted refresh still owns only its secondary credential probe.
+        for index in 0..self.servers.len() {
+            if self.servers[index].is_none() {
+                let _ = self.release_unstarted_credential(index);
+            }
+        }
     }
 }
 
@@ -1821,11 +1933,12 @@ done
             panic!("setup did not submit its persistent group request");
         });
         assert!(
-            crate::chrome_connector::setup(
+            crate::chrome_connector::setup_with_test_preflight(
                 manager.store.root(),
                 server,
                 &manager.workspace,
-                cancel
+                cancel,
+                |_| async { Ok(()) },
             )
             .await
             .is_err()
@@ -1867,6 +1980,228 @@ done
             .store
             .settle(&probe, xcb_core::session::State::Idle, crate::now_ms())
             .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chrome_setup_preflight_failure_preserves_credentials_config_and_other_lease() {
+        let (_directory, manager) = chrome_manager();
+        let server = manager.config.servers[0].clone();
+        let account = server.credential_account.clone().unwrap();
+        let token = crate::auth::token(&manager.store, &account).unwrap();
+        let config = crate::config::Config::default();
+        config.save(manager.store.root(), None).unwrap();
+        let config_path = manager.store.root().join("config.json");
+        let config_before = std::fs::read(&config_path).unwrap();
+        let db = rusqlite::Connection::open_with_flags(
+            manager.store.root().join("xcb.sqlite"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let receipts = || {
+            db.query_row("SELECT COUNT(*) FROM tool_effects", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        let receipts_before = receipts();
+        let (_stop, cancel) = tokio::sync::watch::channel(false);
+        let store = &manager.store;
+        let selected = &account;
+        let expected_token = token.as_str();
+        let error = crate::chrome_connector::setup_with_test_preflight(
+            manager.store.root(),
+            server,
+            &manager.workspace,
+            cancel,
+            |observed| async move {
+                assert_eq!(observed.as_str(), expected_token);
+                let runs = store.unsettled_runs().unwrap();
+                assert_eq!(runs.len(), 2, "preflight holds the selected account");
+                let probe = runs.iter().find(|run| &run.account == selected).unwrap();
+                assert!(probe.pid.is_none() && probe.capability_processes.is_empty());
+                Err(Error::Unavailable("synthetic browser scope refusal"))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("scope refusal"));
+        assert_eq!(
+            receipts(),
+            receipts_before,
+            "no browser receipt before preflight passes"
+        );
+        assert_eq!(std::fs::read(&config_path).unwrap(), config_before);
+        assert_eq!(
+            crate::auth::token(&manager.store, &account)
+                .unwrap()
+                .as_str(),
+            token.as_str()
+        );
+        assert!(!manager.store.authentication_required(&account).unwrap());
+        let remaining = manager.store.unsettled_runs().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, manager.run.id);
+        assert!(
+            manager
+                .store
+                .prepare_probe(&manager.run.account, None, crate::now_ms())
+                .is_err()
+        );
+        let released = manager
+            .store
+            .prepare_probe(&account, None, crate::now_ms())
+            .unwrap();
+        assert!(!test_has_open_tools(&manager.store, &released));
+        manager
+            .store
+            .settle(&released, xcb_core::session::State::Idle, crate::now_ms())
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chrome_setup_preflight_cancel_and_closed_channel_release_only_unstarted_probe() {
+        for close_channel in [false, true] {
+            let (_directory, manager) = chrome_manager();
+            let server = manager.config.servers[0].clone();
+            let account = server.credential_account.clone().unwrap();
+            let (stop, cancel) = tokio::sync::watch::channel(false);
+            let error = crate::chrome_connector::setup_with_test_preflight(
+                manager.store.root(),
+                server,
+                &manager.workspace,
+                cancel,
+                |_| async move {
+                    if !close_channel {
+                        stop.send(true).unwrap();
+                    }
+                    drop(stop);
+                    std::future::pending().await
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("cancelled"));
+            let remaining = manager.store.unsettled_runs().unwrap();
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].id, manager.run.id);
+            assert!(remaining[0].capability_processes.is_empty());
+            let probe = manager
+                .store
+                .prepare_probe(&account, None, crate::now_ms())
+                .unwrap();
+            assert!(!test_has_open_tools(&manager.store, &probe));
+            manager
+                .store
+                .settle(&probe, xcb_core::session::State::Idle, crate::now_ms())
+                .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chrome_setup_dropped_preflight_future_releases_its_never_started_probe() {
+        let (_directory, manager) = chrome_manager();
+        let server = manager.config.servers[0].clone();
+        let account = server.credential_account.clone().unwrap();
+        let (_stop, cancel) = tokio::sync::watch::channel(false);
+        let (started, entered) = tokio::sync::oneshot::channel();
+        let mut setup = Box::pin(crate::chrome_connector::setup_with_test_preflight(
+            manager.store.root(),
+            server,
+            &manager.workspace,
+            cancel,
+            |_| async {
+                started.send(()).unwrap();
+                std::future::pending().await
+            },
+        ));
+        tokio::select! {
+            result = &mut setup => panic!("preflight unexpectedly returned: {result:?}"),
+            result = entered => result.unwrap(),
+        }
+        let pending = manager.store.unsettled_runs().unwrap();
+        assert_eq!(pending.len(), 2);
+        let probe = pending.iter().find(|run| run.account == account).unwrap();
+        assert!(probe.pid.is_none() && probe.capability_processes.is_empty());
+        assert!(!test_has_open_tools(&manager.store, probe));
+        drop(setup);
+        assert_eq!(
+            manager.store.run(&probe.id).unwrap().unwrap().phase,
+            "settled"
+        );
+        let remaining = manager.store.unsettled_runs().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, manager.run.id);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chrome_setup_preflight_success_still_requires_real_extension_success() {
+        for connected in [false, true] {
+            let context = if connected {
+                json!({"tabGroupId":42,"availableTabs":[{"tabId":123}]})
+            } else {
+                json!({"availableTabs":[]})
+            };
+            let (_directory, manager) = chrome_setup_manager(context);
+            manager
+                .store
+                .settle(
+                    &manager.run,
+                    xcb_core::session::State::Idle,
+                    crate::now_ms(),
+                )
+                .unwrap();
+            let (_stop, cancel) = tokio::sync::watch::channel(false);
+            let result = crate::chrome_connector::setup_with_test_preflight(
+                manager.store.root(),
+                manager.config.servers[0].clone(),
+                &manager.workspace,
+                cancel,
+                |_| async { Ok(()) },
+            )
+            .await;
+            assert_eq!(result.is_ok(), connected);
+            assert!(!manager.store.root().join("config.json").exists());
+            let remaining = manager.store.unsettled_runs().unwrap();
+            if connected {
+                assert!(remaining.is_empty());
+            } else {
+                assert_eq!(remaining.len(), 1);
+                assert!(test_has_open_tools(&manager.store, &remaining[0]));
+                assert_eq!(
+                    crate::os::process_exists(remaining[0].pid.unwrap()),
+                    Some(false)
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chrome_setup_permission_refusal_has_its_own_message_and_settles_known_no_effects() {
+        let (_directory, mut manager) = chrome_setup_manager(json!({}));
+        let server = &mut manager.config.servers[0];
+        let script = std::fs::read_to_string(&server.executable).unwrap();
+        let script = script.replace(
+            "\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{}\"}]}",
+            "\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"Permission denied by user. private refusal details\"}]}",
+        );
+        assert_ne!(script, std::fs::read_to_string(&server.executable).unwrap());
+        let mut pin =
+            crate::process::Pin::load(manager.store.root(), xcb_core::Provider::Claude).unwrap();
+        std::fs::write(&server.executable, script).unwrap();
+        server.sha256 = crate::process::executable_digest(&server.executable).unwrap();
+        pin.sha256 = server.sha256.clone();
+        pin.save(manager.store.root()).unwrap();
+        let error = manager.bootstrap_chrome().await.unwrap_err();
+        assert!(error.to_string().contains("permission policy"));
+        assert!(!format!("{error:?}").contains("private refusal details"));
+        assert!(!test_has_open_tools(&manager.store, &manager.run));
+        manager.finish_chrome_setup().await.unwrap();
+        assert!(manager.store.unsettled_runs().unwrap().is_empty());
     }
 
     #[cfg(unix)]
@@ -2023,6 +2358,92 @@ done
         assert_eq!(manager.store.unsettled_runs().unwrap().len(), 1);
         assert!(manager.shutdown().await);
         assert_eq!(manager.store.unsettled_runs().unwrap().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chrome_refresh_cancellation_settles_only_proven_unstarted_credentials() {
+        for same_account in [false, true] {
+            for mutated in [false, true] {
+                let (_directory, mut manager) = if same_account {
+                    chrome_setup_manager(json!({"tabGroupId":42,"availableTabs":[]}))
+                } else {
+                    chrome_manager()
+                };
+                let store = manager.store.clone();
+                let account = manager.config.servers[0]
+                    .credential_account
+                    .clone()
+                    .unwrap();
+                let before = crate::auth::token(&store, &account).unwrap();
+                let (started, received) = tokio::sync::oneshot::channel();
+                manager.credential_refresh_fixture =
+                    Some(CredentialRefreshFixture { started, mutated });
+                let mut launch = Box::pin(manager.ensure_server(0));
+                let lease = tokio::select! {
+                    lease = received => lease.unwrap(),
+                    result = &mut launch => panic!("refresh fixture unexpectedly returned: {result:?}"),
+                };
+                drop(launch);
+                assert!(manager.servers[0].is_none());
+                assert_eq!(manager.effects(), EffectState::Uncertain);
+                assert_eq!(manager.shutdown().await, !mutated);
+                assert_eq!(manager.effects() == EffectState::Uncertain, mutated);
+                if mutated {
+                    assert!(store.require_settled_tools(&lease).is_err());
+                }
+                assert_eq!(
+                    store.unsettled_runs().unwrap().len(),
+                    1 + usize::from(mutated && !same_account)
+                );
+                assert_eq!(*crate::auth::token(&store, &account).unwrap(), *before);
+                drop(manager);
+                assert_eq!(
+                    store.unsettled_runs().unwrap().len(),
+                    1 + usize::from(mutated && !same_account)
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn chrome_dropped_refresh_releases_no_effect_probe_but_keeps_pending_receipt() {
+        for mutated in [false, true] {
+            let (_directory, mut manager) = chrome_manager();
+            let store = manager.store.clone();
+            let (started, received) = tokio::sync::oneshot::channel();
+            manager.credential_refresh_fixture =
+                Some(CredentialRefreshFixture { started, mutated });
+            let mut launch = Box::pin(manager.ensure_server(0));
+            let lease = tokio::select! {
+                lease = received => lease.unwrap(),
+                result = &mut launch => panic!("refresh fixture unexpectedly returned: {result:?}"),
+            };
+            drop(launch);
+            if mutated {
+                // The pending receipt also guards a helper that has already
+                // independently joined and cleared its process marker.
+                store
+                    .clear_capability_custody(&lease, "claude_oauth_auth")
+                    .unwrap();
+            }
+            drop(manager);
+            assert_eq!(
+                store.unsettled_runs().unwrap().len(),
+                1 + usize::from(mutated)
+            );
+            assert_eq!(
+                store.run(&lease.id).unwrap().unwrap().phase == "settled",
+                !mutated
+            );
+            if mutated {
+                assert!(matches!(
+                    store.require_settled_tools(&lease),
+                    Err(Error::CleanupUnproven)
+                ));
+            }
+        }
     }
 
     #[test]

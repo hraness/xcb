@@ -86,7 +86,9 @@ struct Line {
 impl Line {
     fn new(max_bytes: usize) -> Self {
         Self {
-            bytes: Zeroizing::new(Vec::with_capacity(max_bytes.min(128))),
+            // Reserve the bounded line so growth cannot leave a secret-bearing
+            // allocation behind before the retained buffer is zeroized.
+            bytes: Zeroizing::new(Vec::with_capacity(max_bytes)),
             max_bytes,
             invalid: false,
         }

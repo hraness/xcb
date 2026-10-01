@@ -511,6 +511,19 @@ async fn run_reserved(
     admit_prompting_probe(&store, &run, &id)?;
     match pin.provider {
         Provider::Claude => {
+            let (auth_cancel, receiver) = watch::channel(false);
+            let refresh = auth::refresh_claude_credentials(&store, &run, &pin, receiver);
+            match supervise_auth_preparation(deadline, cancel.clone(), auth_cancel, refresh).await {
+                Ok(None) => (),
+                Ok(Some(code)) => {
+                    let mut failure = settle_unstarted(&store, &run, &id, false);
+                    if failure.code != FailureCode::CustodyUnproven {
+                        failure.code = code;
+                    }
+                    return Err(failure);
+                }
+                Err(error) => return Err(preparation_failed(&store, &run, &id, false, error)),
+            }
             let credential = match auth::token(&store, &request.account) {
                 Ok(value) => value,
                 Err(_) => return Err(settle_unstarted(&store, &run, &id, false)),
@@ -549,6 +562,37 @@ async fn run_reserved(
             .await
         }
     }
+}
+
+/// The application deadline stops authentication through its cancellation
+/// channel. Keep ownership until its helper joins; a dropped future cannot
+/// establish that a credential refresh stopped or was never submitted.
+async fn supervise_auth_preparation(
+    deadline: Instant,
+    mut cancel: watch::Receiver<bool>,
+    auth_cancel: watch::Sender<bool>,
+    preparation: impl std::future::Future<Output = Result<()>>,
+) -> Result<Option<FailureCode>> {
+    if *cancel.borrow() {
+        return Ok(Some(FailureCode::Cancelled));
+    }
+    if Instant::now() >= deadline {
+        return Ok(Some(FailureCode::Deadline));
+    }
+    tokio::pin!(preparation);
+    let interrupted = tokio::select! {
+        biased;
+        _ = async { while !*cancel.borrow() { if cancel.changed().await.is_err() { break; } } } => FailureCode::Cancelled,
+        _ = tokio::time::sleep_until(deadline) => FailureCode::Deadline,
+        result = &mut preparation => return result.map(|()| None),
+    };
+    let _ = auth_cancel.send(true);
+    if let Err(error) = preparation.await
+        && error.is_cleanup_unproven()
+    {
+        return Err(error);
+    }
+    Ok(Some(interrupted))
 }
 
 /// Host-only qualification. This accepts an independently collected private
@@ -894,7 +938,7 @@ fn preparation_failed(
     error: Error,
 ) -> GenerateFailure {
     diagnostic::record_error(store, run, id, Stage::Prepare, &error);
-    if matches!(error, Error::CleanupUnproven) {
+    if error.is_cleanup_unproven() {
         GenerateFailure::new(FailureCode::CustodyUnproven).bound(id)
     } else {
         settle_unstarted(store, run, id, codex)
@@ -903,6 +947,7 @@ fn preparation_failed(
 
 fn settle_unstarted(store: &Store, run: &RunRecord, id: &Id, codex: bool) -> GenerateFailure {
     let settled = (!codex || auth::discard_unstarted_codex_auth(store, run, true).is_ok())
+        && store.require_settled_tools(run).is_ok()
         && store.settle(run, State::Failed, now_ms()).is_ok();
     if settled {
         GenerateFailure::new(FailureCode::Unavailable)
@@ -1184,6 +1229,87 @@ mod tests {
     use std::collections::VecDeque;
     use tokio::process::Command;
     use xcb_core::models::Mode;
+
+    #[tokio::test]
+    async fn application_auth_deadline_waits_for_join_and_preserves_uncertainty() {
+        for outcome in [0, 1, 2] {
+            let (_sender, cancel) = watch::channel(false);
+            let (auth_cancel, mut auth_receiver) = watch::channel(false);
+            let mut joined = false;
+            let preparation = async {
+                auth_receiver.changed().await.unwrap();
+                assert!(*auth_receiver.borrow());
+                joined = true;
+                match outcome {
+                    0 => Ok(()),
+                    1 => Err(Error::Unavailable("Claude sign-in cancelled")),
+                    _ => Err(Error::AuthUnproven("refresh status is unknown")),
+                }
+            };
+            let result = supervise_auth_preparation(
+                Instant::now() + Duration::from_millis(10),
+                cancel,
+                auth_cancel,
+                preparation,
+            )
+            .await;
+            assert!(joined);
+            if outcome == 2 {
+                assert!(result.unwrap_err().is_cleanup_unproven());
+            } else {
+                assert_eq!(result.unwrap(), Some(FailureCode::Deadline));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn application_auth_initial_cancel_does_not_poll_refresh() {
+        let (_sender, cancel) = watch::channel(true);
+        let (auth_cancel, _receiver) = watch::channel(false);
+        let result = supervise_auth_preparation(
+            Instant::now() + Duration::from_secs(1),
+            cancel,
+            auth_cancel,
+            async { panic!("cancelled request must not start authentication") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, Some(FailureCode::Cancelled));
+    }
+
+    #[test]
+    fn application_auth_failure_does_not_settle_pending_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&xcb_core::canonical(dir.path()).unwrap().join("state")).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Test", 1, None)
+            .unwrap();
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+        store
+            .begin_tool(
+                &run,
+                "xcb_auth_claude_fixture",
+                "host_auth_claude_oauth",
+                "fixture",
+            )
+            .unwrap();
+        let request = new_id("application");
+        let failure = preparation_failed(
+            &store,
+            &run,
+            &request,
+            false,
+            Error::AuthUnproven("safe diagnosis"),
+        );
+        assert_eq!(failure.code, FailureCode::CustodyUnproven);
+        assert_eq!(failure.joined, None);
+        // Even a differently classified error cannot erase pending effects.
+        assert_eq!(
+            settle_unstarted(&store, &run, &request, false).code,
+            FailureCode::CustodyUnproven
+        );
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+    }
 
     #[test]
     fn capability_inventory_is_bounded_without_truncation() {

@@ -5,6 +5,72 @@ use tokio::sync::mpsc;
 use xcb_runtime::auth::ClaudeLoginEvent;
 use zeroize::Zeroizing;
 
+pub async fn login(
+    store: &xcb_runtime::store::Store,
+    account: &xcb_core::Id,
+    pin: &xcb_runtime::process::Pin,
+    browser: bool,
+    machine: bool,
+    cancel: tokio::sync::watch::Sender<bool>,
+    receiver: tokio::sync::watch::Receiver<bool>,
+) -> xcb_runtime::Result<()> {
+    use xcb_runtime::auth;
+    check_login_context(account, browser, machine)?;
+    let message = if browser {
+        "Starting full Claude sign-in for browser access. This requires a dedicated xcb Keychain entry for refresh credentials; xcb caches the access token in its private state folder."
+    } else {
+        "Starting Claude sign-in. xcb will show its sign-in page and keep the token in its own state folder."
+    };
+    eprintln!(
+        "{} {message}",
+        crate::ux::Style::stderr().symbol(crate::ux::Symbol::Next)
+    );
+    let (events, prompts) = mpsc::channel(8);
+    let (codes, input) = mpsc::channel(1);
+    let login = async {
+        if browser {
+            auth::login_claude_browser_with_interaction(
+                store, account, pin, receiver, events, input,
+            )
+            .await
+        } else {
+            auth::login_with_interaction(store, account, pin, receiver, events, input).await
+        }
+    };
+    let assistance = serve(prompts, codes);
+    tokio::pin!(login, assistance);
+    tokio::select! {
+        result = &mut login => result,
+        complete = &mut assistance => {
+            if !complete { let _ = cancel.send(true); }
+            login.await
+        },
+    }
+}
+
+pub fn check_login_context(
+    account: &xcb_core::Id,
+    browser: bool,
+    machine: bool,
+) -> xcb_runtime::Result<()> {
+    use xcb_runtime::Error;
+    if browser && !cfg!(target_os = "macos") {
+        return Err(Error::Unavailable(
+            "full Claude browser sign-in requires macOS Keychain; use Codex browser tools on this platform",
+        ));
+    }
+    if !crate::terminal_available() || machine {
+        return Err(Error::guided(
+            "Claude browser sign-in requires a terminal",
+            format!(
+                "xcb accounts login {account}{}",
+                if browser { " --browser" } else { "" }
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// False means input ended before sign-in; the owner must request cancellation
 /// and await the supervised login's physical cleanup.
 pub async fn serve(

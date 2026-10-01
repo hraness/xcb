@@ -557,6 +557,10 @@ enum AccountCommand {
     Login {
         /// Account name or id (listed by `xcb accounts`).
         account: String,
+        /// Authorize Claude browser access. On macOS, stores refresh credentials
+        /// in a dedicated xcb Keychain entry.
+        #[arg(long)]
+        browser: bool,
     },
     /// Store a provider API token piped on stdin for this account.
     Token {
@@ -2039,9 +2043,20 @@ async fn dispatch_inner(
                         }
                     }
                 }
-                Some(AccountCommand::Login { account }) => {
+                Some(AccountCommand::Login { account, browser }) => {
                     let mut stop = stop::Stop::install()?;
                     let account = store.resolve_account(&account)?;
+                    if browser && account.provider != Provider::Claude {
+                        return Err(Error::Unavailable(
+                            "--browser is only supported for Claude sign-in",
+                        ));
+                    }
+                    let browser = browser
+                        || (account.provider == Provider::Claude
+                            && auth::has_claude_browser_credentials(&store, &account.id)?);
+                    if browser {
+                        claude_sign_in::check_login_context(&account.id, true, cli.json)?;
+                    }
                     let pin = stop
                         .settle(ensure_pin(store.root(), account.provider))
                         .await?;
@@ -2053,36 +2068,16 @@ async fn dispatch_inner(
                     }));
                     match account.provider {
                         Provider::Claude => {
-                            eprintln!(
-                                "{} Starting Claude sign-in. xcb will show its sign-in page and keep the token in its own state folder.",
-                                ux::Style::stderr().symbol(ux::Symbol::Next)
-                            );
-                            if terminal_available() && !cli.json {
-                                let (events, prompts) = tokio::sync::mpsc::channel(8);
-                                let (codes, input) = tokio::sync::mpsc::channel(1);
-                                let login = auth::login_with_interaction(
-                                    &store,
-                                    &account.id,
-                                    &pin,
-                                    receiver,
-                                    events,
-                                    input,
-                                );
-                                let assistance = claude_sign_in::serve(prompts, codes);
-                                tokio::pin!(login, assistance);
-                                tokio::select! {
-                                    result = &mut login => result?,
-                                    complete = &mut assistance => {
-                                        if !complete { let _ = cancel.send(true); }
-                                        login.await?;
-                                    },
-                                }
-                            } else {
-                                return Err(Error::guided(
-                                    "Claude browser sign-in requires a terminal",
-                                    format!("xcb accounts login {}", account.id),
-                                ));
-                            }
+                            claude_sign_in::login(
+                                &store,
+                                &account.id,
+                                &pin,
+                                browser,
+                                cli.json,
+                                cancel,
+                                receiver,
+                            )
+                            .await?;
                         }
                         Provider::Codex => {
                             if terminal_available() && !cli.json {
@@ -2132,6 +2127,7 @@ async fn dispatch_inner(
                     if cli.json {
                         print_json(json!({"version":1,"account":account.id,"stored":true}))?;
                     } else {
+                        let account = store.account(&account.id)?;
                         // codeql[rust/cleartext-logging]: the account name is
                         // the user's own provider email, intentionally shown as
                         // the account's display identity after sign-in.
@@ -3670,6 +3666,52 @@ async fn dispatch_inner(
                 let (run, mut run_digest) = store
                     .recovery_candidate(&run_id)?
                     .ok_or(Error::Unavailable("run not found"))?;
+                if let Some(info) = store.inspect_claude_auth_recovery(&run_id, &run_digest)? {
+                    if !yes {
+                        if cli.json {
+                            print_json(json!({
+                                "version": 1,
+                                "dryRun": true,
+                                "run": run.id,
+                                "recovery": "claude-auth",
+                                "retainedSignIns": info.generations.len(),
+                                "reauthenticationRequired": info.reauthentication_required,
+                            }))?;
+                        } else {
+                            println!(
+                                "Claude sign-in processes for run {} have stopped. Recovery will keep their saved credentials and free the account.",
+                                run.id
+                            );
+                            if info.reauthentication_required {
+                                println!(
+                                    "The account will need a new full Claude sign-in before use."
+                                );
+                            }
+                            ux::next(&format!("xcb recover {} --yes", run.id));
+                        }
+                        return Ok(0);
+                    }
+                    store.recover_claude_auth(&run_id, &run_digest, now_ms())?;
+                    // Recovery revalidates this payload and preserves its IDs.
+                    // Render the public metadata selected before credential work.
+                    if cli.json {
+                        print_json(json!({
+                            "version": 1,
+                            "recovered": run.id,
+                            "recovery": "claude-auth",
+                            "reauthenticationRequired": info.reauthentication_required,
+                        }))?;
+                    } else {
+                        println!(
+                            "Recovered Claude sign-in for run {}. Its saved credentials were retained and its account is free.",
+                            run.id
+                        );
+                        if info.reauthentication_required {
+                            ux::next(&format!("xcb accounts login {} --browser", run.account));
+                        }
+                    }
+                    return Ok(0);
+                }
                 // Prepared state also covers a child spawned before its PID
                 // was persisted. Neither --yes nor owner absence proves that
                 // child stopped, so this path only explains why the account
@@ -4104,6 +4146,7 @@ async fn finish_account_setup(
             command: Some(Commands::Accounts {
                 command: Some(AccountCommand::Login {
                     account: account.id.to_string(),
+                    browser: false,
                 }),
             }),
         })))
