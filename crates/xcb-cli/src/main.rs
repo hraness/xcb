@@ -1,5 +1,6 @@
 mod application;
 mod claude_sign_in;
+mod code_sign_in;
 mod context;
 mod device_sign_in;
 mod devin_sign_in;
@@ -11,6 +12,7 @@ mod resources;
 mod route;
 mod stop;
 mod table;
+mod terminal_input;
 mod tools;
 mod ux;
 mod workspaces;
@@ -2024,25 +2026,37 @@ async fn dispatch_inner(
                         println!("{} {added}", ux::Style::stdout().symbol(ux::Symbol::Ok));
                         if interactive_account_add(cli.json, provider, terminal_available()) {
                             let retry = format!("xcb setup {provider} --account {}", account.id);
-                            finish_account_setup(&store, provider, Some(account))
-                                .await
-                                .map_err(|error| Error::guided(error.to_string(), retry))?;
+                            finish_account_setup(
+                                &store,
+                                provider,
+                                Some(account),
+                                stop::Stop::install()?,
+                            )
+                            .await
+                            .map_err(|error| Error::guided(error.to_string(), retry))?;
                         } else {
                             ux::next(&next);
                         }
                     }
                 }
                 Some(AccountCommand::Login { account }) => {
+                    let mut stop = stop::Stop::install()?;
                     let account = store.resolve_account(&account)?;
-                    let pin = ensure_pin(store.root(), account.provider).await?;
+                    let pin = stop
+                        .settle(ensure_pin(store.root(), account.provider))
+                        .await?;
+                    let (cancel, receiver) = tokio::sync::watch::channel(false);
+                    let signal_cancel = cancel.clone();
+                    let _interrupt = AbortOnDrop(tokio::spawn(async move {
+                        stop.recv().await;
+                        let _ = signal_cancel.send(true);
+                    }));
                     match account.provider {
                         Provider::Claude => {
                             eprintln!(
                                 "{} Starting Claude sign-in. xcb will show its sign-in page and keep the token in its own state folder.",
                                 ux::Style::stderr().symbol(ux::Symbol::Next)
                             );
-                            let (cancel, receiver) = tokio::sync::watch::channel(false);
-                            let mut stop = stop::Stop::install()?;
                             if terminal_available() && !cli.json {
                                 let (events, prompts) = tokio::sync::mpsc::channel(8);
                                 let (codes, input) = tokio::sync::mpsc::channel(1);
@@ -2062,7 +2076,6 @@ async fn dispatch_inner(
                                         if !complete { let _ = cancel.send(true); }
                                         login.await?;
                                     },
-                                    _ = stop.recv() => { let _ = cancel.send(true); login.await?; },
                                 }
                             } else {
                                 return Err(Error::guided(
@@ -2077,14 +2090,15 @@ async fn dispatch_inner(
                                     "{} Codex will show a sign-in code. Press Enter when you're ready to open its sign-in page.",
                                     ux::Style::stderr().symbol(ux::Symbol::Next)
                                 );
-                                let (sender, receiver) = tokio::sync::mpsc::channel(1);
-                                let login = runner::login_codex_with_prompt(
+                                let (sender, prompts) = tokio::sync::mpsc::channel(1);
+                                let login = runner::login_codex_with_prompt_and_cancel(
                                     &store,
                                     &account.id,
                                     &pin,
                                     sender,
+                                    receiver,
                                 );
-                                let assistance = device_sign_in::serve(receiver);
+                                let assistance = device_sign_in::serve(prompts);
                                 tokio::pin!(login, assistance);
                                 tokio::select! {
                                     result = &mut login => result?,
@@ -2095,7 +2109,13 @@ async fn dispatch_inner(
                                     "{} Codex will print a sign-in page and a code. Open the page and enter the code to connect this account to xcb.",
                                     ux::Style::stderr().symbol(ux::Symbol::Next)
                                 );
-                                runner::login_codex(&store, &account.id, &pin).await?;
+                                runner::login_codex_with_cancel(
+                                    &store,
+                                    &account.id,
+                                    &pin,
+                                    receiver,
+                                )
+                                .await?;
                             }
                         }
                         Provider::Devin => {
@@ -2105,7 +2125,8 @@ async fn dispatch_inner(
                                     format!("xcb accounts login {}", account.id),
                                 ));
                             }
-                            devin_sign_in::login(&store, &account.id, &pin).await?;
+                            devin_sign_in::login(&store, &account.id, &pin, cancel, receiver)
+                                .await?;
                         }
                     }
                     if cli.json {
@@ -2234,6 +2255,7 @@ async fn dispatch_inner(
                         format!("xcb --json accounts add {provider}"),
                     ));
                 }
+                let mut stop = stop::Stop::install()?;
                 let accounts: Vec<_> = store
                     .accounts()?
                     .into_iter()
@@ -2251,7 +2273,7 @@ async fn dispatch_inner(
                 } else if new {
                     None
                 } else if !accounts.is_empty() && terminal_available() {
-                    match choose_setup_account(&accounts, provider)? {
+                    match choose_setup_account(&accounts, provider).await? {
                         SetupChoice::New => None,
                         SetupChoice::Existing(index) => Some(accounts[index].clone()),
                         SetupChoice::Cancel => return Ok(0),
@@ -2301,7 +2323,7 @@ async fn dispatch_inner(
                 let selected = match selected {
                     Some(account) => Some(account),
                     None if provider == Provider::Devin => {
-                        let pin = ensure_pin(store.root(), provider).await?;
+                        let pin = stop.settle(ensure_pin(store.root(), provider)).await?;
                         require_supported(store.root(), &pin)?;
                         Some(add_setup_account(&store, provider, &plan)?)
                     }
@@ -2310,7 +2332,7 @@ async fn dispatch_inner(
                 let retry = selected
                     .as_ref()
                     .map(|account| format!("xcb setup {provider} --account {}", account.id));
-                finish_account_setup(&store, provider, selected)
+                finish_account_setup(&store, provider, selected, stop)
                     .await
                     .map_err(|error| match retry {
                         Some(command) => Error::guided(error.to_string(), command),
@@ -4003,7 +4025,7 @@ fn parse_setup_choice(input: &str, count: usize) -> Option<SetupChoice> {
     }
 }
 
-fn choose_setup_account(
+async fn choose_setup_account(
     accounts: &[xcb_runtime::store::Account],
     provider: Provider,
 ) -> Result<SetupChoice> {
@@ -4019,13 +4041,13 @@ fn choose_setup_account(
     }
     eprintln!("  0. Cancel");
     loop {
+        let mut reader = terminal_input::Reader::new(false, 1024)?;
         eprint!("Choose an account: ");
         io::stderr().flush()?;
-        let mut input = String::new();
         // EOF cancels before adding accounts or opening sign-in.
-        if io::stdin().read_line(&mut input)? == 0 {
+        let Some(input) = reader.read_line().await? else {
             return Ok(SetupChoice::Cancel);
-        }
+        };
         if let Some(choice) = parse_setup_choice(&input, accounts.len()) {
             return Ok(choice);
         }
@@ -4056,12 +4078,13 @@ async fn finish_account_setup(
     store: &Store,
     provider: Provider,
     account: Option<xcb_runtime::store::Account>,
+    mut stop: stop::Stop,
 ) -> Result<i32> {
     let ok = ux::Style::stdout().symbol(ux::Symbol::Ok);
     let name = provider_name(provider);
     // 2. Check the provider build, and that xcb can run it, before
     // any sign-in starts.
-    let pin = ensure_pin(store.root(), provider).await?;
+    let pin = stop.settle(ensure_pin(store.root(), provider)).await?;
     require_supported(store.root(), &pin)?;
     println!("{ok} {name} {} is installed", pin.version);
     // 3. A rejected credential must be replaced by sign-in; refreshing
@@ -4074,7 +4097,7 @@ async fn finish_account_setup(
     };
     if account_needs_sign_in(store, &account)? {
         let _held = ux::hold_next();
-        Box::pin(dispatch(Cli {
+        stop.settle(Box::pin(dispatch(Cli {
             state: Some(store.root().to_path_buf()),
             json: false,
             cwd: PathBuf::from("."),
@@ -4083,12 +4106,14 @@ async fn finish_account_setup(
                     account: account.id.to_string(),
                 }),
             }),
-        }))
+        })))
         .await?;
     }
     // 4. Load the account's models (what `accounts refresh` does).
     require_setup_sign_in(store, &account)?;
-    let models = runner::probe(store, &pin, Some(&account.id)).await?;
+    let models = stop
+        .settle(runner::probe(store, &pin, Some(&account.id)))
+        .await?;
     require_setup_sign_in(store, &account)?;
     store.set_account_models(&account.id, &models)?;
     println!("{ok} Loaded {} models", models.len());

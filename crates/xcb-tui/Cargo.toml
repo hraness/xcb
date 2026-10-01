@@ -17,10 +17,10 @@ ratatui-textarea = "=0.9.2"
 serde_json = "=1.0.151"
 unicode-segmentation = "=1.13.3"
 uuid = { version = "=1.26.1", features = ["v4"] }
-xcb-core = { version = "0.16.3", path = "../xcb-core" }
+xcb-core = { version = "0.16.4", path = "../xcb-core" }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "=1.1.5", features = ["fs", "process"] }
 
 [target.'cfg(windows)'.dependencies]
-xcb-platform = { version = "0.16.3", path = "../xcb-platform" }
+xcb-platform = { version = "0.16.4", path = "../xcb-platform" }

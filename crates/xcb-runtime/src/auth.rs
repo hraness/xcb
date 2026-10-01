@@ -1138,7 +1138,7 @@ pub fn prepare_codex_login(
         .env_clear()
         .envs(env)
         .current_dir(&home)
-        .stdin(std::process::Stdio::inherit())
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .kill_on_drop(true);

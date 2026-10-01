@@ -10,6 +10,22 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.16.4 - 2026-09-30
+
+Browser sign-in accepts pasted codes reliably and restores the terminal after
+completion, cancellation, or failure.
+
+- Keep Devin code entry in xcb and send the code to a private provider terminal,
+  preventing sign-in from stopping when the provider reads a foreground terminal.
+- Normalize Enter, editing, and Ctrl+C for Claude, Devin, Codex, setup, and relay
+  prompts. Hide pasted sign-in codes and restore the exact previous settings.
+- Let the provider finish exchanging a submitted code after code entry ends,
+  and show when xcb is finishing sign-in.
+- Keep cancellation active from provider preparation through process cleanup.
+  Preserve saved accounts and recovery files when cleanup cannot be confirmed.
+- Restore terminal settings around compatibility CLI sign-in and logout. Bound
+  child waits and stop Claude fallback attempts after cancellation.
+
 ## 0.16.3 - 2026-09-30
 
 Verified native release installs and supported global compatibility installs

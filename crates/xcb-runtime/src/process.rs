@@ -1514,6 +1514,8 @@ pub(crate) async fn capture_supervised_interactive(
                 let mut out_buf = zeroize::Zeroizing::new([0u8; 4096]);
                 let mut err_buf = zeroize::Zeroizing::new([0u8; 4096]);
                 let mut stderr_count = 0usize;
+                let mut code_submitted = false;
+                let mut input_closed = false;
                 loop {
                     if out_closed && err_closed {
                         return Ok(bytes);
@@ -1535,8 +1537,17 @@ pub(crate) async fn capture_supervised_interactive(
                         }
                         code = async {
                             if let Some(i) = interaction.as_mut() { i.codes.recv().await } else { std::future::pending().await }
-                        } => {
-                            let Some(mut code) = code else { return Err(Error::Unavailable("sign-in input closed")); };
+                        }, if !input_closed => {
+                            let Some(mut code) = code else {
+                                if !code_submitted {
+                                    return Err(Error::Unavailable("sign-in input closed"));
+                                }
+                                // The reader may finish immediately after handing off
+                                // its code. Provider exchange and physical cleanup
+                                // still belong to the supervised login future.
+                                input_closed = true;
+                                continue;
+                            };
                             if code.is_empty() || code.len() > 4096 || code.chars().any(char::is_control) {
                                 return Err(Error::Protocol("invalid sign-in code"));
                             }
@@ -1554,6 +1565,7 @@ pub(crate) async fn capture_supervised_interactive(
                                     }
                                 }
                             }
+                            code_submitted = true;
                         }
                     }
                 }
@@ -2700,6 +2712,50 @@ mod tests {
 #[cfg(all(test, unix))]
 mod login_interaction_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn raw_terminal_code_submission_survives_input_sender_completion() {
+        let (stdin, terminal) = login_terminal().unwrap();
+        let (sender, codes) = tokio::sync::mpsc::channel(1);
+        let mut sender = Some(sender);
+        let interaction = LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(move |bytes| {
+                if bytes.windows(5).any(|window| window == b"ready") {
+                    // A terminal reader has completed its one requested code.
+                    // Closing its channel must not kill an in-flight exchange.
+                    if let Some(sender) = sender.take() {
+                        sender
+                            .try_send(zeroize::Zeroizing::new("manual-code".into()))
+                            .unwrap();
+                    }
+                }
+                Ok(())
+            }),
+        };
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "/bin/stty raw -echo; printf 'ready\\n'; code=$(/bin/dd bs=1 count=12 2>/dev/null); test \"$code\" = \"$(printf 'manual-code\\r')\" || exit 3; /bin/sleep 0.05; printf 'synthetic-token\\n'",
+        ]);
+        let (_cancel, receiver) = tokio::sync::watch::channel(false);
+        let result = capture_supervised_interactive(
+            command,
+            1024,
+            Duration::from_secs(5),
+            receiver,
+            |_| Ok(()),
+            Some(interaction),
+        )
+        .await;
+        let CaptureOutcome::Joined(Ok(bytes)) = result else {
+            panic!("raw provider exchange was cancelled when its code sender completed");
+        };
+        assert_eq!(&*bytes, b"ready\nsynthetic-token\n");
+    }
+
     #[tokio::test]
     async fn terminal_login_cancellation_proves_process_group_exit() {
         let (stdin, terminal) = login_terminal().unwrap();

@@ -132,17 +132,19 @@ fn resolve_relay(
 
 /// One line of interactive input with the prompt on stderr — stdout is
 /// reserved for data. `None` when stdin is not a terminal.
-fn prompt(label: &str) -> Result<Option<String>> {
+async fn prompt(label: &str, hidden: bool, max_bytes: usize) -> Result<Option<String>> {
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
         return Ok(None);
     }
+    let mut reader = super::terminal_input::Reader::new(hidden, max_bytes)?;
     eprint!("{label} ");
     std::io::stderr().flush()?;
-    let mut line = String::new();
-    let read = std::io::stdin().read_line(&mut line)?;
-    if read == 0 {
+    let Some(line) = reader.read_line().await? else {
         return Ok(None);
+    };
+    if hidden {
+        eprintln!();
     }
     Ok(Some(line.trim().to_string()))
 }
@@ -202,6 +204,20 @@ pub struct LinkOptions<'a> {
 /// device. A linked device that lacks the account key waits for a peer
 /// `xcb remote admit` before returning.
 pub async fn link(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
+    let mut stop = crate::stop::Stop::install()?;
+    let reauth = options.reauth;
+    // Enrollment and renewal persist resumable state and own no provider
+    // processes. Cancelling network waits must retain that state for retry.
+    tokio::select! {
+        result = link_inner(state_root, options) => result,
+        _ = stop.recv() => Err(Error::guided(
+            "link interrupted; saved sign-in and enrollment state is preserved",
+            if reauth { "xcb link --reauth" } else { "xcb link" },
+        )),
+    }
+}
+
+async fn link_inner(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
     if options.reauth {
         return reauthenticate(state_root, options).await;
     }
@@ -261,9 +277,9 @@ pub async fn link(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
         // Phase 1 — request the code (silent rejection is the contract).
         let email = match email {
             Some(email) => email.to_string(),
-            None => {
-                prompt("Email:")?.ok_or_else(|| Error::Message("email required; pass --email"))?
-            }
+            None => prompt("Email:", false, 512)
+                .await?
+                .ok_or_else(|| Error::Message("email required; pass --email"))?,
         };
         if !email_ok(&email) {
             return Err(invalid("email"));
@@ -280,7 +296,9 @@ pub async fn link(state_root: &Path, options: LinkOptions<'_>) -> Result<i32> {
             Some(code) => code.to_string(),
             None => {
                 eprintln!("A sign-in code was emailed to {email}.");
-                prompt("Code:")?.ok_or_else(|| Error::Message("code required; pass --code"))?
+                prompt("Code:", true, 64)
+                    .await?
+                    .ok_or_else(|| Error::Message("code required; pass --code"))?
             }
         };
         if code.len() != 8 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -373,7 +391,9 @@ async fn reauthenticate(state_root: &Path, options: LinkOptions<'_>) -> Result<i
     }
     let email = match options.email {
         Some(email) => email.to_owned(),
-        None => prompt("Email:")?.ok_or_else(|| Error::Message("email required; pass --email"))?,
+        None => prompt("Email:", false, 512)
+            .await?
+            .ok_or_else(|| Error::Message("email required; pass --email"))?,
     };
     if !email_ok(&email) {
         return Err(invalid("email"));
@@ -393,7 +413,7 @@ async fn reauthenticate(state_root: &Path, options: LinkOptions<'_>) -> Result<i
         Some(code) => code.to_owned(),
         None => {
             eprintln!("A sign-in code was emailed to {email}.");
-            prompt("Code:")?.ok_or_else(|| {
+            prompt("Code:", true, 64).await?.ok_or_else(|| {
                 Error::Message("code required; rerun xcb link --reauth with --email and --code")
             })?
         }
