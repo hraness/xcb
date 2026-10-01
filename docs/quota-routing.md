@@ -61,7 +61,7 @@ quota-evidence gates; this change only removes blocked candidates.
 Managed tasks then rank the accounts and models that remain. xcb derives
 relative quality, cost, and latency profiles from observed model identities and
 sorts the models into Pareto layers: a model is in the first layer when no other
-model beats it on all three at once. It then scores the layers for routine,
+model is at least as good on every measure and better on one. It then scores the layers for routine,
 balanced, or complex work. Fresh quota timing, configured favorites and a
 soft workspace-learned provider preference adjust the score. An explicit opening “Use
 Claude/Codex/Devin” directive remains a hard provider constraint. The optional

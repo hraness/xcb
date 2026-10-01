@@ -6,7 +6,7 @@ One plan hits its limit. The others sit unused.
 
 title
 00:00:04.400 --> 00:00:07.600
-Excalibur. Keep coding when one subscription hits its limit.
+Excalibur. Use your Claude, Codex, and Devin plans from one agent.
 
 step-1
 00:00:07.600 --> 00:00:12.000
@@ -14,11 +14,11 @@ One thread. Type a task once. xcb picks the project and the account.
 
 step-2
 00:00:12.000 --> 00:00:16.400
-Quota that resets first. The account whose unused quota is closest to lapsing gets the task.
+Quota about to reset. xcb favors unused quota that is about to reset.
 
 step-3
 00:00:16.400 --> 00:00:20.800
-Moves on at a limit. A limit mid-task? xcb continues it on another account.
+Moves on at a limit. At a reported usage limit, xcb can continue on an available account.
 
 step-4
 00:00:20.800 --> 00:00:25.200
@@ -38,4 +38,4 @@ What it doesn't do. xcb doesn't raise any usage limit. It spends the quota you a
 
 end
 00:00:37.600 --> 00:00:42.100
-Excalibur. xcb.sh. Free for macOS and Linux. Latest release: v0.12.0.
+Excalibur. xcb.sh. Free for Apple silicon Macs and Linux.

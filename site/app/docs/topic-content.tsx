@@ -47,7 +47,7 @@ function GettingStarted() {
       <p>This tutorial installs xcb, connects one Claude account, and sends a task to a small practice project. At the end you’ll see which account and model xcb picked and the fix it made.</p>
       <h2 id="requirements">Before you start</h2>
       <ul>
-        <li>A Mac with Apple silicon, a Linux x86_64 or ARM64 machine, or Windows x86_64 (providers run in WSL2). Other hosts can <a href="#build-from-source">build from source</a>.</li>
+        <li>A Mac with Apple silicon, a Linux x86_64 or ARM64 machine, or Windows x86_64 (Claude runs in WSL2). Other hosts can <a href="#build-from-source">build from source</a>.</li>
         <li>A Claude subscription and Claude Code {supportedBuilds.claudeMinimum} or later. Check with <code>claude --version</code>.</li>
         <li>On Linux, Claude runs only after you <a href="/docs/providers#claude-on-linux">run xcb’s sandbox checks</a> on that machine. Do that before step 2.</li>
       </ul>
@@ -76,12 +76,12 @@ printf 'export function add(a, b) {\\n  return a - b;\\n}\\n' > add.js`}</Code>
       <p>This opens your thread. Type <code>Fix add() in ~/xcb-tutorial/add.js so it adds instead of subtracting.</code> and press Enter. xcb replies with the folder it chose and why, such as “Started <strong>Fix add()</strong> in <code>xcb-tutorial</code> · path in <code>xcb-tutorial</code> · /workspace to move”. The session card above the chat shows the routed model while the task runs, and the answer appears in the thread when it finishes.</p>
       <p>Check the result from another terminal:</p>
       <Code>{`cat ~/xcb-tutorial/add.js`}</Code>
-      <p>The function now returns <code>a + b</code>. xcb routed the task to one of your accounts, ran Claude Code in a sandbox with access to this folder only, and recorded how the run ended.</p>
+      <p>Check that the function returns <code>a + b</code>. xcb records which account ran the task and how it ended; review the result before relying on it.</p>
       <h2 id="come-back">6. Close the terminal and come back</h2>
-      <p>Send a second task, such as <code>Add a test for add()</code>, and close the terminal window while it runs. The task keeps going. Run <code>xcb</code> again and type <code>/tasks</code> to see it finished.</p>
+      <p>Send a second task, such as <code>Add a test for add()</code>, and close the terminal window while it runs. The task keeps going. Run <code>xcb</code> again and type <code>/tasks</code> to check its progress and read the result.</p>
       <p>To run one task without the thread, use <code>xcb run -p &quot;Explain this repository&quot;</code> in a project folder. It prints the answer when the task finishes.</p>
       <h2 id="build-from-source">Build from source</h2>
-      <p>On an Intel Mac, ARM Linux, or any host without a release archive, build with Git, Rust 1.97.1, and the platform’s build tools:</p>
+      <p>On an Intel Mac or any host without a release archive, build with Git, Rust 1.97.1, and the platform’s build tools:</p>
       <Code>{`git clone https://github.com/hraness/xcb.git
 cd xcb
 rustup toolchain install 1.97.1 --profile minimal
@@ -115,7 +115,7 @@ function HowRoutingWorks() {
       </ul>
       <p>Your constraints narrow the list first. A prompt that starts with <code>Use Claude</code>, <code>Use Codex</code>, or <code>Use Devin</code> requires that provider, and <code>xcb run --account</code> or a pinned <code>provider</code>, <code>account</code>, or <code>model</code> in a route request does the same. xcb never falls back outside a constraint.</p>
       <h2 id="rank">2. Rank the models</h2>
-      <p>xcb gives each model relative quality, cost, and latency scores and sorts the models into tiers: a model is in the first tier when no other model beats it on all three at once. It then scores the tiers for routine, balanced, or complex work.</p>
+      <p>xcb gives each model relative quality, cost, and latency scores and sorts the models into tiers: a model is in the first tier when no other model is at least as good on every measure and better on one. It then scores the tiers for routine, balanced, or complex work.</p>
       <p>The kind of task comes from the <a href="/docs/reflexes">route reflex</a>, a small classifier that learns from the model tiers you ask for. If you turn on the <a href="/docs/security#judge">optional judge</a>, its answers feed the same classifier. A prompt of at least 400 words or 8 KiB always gets the highest-quality model available, whatever its price. Quota timing, your <code>favorites</code> in <a href="/docs/reference#configuration">config.json</a>, and the provider you usually pick for that project adjust the score.</p>
       <p>Fresh Claude and Codex usage meters also favor unused capacity approaching a reset. xcb divides each window’s remaining percentage by its time to reset and uses the lowest rate across overlapping windows, so a short window cannot hide a tight weekly allowance. Stale or missing meters add no preference. This changes the ranking within the task’s quality requirements; it does not predict the provider’s bill.</p>
       <p>The scores are heuristics, not measured quality or prices. When a usage limit rules out a stronger model, the chosen route says so.</p>
@@ -137,10 +137,10 @@ xcb models tiers --task "fix a race in the scheduler"   # every model's tier and
 function Security() {
   return (
     <>
-      <p>xcb runs on your machine. Your accounts, credentials, and task history stay there, and model requests go from each provider’s own CLI to that provider.</p>
+      <p>xcb runs on your machine. It stores your accounts, credentials, and task history locally. Model requests go from each provider’s own CLI to that provider; optional services are described below.</p>
       <h2 id="local">What stays on your machine</h2>
       <ul>
-        <li><strong>State:</strong> accounts, credentials, conversations, tasks, and settings live in <code>~/.local/share/xcb</code> (or <code>XCB_STATE</code>), readable only by you.</li>
+        <li><strong>State:</strong> accounts, conversations, tasks, settings, and ordinary model sign-ins live in <code>~/.local/share/xcb</code> (or <code>XCB_STATE</code>), readable only by you. Full Claude browser sign-in uses a dedicated macOS Keychain entry for refresh credentials.</li>
         <li><strong>Credentials:</strong> xcb stores a sign-in only when you run <code>xcb setup</code>, <code>xcb accounts login</code>, or an explicit <code>import</code> command. It never reads your existing provider logins on its own, and import copies the one file you name, leaving it in place.</li>
         <li><strong>Usage:</strong> token and usage measurement stays local. Uploading usage to aicharts is unavailable.</li>
         <li><strong>Learning:</strong> the <a href="/docs/reflexes">reflexes</a> store numeric features and your labels, never prompt or response text.</li>
@@ -155,7 +155,7 @@ function Security() {
         <li>continuation: up to 8 KiB each of the original task and the last response;</li>
         <li>context management: up to 88 KiB of recent messages, plus the names and sizes of old tool results, never their contents.</li>
       </ul>
-      <p>The judge can only order routes that already passed every check. It cannot add a provider or skip a safety check. Its key is stored in the state folder with mode 0600, or read from <code>XCB_JEV_API_KEY</code>. See <a href="/docs/customization#judge">customize xcb</a> to turn it on.</p>
+      <p>The judge helps classify the task; deterministic routing picks among accounts and models that passed the required checks. The judge cannot add a provider or skip a safety check. Its key is stored in the state folder with mode 0600, or read from <code>XCB_JEV_API_KEY</code>. See <a href="/docs/customization#judge">customize xcb</a> to turn it on.</p>
       <h2 id="network">Other network requests</h2>
       <ul>
         <li><strong>Supported builds:</strong> about once an hour, xcb reads the list of reviewed provider builds from this repository’s <code>qualified-builds.json</code> on GitHub.</li>
@@ -163,7 +163,6 @@ function Security() {
         <li><strong>Updates:</strong> <code>xcb update check</code>, <code>xcb upgrade</code>, and the optional daily check read release data from GitHub.</li>
         <li><strong>Remote devices:</strong> only after <code>xcb link</code>. Task content crosses the relay end-to-end encrypted.</li>
       </ul>
-      <p>None of these send prompts, files, or account details.</p>
       <h2 id="extensions">Extensions that run code</h2>
       <p>Hooks run programs you choose at session and turn events. They are off by default and need their own <code>xcb plugins enable hooks</code>. Panes change only what the terminal shows; they cannot run code or grant a provider new tools.</p>
       <p>Registered host MCP servers run outside the provider sandbox with their own permissions. Providers receive their tools and results, but do not inherit their environments or credentials. Connect only servers you trust. The desktop computer-use connector uses Codex’s automatic approval reviewer. See <Ext href={`${repositoryDocs}/tools.md`}>browser and shared tools</Ext>.</p>
@@ -244,7 +243,7 @@ xcb resume <session-id>`}</Code>
 function Providers() {
   return (
     <>
-      <p>xcb names each account after the identity the provider reports, stores its credentials in xcb’s state folder, and checks the provider’s executable before running it. Replace <code>&lt;account-id&gt;</code> below with the ID xcb prints when it adds the account; <code>xcb accounts</code> lists them.</p>
+      <p>xcb names each account after the identity the provider reports and checks the provider’s executable before running it. Ordinary model sign-ins stay in xcb’s state folder; full Claude browser sign-in stores refresh credentials in a dedicated macOS Keychain entry. Replace <code>&lt;account-id&gt;</code> below with the ID xcb prints when it adds the account; <code>xcb accounts</code> lists them.</p>
       <h2 id="supported-builds">Supported builds</h2>
       <div className="xcb-docs-table-wrap" role="region" aria-labelledby="provider-status-caption" tabIndex={0}><table>
         <caption id="provider-status-caption">Provider builds xcb runs, and their status</caption>
@@ -295,7 +294,7 @@ xcb accounts refresh <account-id>`}</Code>
       <p>To reconnect an existing account, add <code>--account</code>. The sign-in must belong to the same account, and its credentials must have changed to clear a previous sign-in failure:</p>
       <Code>{`xcb accounts import-codex --account <account-id> --source /absolute/path/to/auth.json
 xcb accounts refresh <account-id>`}</Code>
-      <p>Import leaves the source file in place and copies no Codex settings, plugins, or sessions. Updating an existing account preserves its enabled state and usage limits. API-key sign-ins aren’t accepted. xcb runs Codex with the gpt-6-astra, gpt-6-sol, and gpt-5.6-sol models.</p>
+      <p>Import leaves the source file in place and copies no Codex settings, plugins, or sessions. Updating an existing account preserves its enabled state and usage limits. API-key sign-ins aren’t accepted. Run <code>xcb models</code> to see the models available to your accounts.</p>
       <h2 id="devin" className="xcb-provider-heading"><ProviderMark mark="devin" label="Devin" size={24} />Devin</h2>
       <p>Sign in with the Devin CLI, then copy that sign-in into xcb:</p>
       <Code>{`devin auth login
@@ -313,7 +312,7 @@ xcb accounts disable <account>      # keep it, but route nothing to it
 xcb accounts enable <account>`}</Code>
       <p>Copy full model keys, such as <code>claude/sonnet/low</code>, from <code>xcb models</code>. A saved session keeps its account. In the thread, start a prompt with <code>Use Claude</code>, <code>Use Codex</code>, or <code>Use Devin</code> to require that provider.</p>
       <h2 id="usage-limits">Usage limits</h2>
-      <p><code>xcb accounts</code> shows each account’s known usage and when it resets. When Claude reports an account-wide limit, xcb routes around that account until the reported reset and says why if you pick it yourself. A reset allows another attempt; it doesn’t promise the provider will accept it. Usage xcb hasn’t measured stays unknown, and xcb doesn’t guess a limit from Codex or Devin errors. <code>xcb --json accounts</code> adds <code>quotaBlockedUntilMs</code>. The <Ext href={`${repositoryDocs}/quota-routing.md`}>quota routing reference</Ext> has the details.</p>
+      <p><code>xcb accounts</code> shows each account’s known usage and when it resets. Fresh Claude and Codex account-wide meters can keep an account out of rotation until its reported reset. An explicit account-limit error without a reset starts a cooldown; it does not invent a usage percentage or reset time. Other errors do not imply a quota limit. A reset or expired cooldown allows another attempt, but does not promise the provider will accept it. Usage xcb hasn’t measured stays unknown. <code>xcb --json accounts</code> adds <code>quotaBlockedUntilMs</code>. The <Ext href={`${repositoryDocs}/quota-routing.md`}>quota routing reference</Ext> has the details.</p>
     </>
   );
 }
@@ -409,7 +408,7 @@ xcb reflex status settle   # generation, live precision and recall, open trials`
         ["route", "Prompt shape (imperative opening, resume language, action verbs, length), keyword cues, and the optional judge’s answers", "frontier or standard", "active"],
         ["settle", "How much work the turn did (tool calls), how the worker’s report ends (in progress, waiting on CI, asking for a go-ahead, handing you a step, naming a risky action, a final summary), and how the turn ended", "done, stopped short, confirm, question, needs approval, blocked, interrupted, …", "auto"],
       ]} />
-      <p>Route’s shipped parameters reproduce xcb’s behavior before reflexes. Settle’s were fitted on 2,428 real follow-up messages and tuned for precision: about four in five turns it calls stopped short were followed by “continue”, and about two in three it calls confirm were followed by “yes”.</p>
+      <p>Route’s shipped parameters reproduce xcb’s behavior before reflexes. Settle starts with parameters fitted on one operator’s follow-up messages, then learns from your replies. The <Ext href={`${repositoryDocs}/reflexes.md#measured-on-operator-history`}>experiment report</Ext> describes that dataset and its limits.</p>
       <h2 id="learning">How it learns from you</h2>
       <ul>
         <li>Reply <code>continue</code>, <code>keep going</code>, or <code>push it</code> right after a task completes, and xcb records that the turn stopped short. When settle acts, it also reopens that task in its session.</li>
@@ -425,8 +424,8 @@ xcb reflex train settle`}</Code>
       <p>Every 16 labels, xcb fits a challenger from the shipped starting point. The challenger and the current parameters are then scored on the next 48 labels, which neither was fitted on. The challenger replaces the current parameters only if it lowers log loss there without losing accuracy or ranking quality. Every generation records its parent and the trial it won.</p>
       <h2 id="continuation">Continuing work that stopped short</h2>
       <p>When the settle reflex acts, a completed turn it sorts as stopped short continues in its existing session with a prompt to carry out the step it described. The checks for any automatic continuation apply first: the worker has stopped and its effects are recorded, no question or approval is pending, nothing failed or is uncertain, the response isn’t a repeat, and attempts and time remain. A configured judge can still veto it.</p>
-      <p>A turn sorted as confirm (“Should I open the PR and merge it?”) is answered “yes, go ahead” only when the <code>confirm</code> head acts too. xcb never answers a request whose report mentions deleting, dropping, deploying, releasing, production, spending, credentials, or sending something, or that hands a step to you. That check is in the runtime, so a replaced program can’t remove it.</p>
-      <p>By default, settle and confirm use <code>auto</code>: sorted categories appear on tasks and xcb learns from your replies, but a head acts only after a replay of your own replies shows its precision is at least 0.75 for continuing a stopped turn and 0.85 for answering a go-ahead, as a 99% lower bound. It goes back to observing if precision falls, and about one acting turn in ten is still left for you so the measurement stays current.</p>
+      <p>A turn sorted as confirm is answered “yes, go ahead” only when the <code>confirm</code> head acts too. Detected cues for deletion, deployment, spending, credentials, messages to people, or a handoff to you block automatic confirmation. That check is in the runtime, so a replaced program can’t remove it.</p>
+      <p>By default, settle and confirm use <code>auto</code>: they learn from your replies and act only after a replay meets their estimated precision thresholds. About one eligible turn in ten still waits for you, providing evidence that can return a head to observation. Repeated tests and delayed feedback limit those estimates; the <Ext href={`${repositoryDocs}/reflexes.md#auto-acting-once-certified`}>statistical reference</Ext> explains the thresholds and limitations.</p>
       <h2 id="configure">Configure, roll back, or replace</h2>
       <p>The defaults in <code>config.json</code> under <code>extensions.reflexes</code> are:</p>
       <Code language="json">{`{ "route": "active", "settle": "auto", "confirm": "auto", "learn": true }`}</Code>
@@ -694,7 +693,7 @@ const commandGroups: readonly Readonly<{ id: string; title: string; commands: re
     ["resume [id]", "Reopen a direct provider session"],
   ] },
   { id: "commands-setup", title: "Setup", commands: [
-    ["service", "Start the background supervisor at login (macOS); install, status, uninstall, plan"],
+    ["service", "Start the background supervisor at login (macOS or Linux); install, status, uninstall, plan"],
     ["update", "Check for updates and set the update policy; check, status, enable, disable"],
     ["upgrade [version]", "Install the latest, or a named, verified release"],
     ["completions <shell>", "Print shell completions"],
@@ -763,7 +762,7 @@ function Reference() {
         [<code key="e">XCB_RELAY_URL</code>, <>Default relay for <code>xcb link</code></>],
         [<code key="e">NO_COLOR</code>, "Any non-empty value turns off color"],
         [<code key="e">VISUAL</code>, <>Editor opened by Ctrl-G, then <code>EDITOR</code></>],
-        [<code key="e">XCB_VERSION</code>, <>Installer only: install this release instead of building from source</>],
+        [<code key="e">XCB_VERSION</code>, <>Installer only: install and pin this exact release instead of the latest</>],
         [<code key="e">XCB_INSTALL_PREFIX</code>, <>Installer only: install under this prefix instead of <code>~/.local</code></>],
         [<code key="e">XCB_ADD_PATH</code>, <>Installer only: <code>yes</code> adds the <code>bin</code> folder to your shell profile</>],
       ]} />

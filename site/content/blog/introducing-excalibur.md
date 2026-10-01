@@ -1,83 +1,52 @@
-Excalibur, or xcb, routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. You can type tasks into its terminal or have another agent hand them over as JSON, and either way xcb runs each task in the provider's own coding tool, under your own sign-in.
+Excalibur (xcb) routes coding tasks across the Claude, Codex, and Devin subscriptions you already pay for. Give it a task, and it chooses an available account and a model for the work. Each task runs through the provider's own coding tool under your sign-in.
 
-Paying for more than one coding agent means more than one of everything around it: a terminal for each provider, a sign-in and usage limits for each account, and sessions scattered across windows. Before each task you check which account is free, and afterward you look through those windows for the session that was fixing a flaky test.
+With several coding plans, choosing where to send the next task becomes a job of its own. One account is busy, another is close to its limit, and a third has unused quota that resets soon. xcb keeps that account selection together with the tasks, so you can follow the work from one terminal.
 
-## How xcb runs each task
+## Put the task in one thread
 
-xcb reaches each model through the provider's own tool: Claude Code, Codex, or the Devin CLI. You sign in through that tool's own flow, and xcb keeps the credentials in a private profile outside your projects. It runs a private copy of the tool you installed, and only builds that pass xcb's checks.
+Plain `xcb` opens a conversation across your projects. Name a project in your request, such as “fix the failing parser test in ~/src/app”, and xcb selects its directory. If the project is unclear, it asks you to choose before starting.
 
-For each task, xcb picks an account that is signed in, idle, and not at a known usage limit, on a model from that provider's current model list. Known limits come from Claude's five-hour and seven-day usage windows; xcb does not infer Codex or Devin limits. While the task runs, xcb holds that account so no other task can start on it, and it releases the account only after the provider process has exited. The provider runs in an operating-system sandbox (Seatbelt on macOS, bwrap on Linux) with a private home directory and a cleared environment, and it changes your files through xcb. When the run ends, xcb records how it ended; if it cannot confirm that, it keeps the account held and does not retry.
+The task runs under a background supervisor and continues when you close the terminal. `/tasks` shows the work, `/attention` collects questions waiting for your answer, and `/steer <task-id> <guidance>` adds instructions for a task's next turn. Different projects can run at the same time on different accounts; tasks in the same project take turns.
 
-If a task from your thread stops on a usage limit that the provider reports, xcb can move it to another account that is free, along with its original instructions. xcb has no model access of its own and does not raise any account's usage limits. Each provider's terms and limits apply to every task xcb runs.
+## Choose an account for the work
 
-## Work from one thread across your projects
+xcb first finds accounts that are signed in, idle, and able to take the task. It then ranks their models for the work. Fresh Claude and Codex usage reports let it favor unused quota approaching a reset while preserving the task's quality requirements and any provider, account, or model you chose.
 
-Plain `xcb` opens your thread, one conversation per machine that spans your projects. Type a task and xcb picks the project directory it runs in and says why, for example “Started Fix the parser in `app` · named `app` · /workspace to move”. When it cannot tell which project you mean, it asks and saves nothing until you pick.
+The selected account stays reserved until the provider process exits. If xcb cannot confirm how a run ended, it keeps the account reserved instead of retrying. When a provider reports a usage limit during a managed task and the run ends cleanly, xcb can continue on another available account with the original instructions.
 
-Each prompt becomes a task that keeps running after you close the terminal, because a background supervisor runs it. `/tasks` lists the work, `/attention` collects the questions and approvals your agents are waiting on, and `/steer <task-id> <guidance>` queues guidance for a task's next turn. Tasks in different projects can run at the same time on different accounts; tasks in the same project run one at a time.
+That makes existing capacity easier to use. Each account still has its provider's usage limits. The [routing guide](/docs/how-routing-works) explains the selection rules and how to inspect a route before starting it.
 
-If you use one subscription, or you rely on a provider's plugins, MCP servers, skills, subagents, or web search, the provider's own tool serves you better. Those features are not available in the runs xcb starts, where the provider works on your files through xcb's own tools.
+## Keep the provider and the project separate
 
-## Hand tasks to xcb from another program
+xcb stores provider credentials outside your projects and starts supported provider builds in an operating-system sandbox. Project file access goes through xcb's tools. Native provider shells and unrelated plugins are unavailable inside those runs; registered host tools have their own permissions and setup.
 
-Another program, usually a coding agent, can give xcb one task with `xcb --json route`. It writes one JSON request to stdin:
+If one coding plan covers your work and you want that provider's complete native toolset, its own coding tool may already suit you. xcb is useful when choosing among accounts, keeping tasks running, or handing work between programs is part of your day.
 
-```json
-{ "version": 1, "workspace": "/absolute/path/to/project", "task": "Fix the failing parser test and show the diff" }
-```
+Platform support also matters. The [accounts guide](/docs/providers) lists supported provider builds. The [command runner](/docs/workspace) uses an offline Linux VM on macOS with Apple silicon for tests and builds; native macOS builds cannot run in that VM. The self-tuning managed harness remains in development and does not run self-modifying routing policies.
 
-xcb picks the account and model, runs exactly one provider turn, and writes one JSON result to stdout once the provider process has exited:
+## Hand over a task from another agent
+
+An agent or script can send one JSON request to `xcb --json route`:
 
 ```json
 {
   "version": 1,
-  "status": "completed",
-  "requestId": "route_…",
-  "session": "s_…",
-  "route": { "provider": "claude", "account": "a_…", "model": "claude/sonnet/low", "label": "Sonnet · low", "reason": "…" },
-  "state": "idle",
-  "outcome": { "terminal": "completed", "joined": true, "effects": "settled", "pending_attention": false, "failure": null },
-  "text": "…"
+  "workspace": "/absolute/path/to/project",
+  "task": "Fix the failing parser test and show the diff"
 }
 ```
 
-The request can also pin a provider, account, or model, set a deadline, or ask for a dry run that shows the chosen route without reserving an account. It never accepts tools, hooks, system prompts, credentials, or provider flags. Returned text is capped at 256 KiB. A failure exits with a nonzero code and names a reason such as `busy` or `needs_input`; `custody_unproven` means xcb could not confirm how the run ended, so the account stays held and the caller should not retry blindly.
+xcb chooses the account and model, runs one provider turn, and returns the route, outcome, and answer as JSON. A dry run can show the proposed route without reserving an account. The [route reference](/docs/route) covers the request and result.
 
-Applications can embed the TypeScript SDK instead. There the application names the account and model for each task and supplies the provider adapters, and `createSubscriptionRouter` holds that account while the task runs. The [route documentation](/docs/route) covers both.
+An application can instead use the TypeScript SDK. In that interface, the application chooses the account and model, and xcb holds the account while the task runs. The [SDK guide](/docs/sdk) has a complete example.
 
-## How xcb compares
+## Connect your first account
 
-[Herdr](/compare/herdr) keeps your coding agents running, each in its own terminal, and marks which one is waiting on you; xcb decides which of your accounts runs each task, on which model, and holds that account until the run ends. Like [Pi](/compare/pi), a minimal coding agent you adapt with extensions, xcb can be reshaped: panes change what its terminal shows, hooks run your own programs when sessions and turns start or end, and reflexes learn from your replies and can be rolled back. None of them can give a provider run more access, and because hooks run with your own permissions, each one stays off until you turn it on. The [comparison page](/compare) covers other tools.
-
-## Limits
-
-With the tested accounts, Claude, Codex, and Devin have each completed a coding task through xcb on macOS on Apple silicon: each wrote a small script, ran its own checks in the command VM, and recorded the result. Codex ran on Codex CLI 0.158.0 and Devin on Devin CLI 3000.11.3. Codex runs only on specific builds that xcb has checked. On Linux only Claude runs, in a bwrap sandbox once `xcb doctor --provider claude --qualify-sandbox` passes; on Ubuntu 24.04 that needs the AppArmor profile xcb prints. A signed-in coding session on a real Linux machine has not been confirmed yet. Codex and Devin need macOS. On Windows, xcb runs natively for everything except the providers, which run in the Linux build inside WSL2. The [providers page](/docs/providers) lists each supported build and its status.
-
-Tests and builds run only in an offline Linux VM that you set up on macOS on Apple silicon; without it, agents can read and change files but cannot run commands. Git in that VM is read-only, so agents working through xcb do not commit or push, and native macOS or Xcode builds cannot run there.
-
-The managed harness that runs the tasks in your thread is experimental. It is being rebuilt so that it can propose routing rules, test them on labeled examples, and keep a rule only when it scores better than the current one. That work is in development, and the current build does not run self-modifying routing policies.
-
-## Install xcb and connect Claude
-
-Latest release: {{release.version}}. Release binaries are built for macOS on Apple silicon, Linux on x86_64 and ARM64, and Windows on x86_64. On macOS or Linux, one line installs xcb:
-
-```sh
-curl -fsSL https://xcb.sh/install.sh | sh
-```
-
-On Windows, from PowerShell:
-
-```powershell
-irm https://xcb.sh/install.ps1 | iex
-```
-
-The Windows build isn't code-signed yet, so SmartScreen may ask before it runs the first time.
-
-With Claude Code installed, `xcb setup claude` adds a Claude account or reuses yours, checks your Claude Code build, opens the browser sign-in, and loads the account's models. Then plain `xcb` opens your thread:
+Latest release: {{release.version}}. Follow the [installation guide](/install) for your platform. With Claude Code installed, connect an account and open your thread:
 
 ```sh
 xcb setup claude
 xcb
 ```
 
-To build from source, or to connect Codex or Devin, follow the [getting started guide](/docs/getting-started).
+Setup checks the provider build, opens sign-in, and loads the account's models. The [getting started guide](/docs/getting-started) walks through the first task.

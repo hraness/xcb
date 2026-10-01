@@ -48,16 +48,16 @@ Post 7 of 9, 189 characters
 xcb is for developers juggling more than one coding plan. It works for agents too: another program hands xcb a task as JSON and gets back which account ran it, how it ended, and the answer.
 ```
 
-Post 8 of 9, 183 characters
+Post 8 of 9, 143 characters
 
 ```text
-The idea behind Excalibur: every coding plan you pay for works as one, from whichever machine you're at, and none of your quota expires unused while another account sits at its limit.
+The idea behind Excalibur: use your coding plans together, from whichever machine you're at, so more work reaches accounts with quota to spare.
 ```
 
-Post 9 of 9, 255 characters
+Post 9 of 9, 238 characters
 
 ```text
-xcb is free and MIT licensed. Latest release: v0.17.1. Install it with one command on a Mac with Apple silicon or on Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
+xcb is free and MIT licensed. Latest release: v0.17.1. Install it on a Mac with Apple silicon or on Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
 
 https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 ```
@@ -106,16 +106,16 @@ Post 7 of 9, 189 characters
 xcb is for developers juggling more than one coding plan. It works for agents too: another program hands xcb a task as JSON and gets back which account ran it, how it ended, and the answer.
 ```
 
-Post 8 of 9, 183 characters
+Post 8 of 9, 143 characters
 
 ```text
-The idea behind Excalibur: every coding plan you pay for works as one, from whichever machine you're at, and none of your quota expires unused while another account sits at its limit.
+The idea behind Excalibur: use your coding plans together, from whichever machine you're at, so more work reaches accounts with quota to spare.
 ```
 
-Post 9 of 9, 255 characters
+Post 9 of 9, 238 characters
 
 ```text
-xcb is free and MIT licensed. Latest release: v0.17.1. Install it with one command on a Mac with Apple silicon or on Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
+xcb is free and MIT licensed. Latest release: v0.17.1. Install it on a Mac with Apple silicon or on Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
 
 https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 ```
@@ -164,16 +164,16 @@ Post 7 of 9, 189 characters
 xcb is for developers juggling more than one coding plan. It works for agents too: another program hands xcb a task as JSON and gets back which account ran it, how it ended, and the answer.
 ```
 
-Post 8 of 9, 183 characters
+Post 8 of 9, 143 characters
 
 ```text
-The idea behind Excalibur: every coding plan you pay for works as one, from whichever machine you're at, and none of your quota expires unused while another account sits at its limit.
+The idea behind Excalibur: use your coding plans together, from whichever machine you're at, so more work reaches accounts with quota to spare.
 ```
 
-Post 9 of 9, 255 characters
+Post 9 of 9, 238 characters
 
 ```text
-xcb is free and MIT licensed. Latest release: v0.17.1. Install it with one command on a Mac with Apple silicon or on Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
+xcb is free and MIT licensed. Latest release: v0.17.1. Install it on a Mac with Apple silicon or on Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
 
 https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 ```
@@ -195,9 +195,9 @@ xcb runs Claude Code, Codex, or the Devin CLI under your own sign-in, in an OS s
 
 xcb is for developers juggling more than one coding plan. It works for agents too: another program hands xcb a task as JSON and gets back which account ran it, how it ended, and the answer.
 
-The idea behind Excalibur: every coding plan you pay for works as one, from whichever machine you're at, and none of your quota expires unused while another account sits at its limit.
+The idea behind Excalibur: use your coding plans together, from whichever machine you're at, so more work reaches accounts with quota to spare.
 
-xcb is free and MIT licensed. Latest release: v0.17.1. Install it with one command on a Mac with Apple silicon or on Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
+xcb is free and MIT licensed. Latest release: v0.17.1. Install it on a Mac with Apple silicon or on Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
 
 https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 ```
@@ -224,7 +224,7 @@ Topics: Developer Tools, Artificial Intelligence, Open Source
 - Link your machines with xcb link. From any of them, xcb fleet shows what each one is doing, and xcb dispatch sends a task to the one at home. Task content is end-to-end encrypted, on a relay you run yourself.
 - xcb runs Claude Code, Codex, or the Devin CLI under your own sign-in, in an OS sandbox, and holds each account for one task at a time. It never falls back to an API key, and it never touches API traffic.
 - xcb is for developers juggling more than one coding plan. It works for agents too: another program hands xcb a task as JSON and gets back which account ran it, how it ended, and the answer.
-- xcb is free and MIT licensed. Latest release: v0.17.1. Install it with one command on a Mac with Apple silicon or on Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
+- xcb is free and MIT licensed. Latest release: v0.17.1. Install it on a Mac with Apple silicon or on Linux, connect a Claude account with xcb setup claude, and open your thread with xcb.
 - Latest release: v0.17.1. https://xcb.sh/blog/one-agent-for-all-your-ai-plans
 
 ## Beats
@@ -236,9 +236,9 @@ Topics: Developer Tools, Artificial Intelligence, Open Source
 5. Start work on your desktop from your laptop
 6. Your own sign-ins, in each provider's own tool
 7. Made for people who run agents all day, and for agents
-8. Every plan you pay for, used before it resets
+8. Put more of your subscription quota to work
 9. What xcb doesn't do
-10. Free, open source, and on Apple silicon Macs and Linux today
+10. Free, open source, and on Apple silicon Macs and Linux
 
 ## Facts and their records
 

@@ -30,6 +30,7 @@ export default function Blog() {
       <SiteHeader active="blog" />
       <main id="main" tabIndex={-1}>
         <ArticleIndex
+          showDates={false}
           heading="Blog"
           headingId="blog-title"
           headingLevel={1}

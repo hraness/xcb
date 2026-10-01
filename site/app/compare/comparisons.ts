@@ -47,7 +47,7 @@ export interface Comparison {
   readonly description: string;
   /** The verdict: what each product is and when to pick which, in one or two sentences. */
   readonly lead: string;
-  /** The day the other product's sources were last read and the page last changed. */
+  /** The day the page last materially changed; individual sources retain their own check dates. */
   readonly updated: ArticleIsoDate;
   readonly picks: Readonly<{ tool: readonly string[]; xcb: readonly string[] }>;
   /** Compact, qualified overview; detailed source-backed rows follow in a disclosure. */
@@ -230,7 +230,7 @@ export const comparisons: readonly Comparison[] = [
     title: "xcb vs Claude Code and Codex: when to add a router",
     description: "Use Claude Code or Codex on its own when one subscription covers you. Add xcb when you pay for several and want each task sent to an account that can take it.",
     lead: "Use Claude Code or Codex on its own when one subscription covers your work and you want every native feature. Add xcb when you pay for more than one: it runs those same tools under your accounts, sends each task to one that can take it now, and keeps the work going after you close the terminal.",
-    updated: checkedOn,
+    updated: "2026-10-01",
     picks: {
       tool: [
         "One Claude subscription covers your work.",
@@ -248,7 +248,7 @@ export const comparisons: readonly Comparison[] = [
     rows: [
       { aspect: "Model access", tool: "A Claude plan, an API key, or a cloud provider such as Amazon Bedrock", xcb: "Your subscriptions, through each provider’s own tool; xcb has no model access of its own" },
       { aspect: "Accounts", tool: "One account per sign-in; switch with `/login`", xcb: "Several accounts across providers; each task goes to one that can take it now" },
-      { aspect: "Tools in a run", tool: "Built-in file, shell, and web tools, plus MCP servers, plugins, skills, and subagents", xcb: "Claude Code’s built-in tools are off; xcb’s file tools and command VM take their place" },
+      { aspect: "Tools in a run", tool: "Built-in file, shell, and web tools, plus MCP servers, plugins, skills, and subagents", xcb: "xcb’s file tools, offline command VM, and registered host tools replace Claude Code’s built-in tools" },
       { aspect: "Sandboxing", tool: "An optional OS sandbox for shell commands: Seatbelt on macOS, bubblewrap on Linux and WSL2", xcb: "The whole Claude Code process runs in a sandbox with a private home directory" },
       { aspect: "Commands and Git", tool: "Runs commands on your machine and can commit and push", xcb: "Commands run in an offline Linux VM on macOS ARM64; Git is read-only for workers" },
       { aspect: "After you close it", tool: "A local session ends; cloud sessions and routines run in Anthropic’s cloud", xcb: "Managed tasks keep running under a background supervisor on your machine" },
@@ -262,7 +262,7 @@ export const comparisons: readonly Comparison[] = [
         title: "Codex",
         paragraphs: [
           "The same choice applies to Codex, OpenAI’s open-source coding agent for the terminal, IDE, and desktop, which signs in with a ChatGPT plan or an API key. Codex has its own sandbox and approval modes, subagents, skills, MCP servers, and cloud tasks. Use it on its own when one ChatGPT plan covers your work.",
-          "xcb runs Codex through its [app-server](https://learn.chatgpt.com/docs/app-server), which OpenAI documents for building Codex into your own product, with ChatGPT device sign-in. Inside an xcb run, Codex’s own shell, web search, and subagents are off, and xcb’s file tools take their place.",
+          "xcb runs Codex through its [app-server](https://learn.chatgpt.com/docs/app-server), which OpenAI documents for building Codex into your own product, with ChatGPT device sign-in. Inside an xcb run, Codex’s own shell, web search, and subagents are off, and xcb’s file tools and registered host tools take their place.",
           "xcb runs Codex on macOS only and supports specific Codex builds, adding new ones after they pass its checks, so it can trail the newest Codex release. A signed-in Codex coding session passed on Codex CLI 0.158.0.",
         ],
       },
@@ -276,6 +276,7 @@ export const comparisons: readonly Comparison[] = [
       },
     ],
     sources: [
+      { label: "xcb: registered browser and shared tools", href: "https://github.com/hraness/xcb/blob/1e64357a40fb9b0cb167e9803bc572675100d469/docs/tools.md", checkedOn: "2026-10-01" },
       { label: "Claude Code overview", href: "https://code.claude.com/docs/en/overview", checkedOn },
       { label: "Claude Code sandboxed Bash tool", href: "https://code.claude.com/docs/en/sandboxing", checkedOn },
       { label: "Claude Code routines", href: "https://code.claude.com/docs/en/routines", checkedOn },
@@ -420,7 +421,7 @@ export const comparisons: readonly Comparison[] = [
     glance: [
       { label: "Focus", values: ["Terminal, IDE, desktop agent", "Router around provider agents"] },
       { label: "Model access", values: ["75+ API providers; local models", "Claude, Codex, Devin plans"] },
-      { label: "Worker plugins", values: [{ status: "yes", label: "Plugins and MCP" }, { status: "no", label: "Fixed xcb tool boundary" }] },
+      { label: "Worker plugins", values: [{ status: "yes", label: "Plugins and MCP" }, { status: "partial", label: "Registered host tools", detail: "No unrelated provider plugins or provider-native shells." }] },
       { label: "Permissions", values: ["Allow, ask, or deny rules", { status: "yes", label: "Sandboxed provider runs", detail: "Commands use an offline VM on Mac ARM64." }] },
       { label: "Platforms", values: ["Mac, Linux, Windows", xcbPlatforms] },
       { label: "License", values: ["MIT", "MIT"] },
@@ -428,8 +429,8 @@ export const comparisons: readonly Comparison[] = [
     tool: "OpenCode",
     title: "xcb vs OpenCode: an open agent or a router for your subscriptions",
     description: "OpenCode is an open agent for 75+ providers and no longer bundles Claude Pro/Max plugins. xcb uses your Claude plan through Claude Code, plus Codex and Devin.",
-    lead: "OpenCode is an open-source coding agent for 75+ providers and local models, and its docs say Anthropic prohibits using a Claude Pro or Max plan through OpenCode plugins. xcb uses your Claude subscription through the unmodified Claude Code binary, along with Codex and the Devin CLI, but it is a router, not an agent you configure.",
-    updated: checkedOn,
+    lead: "OpenCode is an open-source coding agent for 75+ providers and local models, and its docs say Anthropic prohibits using a Claude Pro or Max plan through OpenCode plugins. xcb uses your Claude subscription through the unmodified Claude Code binary, along with Codex and the Devin CLI, routing tasks across the accounts you connect.",
+    updated: "2026-10-01",
     picks: {
       tool: [
         "You want one open-source agent across 75+ providers or local models.",
@@ -447,7 +448,7 @@ export const comparisons: readonly Comparison[] = [
       { aspect: "What it is", tool: "An open-source coding agent for the terminal, IDE, and desktop", xcb: "A router and terminal around Claude Code, Codex, and the Devin CLI" },
       { aspect: "Model access", tool: "75+ providers through API keys, plus local models", xcb: "Your Claude, Codex, and Devin subscriptions, through each provider’s own tool" },
       { aspect: "Subscriptions", tool: "ChatGPT Plus, GitHub Copilot, and GitLab Duo; Claude Pro/Max plugins no longer bundled", xcb: "Claude through the unmodified Claude Code binary, ChatGPT through Codex, and Devin plans" },
-      { aspect: "Customization", tool: "Custom agents and subagents, plugins, MCP servers, and language servers", xcb: "Panes, hooks, and reflex programs; workers get only xcb’s tools, with no MCP servers or plugins" },
+      { aspect: "Customization", tool: "Custom agents and subagents, plugins, MCP servers, and language servers", xcb: "Panes, hooks, and reflex programs; workers use xcb’s tools and registered host MCP servers" },
       { aspect: "Permissions", tool: "Rules that allow, ask about, or deny edits, shell commands, and web fetches", xcb: xcbFacts.sandbox },
       { aspect: "For your own code", tool: "An SDK and a server mode", xcb: xcbFacts.route },
       { aspect: "Platforms", tool: "macOS, Linux, and Windows", xcb: xcbFacts.platforms },
@@ -465,6 +466,7 @@ export const comparisons: readonly Comparison[] = [
       },
     ],
     sources: [
+      { label: "xcb: registered browser and shared tools", href: "https://github.com/hraness/xcb/blob/1e64357a40fb9b0cb167e9803bc572675100d469/docs/tools.md", checkedOn: "2026-10-01" },
       { label: "OpenCode home page", href: "https://opencode.ai/", checkedOn },
       { label: "OpenCode providers", href: "https://opencode.ai/docs/providers/", checkedOn },
       { label: "OpenCode agents", href: "https://opencode.ai/docs/agents/", checkedOn },

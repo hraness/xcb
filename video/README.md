@@ -3,8 +3,7 @@
 A captioned film with no narration, built from the Slopcamera `launch-film`
 template. The scenes draw the same illustrations as the site: `mockups.tsx`
 renders `site/app/mockups/surfaces.tsx` with the fixtures in
-`site/app/mockups/fixtures.ts`, and `copy.ts` takes every number and the
-status from `site/app/launch/facts.ts`.
+`site/app/mockups/fixtures.ts`, and `copy.ts` takes each number from `site/app/launch/facts.ts`.
 
 Run these in `video/`, one at a time; each render is heavy.
 

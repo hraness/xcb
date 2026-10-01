@@ -50,7 +50,7 @@ export default function Reflexes() {
 
           <MarketingSection
             id="gets-better"
-            heading="Gets better as you use it. Only when it can prove it."
+            heading="New parameters have to win a trial."
             headingId="gets-better-title"
             summary="Every 16 labels, xcb fits a challenger anchored on the shipped defaults. It has to beat the active generation on the next 48 labels, which neither has seen."
           >
@@ -62,7 +62,7 @@ export default function Reflexes() {
                 <span className="xcb-evolve-arrow" aria-hidden="true">→</span>
                 <div className="xcb-evolve-step"><strong>trial</strong><span>win on unseen labels</span></div>
                 <span className="xcb-evolve-arrow" aria-hidden="true">→</span>
-                <div className="xcb-evolve-step"><strong>certify</strong><span>act once your replies prove it</span></div>
+                <div className="xcb-evolve-step"><strong>certify</strong><span>act after a replay meets the threshold</span></div>
               </div>
               <p>A challenger is promoted only if, on held-out labels that arrived after it was fitted, it lowers log loss without losing accuracy or ranking quality. Each generation records its parent and the trial that promoted it. <code>xcb reflex rollback settle 0</code> returns to the defaults.</p>
               <p>Trials use the replies that arrive after training. Successful candidates become the active rule; the rest leave it unchanged. Once a trial ends, its labels can help train the next candidate.</p>
@@ -74,13 +74,13 @@ export default function Reflexes() {
             id="malleable"
             heading="Change the logic, not just the weights."
             headingId="malleable-title"
-            summary="Parameters are data and programs are replaceable, so the learned part and the decision logic are separate seams."
+            summary="Replace a decision program or train its parameters independently."
           >
             <div className="xcb-readiness">
-              <div><h3>Replace a program</h3><p>Drop an organism at <code>reflexes/route.algal.json</code> in the state directory to add a gate or combine heads differently. xcb admits it only if it has no effects and no agent calls. Every observation records the digest of the program that made it.</p></div>
+              <div><h3>Replace a program</h3><p>Put a program at <code>reflexes/route.algal.json</code> in the state directory to add a gate or combine heads differently. xcb accepts it only if it has no effects and no agent calls. Every observation records the digest of the program that made it.</p></div>
               <div><h3>Bootstrap from history</h3><p><code>xcb reflex import</code> replays your own labeled history in order, reports how the reflex would have done, and adopts only heads that won a trial. It keeps derived features, not text.</p></div>
-              <div><h3>Acts once it has earned it</h3><p>Continuing a stopped-short turn and answering a go-ahead default to <code>auto</code>. Each acts only after your own replies certify its precision (0.75 and 0.85 as a 99% lower bound), leaves about one turn in ten to you, and goes back to observing if it slips. The deterministic safety gates, a risk veto for deletion, deployment, spending and credentials, and a configured judge&apos;s veto still apply.</p></div>
-              <a className="xcb-compare-guide-link" href="/docs/reflexes">Read the reflex guide ↗</a>
+              <div><h3>Acts once it has earned it</h3><p>Continuing a stopped-short turn and answering a go-ahead default to <code>auto</code>. Each acts after a replay of your own replies meets its estimated precision threshold, and leaves about one eligible turn in ten to you. Later feedback can return it to observation. These estimates have <a href={`${reference}#auto-acting-once-certified`}>statistical limits</a>. Permission checks, detected risk cues, and a configured judge&apos;s veto still apply.</p></div>
+              <a className="xcb-compare-guide-link" href="/docs/reflexes">Read the reflex guide →</a>
             </div>
           </MarketingSection>
         </MarketingPage>

@@ -51,15 +51,17 @@ export default function IntroducingExcalibur() {
       <SiteHeader active="blog" />
       <main id="main" tabIndex={-1}>
         <MarketingArticle
+          showDates={false}
           author={blogAuthor}
           dek={post.dek}
           eyebrow={post.eyebrow}
           heading={post.title}
           provenance={articleProvenanceFromAdmission(post.admission)}
           published={post.published}
+          updated={post.updated}
           after={(
             <>
-              <ArticleSources sources={post.sources} />
+              <ArticleSources showDates={false} sources={post.sources} />
               {related.length === 0 ? null : <ArticleRelatedProducts items={related} />}
               <p className="xcb-blog-back"><a href="/blog">← All posts</a></p>
             </>

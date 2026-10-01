@@ -6,7 +6,7 @@ import { articleJsonLd, createArticleMetadata, NOINDEX_ROBOTS } from "@hraness/w
 import { JsonLdScript } from "@hraness/web-discovery/json-ld";
 import { SiteHeader } from "../../site-header";
 import { blogArticleDiscovery, blogRelatedProducts, blogSite } from "../discovery";
-import { blogBodies, blogStatusLabel } from "../posts.generated";
+import { blogBodies } from "../posts.generated";
 import { blogAuthor, blogFeedPath, blogTitle, findBlogPost, markdownBlogPosts } from "../posts";
 
 export const dynamicParams = false;
@@ -42,17 +42,18 @@ export default async function BlogPost({ params }: { params: Promise<{ slug: str
       <SiteHeader active="blog" />
       <main id="main" tabIndex={-1}>
         <MarketingArticle
+          showDates={false}
           author={blogAuthor}
           dek={entry.dek}
           eyebrow={entry.eyebrow}
           heading={entry.title}
           provenance={articleProvenanceFromAdmission(entry.admission)}
           published={entry.published}
+          updated={entry.updated}
           toc={body.toc}
           after={(
             <>
-              {entry.statusInBody ? null : <p className="xcb-blog-status">{blogStatusLabel}</p>}
-              <ArticleSources sources={entry.sources} />
+              <ArticleSources showDates={false} sources={entry.sources} />
               {related.length === 0 ? null : <ArticleRelatedProducts items={related} />}
               <p className="xcb-blog-back"><a href="/blog">← All posts</a></p>
             </>

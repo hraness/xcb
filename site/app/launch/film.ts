@@ -11,7 +11,7 @@ export const launchFilm: Readonly<{ video: ArticleVideoRecord }> | null = {
   video: {
     name: "Introducing Excalibur",
     description:
-      "A 42-second film with captions and no narration. It opens on one plan at its limit while the others sit unused, then the title card. An xcb thread picks the project and the account; the Claude account whose quota resets first takes the task; a limit mid-task moves the task to another account; xcb tasks and xcb attention show work running in the background; and xcb fleet sends a task from a laptop to a desktop. It closes on what xcb does not do: it raises no usage limit.",
+      "A captioned introduction to xcb: choose an account for a task, favor quota near its reset, continue on an available account after a reported usage limit, and follow work across machines.",
     sources: [
       { src: "/media/xcb-launch.webm", type: "video/webm" },
       { src: "/media/xcb-launch.mp4", type: "video/mp4" },
@@ -21,6 +21,6 @@ export const launchFilm: Readonly<{ video: ArticleVideoRecord }> | null = {
     width: 1920,
     height: 1080,
     duration: "PT42.1S",
-    uploadDate: "2026-09-29",
+    uploadDate: "2026-10-01",
   },
 };

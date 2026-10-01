@@ -27,8 +27,8 @@ export const hubTitle = "How xcb compares with coding agents, terminals, and rou
 export const hubDescription = "xcb runs each coding task on one of your own Claude, Codex, or Devin subscriptions. See where it fits beside agents, agent terminals, and routers.";
 export const hubHeading = "How xcb compares";
 export const hubLead = "xcb runs each coding task on one of your own Claude, Codex, or Devin subscriptions, through that provider’s own tool. It holds the account until the run ends, sandboxes the run, and returns the result to you or to another agent.";
-/** The day the tool descriptions below were last read against their sources. */
-export const hubUpdated: ArticleIsoDate = "2026-09-28";
+/** The day this comparison guide last materially changed. */
+export const hubUpdated: ArticleIsoDate = "2026-10-01";
 
 export const hubGroups: readonly HubGroup[] = [
   {
@@ -121,5 +121,5 @@ export const hubElsewhere: readonly string[] = [
   "You pay for one subscription and want every native feature: use that provider’s own tool.",
   "The agent needs to commit, push, or build for macOS: in xcb, Git is read-only for workers, and commands run in an offline Linux VM on macOS ARM64.",
   "You need providers to run natively on Windows, or Codex or Devin on Linux: Windows provider work requires xcb’s Linux build in WSL2, and Codex and Devin need macOS.",
-  "You want web search, MCP servers, or plugins inside the agent: xcb turns those off in its runs, so use the provider’s tool or an open agent.",
+  "You need the provider’s native shell or unrelated plugins: use its own tool or an open agent. xcb supports registered host MCP servers, including browser tools.",
 ];
