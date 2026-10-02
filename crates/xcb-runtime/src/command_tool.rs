@@ -26,10 +26,12 @@ pub(crate) struct CommandToolResult {
     pub effects: EffectState,
     pub joined: bool,
 }
+
 struct Active {
     cancel: watch::Sender<bool>,
     task: JoinHandle<CommandToolResult>,
 }
+
 /// Snapshot, capture and backend preparation run on a blocking thread. The
 /// handle stays here until joined so a dropped provider wait cannot orphan
 /// the retained input or leave its tool receipt unsettled.
@@ -39,6 +41,7 @@ struct Preparing {
     call: String,
     task: JoinHandle<Result<Prepared>>,
 }
+
 struct Prepared {
     backend: CommandBackend,
     input: CommandInput,
@@ -47,6 +50,7 @@ struct Prepared {
     owned_input: OwnedSnapshot,
     custody: CommandCustody,
 }
+
 /// One ordinary workspace tool call running on a blocking thread. If the
 /// provider wait is dropped mid-call, the call still completes here and its
 /// observed effects settle the receipt before custody can be released.
@@ -55,7 +59,9 @@ struct BlockingCall {
     run: RunRecord,
     call: String,
     task: JoinHandle<(Result<Value>, EffectState)>,
+    cancel: Option<watch::Sender<bool>>,
 }
+
 #[derive(Default)]
 pub(crate) struct CommandTools {
     active: Option<Active>,
@@ -73,7 +79,11 @@ fn prepare(
     workspace: Arc<Workspace>,
     request: CommandRequest,
 ) -> Result<Prepared> {
-    let backend = CommandBackend::load(&backend_root).map_err(|_| Error::Unavailable("offline command runner is not ready; run the supported setup-command-runner.py installer"))?;
+    let backend = CommandBackend::load(&backend_root).map_err(|_| {
+        Error::Unavailable(
+            "offline command runner is not ready; run the supported setup-command-runner.py installer",
+        )
+    })?;
     let command_id = new_id("cmd");
     let snapshots = backend_root.join("snapshots");
     private::directory(&snapshots)?;
@@ -88,7 +98,7 @@ fn prepare(
         snapshot: snapshot.encoded().clone(),
     };
     // Capture verifies the written file against the digest of the bytes
-    // that were encoded once; the backend never re-reads the snapshot.
+    // that were encoded once; the backend never re-reads the snapshot file.
     let owned_input = OwnedSnapshot::capture(&input.snapshot_path, &snapshot_sha256)?;
     Ok(Prepared {
         backend,
@@ -197,6 +207,7 @@ impl CommandTools {
         self.active = Some(Active { cancel, task });
         Ok(())
     }
+
     async fn join_preparation(&mut self) -> Result<Prepared> {
         let Some(preparing) = self.preparing.as_mut() else {
             return Err(Error::Conflict("no command preparation"));
@@ -208,6 +219,7 @@ impl CommandTools {
         result
             .map_err(|_| Error::Unavailable("command preparation worker failed; input retained"))?
     }
+
     /// Run one ordinary workspace tool on a blocking thread. The call's
     /// effects are returned to the caller for settlement; a dropped wait is
     /// joined and settled by cancel_and_join instead.
@@ -226,12 +238,42 @@ impl CommandTools {
                 EffectState::None,
             );
         }
-        let task = tokio::task::spawn_blocking(move || workspace.call_observed(&name, &arguments));
+        let host = if name == "workspace_host_exec" {
+            if let Err(error) = host::admit(&store, &run, workspace.root()) {
+                return (Err(error), EffectState::None);
+            }
+            match host::Request::parse(&arguments, workspace.root()) {
+                Ok(request) => Some(request),
+                Err(error) => return (Err(error), EffectState::None),
+            }
+        } else {
+            None
+        };
+        let (cancel, cancellation) = watch::channel(false);
+        let host_call = host.is_some();
+        let task = tokio::task::spawn_blocking(move || {
+            if let Some(request) = host {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build();
+                return match runtime {
+                    Ok(runtime) => {
+                        runtime.block_on(host::call(workspace.root(), request, cancellation))
+                    }
+                    Err(_) => (
+                        Err(Error::Unavailable("host command owner could not start")),
+                        EffectState::None,
+                    ),
+                };
+            }
+            workspace.call_observed(&name, &arguments)
+        });
         self.blocking = Some(BlockingCall {
             store,
             run,
             call,
             task,
+            cancel: host_call.then_some(cancel),
         });
         let Some(blocking) = self.blocking.as_mut() else {
             unreachable!("blocking call was just stored");
@@ -245,6 +287,7 @@ impl CommandTools {
             EffectState::Uncertain,
         ))
     }
+
     pub async fn wait(&mut self) -> CommandToolResult {
         let Some(active) = self.active.as_mut() else {
             return CommandToolResult {
@@ -263,6 +306,7 @@ impl CommandTools {
             joined: false,
         })
     }
+
     /// Join every retained handle: an interrupted preparation, an
     /// interrupted workspace call and the active command owner. Their
     /// receipts settle here so a dropped provider wait never leaves a
@@ -293,6 +337,9 @@ impl CommandTools {
             ));
         }
         if let Some(blocking) = self.blocking.take() {
+            if let Some(cancel) = &blocking.cancel {
+                cancel.send_replace(true);
+            }
             let effects = match blocking.task.await {
                 Ok((_, effects)) => effects,
                 Err(_) => EffectState::Uncertain,
@@ -311,6 +358,7 @@ impl CommandTools {
         folded
     }
 }
+
 fn combine_effects(previous: EffectState, next: EffectState) -> EffectState {
     if previous == EffectState::Uncertain || next == EffectState::Uncertain {
         EffectState::Uncertain
@@ -320,6 +368,7 @@ fn combine_effects(previous: EffectState, next: EffectState) -> EffectState {
         EffectState::None
     }
 }
+
 /// Settle the receipt of a call whose provider wait was dropped. An
 /// uncertain call, or a receipt that cannot be written, keeps custody.
 fn settle_interrupted(
@@ -339,13 +388,20 @@ fn settle_interrupted(
         joined: true,
     }
 }
+
 impl Drop for CommandTools {
     fn drop(&mut self) {
         if let Some(active) = &self.active {
             active.cancel.send_replace(true);
         }
+        if let Some(blocking) = &self.blocking
+            && let Some(cancel) = &blocking.cancel
+        {
+            cancel.send_replace(true);
+        }
     }
 }
+
 // This capability is created only for the unique input just published by this
 // invocation. It is never reconstructed from a historical job or caller path.
 struct OwnedSnapshot {
@@ -355,6 +411,7 @@ struct OwnedSnapshot {
     identity: xcb_core::FileIdentity,
     sha256: String,
 }
+
 const SNAPSHOT_LIMIT: u64 = 96 * 1024 * 1024;
 
 /// Device, inode, owner, group, mode, links, size, mtime and ctime: every
@@ -488,18 +545,32 @@ fn finish_command(
         };
     }
     let (mut output, effects) = publication;
-    if store.clear_command_custody(run, &outcome.custody).is_err() {
+    // A partial publication is itself an unresolved effect. Keep both the
+    // command custody marker and the tool intent so recovery can reconcile
+    // the exact guest receipt and real worktree before any retry.
+    if effects == EffectState::Uncertain {
         return CommandToolResult {
-            output: Err(Error::Unavailable("command custody settlement failed")),
-            effects: EffectState::Uncertain,
+            output: Err(Error::Unavailable(
+                "command publication is uncertain; account custody retained",
+            )),
+            effects,
             joined: true,
         };
     }
-    if effects != EffectState::Uncertain && store.settle_tool(run, call).is_err() {
+    // Settle the tool intent before clearing command custody. If either write
+    // is ambiguous, leaving custody in place preserves an exact recovery key.
+    if store.settle_tool(run, call).is_err() {
         return CommandToolResult {
             output: Err(Error::Unavailable(
                 "command effect receipt could not settle",
             )),
+            effects: EffectState::Uncertain,
+            joined: true,
+        };
+    }
+    if store.clear_command_custody(run, &outcome.custody).is_err() {
+        return CommandToolResult {
+            output: Err(Error::Unavailable("command custody settlement failed")),
             effects: EffectState::Uncertain,
             joined: true,
         };
@@ -534,6 +605,7 @@ fn clipped_at(value: &str, maximum: usize) -> (&str, bool) {
     }
     (&value[..end], end != value.len())
 }
+
 fn publish(
     workspace: &Workspace,
     snapshot: &crate::broker::snapshot::CommandSnapshot,
@@ -552,11 +624,16 @@ fn publish(
                 outcome.error.as_deref().unwrap_or("command did not start"),
                 4096,
             );
-            return Ok(
-                json!({"commandId":outcome.custody.command_id,"status":"not_started",
-                "joined":true,"published":false,"error":error,"truncated":truncated,
-                "network":"none","platform":"linux"}),
-            );
+            return Ok(json!({
+                "commandId": outcome.custody.command_id,
+                "status": "not_started",
+                "joined": true,
+                "published": false,
+                "error": error,
+                "truncated": truncated,
+                "network": "none",
+                "platform": "linux"
+            }));
         };
         let eligible = !cancelled
             && !output.cancelled
@@ -600,17 +677,28 @@ fn publish(
                 (Some(text), cut)
             })
             .unwrap_or((None, false));
-        Ok(
-            json!({"commandId":outcome.custody.command_id,"exitCode":output.exit_code,
-            "stdout":stdout,"stderr":stderr,"timedOut":output.timed_out,
-            "cancelled":cancelled || output.cancelled,"truncated":output.truncated || stdout_cut || stderr_cut || error_cut,
-            "joined":true,"network":"none","platform":"linux","published":eligible,
-            "scratchCleanupPending":output.cleanup_pending,
-            "scratchCleanupNotice":output.cleanup_pending.then_some("Command joined; private scratch cleanup is pending. Execution and publication results remain valid."),
-            "publication":publication,"stagedChangesRetained":!eligible,
-            "gitInspectionAvailable":snapshot.document.git.is_some(),"gitUnavailable":snapshot.git_unavailable,
-            "excludedInputPaths":excluded,"excludedPathsTruncated":excluded.len() != snapshot.excluded.len(),"error":error}),
-        )
+        Ok(json!({
+            "commandId": outcome.custody.command_id,
+            "exitCode": output.exit_code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "timedOut": output.timed_out,
+            "cancelled": cancelled || output.cancelled,
+            "truncated": output.truncated || stdout_cut || stderr_cut || error_cut,
+            "joined": true,
+            "network": "none",
+            "platform": "linux",
+            "published": eligible,
+            "scratchCleanupPending": output.cleanup_pending,
+            "scratchCleanupNotice": output.cleanup_pending.then_some("Command joined; private scratch cleanup is pending. Execution and publication results remain valid."),
+            "publication": publication,
+            "stagedChangesRetained": !eligible,
+            "gitInspectionAvailable": snapshot.document.git.is_some(),
+            "gitUnavailable": snapshot.git_unavailable,
+            "excludedInputPaths": excluded,
+            "excludedPathsTruncated": excluded.len() != snapshot.excluded.len(),
+            "error": error
+        }))
     })();
     (result, effects)
 }
@@ -636,5 +724,6 @@ pub async fn recover(store: &Store, run: &RunRecord, expected_digest: &str) -> R
     store.reconcile_command_custody(&run.id, expected_digest, custody)
 }
 
+mod host;
 #[cfg(all(test, unix))]
 mod tests;
