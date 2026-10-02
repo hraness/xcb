@@ -10,6 +10,18 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+- `xcb backlog add --model provider/model[/effort]` pins a managed task to
+  one observed model. The pin resolves to a canonical key at admission
+  (unobserved, ambiguous, and `routing never`-excluded values are refused),
+  implies the model's provider as required, and is stamped on every worker
+  session so failover stays inside the pin.
+- Worker agents can pin the same way with `xcb_backlog_add`'s optional
+  `model` field.
+- A queued task whose pinned model later lands on `routing never` fails at
+  dispatch instead of waiting on a condition nothing lifts.
+
 ## 0.17.4 - 2026-10-02
 
 Accounts can run more than one task at a time.
