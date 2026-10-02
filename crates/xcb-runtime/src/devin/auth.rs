@@ -279,7 +279,7 @@ pub async fn login_with_cancel(
     pin: &crate::process::Pin,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
-    super::runtime_admitted(pin)?;
+    super::runtime_admitted_with_catalog(store.root(), pin)?;
     login_inner(store, account, pin, cancel).await
 }
 

@@ -76,7 +76,10 @@ public `key`, `label` and `observedAtMs`. Keys match `xcb models` and accounts
 match `xcb accounts`. Qualifying needs a model seen in the last 24 hours; once
 qualified, a model stays listed without further catalog refreshes. A reason is
 `application_not_qualified`, `account_disabled`, `account_busy`, `not_connected`,
-`runtime_unavailable`, `models_unavailable`, or `null` when ready.
+`runtime_unavailable`, `models_unavailable`, or `null` when ready. `busy` is
+true while the account has any unfinished run; `account_busy` means its runs
+reached the configured `max_runs_per_account` limit, so the account cannot
+take another task right now.
 
 A qualified account additionally carries `qualification` with `runtimeVersion`,
 `runtimeDigest`, `evidenceDigest` and `expiresAt`, which is always `null`:

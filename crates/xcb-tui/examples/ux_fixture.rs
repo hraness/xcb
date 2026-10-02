@@ -127,6 +127,7 @@ fn fixture() -> View {
         quota_blocked_until_ms: None,
         runway: xcb_core::usage::Estimate::unknown("synthetic fixture"),
         busy: true,
+        active_runs: 1,
         enabled: true,
         authentication_required: false,
     });

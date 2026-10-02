@@ -19,13 +19,6 @@ describe("cli binary discovery", () => {
     expect(candidates.some((c) => c.includes(".local"))).toBe(true);
   });
 
-  test("pre-0.4.0 pin names apply only when the XCB_* variable is unset", () => {
-    const env = (name: string) => name === "AGENTMIXER_CLAUDE" ? "/legacy/claude" : undefined;
-    expect(cliBinaryCandidates("claude", env)[0]).toBe("/legacy/claude");
-    const both = (name: string) => name === CLI_CLAUDE_ENV ? "/new/claude" : name === "AGENTMIXER_CLAUDE" ? "/legacy/claude" : undefined;
-    expect(cliBinaryCandidates("claude", both)[0]).toBe("/new/claude");
-  });
-
   test("inspection rejects missing, non-executable and non-regular targets", async () => {
     const root = await dir();
     await writeFile(join(root, "plain"), "not executable", { mode: 0o644 });

@@ -21,7 +21,7 @@ describe("compatibility CLI update policy", () => {
     for (const argv of [[], ["chat"], ["run", "-p", "task"], ["resume"], ["doctor"], ["./workspace"], ["--provider", "claude"]]) {
       expect(options(argv).suppressAutomatic).toBe(false);
     }
-    for (const command of ["auth", "sessions", "judge", "migrate", "update"]) {
+    for (const command of ["auth", "sessions", "judge", "update"]) {
       expect(options([command]).suppressAutomatic).toBe(true);
     }
     expect(options(["run"], {}, false, true).suppressAutomatic).toBe(true);

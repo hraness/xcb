@@ -92,6 +92,10 @@ pub enum BacklogCommand {
         /// Exact project directory; required when the target is the thread.
         #[arg(long)]
         workspace: Option<PathBuf>,
+        /// Pin the task to one observed model (provider/model[/effort]);
+        /// omitted or "auto" routes automatically.
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Edit undispatched work; a revision protects against concurrent edits.
     Edit {
@@ -874,6 +878,7 @@ pub async fn backlog(
             priority,
             id,
             workspace,
+            model,
         }) => {
             runnable = ready;
             let (conversation, workspace) =
@@ -887,6 +892,7 @@ pub async fn backlog(
                     prompt,
                     !ready,
                     priority,
+                    model.filter(|model| model != "auto"),
                 )
                 .await?
         }

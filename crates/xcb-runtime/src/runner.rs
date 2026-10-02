@@ -70,6 +70,7 @@ impl Diagnostic {
             | Error::Unavailable(_)
             | Error::CodexRpc { .. }
             | Error::CodexNotification { .. }
+            | Error::CodexNativeTool { .. }
             | Error::DevinRpc { .. }
             | Error::DevinModelChoices { .. }
             | Error::Message(_)
@@ -667,11 +668,7 @@ pub(crate) async fn prepare(
     token: Option<&str>,
     tools: bool,
 ) -> Result<Launch> {
-    if pin.provider != Provider::Claude || !claude::version_admitted(&pin.version) {
-        return Err(Error::Unavailable(
-            "native execution requires an admitted Claude adapter; other providers remain unqualified",
-        ));
-    }
+    claude::runtime_admitted_with_catalog(root, pin)?;
     if !sandbox::available() {
         return Err(Error::Unavailable(
             "native OS confinement is not qualified on this platform; no unsandboxed fallback",
@@ -728,11 +725,7 @@ pub(crate) async fn prepare(
     token: Option<&str>,
     tools: bool,
 ) -> Result<Launch> {
-    if pin.provider != Provider::Claude || !claude::version_admitted(&pin.version) {
-        return Err(Error::Unavailable(
-            "native execution requires an admitted Claude adapter; other providers remain unqualified",
-        ));
-    }
+    claude::runtime_admitted_with_catalog(root, pin)?;
     let status = sandbox::linux_sandbox(root);
     if !status.qualified {
         return Err(Error::Unavailable(
@@ -852,7 +845,7 @@ fn prepare_codex_native(
     proxy: Option<&crate::native_mcp::NativeMcpProxy>,
 ) -> Result<(Launch, crate::codex::CodexProtocol)> {
     use crate::codex::{self, CodexOptions, CodexProtocol};
-    codex::runtime_admitted(pin)?;
+    codex::runtime_admitted_with_catalog(store.root(), pin)?;
     if !sandbox::available() {
         return Err(Error::Unavailable(
             "Codex requires qualified native OS confinement",
@@ -982,7 +975,7 @@ pub(crate) async fn prepare_devin(
     run: Option<&RunRecord>,
 ) -> Result<(Launch, crate::devin::DevinProtocol)> {
     use crate::devin::{self, DevinBridge, DevinOptions, DevinProtocol};
-    devin::runtime_admitted(pin)?;
+    devin::runtime_admitted_with_catalog(store.root(), pin)?;
     if !sandbox::available() {
         return Err(Error::Unavailable(
             "Devin requires qualified native OS confinement",
@@ -1146,6 +1139,49 @@ async fn probe_devin(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<V
                 "Devin returned no models; refresh the account credentials",
             ));
         }
+        if let Some(account) = account {
+            // The provider's own account meter is the GetUserStatus call the
+            // CLI's `auth status` makes; the host reads it directly with the
+            // stored session token. Metering is best-effort: a failure leaves
+            // usage unmeasured instead of failing the account refresh.
+            let token = crate::devin::auth::token(store, account)?;
+            if let Ok(status) =
+                crate::devin::status::user_status(token.as_str(), crate::devin::VERSION, now_ms())
+                    .await
+            {
+                let pool = store.account(account)?.quota_pool;
+                let now = now_ms();
+                for (name, window) in [
+                    ("devin.daily", status.daily),
+                    ("devin.weekly", status.weekly),
+                ] {
+                    let Some(window) = window else { continue };
+                    let point = QuotaPoint {
+                        pool: pool.clone(),
+                        window: Id::new(name)?,
+                        // The service reports remaining percentage; the store
+                        // records usage as used_percent.
+                        used_percent: 100.0 - window.remaining_percent,
+                        resets_at_ms: window.resets_at_ms,
+                        observed_at_ms: now,
+                    };
+                    if point.validate().is_ok() {
+                        store.record_account_quota(
+                            run.as_ref()
+                                .ok_or(Error::Conflict("quota probe has no lease"))?,
+                            &point,
+                        )?;
+                    }
+                }
+                if status.email.is_some() || status.plan_name.is_some() {
+                    store.set_account_identity(
+                        account,
+                        status.email,
+                        status.plan_name.map(|plan| format!("Devin {plan}")),
+                    )?;
+                }
+            }
+        }
         Ok(models)
     })
     .await
@@ -1176,22 +1212,21 @@ pub fn provider_admitted(root: &Path, pin: &Pin) -> bool {
     if crate::catalog::denied(root, &pin.sha256) {
         return false;
     }
-    let listed = || crate::catalog::admitted(root, pin.provider, &pin.version, &pin.sha256);
     match pin.provider {
         Provider::Claude => {
-            claude::version_admitted(&pin.version)
+            claude::runtime_admitted_with_catalog(root, pin).is_ok()
                 && (sandbox::available()
                     || (cfg!(target_os = "linux") && sandbox::linux_sandbox(root).qualified))
         }
         Provider::Codex => {
             cfg!(target_os = "macos")
                 && sandbox::available()
-                && (crate::codex::runtime_admitted(pin).is_ok() || listed())
+                && crate::codex::runtime_admitted_with_catalog(root, pin).is_ok()
         }
         Provider::Devin => {
             cfg!(target_os = "macos")
                 && sandbox::available()
-                && (crate::devin::runtime_admitted(pin).is_ok() || listed())
+                && crate::devin::runtime_admitted_with_catalog(root, pin).is_ok()
         }
     }
 }
@@ -1509,7 +1544,7 @@ async fn login_codex_inner(
     {
         return Err(Error::Unavailable("Codex sign-in cancelled before launch"));
     }
-    crate::codex::runtime_admitted(pin)?;
+    crate::codex::runtime_admitted_with_catalog(store.root(), pin)?;
     let status_output = std::io::stderr().as_fd().try_clone_to_owned()?;
     let mut artifacts = LaunchArtifacts::create(store.root())?;
     let snapshot_pin = Pin {
@@ -2301,7 +2336,23 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
                 }
                 Err(Error::Protocol("usage frame limit"))
             }).await.map_err(|_| Error::Unavailable("usage query timed out"))??;
-            for point in parse_quotas(&response, &store.account(account)?.quota_pool, now_ms())? { store.record_account_quota(run.as_ref().ok_or(Error::Conflict("quota probe has no lease"))?, &point)?; }
+            let pool = store.account(account)?.quota_pool;
+            let now = now_ms();
+            let mut points = parse_quotas(&response, &pool, now)?;
+            if points.is_empty() {
+                // `get_usage` resolves only for stored-credential profiles, so
+                // env-token launches never serve it. Browser sign-ins fall
+                // back to the provider's own usage endpoint; setup tokens
+                // lack its scope and stay passively metered.
+                if let Ok(Some(usage)) = auth::claude_usage(store, account).await {
+                    points = parse_quotas(
+                        &json!({"rate_limits_available": true, "rate_limits": usage}),
+                        &pool,
+                        now,
+                    )?;
+                }
+            }
+            for point in points { store.record_account_quota(run.as_ref().ok_or(Error::Conflict("quota probe has no lease"))?, &point)?; }
             // subscription_type is the provider's own plan report; the profile
             // file inside our launch profile may carry the account email.
             let plan = response
@@ -2488,7 +2539,7 @@ pub async fn run(
     let workspace = Workspace::open(Path::new(&session.workspace))?;
     if session.model.provider == Provider::Codex {
         let pin = Pin::load(store.root(), Provider::Codex)?;
-        crate::codex::runtime_admitted(&pin)?;
+        crate::codex::runtime_admitted_with_catalog(store.root(), &pin)?;
         let run = store.prepare_run(&session.id, session.revision, now_ms())?;
         #[cfg(target_os = "macos")]
         let mut native_proxy = if !input.pane_generation {
@@ -2571,7 +2622,7 @@ pub async fn run(
     }
     if session.model.provider == Provider::Devin {
         let pin = Pin::load(store.root(), Provider::Devin)?;
-        crate::devin::runtime_admitted(&pin)?;
+        crate::devin::runtime_admitted_with_catalog(store.root(), &pin)?;
         let run = store.prepare_run(&session.id, session.revision, now_ms())?;
         let (launch, protocol) = match prepare_devin(
             &store,

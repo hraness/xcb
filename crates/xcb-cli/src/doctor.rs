@@ -917,6 +917,7 @@ mod tests {
                 quota_blocked_until_ms: None,
                 runway: Estimate::unknown("quota_or_burn_unmeasured"),
                 busy: false,
+                active_runs: 0,
                 enabled: health != Health::Off,
                 authentication_required: false,
             },

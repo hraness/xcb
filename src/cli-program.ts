@@ -6,7 +6,7 @@ import { SqliteAccountLeases } from "./accounts.ts";
 import { createPublicWeb } from "./public-web.ts";
 import { boundedText } from "./validation.ts";
 
-import { assertWorkspaceStateSeparation, ensureCliState, migrateLegacyState } from "./cli/state.ts";
+import { assertWorkspaceStateSeparation, ensureCliState } from "./cli/state.ts";
 import { inspectCliBinary, CLI_CODEX_ENV, CLI_CLAUDE_ENV, CLI_DEVIN_ENV, type CliProviderName } from "./cli/binaries.ts";
 import { claudeLogin, claudeAuthStatus, clearClaudeOAuthToken } from "./cli/auth.ts";
 import { cliCodexHostDiagnostic, codexAuthStatus, codexLogin, codexLogout } from "./cli/codex.ts";
@@ -45,7 +45,6 @@ Usage:
   xcb-compat judge token       store the jev API key read from stdin (piped, never echoed)
   xcb-compat judge logout      remove the stored jev API key
   xcb-compat judge test        ask the judge a bounded question batch (live call)
-  xcb-compat migrate           copy legacy AgentMixer state into ~/.xcb (keeps the original)
   xcb-compat update            install the latest verified compatibility release
   xcb-compat update check      check for a newer release (--json for structured output)
   xcb-compat update status     show this installation's update policy
@@ -472,13 +471,6 @@ export async function main(argv: readonly string[], version: string): Promise<nu
     return fail("requires node ≥ 24 or bun ≥ 1.3.14");
   }
   const { path: stateRoot } = await ensureCliState();
-  if (command === "migrate") {
-    if (rest.length !== 0) return fail("usage: xcb-compat migrate");
-    const migrated = await migrateLegacyState(stateRoot);
-    process.stdout.write(`${green("✓")} migrated ${migrated.entries} entries from ${migrated.source}\n`);
-    process.stdout.write(`${dim("the legacy directory was left untouched — remove it yourself when ready")}\n`);
-    return 0;
-  }
   if (command === "doctor") return await commandDoctor(stateRoot);
   if (command === "auth") {
     const sub = rest[0];

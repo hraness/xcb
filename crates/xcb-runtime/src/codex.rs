@@ -6,7 +6,8 @@ pub(crate) use config::configuration_with_native;
 pub(crate) use config::static_catalog_with_native;
 pub use config::{
     ARGS, Admission, BINARY_SHA256, QUALIFIED_MODELS, SCHEMA_SHA256, StaticCatalog, VERSION,
-    configuration, runtime_admitted, static_catalog, thread_configuration, version_admitted,
+    configuration, runtime_admitted, runtime_admitted_with_catalog, static_catalog,
+    thread_configuration, version_admitted,
 };
 #[cfg(all(test, unix))]
 pub(crate) use config::{fixture_catalog_source, static_catalog_bound};
@@ -415,6 +416,46 @@ pub fn parse_quotas(value: &Value, pool: &Id, observed: u64) -> Result<Vec<Quota
     Ok(points)
 }
 
+fn reset_credit_ids(value: &Value) -> Result<Vec<String>> {
+    let container = &value["rateLimitResetCredits"];
+    if container.is_null() {
+        return Ok(Vec::new());
+    }
+    object(container)?;
+    let credits = container["credits"]
+        .as_array()
+        .ok_or(Error::Protocol("Codex reset credit list"))?;
+    require(credits.len() <= 16, "Codex reset credit bound")?;
+    let mut ids = Vec::new();
+    for credit in credits {
+        object(credit)?;
+        let id = credit["id"]
+            .as_str()
+            .or_else(|| credit["creditId"].as_str())
+            .or_else(|| credit["credit_id"].as_str());
+        if let Some(id) = id {
+            require(id.len() <= 120, "Codex reset credit id bound")?;
+            ids.push(id.to_string());
+        }
+    }
+    Ok(ids)
+}
+
+fn reset_credit_consume(value: &Value, pool: &Id, points: &[QuotaPoint]) -> Result<Option<Value>> {
+    let exhausted = points.iter().any(|point| point.used_percent >= 100.0)
+        || value["ordinaryUsageAllowed"] == false;
+    if !exhausted {
+        return Ok(None);
+    }
+    let Some(credit_id) = reset_credit_ids(value)?.into_iter().next() else {
+        return Ok(None);
+    };
+    let window = points.iter().map(|p| p.resets_at_ms).max().unwrap_or(0);
+    Ok(Some(
+        json!({"creditId": credit_id, "idempotencyKey": crate::digest(format!("{pool}.{credit_id}.{window}").as_bytes())}),
+    ))
+}
+
 impl CodexProtocol {
     pub(crate) async fn read_quotas(
         &mut self,
@@ -428,7 +469,26 @@ impl CodexProtocol {
         let value = self
             .rpc(process, "account/rateLimits/read", json!({}))
             .await?;
-        parse_quotas(&value, pool, now_ms())
+        let observed = now_ms();
+        let points = parse_quotas(&value, pool, observed)?;
+        // The account is at a limit and still holds a consumable reset
+        // credit: spend exactly one, bound to this account and window so a
+        // retried probe cannot double-spend, then re-read. A failed consume
+        // or an empty credit list leaves the window-bound answer unchanged.
+        let Some(request) = reset_credit_consume(&value, pool, &points)? else {
+            return Ok(points);
+        };
+        if self
+            .rpc(process, "account/rateLimitResetCredit/consume", request)
+            .await
+            .is_err()
+        {
+            return Ok(points);
+        }
+        let refreshed = self
+            .rpc(process, "account/rateLimits/read", json!({}))
+            .await?;
+        parse_quotas(&refreshed, pool, now_ms())
     }
     // Other platforms retain the pure codec for tests, but cannot launch it.
     #[cfg_attr(any(windows, not(any(target_os = "macos", test))), allow(dead_code))]
@@ -739,23 +799,38 @@ impl CodexProtocol {
                 .all(|review| review.action["toolName"] == tool),
             "Codex reviewed native tool changed",
         )?;
-        require(
-            item["server"] == "cua_repl"
-                && ["js", "js_reset", "turn_ended"].contains(&tool.as_str())
-                && self
-                    .options
-                    .native_mcp
-                    .as_ref()
-                    .and_then(|config| config["enabled_tools"].as_array())
-                    .is_some_and(|tools| tools.contains(&json!(tool)))
-                && item["arguments"].is_object()
-                && serde_json::to_vec(&item["arguments"])?.len() <= MAX_JSON_BYTES
-                && item["appContext"].is_null()
-                && item["pluginId"].is_null()
-                && item["mcpAppResourceUri"].is_null()
-                && item["mcpAppUi"].is_null(),
-            "Codex unadmitted native tool",
-        )?;
+        // Codex's own server carries read-only MCP introspection builtins the
+        // model may call regardless of configured connectors; outside xcb these
+        // are always available, so parity requires admitting them here. They
+        // never reach a configured MCP server, so enabled_tools does not apply.
+        let codex_introspection = item["server"] == "codex"
+            && [
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource",
+            ]
+            .contains(&tool.as_str());
+        let cua_repl_tool = item["server"] == "cua_repl"
+            && ["js", "js_reset", "turn_ended"].contains(&tool.as_str())
+            && self
+                .options
+                .native_mcp
+                .as_ref()
+                .and_then(|config| config["enabled_tools"].as_array())
+                .is_some_and(|tools| tools.contains(&json!(tool)));
+        if !((codex_introspection || cua_repl_tool)
+            && item["arguments"].is_object()
+            && serde_json::to_vec(&item["arguments"])?.len() <= MAX_JSON_BYTES
+            && item["appContext"].is_null()
+            && item["pluginId"].is_null()
+            && item["mcpAppResourceUri"].is_null()
+            && item["mcpAppUi"].is_null())
+        {
+            return Err(Error::CodexNativeTool {
+                server_sha256: crate::digest(item["server"].as_str().unwrap_or("").as_bytes()),
+                tool_sha256: crate::digest(tool.as_bytes()),
+            });
+        }
         if completed {
             let call = self
                 .native_calls
@@ -923,7 +998,7 @@ impl CodexProtocol {
             Some("account/updated") => account_identity_notice(&value["params"]),
             Some("account/rateLimits/updated") => {
                 let p = &value["params"];
-                closed(p, &["rateLimits"])?;
+                closed(p, &["rateLimits", "rateLimitResetCredits"])?;
                 require(
                     p["rateLimits"].is_null() || p["rateLimits"].is_object(),
                     "Codex rate limit shape",

@@ -239,29 +239,6 @@ original in local history. Missing or malformed compaction advice falls back
 to the deterministic Gobstopper plan; unasked candidates beyond the 64-question
 bound remain verbatim.
 
-## Migrating from AgentMixer
-
-The 0.4.0 line renames the compatibility package's public identifiers from
-AgentMixer to xcb: `@hraness/agentmixer` → `@hraness/xcb`, the `agentmixer`
-executable → `xcb-compat` (the bare `xcb` name belongs to the native Rust
-CLI), `~/.agentmixer` → `~/.xcb`, `AGENTMIXER_*` environment
-variables → `XCB_*`, `agentmixer.*` schema ids → `xcb.*`, `agentmixer_*`
-SQLite tables → `xcb_*`, and the `AgentMixer` runtime class → `Xcb`.
-
-Existing state is never renamed or overwritten silently:
-
-- Run `xcb-compat migrate` once to copy `~/.agentmixer` (or `$AGENTMIXER_STATE`) into
-  the canonical root. The target must be empty; the legacy directory is left
-  untouched so an older install still works — remove it yourself when ready.
-- Alternatively, point `XCB_STATE` at the existing directory; the
-  `agentmixer_*` SQLite tables rename to `xcb_*` lazily on first open either
-  way.
-- `AGENTMIXER_CLAUDE` / `AGENTMIXER_CODEX` binary pins are still honored when
-  the `XCB_*` variable is unset; rename them when convenient.
-- Update dependents: package imports use `@hraness/xcb`, the runtime class is
-  `Xcb`, and shell invocations use `xcb-compat`. The last AgentMixer release line is
-  `@hraness/agentmixer@0.3.0` under tag `v0.3.0`.
-
 ## Application-owned capability profiles
 
 An application can define its own tools with `createCapabilityProfile()` and

@@ -20,6 +20,11 @@ pub const SCHEMA_SHA256: &str = "ca6bdd8786588a11b8b0713d697a211a703f688e20776d2
 pub const REVIEWED_BUILDS: &[(&str, &str, &str)] = &[
     (VERSION, BINARY_SHA256, SCHEMA_SHA256),
     (
+        "0.159.3",
+        "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878",
+        "ca6bdd8786588a11b8b0713d697a211a703f688e20776d2d1cb5054dc749f139",
+    ),
+    (
         "0.158.0",
         "788a818fbb9596869c7a487554507cb8bdca17584b8671112b23f9e225ba35c8",
         "b245d4b027cf8d1624c0c6733e6918c042bc278886251e7f2d90a3f29abfac2d",
@@ -98,6 +103,28 @@ pub fn runtime_admitted(pin: &Pin) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Accept the baked release builds and exact provider binaries that the
+/// reviewed-builds catalog has admitted. The catalog is intentionally an
+/// exact `(version, sha256)` allowlist: it makes compatible Codex updates
+/// usable without waiting for an xcb release while keeping protocol changes,
+/// unknown bytes, and explicitly denied builds unavailable.
+pub fn runtime_admitted_with_catalog(root: &Path, pin: &Pin) -> Result<()> {
+    if crate::catalog::denied(root, &pin.sha256) {
+        return Err(Error::Unavailable(
+            "Codex build is denied by the reviewed-builds catalog",
+        ));
+    }
+    if runtime_admitted(pin).is_ok()
+        || (pin.provider == Provider::Codex
+            && crate::catalog::admitted(root, Provider::Codex, &pin.version, &pin.sha256))
+    {
+        return Ok(());
+    }
+    Err(Error::Unavailable(
+        "Codex build has no broker-only qualification; install the qualified build and run xcb doctor",
+    ))
 }
 
 /// Construction is restricted to checked runtime metadata. This binds the
@@ -310,7 +337,7 @@ fn store_catalog_source(path: &Path, expected_sha256: &str, source: &Value) -> R
 /// The extracted catalog is cached under `root/providers/` keyed by the exact
 /// executable digest, so a turn does not re-scan the binary.
 pub fn static_catalog(root: &Path, pin: &Pin, selected: Option<&str>) -> Result<StaticCatalog> {
-    runtime_admitted(pin)?;
+    runtime_admitted_with_catalog(root, pin)?;
     static_catalog_bound(root, pin, selected, &pin.sha256)
 }
 
@@ -706,11 +733,12 @@ mod tests {
             pin.version = "0.0.0".into();
             assert!(runtime_admitted(&pin).is_err());
         }
-        let schemas: BTreeSet<_> = REVIEWED_BUILDS
-            .iter()
-            .map(|(_, _, schema)| schema)
-            .collect();
-        assert_eq!(schemas.len(), REVIEWED_BUILDS.len());
+        // Distinct versions may share a schema when the generated schema is
+        // unchanged; version and executable digests stay unique.
+        let versions: BTreeSet<_> = REVIEWED_BUILDS.iter().map(|(v, _, _)| v).collect();
+        let executables: BTreeSet<_> = REVIEWED_BUILDS.iter().map(|(_, s, _)| s).collect();
+        assert_eq!(versions.len(), REVIEWED_BUILDS.len());
+        assert_eq!(executables.len(), REVIEWED_BUILDS.len());
     }
 
     #[test]
@@ -738,6 +766,51 @@ mod tests {
             changed["models"][0]["node_repl_disabled"] = unsupported;
             assert!(transform_catalog(changed, Some("gpt-6-astra"), true).is_err());
         }
+    }
+
+    #[test]
+    fn catalog_admission_reaches_the_launch_gate_without_becoming_fail_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        private::directory(&root.join("providers")).unwrap();
+        let digest = "a".repeat(64);
+        private::create(
+            &root.join("providers/catalog.json"),
+            serde_json::json!({
+                "version": 1,
+                "codex": [{"version": "0.160.0", "sha256": digest.clone()}],
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        let pin = Pin {
+            provider: Provider::Codex,
+            executable: "/synthetic/codex".into(),
+            sha256: digest.clone(),
+            version: "0.160.0".into(),
+            host_sha256: "0".repeat(64),
+            observed_at_ms: 0,
+        };
+        runtime_admitted_with_catalog(&root, &pin).unwrap();
+
+        let mut unknown = pin.clone();
+        unknown.version = "0.160.1".into();
+        assert!(runtime_admitted_with_catalog(&root, &unknown).is_err());
+
+        private::replace(
+            &root.join("providers/catalog.json"),
+            serde_json::json!({
+                "version": 1,
+                "codex": [{"version": "0.160.0", "sha256": digest.clone()}],
+                "deny": {"codex": [digest.clone()]},
+            })
+            .to_string()
+            .as_bytes(),
+            &crate::digest(private::read(&root.join("providers/catalog.json"), 64 * 1024).unwrap()),
+        )
+        .unwrap();
+        assert!(runtime_admitted_with_catalog(&root, &pin).is_err());
     }
 
     // Unix catalog paths; Codex launch is refused on Windows.

@@ -213,7 +213,7 @@ command, setting, and exit code.
 
 - **Tools:** providers use xcb's workspace tools and registered host MCP servers. Native shells and unrelated provider plugins remain unavailable; see [browser and shared tools](docs/tools.md).
 - **Tests and builds:** the [command runner](docs/command-runner.md) is an offline Linux VM on macOS ARM64; Git is read-only there, and native macOS builds can't run.
-- **Concurrency:** each account runs one provider turn at a time, and tasks in the same project folder take turns.
+- **Concurrency:** each account runs one provider turn at a time by default; `max_runs_per_account` in `config.json` (1–32) raises how many tasks may share an account, while sign-in and account checks still take the account alone. Tasks in the same project folder take turns.
 - **Remote devices:** `xcb link` needs a relay deployed from this repository's `convex/` folder ([remote operations](docs/remote-operations.md)).
 - **Managed harness:** the self-tuning harness is in development; the current build does not run self-modifying routing policies ([design](docs/managed-harness.md)).
 
@@ -228,8 +228,7 @@ command, setting, and exit code.
 
 ## More
 
-The name xcb is short for Excalibur. xcb was formerly AgentMixer: `xcb accounts import-agentmixer --source <path>`
-copies one Claude credential ([migrating](docs/compatibility.md#migrating-from-agentmixer)).
+The name xcb is short for Excalibur. xcb was formerly AgentMixer.
 The [compatibility reference](docs/compatibility.md) covers the TypeScript
 package and its `xcb-compat` CLI. Supported Unix Bun/npm global copies update
 before interactive work; `xcb-compat update disable` turns that off. SDK imports

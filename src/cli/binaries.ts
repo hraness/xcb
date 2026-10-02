@@ -14,10 +14,6 @@ import { assertPrivateStat, canonicalizePrivatePath, matchesPrivateStat, openPri
 export const CLI_CODEX_ENV = "XCB_CODEX";
 export const CLI_CLAUDE_ENV = "XCB_CLAUDE";
 export const CLI_DEVIN_ENV = "XCB_DEVIN";
-/** Pre-0.4.0 pin names, honored only when the XCB_* variable is unset. */
-const LEGACY_CLI_CODEX_ENV = "AGENTMIXER_CODEX";
-const LEGACY_CLI_CLAUDE_ENV = "AGENTMIXER_CLAUDE";
-const LEGACY_CLI_DEVIN_ENV = "AGENTMIXER_DEVIN";
 
 export type CliProviderName = "codex" | "claude" | "devin";
 export type CliBinaryInspection = Readonly<{
@@ -69,10 +65,9 @@ function pathEntries(env: (name: string) => string | undefined): string[] {
 
 /** Closed discovery order: explicit env pin, PATH, then known install locations. */
 const PROVIDER_ENV: Record<CliProviderName, string> = { claude: CLI_CLAUDE_ENV, codex: CLI_CODEX_ENV, devin: CLI_DEVIN_ENV };
-const LEGACY_PROVIDER_ENV: Record<CliProviderName, string> = { claude: LEGACY_CLI_CLAUDE_ENV, codex: LEGACY_CLI_CODEX_ENV, devin: LEGACY_CLI_DEVIN_ENV };
 
 export function cliBinaryCandidates(provider: CliProviderName, env: (name: string) => string | undefined = (name) => process.env[name]): readonly string[] {
-  const pinned = env(PROVIDER_ENV[provider]) ?? env(LEGACY_PROVIDER_ENV[provider]);
+  const pinned = env(PROVIDER_ENV[provider]);
   const command = provider;
   const home = homedir();
   const known = provider === "claude"

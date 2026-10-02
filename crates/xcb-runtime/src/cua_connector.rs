@@ -254,12 +254,15 @@ pub fn registration(
         return Err(invalid());
     }
     let sky = codex_home.join("computer-use/Codex Computer Use.app");
-    let codex = resources.join("codex");
     let manifest_bytes = read_regular(&installed.manifest, MAX_MANIFEST_BYTES)?;
     if digest(&manifest_bytes) != installed.manifest_sha256 {
         return Err(invalid());
     }
     let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
+    // The vendor manifest names the bundled CLI. Newer app layouts nest it
+    // under codex-cli/, so resolve the declared path and require it to stay
+    // inside the same verified app bundle rather than pinning `Resources/codex`.
+    let codex = contained_codex_path(&manifest, app)?;
     let environment = admitted_environment(
         &manifest["mcpServers"]["cua_repl"]["env"],
         codex_home,
@@ -370,6 +373,21 @@ fn verify_vendor_bundle(path: &Path, identifier: &str) -> Result<()> {
 }
 
 #[cfg(any(target_os = "macos", test))]
+fn contained_codex_path(manifest: &Value, app: &Path) -> Result<PathBuf> {
+    let codex = absolute_path(
+        manifest
+            .pointer("/mcpServers/cua_repl/env/CODEX_CLI_PATH")
+            .and_then(Value::as_str),
+    )?;
+    let app_root = app.canonicalize().map_err(|_| invalid())?;
+    let resolved_codex = codex.canonicalize().map_err(|_| invalid())?;
+    if !resolved_codex.starts_with(&app_root) || codex.symlink_metadata()?.is_symlink() {
+        return Err(invalid());
+    }
+    Ok(codex)
+}
+
+#[cfg(any(target_os = "macos", test))]
 fn admitted_environment(
     value: &Value,
     codex_home: &Path,
@@ -439,7 +457,7 @@ fn admitted_environment(
         || !["0", "1"].contains(&admitted["BROWSER_USE_TINYSKY_ENABLED"].as_str())
         || admitted["BROWSER_USE_AVAILABLE_BACKENDS"]
             .split(',')
-            .any(|backend| !["chrome", "edge", "iab"].contains(&backend))
+            .any(|backend| !["chrome", "edge", "iab", "mcpapps"].contains(&backend))
     {
         return Err(invalid());
     }
@@ -481,6 +499,37 @@ mod tests {
         let mut bad = env;
         bad["NODE_REPL_TRUSTED_CODE_PATHS"] = Value::String("/workspace".into());
         assert!(admitted_environment(&bad, home, runtime, &sky, codex).is_err());
+    }
+
+    #[test]
+    fn codex_cli_path_admits_only_nested_locations_inside_the_app() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("ChatGPT.app");
+        for nested in [
+            "Contents/Resources/codex",
+            "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+        ] {
+            let path = app.join(nested);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"cli").unwrap();
+            let manifest = serde_json::json!({
+                "mcpServers":{"cua_repl":{"env":{"CODEX_CLI_PATH":path.to_string_lossy()}}}
+            });
+            assert_eq!(contained_codex_path(&manifest, &app).unwrap(), path);
+        }
+        let outside = root.path().join("outside");
+        fs::write(&outside, b"cli").unwrap();
+        for bad in [
+            serde_json::json!({
+                "mcpServers":{"cua_repl":{"env":{"CODEX_CLI_PATH":outside.to_string_lossy()}}}
+            }),
+            serde_json::json!({
+                "mcpServers":{"cua_repl":{"env":{"CODEX_CLI_PATH":"/missing/codex"}}}
+            }),
+            serde_json::json!({"mcpServers":{"cua_repl":{"env":{}}}}),
+        ] {
+            assert!(contained_codex_path(&bad, &app).is_err());
+        }
     }
 
     #[test]

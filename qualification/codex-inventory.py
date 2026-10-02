@@ -256,7 +256,10 @@ def run_case(model, effort, trace=False, delegation=False):
     policy = policy.replace('(remote tcp "*:443")', f'(remote tcp "localhost:{port}")')
     for name, path in {'exe': exe, 'work': scratch, 'profile': profile, 'config': config, 'catalog': catalog, 'ca_bundle': ca_bundle}.items():
         policy = policy.replace('{' + name + '}', json.dumps(str(path)))
-    assert not re.search(r'\{(?:exe|work|profile|config|catalog|ca_bundle)\}', policy)
+    # The native CUA proxy lane belongs to the Rust launcher; this inventory
+    # always runs the plain broker profile, so the placeholder is empty.
+    policy = policy.replace('{native_rules}', '')
+    assert not re.search(r'\{(?:exe|work|profile|config|catalog|ca_bundle|native_rules)\}', policy)
     (case/'inventory.sb').write_text(policy)
     env = {'HOME': str(home), 'CODEX_HOME': str(profile), 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LANG': 'en_US.UTF-8', 'NO_COLOR': '1',
            'XDG_CONFIG_HOME': str(home/'.config'), 'XDG_DATA_HOME': str(home/'.local/share'), 'XDG_CACHE_HOME': str(home/'.cache'),

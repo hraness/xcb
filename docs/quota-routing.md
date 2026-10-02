@@ -58,6 +58,13 @@ ownership, so a second terminal cannot race a newly recorded exhaustion.
 Configured continuation retains its existing cleanup, effect, checkpoint and
 quota-evidence gates; this change only removes blocked candidates.
 
+By default an account runs one task at a time. `max_runs_per_account` in
+`config.json` (1 to 32) raises how many tasks may share one account; every
+run still gets its own provider profile, so concurrent tasks do not share
+provider state. Sign-in, credential checks, and other account operations
+still take the account alone: no task starts while one is held, and none of
+them start while tasks are running.
+
 Managed tasks then rank the accounts and models that remain. xcb derives
 relative quality, cost, and latency profiles from observed model identities and
 sorts the models into Pareto layers: a model is in the first layer when no other
@@ -220,7 +227,14 @@ fallback.
 
 **Pins and constraints.** An opening “Use Claude/Codex/Devin”, `--account`,
 `--provider`, and `--model` still narrow the routes first; the stack orders
-what remains. A pinned model that matches no pattern still runs.
+what remains. A pinned model that matches no pattern still runs. Managed
+backlog tasks take the same pin: `xcb backlog add <target> "<task>" --model
+provider/model/effort` records an exact observed key on the task, requires
+its provider, and stamps it on every worker session, so failover stays
+inside the pin. The pin resolves to one catalog entry at admission — bare
+ids and labels work only when they name one model — and a `never`-matched
+pin is refused up front; if the never list changes while a pinned task is
+queued, dispatch fails the task rather than widening it.
 
 ## Automatic capability selection
 

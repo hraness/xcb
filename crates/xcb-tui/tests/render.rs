@@ -881,6 +881,7 @@ fn account_row() -> xcb_core::ui::AccountRow {
         quota_blocked_until_ms: None,
         runway: xcb_core::usage::Estimate::unknown("test"),
         busy: false,
+        active_runs: 0,
         enabled: true,
         authentication_required: false,
     }

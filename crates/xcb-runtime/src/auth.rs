@@ -124,6 +124,17 @@ pub fn store_token(store: &Store, id: &Id, bytes: &[u8]) -> Result<()> {
     result
 }
 
+/// The provider's own subscription meter for browser-signed-in Claude
+/// accounts. `None` means the account holds a setup token, which the usage
+/// endpoint refuses by scope — those accounts stay passively metered by
+/// rate-limit events observed during runs.
+pub(crate) async fn claude_usage(store: &Store, id: &Id) -> Result<Option<serde_json::Value>> {
+    let Some(token) = claude_oauth::cached_token(store, id)? else {
+        return Ok(None);
+    };
+    claude_oauth::fetch_usage(&token).await.map(Some)
+}
+
 pub(crate) fn token(store: &Store, id: &Id) -> Result<Zeroizing<String>> {
     if store.account(id)?.provider != Provider::Claude {
         return Err(Error::Conflict("subscription token provider mismatch"));
@@ -556,7 +567,6 @@ async fn login_claude(
     }
     pin.verify()?;
     let run = store.prepare_probe(id, None, crate::now_ms())?;
-    let interactive = interaction.is_some();
     let planned = (|| {
         let publication = claude_token_publication(store, &run)?;
         let artifacts = LaunchArtifacts::create(store.root())?;
@@ -576,9 +586,10 @@ async fn login_claude(
             .envs(env)
             .env("COLUMNS", "4096")
             .current_dir(&home);
-        if interactive {
-            command.env("BROWSER", "/usr/bin/true");
-        }
+        // The provider completes browser sign-in through its own loopback
+        // channel only when it can actually launch a browser; a suppressed
+        // BROWSER leaves the paste prompt as an unmounted fallback that
+        // never reads input, so no BROWSER override is set here.
         Ok::<_, Error>((command, publication, artifacts))
     })();
     let (command, publication, mut artifacts) = match planned {
@@ -610,27 +621,6 @@ async fn login_claude(
         .await
     };
     finish_claude_login(store, &run, &publication, &mut artifacts, outcome)
-}
-
-/// Explicit legacy import: reads a pre-0.4.0 AgentMixer `claude-oauth-token`
-/// file from `source` and stores it as a new Claude account. The legacy state
-/// root is never a live default; the source directory is left untouched.
-pub fn import_agentmixer_token(store: &Store, source: &Path) -> Result<Id> {
-    private::check_directory(source)?;
-    let bytes = Zeroizing::new(private::read(&source.join("claude-oauth-token"), 2048)?);
-    if !std::str::from_utf8(&bytes).is_ok_and(|text| valid_token(text.trim())) {
-        return Err(Error::Unavailable(
-            "legacy subscription token is missing or invalid",
-        ));
-    }
-    let account = store.add_account(
-        Provider::Claude,
-        "Imported subscription",
-        crate::now_ms(),
-        None,
-    )?;
-    store_token(store, &account.id, &bytes)?;
-    Ok(account.id)
 }
 
 const MAX_CODEX_AUTH_BYTES: usize = 64 * 1024;
@@ -1507,25 +1497,85 @@ mod claude_login_observer_tests {
         let mut command = tokio::process::Command::new("/bin/sh");
         command.args([
             "-c",
-            "printf 'Invalid code. Please make sure the full code was copied.\\n' >&2; sleep 30",
+            // exec keeps the helper a single group member; a forked `sleep`
+            // orphan can outlive the group-absent proof on a loaded host.
+            "printf 'Invalid code. Please make sure the full code was copied.\\n' >&2; exec sleep 30",
         ]);
         let (_cancel, cancel) = tokio::sync::watch::channel(false);
         let outcome = crate::process::capture_supervised_interactive(
             command,
             1024,
-            std::time::Duration::from_secs(5),
+            // Below the helper's own 30-second wait; generous enough that a
+            // loaded scheduler cannot race the child into the deadline.
+            std::time::Duration::from_secs(20),
             cancel,
             |_| Ok(()),
             Some(interaction),
         )
         .await;
-        assert!(matches!(
-            outcome,
-            crate::process::CaptureOutcome::Joined(Err(Error::Unavailable(
-                "Claude rejected an incomplete sign-in code; retry sign-in and copy the full code"
-            )))
-        ));
+        let debug = match &outcome {
+            crate::process::CaptureOutcome::Joined(Err(e)) => e.to_string(),
+            crate::process::CaptureOutcome::Joined(Ok(_)) => "joined-ok".into(),
+            crate::process::CaptureOutcome::NeverStarted(e) => format!("never-started:{e}"),
+            crate::process::CaptureOutcome::Unproven => "unproven".into(),
+        };
+        assert!(
+            matches!(
+                outcome,
+                crate::process::CaptureOutcome::Joined(Err(Error::Unavailable(
+                    "Claude rejected an incomplete sign-in code; retry sign-in and copy the full code"
+                )))
+            ),
+            "{debug}"
+        );
     }
+    /// A provider whose input listener mounts after the paste prompt renders
+    /// can discard a code written during that mount. A silent child must see
+    /// the retained code redelivered without operator action.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn silent_child_after_submit_receives_the_code_again() {
+        let (stdin, terminal) = crate::process::login_terminal().unwrap();
+        let (codes, receiver) = tokio::sync::mpsc::channel(1);
+        let mut observer = ClaudeLoginObserver::default();
+        let interaction = crate::process::LoginInteraction {
+            stdin,
+            terminal,
+            codes: receiver,
+            observer: Box::new(move |bytes| {
+                observer.observe(bytes);
+                Ok(())
+            }),
+        };
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "sleep 10; head -n 2"]);
+        let (_cancel, cancel) = tokio::sync::watch::channel(false);
+        codes
+            .send(zeroize::Zeroizing::new("resend-code#st".to_string()))
+            .await
+            .unwrap();
+        drop(codes);
+        let outcome = crate::process::capture_supervised_interactive(
+            command,
+            1024,
+            std::time::Duration::from_secs(30),
+            cancel,
+            |_| Ok(()),
+            Some(interaction),
+        )
+        .await;
+        let crate::process::CaptureOutcome::Joined(Ok(output)) = outcome else {
+            panic!("the auth helper must join with captured output")
+        };
+        assert_eq!(
+            String::from_utf8_lossy(&output)
+                .matches("resend-code")
+                .count(),
+            2,
+            "the code is written once at submit and once more while the child stays silent"
+        );
+    }
+
     #[test]
     fn only_complete_oauth_links_and_fixed_prompt_leave_capture() {
         let mut observer = ClaudeLoginObserver::default();

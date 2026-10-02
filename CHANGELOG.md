@@ -10,6 +10,73 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.17.7 - 2026-10-02
+
+Claude browser sign-in now completes through the provider's own loopback
+handoff instead of hanging at a code prompt, and account refresh reports
+real remaining quota for Devin and OAuth-signed Claude accounts.
+
+- `xcb accounts login` no longer suppresses the provider's browser launch:
+  Claude's sign-in child opens its own `redirect_uri` pointing at its local
+  callback listener, so completing the page finishes the login. The printed
+  link is the manual fallback variant whose page cannot reach that listener,
+  so it is shown for headless setups but no longer auto-opened. A pasted
+  code that lands before the provider's input reader mounts is redelivered
+  on a bounded cadence, and the CLI prints a heartbeat while the exchange
+  runs instead of sitting silent.
+- `xcb accounts refresh` now reports Devin plan quota: the refresh probe
+  reads the provider's own account status and records daily and weekly
+  remaining-quota windows with their reset times and the account's email and
+  plan name, so listings show real remaining percentage instead of an
+  unmeasured meter. An exhausted window the service omits (a reset timestamp
+  with no remaining percentage) is recorded as fully used.
+- Claude accounts signed in through the browser OAuth flow fall back to the
+  provider's usage endpoint when the in-band `get_usage` reply carries no
+  windows; setup-token accounts remain metered by observed rate-limit events.
+
+## 0.17.6 - 2026-10-02
+
+Supersedes 0.17.5, whose tag was created before its changelog sections were
+deduplicated; no 0.17.5 release was published.
+
+Managed tasks can pin an exact model, and provider self-updates are adopted
+automatically when their reviewed runtime contract is available, so routine
+Claude, Codex, and Devin updates no longer require an xcb release.
+
+- `xcb backlog add --model provider/model[/effort]` pins a managed task to
+  one observed model. The pin resolves to a canonical key at admission
+  (unobserved, ambiguous, and `routing never`-excluded values are refused),
+  implies the model's provider as required, and is stamped on every worker
+  session so failover stays inside the pin.
+- Worker agents can pin the same way with `xcb_backlog_add`'s optional
+  `model` field.
+- A queued task whose pinned model later lands on `routing never` fails at
+  dispatch instead of waiting on a condition nothing lifts.
+- Claude keeps its supported major-version floor while honoring reviewed
+  catalog denials.
+- Codex and Devin accept exact reviewed `(version, sha256)` catalog entries
+  without waiting for a new xcb binary release; unknown or denied builds stay
+  blocked and the last working pin continues routing.
+- `xcb doctor` refreshes provider admission during normal use, and login,
+  metadata, and task launch paths share the same admission check.
+
+## 0.17.4 - 2026-10-02
+
+Accounts can run more than one task at a time.
+
+- `max_runs_per_account` in `config.json` (default 1, up to 32) sets how
+  many tasks may share one subscription at once; every run keeps its own
+  provider profile while sharing the account's quota and rate limits.
+- Sign-in, credential checks, and other account operations still take the
+  account alone: they wait for running tasks to settle, and no task starts
+  while one holds the account.
+- Routing and failover now count an account's live runs instead of treating
+  any busy account as unavailable, and the no-route notice says when an
+  account is at its run limit.
+- The local database migrates on first open to schema version 2; xcb builds
+  before this release refuse it, so old and new versions cannot interleave
+  account writes.
+
 ## 0.17.2 - 2026-10-01
 
 Browser sign-in waits until Devin is ready for the code and reports rejected

@@ -168,7 +168,7 @@ enum Commands {
         /// Session to reopen; the latest session when omitted.
         id: Option<Id>,
     },
-    /// List accounts; subcommands add, connect, and manage them.
+    /// List accounts; subcommands add, sign in, remove, and manage them.
     Accounts {
         #[command(subcommand)]
         command: Option<AccountCommand>,
@@ -587,11 +587,13 @@ enum AccountCommand {
         /// Account name or id (listed by `xcb accounts`).
         account: String,
     },
-    /// Copy agentmixer-era accounts and sessions from a legacy state root.
-    ImportAgentmixer {
-        /// Absolute path to the legacy .agentmixer state directory.
+    /// Permanently remove an account and its stored credentials.
+    Remove {
+        /// Account name or id (listed by `xcb accounts`).
+        account: String,
+        /// Allow removing the account currently selected as the default.
         #[arg(long)]
-        source: PathBuf,
+        force: bool,
     },
     /// Copy an existing Codex CLI sign-in (auth.json) into xcb.
     ImportCodex {
@@ -1062,7 +1064,7 @@ fn no_reply_error(provider: Provider, session: &Id) -> Error {
 }
 
 fn import_acknowledgement(id: &Id) -> serde_json::Value {
-    json!({"version":1,"account":id,"sourcePreserved":true,"sessionsMigrated":false})
+    json!({"version":1,"account":id,"sourcePreserved":true})
 }
 
 async fn broker_stdio() -> Result<i32> {
@@ -1801,14 +1803,18 @@ async fn dispatch_inner(
         _ => {}
     }
     let store = Arc::new(Store::open(&root)?);
-    // Interactive launches keep the pinned provider build current: adopt a
+    // Interactive commands keep the pinned provider build current: adopt a
     // newly discovered binary only when it is an admitted build, so an
-    // auto-update can never strand a task on the pin check.
+    // auto-update can never strand a task or make doctor report stale state.
     if matches!(
         &cli.command,
         None | Some(Commands::Chat { .. })
             | Some(Commands::Resume { .. })
             | Some(Commands::Run { .. })
+            | Some(Commands::Doctor {
+                executable: None,
+                ..
+            })
     ) {
         let home = root.join("metadata-home");
         // One catalog fetch per sweep, at most hourly; failures keep the
@@ -2193,16 +2199,46 @@ async fn dispatch_inner(
                     store.set_account_models(&account.id, &models)?;
                     accounts(&store, &config, cli.json)?;
                 }
-                Some(AccountCommand::ImportAgentmixer { source }) => {
-                    // This is a generated public routing ID, never a credential
-                    // or an internal account record.
-                    let id: Id = auth::import_agentmixer_token(&store, &source)?;
+                Some(AccountCommand::Remove { account, force }) => {
+                    let account = store.resolve_account(&account)?;
+                    let (config_before, _) = Config::load(store.root())?;
+                    let was_default = config_before.default_account.as_ref() == Some(&account.id);
+                    if was_default && !force {
+                        return Err(Error::guided(
+                            "cannot remove the default account without --force",
+                            format!("xcb accounts remove {} --force", account.id),
+                        ));
+                    }
+                    let removed = store.remove_account(&account.id)?;
+                    let mut default_cleared = false;
+                    if was_default && force {
+                        // Re-read after removal so a concurrent config update is
+                        // never overwritten while clearing the removed id.
+                        let (mut current, revision) = Config::load(store.root())?;
+                        if current.default_account.as_ref() == Some(&removed.id) {
+                            current.default_account = None;
+                            current.save(store.root(), revision.as_deref())?;
+                            default_cleared = true;
+                        }
+                    }
                     if cli.json {
-                        print_json(import_acknowledgement(&id))?;
+                        print_json(json!({
+                            "version": 1,
+                            "account": &removed.id,
+                            "provider": removed.provider,
+                            "name": removed.name(),
+                            "removed": ["account_record", "stored_credentials"],
+                            "defaultCleared": default_cleared,
+                        }))?;
                     } else {
                         println!(
-                            "Imported one Claude account as {id}. Original state and sessions are unchanged."
+                            "Removed account {} ({}) and its stored credentials.",
+                            xcb_core::display_text(&removed.name(), 80),
+                            removed.id
                         );
+                        if default_cleared {
+                            println!("Default account cleared.");
+                        }
                     }
                 }
                 Some(AccountCommand::ImportCodex { source, account }) => {
@@ -5568,7 +5604,7 @@ mod tests {
         let id = Id::new("a_public_routing_id").unwrap();
         assert_eq!(
             import_acknowledgement(&id),
-            json!({"version":1,"account":"a_public_routing_id","sourcePreserved":true,"sessionsMigrated":false}),
+            json!({"version":1,"account":"a_public_routing_id","sourcePreserved":true}),
         );
     }
 

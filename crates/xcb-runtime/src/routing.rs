@@ -945,7 +945,7 @@ async fn rank_with_judge(
     let accounts: Vec<_> = connected
         .iter()
         .filter(|account| {
-            !account.busy
+            account.active_runs < config.max_runs_per_account
                 && account.quota_blocked_until_ms.is_none()
                 && account
                     .remaining_percent

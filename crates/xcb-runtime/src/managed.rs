@@ -250,6 +250,11 @@ pub struct ManagedTask {
     pub provider_preference: Option<Provider>,
     #[serde(default)]
     pub provider_required: bool,
+    /// An exact model key the task is pinned to, resolved against the
+    /// observed catalog at admission. Carried into every worker session's
+    /// route pins so failover stays inside the pin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_model: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tried_routes: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1977,6 +1982,39 @@ impl ManagedStore {
         }
     }
 
+    /// Resolve a `provider/model[/effort]` pin to its canonical observed key.
+    /// A bare id or label is accepted only when it names one model; excluded
+    /// routes are refused exactly as dispatch would refuse them.
+    fn resolve_model_pin(&self, requested: &str) -> Result<(String, Provider)> {
+        let store = Store::open(self.root())?;
+        let matches: Vec<_> = store
+            .models()?
+            .into_iter()
+            .filter(|model| {
+                model.key() == requested
+                    || model.id.as_str() == requested
+                    || model.label == requested
+            })
+            .collect();
+        let model = match matches.as_slice() {
+            [] => {
+                return Err(Error::Unavailable(
+                    "model not observed; refresh the catalog",
+                ));
+            }
+            [model] => model,
+            _ => {
+                return Err(Error::Unavailable(
+                    "model is ambiguous; use its full provider/model/effort key",
+                ));
+            }
+        };
+        if Config::load(self.root())?.0.routing.excluded(model) {
+            return Err(xcb_core::Error::Invalid(crate::routing_stack::EXCLUDED_BY_NEVER).into());
+        }
+        Ok((model.key(), model.provider))
+    }
+
     /// Stopping a run the settle reflex started is direct evidence that the
     /// decision to continue was wrong. Best effort: learning never fails a
     /// cancellation.
@@ -2476,6 +2514,23 @@ impl ManagedStore {
             provider_preference = Some(required);
             provider_required = true;
         }
+        // A model pin resolves to its canonical observed key and requires its
+        // own provider. It may sit beside an unpinned provider directive but
+        // can never contradict a required one.
+        let required_model = match options.model.as_deref() {
+            Some(requested) => {
+                let (key, provider) = self.resolve_model_pin(requested)?;
+                if provider_required && provider_preference != Some(provider) {
+                    return Err(Error::Conflict(
+                        "model pin conflicts with the task's required provider",
+                    ));
+                }
+                provider_preference = Some(provider);
+                provider_required = true;
+                Some(key)
+            }
+            None => None,
+        };
         let task_id = Id::new(format!(
             "t_{}",
             digest(format!("xcb-task-v1\0{conversation}\0{id}\0{workspace}"))
@@ -2525,16 +2580,24 @@ impl ManagedStore {
             attachments: attachments.clone(),
             session: None,
             worker_sessions: vec![],
-            route: provider_preference.map(|provider| provider.to_string()),
-            route_reason: provider_preference.map(|provider| {
-                if provider_required {
-                    format!("user required {provider}")
-                } else {
-                    format!("learned workspace preference for {provider}")
-                }
-            }),
+            route: required_model
+                .clone()
+                .or(provider_preference.map(|provider| provider.to_string())),
+            route_reason: required_model
+                .as_ref()
+                .map(|model| format!("user required {model}"))
+                .or_else(|| {
+                    provider_preference.map(|provider| {
+                        if provider_required {
+                            format!("user required {provider}")
+                        } else {
+                            format!("learned workspace preference for {provider}")
+                        }
+                    })
+                }),
             provider_preference,
             provider_required,
+            required_model,
             tried_routes: vec![],
             failed_accounts: vec![],
             state: if routing_question {TaskState::NeedsInput}else{TaskState::Queued},
@@ -5179,6 +5242,7 @@ fn preserve_worker_route(
     session: xcb_core::session::Session,
     requirements: xcb_core::session::TaskRequirements,
     required_provider: Option<Provider>,
+    required_model: Option<&str>,
 ) -> Result<xcb_core::session::Session> {
     let mut pins = session.route_pins.clone();
     if pins
@@ -5190,8 +5254,23 @@ fn preserve_worker_route(
             "required provider conflicts with the worker's saved provider pin",
         ));
     }
+    if pins
+        .model
+        .as_deref()
+        .zip(required_model)
+        .is_some_and(|(pin, required)| pin != required)
+    {
+        return Err(Error::Conflict(
+            "required model conflicts with the worker's saved model pin",
+        ));
+    }
     pins.provider = pins.provider.or(required_provider);
-    if pins.provider != session.route_pins.provider {
+    if pins.model.is_none()
+        && let Some(model) = required_model
+    {
+        pins.model = Some(model.to_string());
+    }
+    if pins.provider != session.route_pins.provider || pins.model != session.route_pins.model {
         store.set_session_route_pins(&session.id, pins)?;
     }
     store.require_session_capabilities(&session.id, requirements)
@@ -5785,9 +5864,13 @@ impl Supervisor {
             .unwrap_or_else(|| "continuing the existing worker session".into());
         let session = if let Some(id) = &task.session {
             match store.session(id)? {
-                Some(session) => {
-                    preserve_worker_route(&store, session, requirements, required_provider)?
-                }
+                Some(session) => preserve_worker_route(
+                    &store,
+                    session,
+                    requirements,
+                    required_provider,
+                    task.required_model.as_deref(),
+                )?,
                 None => {
                     return match managed
                         .fail_unstarted(
@@ -5824,7 +5907,7 @@ impl Supervisor {
                     task: &routing_prompt,
                     required_provider,
                     preferred_provider: provider_preference,
-                    required_model: None,
+                    required_model: task.required_model.as_deref(),
                     excluded_routes: &excluded_routes,
                     excluded_accounts: &excluded_accounts,
                     account: None,
@@ -5841,6 +5924,18 @@ impl Supervisor {
                 }
                 Err(Error::Unavailable(reason)) if reason == routing::NO_QUOTA_AVAILABLE_ROUTE => {
                     return Ok(Dispatch::Deferred(reason.into()));
+                }
+                // A pin refused by routing.never can never run; fail it
+                // rather than deferring on a condition nothing lifts.
+                Err(Error::Core(xcb_core::Error::Invalid(reason))) => {
+                    let detail = format!(
+                        "{reason}: {}",
+                        task.required_model.as_deref().unwrap_or_default()
+                    );
+                    return match managed.fail_unstarted(task, &detail).await {
+                        Ok(_) | Err(Error::Conflict(_)) => Ok(Dispatch::Settled),
+                        Err(error) => Err(error),
+                    };
                 }
                 Err(Error::Conflict(reason) | Error::Unavailable(reason)) => {
                     return Ok(Dispatch::Deferred(format!(
@@ -5872,6 +5967,7 @@ impl Supervisor {
                     session,
                     decision.requirements,
                     required_provider,
+                    task.required_model.as_deref(),
                 )?,
                 Err(Error::Conflict(reason) | Error::Unavailable(reason)) => {
                     return Ok(Dispatch::Deferred(format!(
@@ -5900,16 +5996,19 @@ impl Supervisor {
                 }
             }
         };
-        if self
+        // In-memory occupancy hint only; `prepare_run` stays the atomic
+        // custody gate against the configured per-account run limit.
+        let account_load = self
             .active_accounts
             .values()
-            .any(|account| account == &session.account)
-        {
+            .filter(|account| *account == &session.account)
+            .count() as u32;
+        if account_load >= config.max_runs_per_account {
             if created_session {
                 store.remove_session(&session.id)?;
             }
             return Ok(Dispatch::Deferred(
-                "waiting for an eligible worker: the selected account is busy with another task"
+                "waiting for an eligible worker: the selected account is at its concurrent run limit"
                     .into(),
             ));
         }
@@ -6467,11 +6566,11 @@ fn managed_view(
     // honestly unknown because managed workers do not feed the direct-mode
     // velocity estimator.
     let now = now_ms();
-    let busy: BTreeSet<_> = store
-        .unsettled_runs()?
-        .into_iter()
-        .map(|run| run.account)
-        .collect();
+    let mut active_runs: BTreeMap<Id, u32> = BTreeMap::new();
+    for run in store.unsettled_runs()? {
+        *active_runs.entry(run.account).or_default() += 1;
+    }
+    let busy: BTreeSet<_> = active_runs.keys().cloned().collect();
     view.accounts = store
         .accounts()?
         .iter()
@@ -6487,6 +6586,7 @@ fn managed_view(
                 quota_blocked_until_ms: store.quota_blocked_until(&account.id, now)?,
                 runway: Estimate::unknown("runway is not estimated for managed accounts"),
                 busy: busy.contains(&account.id),
+                active_runs: *active_runs.get(&account.id).unwrap_or(&0),
                 enabled: account.enabled,
                 authentication_required: store.authentication_required(&account.id)?,
             })
@@ -8747,6 +8847,7 @@ mod tests {
             route_reason: None,
             provider_preference: None,
             provider_required: false,
+            required_model: None,
             tried_routes: vec![],
             failed_accounts: vec![],
             state: TaskState::Queued,
@@ -9047,6 +9148,7 @@ mod tests {
                 xcb.session(id).unwrap().unwrap(),
                 task.requirements,
                 Some(Provider::Claude),
+                None,
             )
             .unwrap();
             assert_eq!(session.requirements, requirements);
@@ -9054,12 +9156,34 @@ mod tests {
             assert_eq!(session.revision, settled_revision);
             assert!(xcb.latest_settled_outcome(id).unwrap().is_some());
             let repeated =
-                preserve_worker_route(&xcb, session.clone(), Default::default(), None).unwrap();
+                preserve_worker_route(&xcb, session.clone(), Default::default(), None, None)
+                    .unwrap();
             assert_eq!(repeated.requirements, requirements);
             assert_eq!(repeated.route_pins.provider, Some(Provider::Claude));
             assert!(
-                preserve_worker_route(&xcb, repeated, Default::default(), Some(Provider::Codex),)
-                    .is_err()
+                preserve_worker_route(
+                    &xcb,
+                    repeated.clone(),
+                    Default::default(),
+                    Some(Provider::Codex),
+                    None,
+                )
+                .is_err()
+            );
+            let model_key = repeated.model.key();
+            let pinned =
+                preserve_worker_route(&xcb, repeated, Default::default(), None, Some(&model_key))
+                    .unwrap();
+            assert_eq!(pinned.route_pins.model.as_deref(), Some(model_key.as_str()));
+            assert!(
+                preserve_worker_route(
+                    &xcb,
+                    pinned,
+                    Default::default(),
+                    None,
+                    Some("claude/other-model"),
+                )
+                .is_err()
             );
             let no_routes = BTreeSet::new();
             let no_accounts = BTreeSet::new();

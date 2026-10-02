@@ -139,6 +139,14 @@ pub struct Config {
     /// reopen sooner, while Devin reports no comparable window at all.
     /// Range: one minute to seven days.
     pub quota_limit_cooldown_ms: u64,
+    /// How many unsettled runs one account may hold at once. The default of
+    /// 1 keeps the account dedicated to a single task; raising it runs several
+    /// provider conversations on the same subscription, sharing its quota and
+    /// rate limits and multiplying each. Sign-in, probes and account removal
+    /// still hold the account exclusively: they are refused while any run is
+    /// unsettled, and no new run starts while one is in flight.
+    /// Range: 1 to 32.
+    pub max_runs_per_account: u32,
     /// The routing preference stack: ordered route patterns per task tier,
     /// routes never used, and providers that serve only as a fallback. See
     /// [`crate::routing_stack`].
@@ -163,6 +171,7 @@ impl Default for Config {
             auto_failover: true,
             turn_timeout_ms: 1_800_000,
             quota_limit_cooldown_ms: DEFAULT_QUOTA_LIMIT_COOLDOWN_MS,
+            max_runs_per_account: 1,
             routing: RoutingConfig::default(),
             resources: crate::host_resources::ResourcePolicy::default(),
             capabilities: crate::capabilities::CapabilityConfig::default(),
@@ -182,6 +191,7 @@ impl Config {
         if self.version != 1
             || !(1_000..=3_600_000).contains(&self.turn_timeout_ms)
             || !(60_000..=604_800_000).contains(&self.quota_limit_cooldown_ms)
+            || !(1..=32).contains(&self.max_runs_per_account)
             || self.favorites.len() > 128
             || context.floor_tokens < 1024
             || context.floor_tokens >= context.trigger_tokens
