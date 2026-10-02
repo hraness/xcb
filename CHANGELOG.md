@@ -10,7 +10,10 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## 0.17.5 - 2026-10-02
+## 0.17.6 - 2026-10-02
+
+Supersedes 0.17.5, whose tag was created before its changelog sections were
+deduplicated; no 0.17.5 release was published.
 
 Managed tasks can pin an exact model, and provider self-updates are adopted
 automatically when their reviewed runtime contract is available, so routine
