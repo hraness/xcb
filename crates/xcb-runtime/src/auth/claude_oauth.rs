@@ -952,7 +952,7 @@ pub async fn login_claude_browser_with_interaction(
                     let _ = events.try_send(event);
                 }
                 if observer.failed {
-                    Err(Error::Unavailable("Claude browser sign-in failed"))
+                    Err(Error::Unavailable(observer.failure_message()))
                 } else {
                     Ok(())
                 }

@@ -388,8 +388,11 @@ impl DevinLoginObserver {
                 }
             }
         }
-        self.prompt_seen |= text.contains("then copy the code and paste it below")
-            || text.contains("copy the sign-in code and paste it here");
+        // The URL instructions precede the native terminal's raw-mode setup.
+        // Submitting there can be discarded when that setup flushes stdin.
+        // Wait for the rendered input prompt before handing the operator a code.
+        self.prompt_seen |= text.lines().any(|line| line.trim() == "Code:")
+            && text.contains("Paste the code from the sign-in page");
         if self.url_sent && self.prompt_seen && !self.prompt_sent {
             self.prompt_sent = true;
             events.push(DevinLoginEvent::CodeRequested);
@@ -641,7 +644,7 @@ mod login_tests {
         let base = xcb_core::canonical(directory.path()).unwrap();
         let pin = fixture(
             &base,
-            &format!("printf 'Visit {TEST_URL} to sign in, then copy the code and paste it below.\\n'\nIFS= read -r code\ntest \"$code\" = manual-code || exit 12\n{WRITE_TOKEN}"),
+            &format!("printf 'Visit {TEST_URL} to sign in, then copy the code and paste it below.\\nCode:\\nPaste the code from the sign-in page\\n'\nIFS= read -r code\ntest \"$code\" = manual-code || exit 12\n{WRITE_TOKEN}"),
         )
         .await;
         let store = Store::open(&base.join("state")).unwrap();
@@ -901,7 +904,7 @@ finally:
     async fn native_login_without_input_fails_promptly_and_cleans_account() {
         let directory = tempfile::tempdir().unwrap();
         let base = xcb_core::canonical(directory.path()).unwrap();
-        let pin = fixture(&base, &format!("printf 'Visit {TEST_URL} to sign in, then copy the code and paste it below.\\n'\nIFS= read -r code\n{WRITE_TOKEN}")).await;
+        let pin = fixture(&base, &format!("printf 'Visit {TEST_URL} to sign in, then copy the code and paste it below.\\nCode:\\nPaste the code from the sign-in page\\n'\nIFS= read -r code\n{WRITE_TOKEN}")).await;
         let store = Store::open(&base.join("state")).unwrap();
         let account = store.add_account(Provider::Devin, "Core", 1, None).unwrap();
         let (_sender, cancel) = tokio::sync::watch::channel(false);
@@ -930,7 +933,7 @@ finally:
     #[test]
     fn login_events_only_expose_complete_native_pkce_url_and_fixed_prompt() {
         let output = format!(
-            "private-native-output synthetic-native-login\n\x1b]8;;{TEST_URL}\x07{TEST_URL}\x1b]8;;\x1b\\\nthen copy the code and paste it below."
+            "private-native-output synthetic-native-login\n\x1b]8;;{TEST_URL}\x07{TEST_URL}\x1b]8;;\x1b\\\nthen copy the code and paste it below.\n\x1b[?2026h\rCode:\r\n❭ \x1b[38;5;244mPaste the code from the sign-in page\x1b[0m\r\n"
         );
         for split in 0..=output.len() {
             let mut observer = DevinLoginObserver::default();
@@ -956,14 +959,19 @@ finally:
             observer
                 .observe(format!("\n{TEST_URL}\n").as_bytes())
                 .unwrap(),
-            vec![
-                DevinLoginEvent::AuthorizationUrl(TEST_URL.into()),
-                DevinLoginEvent::CodeRequested
-            ]
+            vec![DevinLoginEvent::AuthorizationUrl(TEST_URL.into())]
+        );
+        assert_eq!(
+            observer
+                .observe(b"\rCode:\r\nPaste the code from the sign-in page")
+                .unwrap(),
+            vec![DevinLoginEvent::CodeRequested]
         );
         assert!(
             observer
-                .observe(format!("{TEST_URL}\nthen copy the code and paste it below.").as_bytes())
+                .observe(
+                    format!("{TEST_URL}\nCode:\nPaste the code from the sign-in page").as_bytes()
+                )
                 .unwrap()
                 .is_empty()
         );
@@ -984,13 +992,15 @@ finally:
         ] {
             assert!(
                 DevinLoginObserver::default()
-                    .observe(format!("{url}\nthen copy the code and paste it below.").as_bytes())
+                    .observe(
+                        format!("{url}\nCode:\nPaste the code from the sign-in page").as_bytes()
+                    )
                     .unwrap()
                     .is_empty()
             );
         }
         let hidden = format!(
-            "\x1b]8;;{TEST_URL}\x07Sign in\x1b]8;;\x07\nthen copy the code and paste it below."
+            "\x1b]8;;{TEST_URL}\x07Sign in\x1b]8;;\x07\nCode:\nPaste the code from the sign-in page"
         );
         assert!(
             DevinLoginObserver::default()
