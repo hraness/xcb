@@ -10,7 +10,7 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## 0.17.3 - 2026-10-02
+## 0.17.4 - 2026-10-02
 
 Accounts can run more than one task at a time.
 
