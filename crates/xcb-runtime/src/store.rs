@@ -1022,6 +1022,71 @@ impl Store {
         self.account(id)?;
         private::check_directory(&self.root.join("accounts").join(id.as_str()))
     }
+
+    /// Permanently remove an account and every account-owned record.
+    ///
+    /// The lease and run checks happen under the same immediate database
+    /// transaction as the deletion. An account held by any unsettled run (or
+    /// by a lease whose run record is inconsistent) is refused before any
+    /// state or credential path is changed; removal never performs recovery or
+    /// releases custody as a side effect.
+    pub fn remove_account(&self, id: &Id) -> Result<Account> {
+        let account_path = self.root.join("accounts").join(id.as_str());
+        // Check the private credential directory before changing the database.
+        // A missing or foreign directory is a custody failure, not permission
+        // to delete only the database record and leave an unknown credential.
+        private::check_directory(&account_path)?;
+
+        let mut db = self.db()?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let json: String = tx.query_row(
+            "SELECT payload FROM accounts WHERE id=?1",
+            [id.as_str()],
+            |row| row.get(0),
+        )?;
+        let account: Account = decode(&json)?;
+        account.validate()?;
+        let held: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM leases WHERE account=?1)
+             OR EXISTS(SELECT 1 FROM runs WHERE account=?1 AND phase!='settled')",
+            [id.as_str()],
+            |row| row.get(0),
+        )?;
+        if held {
+            return Err(Error::Conflict(
+                "account has an unsettled run; exclusive custody remains held",
+            ));
+        }
+
+        // Account-bound history cannot outlive the account foreign key. The
+        // account removal is intentionally permanent, so remove those records
+        // in the same transaction rather than leaving an unusable account id
+        // behind in sessions, runs, usage, or quota history.
+        tx.execute("DELETE FROM runs WHERE account=?1", [id.as_str()])?;
+        tx.execute("DELETE FROM sessions WHERE account=?1", [id.as_str()])?;
+        tx.execute("DELETE FROM usage WHERE account=?1", [id.as_str()])?;
+        tx.execute(
+            "DELETE FROM quotas WHERE pool=?1",
+            [account.quota_pool.as_str()],
+        )?;
+        tx.execute(
+            "DELETE FROM quota_limits WHERE pool=?1",
+            [account.quota_pool.as_str()],
+        )?;
+        if tx.execute("DELETE FROM accounts WHERE id=?1", [id.as_str()])? != 1 {
+            return Err(Error::Unavailable("account not found"));
+        }
+        tx.commit()?;
+
+        // The database deletion is durable before removing the account tree;
+        // no provider credential remains in the state root when this returns
+        // successfully. A filesystem failure is reported rather than claimed
+        // as a successful removal.
+        fs::remove_dir_all(&account_path)?;
+        private::sync_directory(account_path.parent().ok_or(Error::PrivateState)?)?;
+        Ok(account)
+    }
+
     pub fn set_account_enabled(&self, id: &Id, enabled: bool) -> Result<()> {
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2919,6 +2984,58 @@ mod tests {
             },
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn remove_account_deletes_record_and_credentials() {
+        let directory = root();
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
+        let store = Store::open(&state).unwrap();
+        let account = store
+            .add_account(Provider::Claude, "Subscription", 1, None)
+            .unwrap();
+        let credential = store
+            .account_root(&account.id)
+            .unwrap()
+            .join("subscription-token");
+        crate::private::create(&credential, b"stored-credential").unwrap();
+        let account_path = state.join("accounts").join(account.id.as_str());
+
+        let removed = store.remove_account(&account.id).unwrap();
+
+        assert_eq!(removed.id, account.id);
+        assert!(store.accounts().unwrap().is_empty());
+        assert!(!account_path.exists());
+        assert!(store.unsettled_runs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_account_refuses_held_custody_without_releasing_it() {
+        let directory = root();
+        let state = xcb_core::canonical(directory.path()).unwrap().join("state");
+        let store = Store::open(&state).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Subscription", 1, None)
+            .unwrap();
+        let account_path = state.join("accounts").join(account.id.as_str());
+        let run = store.prepare_probe(&account.id, None, 2).unwrap();
+
+        let error = store.remove_account(&account.id).unwrap_err();
+
+        assert!(error.to_string().contains("unsettled run"));
+        assert_eq!(store.accounts().unwrap().len(), 1);
+        assert!(account_path.exists());
+        assert_eq!(store.unsettled_runs().unwrap()[0].id, run.id);
+        let held: bool = store
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM leases WHERE account=?1)",
+                [account.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(held);
     }
 
     #[test]
