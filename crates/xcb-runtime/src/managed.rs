@@ -68,8 +68,8 @@ pub use daemon::{AdmittedDaemon, DaemonChild, DaemonStatus, MAX_DAEMON_GENERATIO
 #[path = "managed_workspace.rs"]
 mod workspace;
 pub use workspace::{
-    Intake, IntakeCues, MigrationConflict, Origin, UpgradeReport, WorkspaceStatus,
-    validate_workspace_root,
+    Intake, IntakeCues, MigrationConflict, Origin, UpgradeReport, WorkspaceAudit, WorkspaceGit,
+    WorkspaceStatus, validate_workspace_root,
 };
 pub use xcb_core::ui::GLOBAL_THREAD_ID;
 #[path = "managed_import.rs"]

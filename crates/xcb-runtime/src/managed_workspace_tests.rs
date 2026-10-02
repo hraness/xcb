@@ -1,4 +1,5 @@
 use super::*;
+use crate::managed::workspace::probe_git;
 use crate::workspace_infer::{
     BindingConfidence, BindingOrigin, BindingSource, Resolution, WorkspaceBinding,
 };
@@ -1710,4 +1711,100 @@ async fn view_conversation_still_rejects_foreign_workspace() {
     assert_eq!(task.workspace, text(&work));
     // A view rooted in a refused directory cannot be created.
     assert!(e.managed.create_conversation(&home()).await.is_err());
+}
+
+fn real_repo(base: &Path, name: &str) -> PathBuf {
+    let repo = dir(base, name);
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(repo.join("a.rs"), "fn a() {}\n").unwrap();
+    git(&["add", "a.rs"]);
+    git(&[
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-qm",
+        "init",
+    ]);
+    repo
+}
+
+#[test]
+fn audit_flags_stranded_work_in_an_unclaimed_workspace() {
+    let e = env();
+    let repo = real_repo(&e.base, "repo");
+    e.managed.admit_workspace(&repo, "command", None).unwrap();
+
+    // Clean tree: probed, but nothing to strand.
+    let audit = e.managed.audit_workspaces(Duration::ZERO).unwrap();
+    let row = audit.iter().find(|r| r.path == text(&repo)).unwrap();
+    assert!(!row.stranded);
+    assert_eq!(row.git.as_ref().unwrap().branch.as_deref(), Some("main"));
+
+    // The shape a session leaves when it dies mid-lane: a tracked edit and
+    // an untracked deliverable, with no task anchored here.
+    fs::write(repo.join("a.rs"), "fn a() { changed() }\n").unwrap();
+    fs::write(repo.join("draft.md"), "uncommitted\n").unwrap();
+    let audit = e.managed.audit_workspaces(Duration::ZERO).unwrap();
+    let row = audit.iter().find(|r| r.path == text(&repo)).unwrap();
+    let git = row.git.as_ref().unwrap();
+    assert_eq!(git.tracked, 1);
+    assert_eq!(git.untracked, 1);
+    assert!(!row.claimed);
+    assert!(row.stranded);
+
+    // Inside the stale window the same tree is fresh work, not abandoned.
+    let audit = e
+        .managed
+        .audit_workspaces(Duration::from_secs(3600))
+        .unwrap();
+    assert!(
+        !audit
+            .iter()
+            .find(|r| r.path == text(&repo))
+            .unwrap()
+            .stranded
+    );
+}
+
+#[tokio::test]
+async fn audit_does_not_strand_a_workspace_a_live_task_claims() {
+    let e = env();
+    let repo = real_repo(&e.base, "repo");
+    e.managed.admit_workspace(&repo, "command", None).unwrap();
+    let view = e.managed.create_conversation(&repo).await.unwrap().id;
+    e.managed
+        .create_task(&view, new_id("m"), "Live".into(), vec![], &repo)
+        .await
+        .unwrap();
+    fs::write(repo.join("a.rs"), "fn a() { changed() }\n").unwrap();
+    let audit = e.managed.audit_workspaces(Duration::ZERO).unwrap();
+    let row = audit.iter().find(|r| r.path == text(&repo)).unwrap();
+    assert!(row.claimed);
+    assert!(!row.stranded);
+}
+
+#[test]
+fn probe_reports_a_suspended_operation() {
+    let base = tempfile::tempdir().unwrap();
+    let repo = real_repo(base.path(), "xcb-audit-probe");
+    fs::write(repo.join(".git").join("MERGE_HEAD"), "0".repeat(40)).unwrap();
+    let git = probe_git(&repo).unwrap();
+    assert_eq!(git.operation, Some("merge"));
+    assert!(git.stranded());
+    fs::remove_file(repo.join(".git").join("MERGE_HEAD")).unwrap();
 }
