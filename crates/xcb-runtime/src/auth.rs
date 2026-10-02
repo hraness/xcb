@@ -612,27 +612,6 @@ async fn login_claude(
     finish_claude_login(store, &run, &publication, &mut artifacts, outcome)
 }
 
-/// Explicit legacy import: reads a pre-0.4.0 AgentMixer `claude-oauth-token`
-/// file from `source` and stores it as a new Claude account. The legacy state
-/// root is never a live default; the source directory is left untouched.
-pub fn import_agentmixer_token(store: &Store, source: &Path) -> Result<Id> {
-    private::check_directory(source)?;
-    let bytes = Zeroizing::new(private::read(&source.join("claude-oauth-token"), 2048)?);
-    if !std::str::from_utf8(&bytes).is_ok_and(|text| valid_token(text.trim())) {
-        return Err(Error::Unavailable(
-            "legacy subscription token is missing or invalid",
-        ));
-    }
-    let account = store.add_account(
-        Provider::Claude,
-        "Imported subscription",
-        crate::now_ms(),
-        None,
-    )?;
-    store_token(store, &account.id, &bytes)?;
-    Ok(account.id)
-}
-
 const MAX_CODEX_AUTH_BYTES: usize = 64 * 1024;
 const CODEX_AUTH_CALL: &str = "xcb_auth_snapshot";
 

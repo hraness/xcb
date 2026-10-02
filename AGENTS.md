@@ -34,11 +34,10 @@
   backends own separate credential custody.
   `src/index.ts` is the package's complete public surface.
 - `src/cli/` is the standalone `xcb-compat` terminal surface (`cli.ts` entry,
-  chat/run/resume/sessions/doctor/auth/judge/migrate commands) built on the same
+  chat/run/resume/sessions/doctor/auth/judge commands) built on the same
   task runtime; `claude-task-adapter.ts` and `cli/sandbox.ts` own the
   seatbelted subscription route it drives. `cli/state.ts` resolves `~/.xcb`
-  (env `XCB_STATE`) and owns the explicit `migrate` copy from legacy
-  `~/.agentmixer`; SQLite `agentmixer_*` tables rename lazily at open.
+  (env `XCB_STATE`).
   `cli/update.ts` sets the compatibility update policy; the `cli.ts` executable
   calls the shared updater before loading `cli-program.ts` or application state.
   Bundle the exact released updater
