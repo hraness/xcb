@@ -417,6 +417,20 @@ def sample_tick(config, at_s=None, runner=command, review_binding_warnings=None)
         resources = probe(config, ["resources", "--workspace", config["workspace"]], runner)
         service = probe(config, ["service", "status"], runner)
         sample = sanitize_sample(resources, service, at_s)
+        try:
+            task_rows = probe(config, ["tasks"], runner)
+        except (StopIteration, IndexError, ValueError, OSError):
+            task_rows = None
+        counts = {key: 0 for key in TASK_KEYS}
+        if isinstance(task_rows, list):
+            for row in task_rows:
+                if isinstance(row, dict):
+                    state = row.get("state")
+                    if state == "running": counts["running"] += 1
+                    elif state == "queued": counts["queued"] += 1
+                    elif state == "needs_input": counts["needsInput"] += 1
+                    elif state == "uncertain": counts["uncertain"] += 1
+        sample["tasks"] = counts
         warnings = [] if review_binding_warnings is None else review_binding_warnings
         require(isinstance(warnings, list) and all(name in REVIEW_TOOLS for name in warnings), "invalid binding warnings")
         sample["review_tools_ok"] = not warnings
@@ -578,7 +592,9 @@ def reconcile(config, evidence_path, at_s=None):
         return {"reconciled": pending["id"], "outcome": evidence["outcome"]}
 
 
-HEARTBEAT_KEYS = {"version", "sequence", "health", "sampleAgeSeconds"}
+HEARTBEAT_KEYS = {"version", "sequence", "health", "sampleAgeSeconds", "tasks", "resources"}
+TASK_KEYS = {"running", "queued", "needsInput", "uncertain"}
+RESOURCE_KEYS = {"pressure", "swapUsedBytes", "physicalTotalBytes", "disksFreeBytes"}
 HEARTBEAT_RESULTS = {"accepted", "authentication_failed", "sequence_rejected", "rate_limited",
                      "remote_unconfigured", "remote_error", "network_error", "deadline", "invalid_response"}
 MAX_SEQUENCE = 2 ** 53 - 1
@@ -627,7 +643,14 @@ def heartbeat_payload(samples, at_s, sequence):
         health = "degraded"
     else:
         health = "degraded" if samples["incidents"] or latest.get("pressure") in ("warning", "critical") else "ok"
-    return {"version": 1, "sequence": sequence, "health": health, "sampleAgeSeconds": at_s - samples["at_s"]}
+    latest = samples["history"][-1]
+    tasks = latest.get("tasks", {key: 0 for key in TASK_KEYS})
+    resources = {"pressure": latest.get("pressure", "unknown"),
+                 "swapUsedBytes": latest.get("swap_used_bytes", 0),
+                 "physicalTotalBytes": latest.get("physical_total_bytes", 0),
+                 "disksFreeBytes": latest.get("disks_free_bytes", [])}
+    return {"version": 1, "sequence": sequence, "health": health, "sampleAgeSeconds": at_s - samples["at_s"],
+            "tasks": tasks, "resources": resources}
 
 
 def validate_heartbeat_payload(payload):
@@ -636,6 +659,14 @@ def validate_heartbeat_payload(payload):
     require(numeric(payload["sequence"]) and 1 <= payload["sequence"] <= MAX_SEQUENCE, "invalid heartbeat sequence")
     require(payload["health"] in ("ok", "degraded", "unknown"), "invalid heartbeat health")
     require(numeric(payload["sampleAgeSeconds"]) and payload["sampleAgeSeconds"] <= 180, "invalid sample age")
+    require(isinstance(payload["tasks"], dict) and set(payload["tasks"]) == TASK_KEYS
+            and all(numeric(value) and 0 <= value <= 10000 for value in payload["tasks"].values()), "invalid task counts")
+    resources = payload["resources"]
+    require(isinstance(resources, dict) and set(resources) == RESOURCE_KEYS
+            and resources["pressure"] in ("normal", "warning", "critical", "unknown")
+            and all(numeric(resources[key]) and value >= 0 for key in ("swapUsedBytes", "physicalTotalBytes") for value in [resources[key]])
+            and isinstance(resources["disksFreeBytes"], list) and len(resources["disksFreeBytes"]) <= 16
+            and all(numeric(value) and value >= 0 for value in resources["disksFreeBytes"]), "invalid resource summary")
 
 
 class NoHeartbeatRedirect(urllib.request.HTTPRedirectHandler):

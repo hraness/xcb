@@ -8,7 +8,9 @@ import { internalMutation, internalQuery } from "./server";
 type MachineId = "laptop-1" | "laptop-2";
 type Health = "ok" | "degraded" | "unknown";
 type HostKey = Readonly<{ id: MachineId; label: "laptop 1" | "laptop 2"; tokenSha256: string }>;
-type Heartbeat = Readonly<{ version: 1; sequence: number; health: Health; sampleAgeSeconds: number }>;
+type TaskCounts = Readonly<{ running: number; queued: number; needsInput: number; uncertain: number }>;
+type Resources = Readonly<{ pressure: "normal" | "warning" | "critical" | "unknown"; swapUsedBytes: number; physicalTotalBytes: number; disksFreeBytes: number[] }>;
+type Heartbeat = Readonly<{ version: 1; sequence: number; health: Health; sampleAgeSeconds: number; tasks: TaskCounts; resources: Resources }>;
 type StoredHost = Readonly<{
   id: MachineId;
   keyGeneration: string;
@@ -16,6 +18,8 @@ type StoredHost = Readonly<{
   lastReceivedAt: number;
   health: Health;
   sampleAgeSeconds: number;
+  tasks?: TaskCounts;
+  resources?: Resources;
 }>;
 type RecordArgs = Omit<Heartbeat, "version"> & { id: MachineId; keyGeneration: string };
 type RecordOutcome = { status: 204 | 401 | 409 | 429 | 503 };
@@ -66,12 +70,22 @@ function configured(): readonly HostKey[] | null {
 }
 
 export function parseHeartbeat(value: unknown): Heartbeat | null {
-  if (!plain(value) || !closed(value, ["version", "sequence", "health", "sampleAgeSeconds"])
+  if (!plain(value) || !["version", "sequence", "health", "sampleAgeSeconds"].every((key) => key in value)
+    || !(Object.keys(value).length === 4 || Object.keys(value).length === 6)
     || value.version !== 1 || !Number.isSafeInteger(value.sequence) || Number(value.sequence) <= 0
     || (value.health !== "ok" && value.health !== "degraded" && value.health !== "unknown")
     || !Number.isInteger(value.sampleAgeSeconds) || Number(value.sampleAgeSeconds) < 0
     || Number(value.sampleAgeSeconds) > 180) return null;
-  return value as Heartbeat;
+  const tasks = value.tasks ?? { running: 0, queued: 0, needsInput: 0, uncertain: 0 };
+  if (!plain(tasks) || !closed(tasks, ["running", "queued", "needsInput", "uncertain"])
+    || Object.values(tasks).some((count) => !Number.isSafeInteger(count) || Number(count) < 0 || Number(count) > 10_000)) return null;
+  const resources = value.resources ?? { pressure: "unknown", swapUsedBytes: 0, physicalTotalBytes: 0, disksFreeBytes: [] };
+  if (!plain(resources) || !closed(resources, ["pressure", "swapUsedBytes", "physicalTotalBytes", "disksFreeBytes"])
+    || !["normal", "warning", "critical", "unknown"].includes(String(resources.pressure))
+    || ![resources.swapUsedBytes, resources.physicalTotalBytes].every((n) => Number.isSafeInteger(n) && Number(n) >= 0)
+    || !Array.isArray(resources.disksFreeBytes) || resources.disksFreeBytes.length > 16
+    || resources.disksFreeBytes.some((n) => !Number.isSafeInteger(n) || Number(n) < 0)) return null;
+  return { ...value, tasks, resources } as Heartbeat;
 }
 
 /** Compare every character in a fixed-size digest. Do not early-return on the
@@ -102,6 +116,8 @@ async function authenticate(request: Request, keys: readonly HostKey[]): Promise
 
 const machineValidator = v.union(v.literal("laptop-1"), v.literal("laptop-2"));
 const healthValidator = v.union(v.literal("ok"), v.literal("degraded"), v.literal("unknown"));
+const taskCountsValidator = v.object({ running: v.number(), queued: v.number(), needsInput: v.number(), uncertain: v.number() });
+const resourcesValidator = v.object({ pressure: v.union(v.literal("normal"), v.literal("warning"), v.literal("critical"), v.literal("unknown")), swapUsedBytes: v.number(), physicalTotalBytes: v.number(), disksFreeBytes: v.array(v.number()) });
 
 /** All writes pass through one atomic mutation. Server receipt time, strictly
  * increasing sequence and the one-minute write interval cannot be overridden
@@ -114,13 +130,17 @@ export const record = internalMutation({
     sequence: v.number(),
     health: healthValidator,
     sampleAgeSeconds: v.number(),
+    tasks: v.optional(taskCountsValidator),
+    resources: v.optional(resourcesValidator),
   },
   handler: async (ctx, args): Promise<RecordOutcome> => {
     const keys = configured();
     if (keys === null || keys.length === 0) return { status: 503 };
     const key = keys.find((entry) => entry.id === args.id);
     if (key === undefined || !digestEqual(key.tokenSha256, args.keyGeneration)) return { status: 401 };
-    if (parseHeartbeat({ version: 1, sequence: args.sequence, health: args.health, sampleAgeSeconds: args.sampleAgeSeconds }) === null) {
+    const tasks = args.tasks ?? { running: 0, queued: 0, needsInput: 0, uncertain: 0 };
+    const resources = args.resources ?? { pressure: "unknown" as const, swapUsedBytes: 0, physicalTotalBytes: 0, disksFreeBytes: [] };
+    if (parseHeartbeat({ version: 1, sequence: args.sequence, health: args.health, sampleAgeSeconds: args.sampleAgeSeconds, tasks, resources }) === null) {
       return { status: 409 };
     }
     const rows = (await Promise.all((["laptop-1", "laptop-2"] as const).map(async (id) =>
@@ -138,6 +158,8 @@ export const record = internalMutation({
       sequence: args.sequence,
       health: args.health,
       sampleAgeSeconds: args.sampleAgeSeconds,
+      tasks,
+      resources,
       lastReceivedAt: now,
     };
     if (existing === undefined) {
@@ -146,6 +168,9 @@ export const record = internalMutation({
     } else {
       await ctx.db.replace(existing._id, next);
     }
+    await ctx.db.insert("xcbHostStatusHistory", { id: key.id, observedAt: now, ...tasks, ...resources });
+    // History is bounded on read; pruning is intentionally deferred to avoid
+    // coupling receipt admission to cleanup work.
     return { status: 204 };
   },
 });
@@ -155,23 +180,25 @@ export const record = internalMutation({
  * database query cannot leave an offline host permanently marked online. */
 export const latest = internalQuery({
   args: {},
-  handler: async (ctx): Promise<StoredHost[] | null> => {
+  handler: async (ctx): Promise<{ hosts: StoredHost[]; history: Array<{ id: MachineId; observedAt: number; running: number; queued: number; needsInput: number; uncertain: number }> } | null> => {
     const rows = (await Promise.all((["laptop-1", "laptop-2"] as const).map(async (id) =>
       await ctx.db.query("xcbHostStatus").withIndex("by_alias", (q) => q.eq("id", id)).take(2)))).flat();
     if (rows.length > 2 || new Set(rows.map((row) => row.id)).size !== rows.length) return null;
-    return rows.map(({ id, keyGeneration, sequence, lastReceivedAt, health, sampleAgeSeconds }) => ({
-      id, keyGeneration, sequence, lastReceivedAt, health, sampleAgeSeconds,
-    }));
+    const history = (await Promise.all((['laptop-1', 'laptop-2'] as const).map(async (id) =>
+      await ctx.db.query('xcbHostStatusHistory').withIndex('by_alias_time', (q) => q.eq('id', id).gte('observedAt', Date.now() - 24 * 60 * 60_000)).take(288)))).flat();
+    return { hosts: rows.map(({ id, keyGeneration, sequence, lastReceivedAt, health, sampleAgeSeconds, tasks, resources }) => ({
+      id, keyGeneration, sequence, lastReceivedAt, health, sampleAgeSeconds, tasks, resources,
+    })), history };
   },
 });
 
-export function project(keys: readonly HostKey[], rows: readonly StoredHost[], checkedAt: number) {
+export function project(keys: readonly HostKey[], source: { hosts: readonly StoredHost[]; history: readonly { id: MachineId; observedAt: number; running: number; queued: number; needsInput: number; uncertain: number }[] }, checkedAt: number) {
   return {
     version: 1 as const,
     configured: keys.length > 0,
     checkedAt,
     machines: keys.map((key) => {
-      const row = rows.find((entry) => entry.id === key.id && digestEqual(entry.keyGeneration, key.tokenSha256));
+      const row = source.hosts.find((entry) => entry.id === key.id && digestEqual(entry.keyGeneration, key.tokenSha256));
       // A future receipt is unknown after a server clock correction, never a
       // reason to keep a host online longer than the observation supports.
       const valid = row !== undefined && row.lastReceivedAt <= checkedAt;
@@ -184,13 +211,16 @@ export function project(keys: readonly HostKey[], rows: readonly StoredHost[], c
         health: valid ? row.health : "unknown" as const,
         state,
         sampleAgeSeconds: valid ? row.sampleAgeSeconds : null,
+        tasks: valid ? (row.tasks ?? { running: 0, queued: 0, needsInput: 0, uncertain: 0 }) : { running: 0, queued: 0, needsInput: 0, uncertain: 0 },
+        resources: valid ? (row.resources ?? { pressure: "unknown", swapUsedBytes: 0, physicalTotalBytes: 0, disksFreeBytes: [] }) : { pressure: "unknown", swapUsedBytes: 0, physicalTotalBytes: 0, disksFreeBytes: [] },
+        activity: source.history.filter((entry) => entry.id === key.id && entry.observedAt <= checkedAt).map(({ observedAt, running, queued, needsInput, uncertain }) => ({ observedAt, running, queued, needsInput, uncertain })),
       };
     }),
   };
 }
 
 const recordRef = makeFunctionReference<"mutation", RecordArgs, RecordOutcome>("hostStatus:record");
-const latestRef = makeFunctionReference<"query", Record<string, never>, StoredHost[] | null>("hostStatus:latest");
+const latestRef = makeFunctionReference<"query", Record<string, never>, { hosts: StoredHost[]; history: Array<{ id: MachineId; observedAt: number; running: number; queued: number; needsInput: number; uncertain: number }> } | null>("hostStatus:latest");
 
 function response(status: number, body?: unknown, cache = false): Response {
   const headers = {
@@ -247,6 +277,7 @@ export const heartbeat = httpAction(async (ctx, request) => {
     const result = await ctx.runMutation(recordRef, {
       id: key.id, keyGeneration: key.tokenSha256, sequence: parsed.sequence,
       health: parsed.health, sampleAgeSeconds: parsed.sampleAgeSeconds,
+      tasks: parsed.tasks, resources: parsed.resources,
     });
     return response(result.status);
   } catch {
@@ -257,11 +288,11 @@ export const heartbeat = httpAction(async (ctx, request) => {
 export const status = httpAction(async (ctx) => {
   const keys = configured();
   if (keys === null) return response(503, { error: "host status is unavailable" });
-  if (keys.length === 0) return response(200, project([], [], Date.now()), true);
+  if (keys.length === 0) return response(200, project([], { hosts: [], history: [] }, Date.now()), true);
   try {
-    const rows = await ctx.runQuery(latestRef, {});
-    if (rows === null) return response(503, { error: "host status is unavailable" });
-    return response(200, project(keys, rows, Date.now()), true);
+    const source = await ctx.runQuery(latestRef, {});
+    if (source === null) return response(503, { error: "host status is unavailable" });
+    return response(200, project(keys, source, Date.now()), true);
   } catch {
     return response(503, { error: "host status is unavailable" });
   }

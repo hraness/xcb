@@ -10,6 +10,13 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.17.10 - 2026-10-02
+
+Aggregate host heartbeats now power a compact activity view with task and resource signals.
+
+- Heartbeats report bounded task-state counts, memory pressure, swap, physical memory, and disk-free summaries.
+- The public status surface adds dense activity bars and resource badges without task titles, paths, IDs, or project details.
+
 ## 0.17.8 - 2026-10-02
 
 Command snapshots stop rejecting entire workspaces over committed files that
