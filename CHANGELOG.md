@@ -22,6 +22,20 @@ version bump pull request by renaming `## Unreleased` to the version.
 - A queued task whose pinned model later lands on `routing never` fails at
   dispatch instead of waiting on a condition nothing lifts.
 
+## 0.17.5 - 2026-10-02
+
+Provider self-updates are adopted automatically when their reviewed runtime
+contract is available, so routine Claude, Codex, and Devin updates no longer
+require an xcb release.
+
+- Claude keeps its supported major-version floor while honoring reviewed
+  catalog denials.
+- Codex and Devin accept exact reviewed `(version, sha256)` catalog entries
+  without waiting for a new xcb binary release; unknown or denied builds stay
+  blocked and the last working pin continues routing.
+- `xcb doctor` refreshes provider admission during normal use, and login,
+  metadata, and task launch paths share the same admission check.
+
 ## 0.17.4 - 2026-10-02
 
 Accounts can run more than one task at a time.

@@ -105,6 +105,28 @@ pub fn runtime_admitted(pin: &Pin) -> Result<()> {
     Ok(())
 }
 
+/// Accept the baked release builds and exact provider binaries that the
+/// reviewed-builds catalog has admitted. The catalog is intentionally an
+/// exact `(version, sha256)` allowlist: it makes compatible Codex updates
+/// usable without waiting for an xcb release while keeping protocol changes,
+/// unknown bytes, and explicitly denied builds unavailable.
+pub fn runtime_admitted_with_catalog(root: &Path, pin: &Pin) -> Result<()> {
+    if crate::catalog::denied(root, &pin.sha256) {
+        return Err(Error::Unavailable(
+            "Codex build is denied by the reviewed-builds catalog",
+        ));
+    }
+    if runtime_admitted(pin).is_ok()
+        || (pin.provider == Provider::Codex
+            && crate::catalog::admitted(root, Provider::Codex, &pin.version, &pin.sha256))
+    {
+        return Ok(());
+    }
+    Err(Error::Unavailable(
+        "Codex build has no broker-only qualification; install the qualified build and run xcb doctor",
+    ))
+}
+
 /// Construction is restricted to checked runtime metadata. This binds the
 /// catalog bytes; the host still owns OS confinement and live qualification.
 #[derive(Debug, Clone)]
@@ -315,7 +337,7 @@ fn store_catalog_source(path: &Path, expected_sha256: &str, source: &Value) -> R
 /// The extracted catalog is cached under `root/providers/` keyed by the exact
 /// executable digest, so a turn does not re-scan the binary.
 pub fn static_catalog(root: &Path, pin: &Pin, selected: Option<&str>) -> Result<StaticCatalog> {
-    runtime_admitted(pin)?;
+    runtime_admitted_with_catalog(root, pin)?;
     static_catalog_bound(root, pin, selected, &pin.sha256)
 }
 
@@ -744,6 +766,51 @@ mod tests {
             changed["models"][0]["node_repl_disabled"] = unsupported;
             assert!(transform_catalog(changed, Some("gpt-6-astra"), true).is_err());
         }
+    }
+
+    #[test]
+    fn catalog_admission_reaches_the_launch_gate_without_becoming_fail_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        private::directory(&root.join("providers")).unwrap();
+        let digest = "a".repeat(64);
+        private::create(
+            &root.join("providers/catalog.json"),
+            serde_json::json!({
+                "version": 1,
+                "codex": [{"version": "0.160.0", "sha256": digest.clone()}],
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        let pin = Pin {
+            provider: Provider::Codex,
+            executable: "/synthetic/codex".into(),
+            sha256: digest.clone(),
+            version: "0.160.0".into(),
+            host_sha256: "0".repeat(64),
+            observed_at_ms: 0,
+        };
+        runtime_admitted_with_catalog(&root, &pin).unwrap();
+
+        let mut unknown = pin.clone();
+        unknown.version = "0.160.1".into();
+        assert!(runtime_admitted_with_catalog(&root, &unknown).is_err());
+
+        private::replace(
+            &root.join("providers/catalog.json"),
+            serde_json::json!({
+                "version": 1,
+                "codex": [{"version": "0.160.0", "sha256": digest.clone()}],
+                "deny": {"codex": [digest.clone()]},
+            })
+            .to_string()
+            .as_bytes(),
+            &crate::digest(private::read(&root.join("providers/catalog.json"), 64 * 1024).unwrap()),
+        )
+        .unwrap();
+        assert!(runtime_admitted_with_catalog(&root, &pin).is_err());
     }
 
     // Unix catalog paths; Codex launch is refused on Windows.

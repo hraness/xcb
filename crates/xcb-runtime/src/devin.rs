@@ -9,7 +9,8 @@ mod wire;
 pub(crate) use bridge::DevinBridge;
 pub use bridge::broker_stdio;
 pub use config::{
-    BINARY_SHA256, NATIVE_TOOLS, VERSION, configuration, runtime_admitted, version_admitted,
+    BINARY_SHA256, NATIVE_TOOLS, VERSION, configuration, runtime_admitted,
+    runtime_admitted_with_catalog, version_admitted,
 };
 #[cfg(target_os = "macos")]
 pub(crate) use wire::DevinOptions;
