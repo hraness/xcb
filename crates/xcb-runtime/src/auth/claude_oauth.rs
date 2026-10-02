@@ -706,6 +706,46 @@ async fn fetch_identity(token: &str) -> Result<(String, String)> {
     profile_identity(status, &Zeroizing::new(body))
 }
 
+/// The provider's own subscription meter. Only browser sign-ins carry the
+/// `user:profile` scope this endpoint requires — setup tokens are refused
+/// outright, so callers must gate on `has_claude_browser_credentials`. The
+/// response body is the raw window map the caller validates and maps.
+pub(crate) async fn fetch_usage(token: &str) -> Result<serde_json::Value> {
+    const HOST: &str = "api.anthropic.com";
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = TlsConnector::from(Arc::new(config));
+    let addresses = tokio::net::lookup_host((HOST, 443)).await?;
+    let mut stream = None;
+    for address in addresses.take(8) {
+        if let Ok(tcp) = TcpStream::connect(address).await {
+            stream = Some(tcp);
+            break;
+        }
+    }
+    let mut tls = connector
+        .connect(
+            ServerName::try_from(HOST).expect("fixed identity host"),
+            stream.ok_or(Error::Unavailable("Claude usage connection failed"))?,
+        )
+        .await?;
+    let request = Zeroizing::new(format!(
+        "GET /api/oauth/usage HTTP/1.1\r\nhost: {HOST}\r\nauthorization: Bearer {token}\r\ncontent-type: application/json\r\naccept: application/json\r\nanthropic-beta: oauth-2025-04-20\r\nconnection: close\r\n\r\n"
+    ));
+    tls.write_all(request.as_bytes()).await?;
+    tls.flush().await?;
+    let (status, body) = crate::jev::read_response(&mut tls).await?;
+    if status != 200 {
+        return Err(Error::Unavailable(
+            "Claude usage report unavailable for this sign-in",
+        ));
+    }
+    serde_json::from_slice(&body).map_err(|_| Error::Protocol("Claude usage response"))
+}
+
 async fn verified_identity(
     token: &str,
     mut cancel: watch::Receiver<bool>,

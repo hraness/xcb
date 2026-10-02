@@ -3,6 +3,7 @@
 pub mod auth;
 mod bridge;
 mod config;
+pub(crate) mod status;
 mod wire;
 
 #[cfg(target_os = "macos")]

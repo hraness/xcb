@@ -1139,6 +1139,49 @@ async fn probe_devin(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<V
                 "Devin returned no models; refresh the account credentials",
             ));
         }
+        if let Some(account) = account {
+            // The provider's own account meter is the GetUserStatus call the
+            // CLI's `auth status` makes; the host reads it directly with the
+            // stored session token. Metering is best-effort: a failure leaves
+            // usage unmeasured instead of failing the account refresh.
+            let token = crate::devin::auth::token(store, account)?;
+            if let Ok(status) =
+                crate::devin::status::user_status(token.as_str(), crate::devin::VERSION, now_ms())
+                    .await
+            {
+                let pool = store.account(account)?.quota_pool;
+                let now = now_ms();
+                for (name, window) in [
+                    ("devin.daily", status.daily),
+                    ("devin.weekly", status.weekly),
+                ] {
+                    let Some(window) = window else { continue };
+                    let point = QuotaPoint {
+                        pool: pool.clone(),
+                        window: Id::new(name)?,
+                        // The service reports remaining percentage; the store
+                        // records usage as used_percent.
+                        used_percent: 100.0 - window.remaining_percent,
+                        resets_at_ms: window.resets_at_ms,
+                        observed_at_ms: now,
+                    };
+                    if point.validate().is_ok() {
+                        store.record_account_quota(
+                            run.as_ref()
+                                .ok_or(Error::Conflict("quota probe has no lease"))?,
+                            &point,
+                        )?;
+                    }
+                }
+                if status.email.is_some() || status.plan_name.is_some() {
+                    store.set_account_identity(
+                        account,
+                        status.email,
+                        status.plan_name.map(|plan| format!("Devin {plan}")),
+                    )?;
+                }
+            }
+        }
         Ok(models)
     })
     .await
@@ -2293,7 +2336,23 @@ pub async fn probe(store: &Store, pin: &Pin, account: Option<&Id>) -> Result<Vec
                 }
                 Err(Error::Protocol("usage frame limit"))
             }).await.map_err(|_| Error::Unavailable("usage query timed out"))??;
-            for point in parse_quotas(&response, &store.account(account)?.quota_pool, now_ms())? { store.record_account_quota(run.as_ref().ok_or(Error::Conflict("quota probe has no lease"))?, &point)?; }
+            let pool = store.account(account)?.quota_pool;
+            let now = now_ms();
+            let mut points = parse_quotas(&response, &pool, now)?;
+            if points.is_empty() {
+                // `get_usage` resolves only for stored-credential profiles, so
+                // env-token launches never serve it. Browser sign-ins fall
+                // back to the provider's own usage endpoint; setup tokens
+                // lack its scope and stay passively metered.
+                if let Ok(Some(usage)) = auth::claude_usage(store, account).await {
+                    points = parse_quotas(
+                        &json!({"rate_limits_available": true, "rate_limits": usage}),
+                        &pool,
+                        now,
+                    )?;
+                }
+            }
+            for point in points { store.record_account_quota(run.as_ref().ok_or(Error::Conflict("quota probe has no lease"))?, &point)?; }
             // subscription_type is the provider's own plan report; the profile
             // file inside our launch profile may carry the account email.
             let plan = response
