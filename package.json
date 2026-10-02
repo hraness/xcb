@@ -53,9 +53,9 @@
     "check:convex": "tsc -p convex/tsconfig.json && bun test ./convex"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.278",
-    "@anthropic-ai/sdk": "0.127.0",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@anthropic-ai/claude-agent-sdk": "0.3.284",
+    "@anthropic-ai/sdk": "0.129.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "zod": "4.6.5"
   },
   "devDependencies": {
@@ -63,9 +63,9 @@
     "@hraness/cli-update": "https://github.com/hraness/cli-update/releases/download/v0.1.0/hraness-cli-update-0.1.0.tgz",
     "@hraness/relay": "github:hraness/relay#5ef01b0613ac49c4da0fcb8d2ee81e667c592992",
     "@types/bun": "1.4.2",
-    "@types/node": "26.6.2",
-    "convex": "1.45.0",
-    "convex-test": "0.0.59",
+    "@types/node": "26.6.3",
+    "convex": "1.46.0",
+    "convex-test": "0.0.60",
     "sigstore": "5.0.0",
     "typescript": "7.0.2"
   }
