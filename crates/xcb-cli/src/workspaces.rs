@@ -5,6 +5,7 @@
 use clap::Subcommand;
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use xcb_core::Id;
 use xcb_runtime::{
     Error, Result,
@@ -40,6 +41,18 @@ pub enum WorkspaceCommand {
     Why {
         /// Task id from `xcb tasks` or `xcb backlog`.
         task: Id,
+    },
+    /// Probe every registered directory for work a dead or interrupted
+    /// session left behind: uncommitted changes, unpushed commits, or a
+    /// suspended merge or rebase, on a workspace no live task claims.
+    Audit {
+        /// Hours since a task last used the directory before its changes
+        /// count as stranded. [default: 24]
+        #[arg(long, default_value_t = 24)]
+        stale_hours: u64,
+        /// Print only stranded workspaces, one path per line, for scripts.
+        #[arg(long)]
+        stranded_only: bool,
     },
     /// List the project grants and memory bindings the upgrade moved, paused or dropped.
     Conflicts,
@@ -85,6 +98,15 @@ pub fn dispatch(
             report_visibility(&store, &path, json, "Showing")
         }
         WorkspaceCommand::Why { task } => why(&store, &task, json),
+        WorkspaceCommand::Audit {
+            stale_hours,
+            stranded_only,
+        } => audit(
+            &store,
+            Duration::from_secs(stale_hours.saturating_mul(3600)),
+            stranded_only,
+            json,
+        ),
         WorkspaceCommand::Conflicts => {
             let conflicts = store.migration_conflicts(false)?;
             if json {
@@ -239,6 +261,84 @@ fn list(store: &ManagedStore, json: bool) -> Result<i32> {
             "{} open upgrade conflict{}. Next: xcb workspaces conflicts",
             open.len(),
             if open.len() == 1 { "" } else { "s" }
+        );
+    }
+    Ok(0)
+}
+
+fn audit(store: &ManagedStore, stale: Duration, stranded_only: bool, json: bool) -> Result<i32> {
+    let rows = store.audit_workspaces(stale)?;
+    let rows: Vec<_> = if stranded_only {
+        rows.into_iter().filter(|row| row.stranded).collect()
+    } else {
+        rows
+    };
+    if json {
+        print_json(&rows)?;
+        return Ok(0);
+    }
+    if stranded_only {
+        for row in &rows {
+            println!("{}", row.path);
+        }
+        return Ok(0);
+    }
+    let now = now_ms();
+    println!(
+        "  {} {} {} {} {} STATE",
+        cell("NAME", 20),
+        cell("PATH", 44),
+        cell("BRANCH", 24),
+        cell("CHANGES", 14),
+        cell("LAST USED", 10),
+    );
+    for row in &rows {
+        let (branch, changes, state) = match &row.git {
+            None => (
+                "-".to_owned(),
+                "-".to_owned(),
+                "not a repository".to_owned(),
+            ),
+            Some(git) => {
+                let changes = format!(
+                    "+{} Δ{} ?{}{}",
+                    git.ahead,
+                    git.tracked,
+                    git.untracked,
+                    git.operation.map(|op| format!(" {op}")).unwrap_or_default(),
+                );
+                let state = if row.stranded {
+                    "STRANDED".to_owned()
+                } else if row.claimed {
+                    "live task".to_owned()
+                } else if git.partial {
+                    "probe partial".to_owned()
+                } else {
+                    "clean".to_owned()
+                };
+                (
+                    git.branch.clone().unwrap_or_else(|| "detached".into()),
+                    changes,
+                    state,
+                )
+            }
+        };
+        println!(
+            "  {} {} {} {} {} {}",
+            cell(&row.name, 20),
+            cell(&row.path, 44),
+            cell(&branch, 24),
+            cell(&changes, 14),
+            cell(&human_age(now, row.last_used_ms), 10),
+            state,
+        );
+    }
+    let stranded = rows.iter().filter(|row| row.stranded).count();
+    if stranded > 0 {
+        println!(
+            "{stranded} workspace{} hold{} work no live task claims. Review or preserve each before deleting its directory.",
+            if stranded == 1 { "" } else { "s" },
+            if stranded == 1 { "s" } else { "" },
         );
     }
     Ok(0)

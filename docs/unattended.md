@@ -85,6 +85,15 @@ not proof that a path is disposable. Measure actual free space after every
 cleanup. Preserve databases, sessions, credentials, evidence, dirty worktrees,
 and unmerged work.
 
+A provider session that dies mid-lane leaves exactly those artifacts:
+uncommitted changes, unpushed commits, or a suspended merge or rebase, in a
+project directory no live task claims. `xcb workspaces audit` probes every
+registered directory for that shape and flags each row `STRANDED` once it has
+sat past `--stale-hours` (24 by default); `--stranded-only` prints just the
+paths for a host runner or a scheduled preservation task, and `--json`
+reports the per-workspace branch, ahead count, change counts, and suspended
+operation. The probe is read-only and never holds a lock.
+
 Do not create a fresh xcb task every minute for telemetry. The task store has
 a 4,096-task limit and a 30-day retention horizon; even one ten-minute agent
 schedule could exhaust it. The host runner samples without model calls and

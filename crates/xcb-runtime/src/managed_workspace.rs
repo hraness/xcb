@@ -880,32 +880,38 @@ fn read_metadata_file(path: &Path, max: u64, named: crate::os::Stamp) -> Option<
 #[path = "managed_workspace_metadata_tests.rs"]
 mod metadata_tests;
 
+/// The repository's per-worktree git directory: `.git` itself, or the
+/// directory a linked worktree's `gitdir:` file names. Bounded; no
+/// subprocess.
+fn git_dir(path: &Path) -> Option<PathBuf> {
+    let git = path.join(".git");
+    if git.is_dir() {
+        return Some(git);
+    }
+    let pointer = bounded_read(&git, 1024)?;
+    let gitdir = PathBuf::from(pointer.trim().strip_prefix("gitdir:")?.trim());
+    Some(if gitdir.is_absolute() {
+        gitdir
+    } else {
+        path.join(gitdir)
+    })
+}
+
 /// `owner/name` of the repository's `origin` remote, read from `.git/config`
 /// or a linked worktree's common directory. Bounded; no subprocess. Only
 /// used to group and rank candidates.
 pub(super) fn repo_identity(path: &Path) -> Option<String> {
-    let git = path.join(".git");
-    let common = if git.is_dir() {
-        git
-    } else {
-        let pointer = bounded_read(&git, 1024)?;
-        let gitdir = PathBuf::from(pointer.trim().strip_prefix("gitdir:")?.trim());
-        let gitdir = if gitdir.is_absolute() {
-            gitdir
-        } else {
-            path.join(gitdir)
-        };
-        match bounded_read(&gitdir.join("commondir"), 4096) {
-            Some(common) => {
-                let common = PathBuf::from(common.trim());
-                if common.is_absolute() {
-                    common
-                } else {
-                    gitdir.join(common)
-                }
+    let gitdir = git_dir(path)?;
+    let common = match bounded_read(&gitdir.join("commondir"), 4096) {
+        Some(common) => {
+            let common = PathBuf::from(common.trim());
+            if common.is_absolute() {
+                common
+            } else {
+                gitdir.join(common)
             }
-            None => gitdir,
         }
+        None => gitdir,
     };
     let config = bounded_read(&common.join("config"), MAX_GIT_FILE_BYTES)?;
     let mut in_origin = false;
@@ -923,6 +929,111 @@ pub(super) fn repo_identity(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Bounds for one `git status` probe: a hung filesystem or lock-holding
+/// peer must not stall an audit, and a giant dirty tree must not grow the
+/// report without limit. Counts past the cap mark the probe `partial`.
+const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const GIT_PROBE_MAX_LINES: usize = 8192;
+
+/// A merge, rebase, cherry-pick or revert suspended mid-operation, read from
+/// the per-worktree git directory. No subprocess.
+fn git_operation(gitdir: &Path) -> Option<&'static str> {
+    if gitdir.join("rebase-merge").is_dir() || gitdir.join("rebase-apply").is_dir() {
+        Some("rebase")
+    } else if gitdir.join("MERGE_HEAD").is_file() {
+        Some("merge")
+    } else if gitdir.join("CHERRY_PICK_HEAD").is_file() {
+        Some("cherry-pick")
+    } else if gitdir.join("REVERT_HEAD").is_file() {
+        Some("revert")
+    } else {
+        None
+    }
+}
+
+/// `git status --porcelain=v2 --branch` for one worktree, bounded: the
+/// optional-locks environment keeps the probe read-only, output is line
+/// capped, and a probe that outlives its deadline is killed. Returns None
+/// when the directory is not a git worktree or git itself is unavailable.
+pub(super) fn probe_git(path: &Path) -> Option<WorkspaceGit> {
+    let gitdir = git_dir(path)?;
+    let operation = git_operation(&gitdir);
+    let mut child = std::process::Command::new("git")
+        .args([
+            "-C",
+            path.to_str()?,
+            "-c",
+            "color.ui=false",
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v2",
+            "--branch",
+        ])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    // A reader thread owns the pipe; the caller waits on the deadline so a
+    // status that hangs with nothing to say still frees the audit.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut out = child.stdout.take()?;
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    let mut git = WorkspaceGit {
+        operation,
+        ..WorkspaceGit::default()
+    };
+    let buf = match rx.recv_timeout(GIT_PROBE_TIMEOUT) {
+        Ok(buf) => {
+            if child.wait().map(|status| !status.success()).unwrap_or(true) {
+                git.partial = true;
+            }
+            buf
+        }
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = rx.try_recv();
+            git.partial = true;
+            Vec::new()
+        }
+    };
+    let mut lines = 0usize;
+    for line in buf.split(|b| *b == b'\n') {
+        lines += 1;
+        if lines > GIT_PROBE_MAX_LINES {
+            git.partial = true;
+            break;
+        }
+        let line = match std::str::from_utf8(line) {
+            Ok(line) => line,
+            Err(_) => {
+                git.partial = true;
+                continue;
+            }
+        };
+        if let Some(head) = line.strip_prefix("# branch.head ") {
+            git.branch = (head != "(detached)").then(|| head.trim().to_owned());
+        } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            for part in ab.split_whitespace() {
+                if let Some(ahead) = part.strip_prefix('+') {
+                    git.ahead = ahead.parse().unwrap_or(0);
+                }
+            }
+        } else if line.starts_with('?') {
+            git.untracked = git.untracked.saturating_add(1);
+        } else if matches!(line.chars().next(), Some('1' | '2' | 'u')) {
+            git.tracked = git.tracked.saturating_add(1);
+        }
+    }
+    Some(git)
 }
 
 fn repo_from_url(url: &str) -> Option<String> {
@@ -1000,6 +1111,52 @@ pub struct WorkspaceStatus {
     pub task_count: u64,
     /// `ok`, `invalid`, `container` or `hidden`.
     pub status: &'static str,
+}
+
+/// A bounded read of one workspace's git state, for `xcb workspaces audit`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceGit {
+    /// Current branch, or None when `HEAD` is detached.
+    pub branch: Option<String>,
+    /// Commits on the branch not present on its upstream.
+    pub ahead: u32,
+    /// Tracked modified, added, deleted, renamed, and conflicted paths.
+    pub tracked: u32,
+    /// Untracked paths, each a file a finished session may have left behind.
+    pub untracked: u32,
+    /// A suspended merge, rebase, cherry-pick or revert still in the tree.
+    pub operation: Option<&'static str>,
+    /// The probe ran but its status output was clipped, so counts are lower
+    /// bounds, or the probe itself timed out or failed.
+    pub partial: bool,
+}
+
+impl WorkspaceGit {
+    /// Work a dead or interrupted session could have left behind: any
+    /// tracked or untracked change, unpushed commits, or a suspended
+    /// operation. A clipped probe still counts; the tree is worth a look.
+    pub(crate) fn stranded(&self) -> bool {
+        self.ahead > 0 || self.tracked > 0 || self.untracked > 0 || self.operation.is_some()
+    }
+}
+
+/// One registry row probed for stranded work: `xcb workspaces audit`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceAudit {
+    pub path: String,
+    pub name: String,
+    pub repo: Option<String>,
+    pub last_used_ms: u64,
+    /// A non-terminal task is anchored here, so dirty state is live work.
+    pub claimed: bool,
+    /// None when the directory is not a git worktree or the probe failed
+    /// outright (missing git binary, unmounted volume).
+    pub git: Option<WorkspaceGit>,
+    /// The audit verdict: unclaimed work sitting in a registered directory
+    /// past the stale window. Review or preserve it; nothing schedules one.
+    pub stranded: bool,
 }
 
 fn registry_rows(db: &Connection) -> Result<Vec<RegistryRow>> {
@@ -1255,6 +1412,49 @@ impl ManagedStore {
                 first_seen_ms: row.first_seen,
                 last_used_ms: row.last_used,
                 task_count: row.task_count,
+            })
+            .collect())
+    }
+
+    /// Registered workspaces joined with a bounded git probe and the set of
+    /// live task claims, for `xcb workspaces audit`. A workspace is stranded
+    /// when its tree holds changes or unpushed commits, no non-terminal task
+    /// is anchored to it, and nothing has used it for `stale` — the shape a
+    /// provider session leaves when it dies mid-lane.
+    pub fn audit_workspaces(&self, stale: Duration) -> Result<Vec<WorkspaceAudit>> {
+        let rows = registry_rows(&*self.db()?)?;
+        let claimed: BTreeSet<String> = {
+            let db = self.db()?;
+            let mut query = db.prepare(&format!(
+                "SELECT DISTINCT workspace FROM tasks WHERE workspace IS NOT NULL AND state IN {NONTERMINAL} LIMIT 8192"
+            ))?;
+            query
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<BTreeSet<_>>>()?
+        };
+        let now = now_ms();
+        Ok(rows
+            .into_iter()
+            .filter(|row| !row.hidden)
+            .filter(|row| {
+                self.validate_workspace(Path::new(&row.path))
+                    .is_ok_and(|canonical| canonical == row.path)
+            })
+            .map(|row| {
+                let claimed = claimed.contains(&row.path);
+                let git = probe_git(Path::new(&row.path));
+                let stale_ms = row.last_used.saturating_add(stale.as_millis() as u64);
+                let stranded =
+                    !claimed && stale_ms <= now && git.as_ref().is_some_and(|git| git.stranded());
+                WorkspaceAudit {
+                    path: row.path,
+                    name: row.name,
+                    repo: row.repo,
+                    last_used_ms: row.last_used,
+                    claimed,
+                    git,
+                    stranded,
+                }
             })
             .collect())
     }

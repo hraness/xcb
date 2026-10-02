@@ -6327,6 +6327,24 @@ mod tests {
             Some(Commands::Workspaces { command: Some(WorkspaceCommand::Why { task }) })
                 if task.as_str() == "t_example"
         ));
+        let cli = Cli::try_parse_from([
+            "xcb",
+            "workspaces",
+            "audit",
+            "--stale-hours",
+            "6",
+            "--stranded-only",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Workspaces {
+                command: Some(WorkspaceCommand::Audit {
+                    stale_hours: 6,
+                    stranded_only: true
+                })
+            })
+        ));
         let cli = Cli::try_parse_from(["xcb", "workspaces", "conflicts", "--json"]).unwrap();
         assert!(matches!(
             cli.command,
