@@ -417,9 +417,7 @@ pub async fn login_with_interaction(
                     let _ = events.try_send(event);
                 }
                 if observer.failed {
-                    Err(Error::Unavailable(
-                        "Claude browser sign-in failed; retry sign-in or paste a setup token",
-                    ))
+                    Err(Error::Unavailable(observer.failure_message()))
                 } else {
                     Ok(())
                 }
@@ -437,6 +435,7 @@ struct ClaudeLoginObserver {
     prompt_sent: bool,
     prompt_seen: bool,
     failed: bool,
+    malformed_code: bool,
 }
 
 #[cfg(any(unix, test))]
@@ -470,6 +469,14 @@ fn oauth_url_has_secret(url: &str) -> bool {
 
 #[cfg(any(unix, test))]
 impl ClaudeLoginObserver {
+    fn failure_message(&self) -> &'static str {
+        if self.malformed_code {
+            "Claude rejected an incomplete sign-in code; retry sign-in and copy the full code"
+        } else {
+            "Claude browser sign-in failed; retry sign-in or paste a setup token"
+        }
+    }
+
     fn observe(&mut self, bytes: &[u8]) -> Vec<ClaudeLoginEvent> {
         // Provider output contains the reusable token. It stays private here;
         // only a known OAuth endpoint and a fixed prompt cross the boundary.
@@ -494,7 +501,12 @@ impl ClaudeLoginObserver {
                 .replace_all(&without_osc, "")
                 .into_owned(),
         );
-        self.failed |= text.contains("OAuth error:");
+        // The official auth command reports malformed manual input without
+        // exiting. Stop our supervised attempt rather than waiting ten minutes
+        // for an exchange that never started. Only this fixed error escapes.
+        self.malformed_code |=
+            text.contains("Invalid code. Please make sure the full code was copied.");
+        self.failed |= self.malformed_code || text.contains("OAuth error:");
         let mut events = Vec::new();
         if !self.url_sent {
             let urls = URL.get_or_init(|| Regex::new(r"https://(?:claude\.com/cai/oauth/authorize|claude\.ai/oauth/authorize|platform\.claude\.com/oauth/authorize|console\.anthropic\.com/oauth/authorize)\?[A-Za-z0-9_~%=&.+:/-]+[\s]").unwrap());
@@ -1456,6 +1468,63 @@ mod claude_login_observer_tests {
                 .is_empty()
         );
         assert!(observer.failed);
+    }
+
+    #[test]
+    fn incomplete_manual_code_rejection_is_private_across_output_fragments() {
+        let output = b"Invalid code. Please make sure the full code was copied.\nprivate-code#private-state private@example.test\n";
+        for split in 0..=output.len() {
+            let mut observer = ClaudeLoginObserver::default();
+            assert!(observer.observe(&output[..split]).is_empty());
+            assert!(observer.observe(&output[split..]).is_empty());
+            assert!(observer.failed, "split {split}");
+            assert_eq!(
+                observer.failure_message(),
+                "Claude rejected an incomplete sign-in code; retry sign-in and copy the full code"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn incomplete_manual_code_stops_and_joins_the_waiting_auth_helper() {
+        let (stdin, terminal) = crate::process::login_terminal().unwrap();
+        let (_codes, receiver) = tokio::sync::mpsc::channel(1);
+        let mut observer = ClaudeLoginObserver::default();
+        let interaction = crate::process::LoginInteraction {
+            stdin,
+            terminal,
+            codes: receiver,
+            observer: Box::new(move |bytes| {
+                observer.observe(bytes);
+                if observer.failed {
+                    Err(Error::Unavailable(observer.failure_message()))
+                } else {
+                    Ok(())
+                }
+            }),
+        };
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'Invalid code. Please make sure the full code was copied.\\n' >&2; sleep 30",
+        ]);
+        let (_cancel, cancel) = tokio::sync::watch::channel(false);
+        let outcome = crate::process::capture_supervised_interactive(
+            command,
+            1024,
+            std::time::Duration::from_secs(5),
+            cancel,
+            |_| Ok(()),
+            Some(interaction),
+        )
+        .await;
+        assert!(matches!(
+            outcome,
+            crate::process::CaptureOutcome::Joined(Err(Error::Unavailable(
+                "Claude rejected an incomplete sign-in code; retry sign-in and copy the full code"
+            )))
+        ));
     }
     #[test]
     fn only_complete_oauth_links_and_fixed_prompt_leave_capture() {

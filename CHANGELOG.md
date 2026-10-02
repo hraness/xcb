@@ -10,6 +10,20 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.17.2 - 2026-10-01
+
+Browser sign-in waits until Devin is ready for the code and reports rejected
+Claude codes clearly.
+
+- Drain the private sign-in terminal so Devin can finish its terminal setup
+  and receive a pasted code on macOS.
+- Give the provider terminal a usable window size and wait for Devin's actual
+  code field before requesting input.
+- Stop failed Claude sign-in attempts and explain when a code is incomplete
+  or rejected, including when the helper remains open.
+- Keep provider terminal output private and stop attempts that exceed the
+  output limit, while confirming process cleanup before releasing an account.
+
 ## 0.17.1 - 2026-10-01
 
 Health checks keep a working provider available when the system has a newer

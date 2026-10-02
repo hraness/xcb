@@ -1449,6 +1449,17 @@ pub(crate) fn login_terminal() -> std::io::Result<(Stdio, tokio::io::unix::Async
         fs::OFlags::RDWR | fs::OFlags::NOCTTY | fs::OFlags::CLOEXEC,
         fs::Mode::empty(),
     )?;
+    // This terminal is private and never resized by the operator's shell.
+    // Native prompt renderers need a real viewport rather than openpty's 0x0.
+    termios::tcsetwinsize(
+        &slave,
+        termios::Winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        },
+    )?;
     let mut settings = termios::tcgetattr(&slave)?;
     settings.local_modes.remove(termios::LocalModes::ECHO);
     termios::tcsetattr(&slave, termios::OptionalActions::Now, &settings)?;
@@ -1459,6 +1470,38 @@ pub(crate) fn login_terminal() -> std::io::Result<(Stdio, tokio::io::unix::Async
         Stdio::from(std::fs::File::from(slave)),
         tokio::io::unix::AsyncFd::new(std::fs::File::from(master))?,
     ))
+}
+
+/// Provider terminal libraries can write queries and rendered prompts through
+/// stdin's tty even when stdout/stderr are pipes. Draining that private output
+/// prevents both a full PTY buffer and macOS TCSADRAIN from blocking sign-in.
+#[cfg(unix)]
+async fn read_login_terminal(
+    terminal: &tokio::io::unix::AsyncFd<std::fs::File>,
+    buffer: &mut [u8],
+) -> std::io::Result<usize> {
+    loop {
+        let mut ready = terminal.readable().await?;
+        match ready
+            .try_io(|fd| rustix::io::read(fd.get_ref(), &mut *buffer).map_err(std::io::Error::from))
+        {
+            Ok(Ok(n)) => return Ok(n),
+            // Linux reports EIO when the last slave closes; other Unix PTYs
+            // report EOF. Neither is physical process-exit evidence.
+            Ok(Err(error))
+                if error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) =>
+            {
+                return Ok(0);
+            }
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {}
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn read_login_terminal(_terminal: &(), _buffer: &mut [u8]) -> std::io::Result<usize> {
+    std::future::pending().await
 }
 
 pub(crate) async fn capture_supervised_interactive(
@@ -1518,6 +1561,9 @@ pub(crate) async fn capture_supervised_interactive_diagnosed(
         Ok(child) => child,
         Err(error) => return CaptureOutcome::NeverStarted(Error::LaunchNotStarted(error)),
     };
+    // Command retains configured stdio descriptors after spawn. Release our
+    // slave endpoint so terminal EOF follows the owned provider's exit.
+    drop(command);
     let Some(group) = Group::adopt(&mut child) else {
         return CaptureOutcome::Unproven;
     };
@@ -1548,10 +1594,23 @@ pub(crate) async fn capture_supervised_interactive_diagnosed(
                 let mut out_buf = zeroize::Zeroizing::new([0u8; 4096]);
                 let mut err_buf = zeroize::Zeroizing::new([0u8; 4096]);
                 let mut stderr_count = 0usize;
+                let mut terminal_buf = zeroize::Zeroizing::new([0u8; 4096]);
+                let mut terminal_count = 0usize;
+                let (mut observer, terminal, mut codes) = match interaction.as_mut() {
+                    Some(i) => {
+                        #[cfg(unix)]
+                        let terminal = Some(&i.terminal);
+                        #[cfg(not(unix))]
+                        let terminal: Option<&()> = None;
+                        (Some(&mut i.observer), terminal, Some(&mut i.codes))
+                    }
+                    None => (None, None, None),
+                };
+                let mut terminal_closed = terminal.is_none();
                 let mut code_submitted = false;
                 let mut input_closed = false;
                 loop {
-                    if out_closed && err_closed {
+                    if out_closed && err_closed && terminal_closed {
                         return Ok(bytes);
                     }
                     tokio::select! {
@@ -1559,7 +1618,7 @@ pub(crate) async fn capture_supervised_interactive_diagnosed(
                             let n = read?;
                             out_closed = n == 0;
                             if bytes.len() + n > max { return Err(Error::Protocol("login output limit")); }
-                            if let Some(i) = interaction.as_mut() { (i.observer)(&out_buf[..n])?; }
+                            if let Some(observer) = observer.as_mut() { observer(&out_buf[..n])?; }
                             bytes.extend_from_slice(&out_buf[..n]);
                         }
                         read = stderr.read(&mut *err_buf), if !err_closed => {
@@ -1572,10 +1631,22 @@ pub(crate) async fn capture_supervised_interactive_diagnosed(
                                 diagnostic_bytes.extend_from_slice(&err_buf[..retained]);
                                 diagnostic_complete &= retained == n;
                             }
-                            if let Some(i) = interaction.as_mut() { (i.observer)(&err_buf[..n])?; }
+                            if let Some(observer) = observer.as_mut() { observer(&err_buf[..n])?; }
+                        }
+                        read = async {
+                            match terminal {
+                                Some(terminal) => read_login_terminal(terminal, &mut *terminal_buf).await,
+                                None => std::future::pending().await,
+                            }
+                        }, if !terminal_closed => {
+                            let n = read?;
+                            terminal_closed = n == 0;
+                            terminal_count += n;
+                            if terminal_count > 1024 * 1024 { return Err(Error::Protocol("login terminal output limit")); }
+                            if let Some(observer) = observer.as_mut() { observer(&terminal_buf[..n])?; }
                         }
                         code = async {
-                            if let Some(i) = interaction.as_mut() { i.codes.recv().await } else { std::future::pending().await }
+                            if let Some(codes) = codes.as_mut() { codes.recv().await } else { std::future::pending().await }
                         }, if !input_closed => {
                             let Some(code) = code else {
                                 if !code_submitted {
@@ -1591,13 +1662,13 @@ pub(crate) async fn capture_supervised_interactive_diagnosed(
                                 return Err(Error::Protocol("invalid sign-in code"));
                             }
                             #[cfg(unix)]
-                            if let Some(i) = interaction.as_mut() {
+                            if let Some(terminal) = terminal {
                                 // Appending Enter to the secret String could leave
                                 // its previous allocation unwiped after growth.
                                 for part in [code.as_bytes(), b"\r"] {
                                     let mut written = 0;
                                     while written < part.len() {
-                                        let mut ready = i.terminal.writable().await?;
+                                        let mut ready = terminal.writable().await?;
                                         match ready.try_io(|fd| rustix::io::write(fd.get_ref(), &part[written..]).map_err(std::io::Error::from)) {
                                             Ok(Ok(0)) => return Err(Error::Protocol("sign-in input stalled")),
                                             Ok(Ok(n)) => written += n,
@@ -2966,6 +3037,105 @@ mod login_interaction_tests {
             panic!("raw provider exchange was cancelled when its code sender completed");
         };
         assert_eq!(&*bytes, b"ready\nsynthetic-token\n");
+    }
+
+    #[tokio::test]
+    async fn terminal_rendering_is_drained_before_code_submission() {
+        let (stdin, terminal) = login_terminal().unwrap();
+        let (sender, codes) = tokio::sync::mpsc::channel(1);
+        let mut sender = Some(sender);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observer_seen = seen.clone();
+        let interaction = LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(move |bytes| {
+                let mut seen = observer_seen.lock().unwrap();
+                seen.extend_from_slice(bytes);
+                if seen.windows(5).any(|window| window == b"ready")
+                    && let Some(sender) = sender.take()
+                {
+                    sender
+                        .try_send(zeroize::Zeroizing::new("manual-code".into()))
+                        .unwrap();
+                }
+                Ok(())
+            }),
+        };
+        let mut command = Command::new("/bin/sh");
+        // More than a PTY buffer, followed by a draining terminal mode change.
+        // The real provider renders through its stdin tty as well as pipes.
+        command.args(["-c", "test \"$(/bin/stty size)\" = '24 80' || exit 2; head -c 65536 /dev/zero >&0; /bin/stty -echo; printf ready >&0; IFS= read -r code; test \"$code\" = manual-code || exit 3; printf 'synthetic-token\\n'"]);
+        let (_cancel, cancel) = tokio::sync::watch::channel(false);
+        let result = capture_supervised_interactive(
+            command,
+            1024,
+            Duration::from_secs(5),
+            cancel,
+            |_| Ok(()),
+            Some(interaction),
+        )
+        .await;
+        let CaptureOutcome::Joined(Ok(bytes)) = result else {
+            panic!("provider terminal rendering prevented code exchange");
+        };
+        assert_eq!(&*bytes, b"synthetic-token\n");
+        assert!(
+            !seen
+                .lock()
+                .unwrap()
+                .windows(11)
+                .any(|window| window == b"manual-code")
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_output_is_drained_after_both_pipes_close() {
+        let (stdin, terminal) = login_terminal().unwrap();
+        let (_sender, codes) = tokio::sync::mpsc::channel(1);
+        let interaction = LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(|_| Ok(())),
+        };
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "exec 1>&- 2>&-; head -c 65536 /dev/zero >&0; /bin/stty -echo",
+        ]);
+        let (_cancel, cancel) = tokio::sync::watch::channel(false);
+        assert!(matches!(capture_supervised_interactive(
+            command, 1024, Duration::from_secs(5), cancel, |_| Ok(()), Some(interaction),
+        ).await, CaptureOutcome::Joined(Ok(bytes)) if bytes.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn excessive_private_terminal_output_stops_and_joins_the_provider() {
+        let (stdin, terminal) = login_terminal().unwrap();
+        let (_sender, codes) = tokio::sync::mpsc::channel(1);
+        let interaction = LoginInteraction {
+            stdin,
+            terminal,
+            codes,
+            observer: Box::new(|_| Ok(())),
+        };
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "head -c 1100000 /dev/zero >&0; sleep 30"]);
+        let (_cancel, cancel) = tokio::sync::watch::channel(false);
+        assert!(matches!(
+            capture_supervised_interactive(
+                command,
+                1024,
+                Duration::from_secs(5),
+                cancel,
+                |_| Ok(()),
+                Some(interaction),
+            )
+            .await,
+            CaptureOutcome::Joined(Err(Error::Protocol("login terminal output limit")))
+        ));
     }
 
     #[tokio::test]
