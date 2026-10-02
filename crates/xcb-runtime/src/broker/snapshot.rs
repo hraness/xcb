@@ -272,7 +272,33 @@ fn walk(
                 )?;
             }
             FileType::RegularFile => {
-                let (data, mode) = read_binary(directory, std::ffi::OsStr::new(&name))?;
+                // A file outside the bounded input contract is reported as
+                // excluded like a symlink or special file; publication still
+                // refuses to touch the real path because it is not an original.
+                if stat.st_nlink != 1 {
+                    if excluded.len() < 256 {
+                        excluded.push(format!("{path} [linked]"));
+                    }
+                    continue;
+                }
+                if stat.st_size > SNAPSHOT_FILE_LIMIT as i64 {
+                    if excluded.len() < 256 {
+                        excluded.push(format!("{path} [oversized]"));
+                    }
+                    continue;
+                }
+                let (data, mode) = match read_binary(directory, std::ffi::OsStr::new(&name)) {
+                    Ok(read) => read,
+                    // The file drifted out of bounds between stat and open:
+                    // exclude it the same way instead of failing the walk.
+                    Err(Error::Unavailable(_)) => {
+                        if excluded.len() < 256 {
+                            excluded.push(format!("{path} [unbounded]"));
+                        }
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 *bytes = bytes
                     .checked_add(data.len())
                     .ok_or(Error::Unavailable("command snapshot byte limit"))?;
