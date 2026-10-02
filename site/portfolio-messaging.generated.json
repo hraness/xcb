@@ -5,7 +5,7 @@
   "portfolio": {
     "contract": "hraness.portfolio-public/v1",
     "url": "https://hraness.com/portfolio.json",
-    "digest": "sha256:d3eb11b155ab8267165e25a96109d7efa2d1001165690ff59de0891ae0b50d3d"
+    "digest": "sha256:0ecd2968be473435e710fb09b3d3c36e42d73b25ee390f684764c8963bf61420"
   },
   "messaging": {
     "formatVersion": 1,
@@ -27,7 +27,7 @@
     "long": "Excalibur (xcb) is a terminal and router for developers who pay for more than one coding agent. Type the work into one conversation, and xcb sends each task to a Claude, Codex, or Devin account that is signed in, idle, and not at a known usage limit, on a model that fits the job. Tasks keep running after you close the terminal, every session appears on one screen, and each account runs one task at a time. Other agents can hand xcb work with one JSON command. xcb is free and MIT licensed, with releases for macOS and Linux.",
     "hero": {
       "heading": "Use your Claude, Codex, and Devin plans from one agent.",
-      "summary": "Use the AI plans you already pay for. xcb routes each task to an available account, from your terminal or app.",
+      "summary": "Excalibur (xcb) is for developers who pay for more than one coding agent. Each task runs in Claude Code, Codex, or the Devin CLI on an account that is signed in, idle, and not at a known limit. Use its terminal or your own agent or app.",
       "primaryAction": "Install xcb",
       "secondaryAction": "See how it works"
     },
@@ -274,10 +274,7 @@
       "messaging": {
         "names": {
           "name": "TextButler",
-          "command": "textbutler",
-          "formerly": [
-            "Message Like Me"
-          ]
+          "command": "textbutler"
         },
         "short": "AI butler for the iMessage, WhatsApp, and Beeper chats you choose",
         "tagline": "An AI butler in your messaging apps."
@@ -1025,7 +1022,7 @@
       "kind": "contract",
       "label": "shared bundle format",
       "direction": "shared",
-      "detail": "Both tools implement the versioned message-like-me.local-message-bundle interchange without importing each other's private state."
+      "detail": "Both tools read and write the same versioned TextButler local message bundle format without importing each other's private state."
     },
     {
       "source": "gobstopper",
