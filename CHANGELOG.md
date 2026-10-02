@@ -12,6 +12,10 @@ version bump pull request by renaming `## Unreleased` to the version.
 
 ## 0.17.5 - 2026-10-02
 
+Managed tasks can pin an exact model, and provider self-updates are adopted
+automatically when their reviewed runtime contract is available, so routine
+Claude, Codex, and Devin updates no longer require an xcb release.
+
 - `xcb backlog add --model provider/model[/effort]` pins a managed task to
   one observed model. The pin resolves to a canonical key at admission
   (unobserved, ambiguous, and `routing never`-excluded values are refused),
@@ -21,13 +25,6 @@ version bump pull request by renaming `## Unreleased` to the version.
   `model` field.
 - A queued task whose pinned model later lands on `routing never` fails at
   dispatch instead of waiting on a condition nothing lifts.
-
-## 0.17.5 - 2026-10-02
-
-Provider self-updates are adopted automatically when their reviewed runtime
-contract is available, so routine Claude, Codex, and Devin updates no longer
-require an xcb release.
-
 - Claude keeps its supported major-version floor while honoring reviewed
   catalog denials.
 - Codex and Devin accept exact reviewed `(version, sha256)` catalog entries
