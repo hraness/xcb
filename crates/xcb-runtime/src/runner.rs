@@ -70,6 +70,7 @@ impl Diagnostic {
             | Error::Unavailable(_)
             | Error::CodexRpc { .. }
             | Error::CodexNotification { .. }
+            | Error::CodexNativeTool { .. }
             | Error::DevinRpc { .. }
             | Error::DevinModelChoices { .. }
             | Error::Message(_)

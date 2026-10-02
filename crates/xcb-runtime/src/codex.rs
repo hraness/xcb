@@ -739,23 +739,26 @@ impl CodexProtocol {
                 .all(|review| review.action["toolName"] == tool),
             "Codex reviewed native tool changed",
         )?;
-        require(
-            item["server"] == "cua_repl"
-                && ["js", "js_reset", "turn_ended"].contains(&tool.as_str())
-                && self
-                    .options
-                    .native_mcp
-                    .as_ref()
-                    .and_then(|config| config["enabled_tools"].as_array())
-                    .is_some_and(|tools| tools.contains(&json!(tool)))
-                && item["arguments"].is_object()
-                && serde_json::to_vec(&item["arguments"])?.len() <= MAX_JSON_BYTES
-                && item["appContext"].is_null()
-                && item["pluginId"].is_null()
-                && item["mcpAppResourceUri"].is_null()
-                && item["mcpAppUi"].is_null(),
-            "Codex unadmitted native tool",
-        )?;
+        if !(item["server"] == "cua_repl"
+            && ["js", "js_reset", "turn_ended"].contains(&tool.as_str())
+            && self
+                .options
+                .native_mcp
+                .as_ref()
+                .and_then(|config| config["enabled_tools"].as_array())
+                .is_some_and(|tools| tools.contains(&json!(tool)))
+            && item["arguments"].is_object()
+            && serde_json::to_vec(&item["arguments"])?.len() <= MAX_JSON_BYTES
+            && item["appContext"].is_null()
+            && item["pluginId"].is_null()
+            && item["mcpAppResourceUri"].is_null()
+            && item["mcpAppUi"].is_null())
+        {
+            return Err(Error::CodexNativeTool {
+                server_sha256: crate::digest(item["server"].as_str().unwrap_or("").as_bytes()),
+                tool_sha256: crate::digest(tool.as_bytes()),
+            });
+        }
         if completed {
             let call = self
                 .native_calls
