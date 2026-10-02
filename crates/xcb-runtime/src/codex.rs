@@ -319,10 +319,13 @@ fn usage(value: &Value) -> Result<(Counters, u64)> {
     let cache_write = optional_count(&value["cacheWriteInputTokens"])?;
     let output = count(&value["outputTokens"])?;
     let total = count(&value["totalTokens"])?;
-    require(
-        input.checked_add(output) == Some(total),
-        "Codex total tokens mismatch",
-    )?;
+    if input.checked_add(output) != Some(total) {
+        return Err(Error::CodexUsage {
+            input,
+            output,
+            total,
+        });
+    }
     let uncached = input
         .checked_sub(cache_read)
         .and_then(|v| v.checked_sub(cache_write))

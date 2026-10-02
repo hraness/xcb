@@ -216,3 +216,40 @@ generated experimental schema to a `CodexProtocolManifest` using
 versions plus executable, schema and manifest digests. A caller-supplied hash
 alone is not admission evidence; mismatched runtime identity fails before
 initialization.
+
+## Native managed worker host commands
+
+This is a separate native xcb worker tool, not a change to the TypeScript
+account-process helper or the credential-free Codex model relay. The existing
+`workspace_exec` remains an offline staged Linux replay with filtered read-only
+Git and no host credentials. `workspace_host_exec` instead runs `argv` in the
+real worktree on the host with ordinary network access. Its input is
+`{argv,cwd,timeoutMs,network:"host"}` with the same bounded argv, relative cwd
+and 1–600000 ms deadline as `workspace_exec`; it does not accept an environment
+map. Git writes and remote effects happen immediately, not via the VM's
+revision-checked publication. Use this lane only for work the user authorized.
+
+Admission requires an active managed Codex session whose persisted task binding
+and workspace match the run, plus the trusted host process policy
+`XCB_HOST_CREDENTIALS_TASK=<exact task ID>`. The host must set this variable
+before launching xcb for that one task; a prompt, tool argument, workspace file
+or worker cannot set it. Other tasks and direct sessions are refused, including
+when they share an account or project. No fallback from an unavailable VM or a
+failed host command crosses this gate. The provider account's private home and
+authentication are not exported; the host reads its own `gh auth token`, global
+Git author identity and `SSH_AUTH_SOCK` at execution time. It clears the child
+environment and passes only selected host values through a bounded private
+mode-0600 env file, consumes and removes that file before launch, and zeroizes
+its credential buffers. The host GitHub token never belongs in argv, tool
+output or receipts; literal occurrences in successful captured output are
+redacted. Do not put tokens into shell arguments or project files.
+
+The host command is supervised as a process group, with a deadline and bounded
+output. A failed, cancelled or unproven command can have already changed local
+Git state or a remote; its tool intent and account custody remain unresolved
+rather than being retried or treated as a successful publication. Reconcile the
+real worktree and remote before any new write. This lane deliberately abandons
+the VM's filesystem and network confinement: arbitrary commands with host
+credentials can read other host files or send data to the network. The policy
+flag is therefore a trusted owner/operator decision, not a convenience mode
+for untrusted replay or a claim of OS isolation.

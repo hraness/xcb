@@ -124,22 +124,50 @@ fn snapshot_round_trips_binary_and_excludes_controls_dependencies_and_secrets() 
 }
 
 #[test]
-fn snapshot_rejects_hardlinks_and_oversized_files() {
-    for kind in ["hardlink", "oversized"] {
-        let fixture = Fixture::new();
-        fixture.write("input", b"unchanged", 0o600);
-        match kind {
-            "hardlink" => {
-                fs::hard_link(fixture.root.join("input"), fixture.root.join("alias")).unwrap()
-            }
-            _ => File::create(fixture.root.join("large"))
-                .unwrap()
-                .set_len(SNAPSHOT_FILE_LIMIT as u64 + 1)
-                .unwrap(),
-        }
-        assert!(fixture.workspace.command_snapshot().is_err(), "{kind}");
-        assert_eq!(fs::read(fixture.root.join("input")).unwrap(), b"unchanged");
+fn snapshot_excludes_hardlinks_and_oversized_files_without_aborting() {
+    let fixture = Fixture::new();
+    fixture.write("input", b"unchanged", 0o600);
+    fixture.write("regular", b"included", 0o600);
+    fs::hard_link(fixture.root.join("input"), fixture.root.join("alias")).unwrap();
+    File::create(fixture.root.join("large"))
+        .unwrap()
+        .set_len(SNAPSHOT_FILE_LIMIT as u64 + 1)
+        .unwrap();
+    let snapshot = fixture.workspace.command_snapshot().unwrap();
+    // Every name of a multiply-linked inode is excluded, like symlinks and
+    // special files; only bounded single-link regular files are inputs.
+    assert_eq!(
+        snapshot
+            .document
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["regular"]
+    );
+    for excluded in ["input [linked]", "alias [linked]", "large [oversized]"] {
+        assert!(
+            snapshot.excluded.iter().any(|path| path == excluded),
+            "{excluded} in {:?}",
+            snapshot.excluded
+        );
     }
+    // Publication through an excluded path is refused and the real file is
+    // untouched: it is not an original, so a write reads as a workspace
+    // conflict rather than a new file.
+    for target in ["large", "alias"] {
+        let (result, effects) = fixture.workspace.publish_command_changes(
+            &snapshot,
+            fixture.changes(&snapshot, vec![write(target, b"must not publish", false)]),
+        );
+        assert!(result.is_err(), "{target}");
+        assert_eq!(effects, EffectState::None, "{target}");
+    }
+    assert_eq!(fs::read(fixture.root.join("input")).unwrap(), b"unchanged");
+    assert_eq!(
+        fs::metadata(fixture.root.join("large")).unwrap().len(),
+        SNAPSHOT_FILE_LIMIT as u64 + 1
+    );
 }
 
 #[test]

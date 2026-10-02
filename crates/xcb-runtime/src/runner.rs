@@ -69,6 +69,7 @@ impl Diagnostic {
             | Error::Conflict(_)
             | Error::Unavailable(_)
             | Error::CodexRpc { .. }
+            | Error::CodexUsage { .. }
             | Error::CodexNotification { .. }
             | Error::CodexNativeTool { .. }
             | Error::DevinRpc { .. }
@@ -3006,8 +3007,11 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         name,
                         arguments,
                     } if admitted && tools => {
-                        if seen_calls.len() >= 128 || !seen_calls.insert(call_id.clone()) {
-                            return Err(Error::Protocol("duplicate or excessive tool call"));
+                        if !seen_calls.insert(call_id.clone()) {
+                            return Err(Error::Protocol("duplicate tool call identifier"));
+                        }
+                        if seen_calls.len() > 128 {
+                            return Err(Error::Protocol("tool call limit exceeded"));
                         }
                         tool_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         store.begin_tool(
