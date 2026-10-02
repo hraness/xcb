@@ -416,11 +416,12 @@ pub fn parse_quotas(value: &Value, pool: &Id, observed: u64) -> Result<Vec<Quota
 }
 
 fn reset_credit_ids(value: &Value) -> Result<Vec<String>> {
-    let credits = &value["rateLimitResetCredits"];
-    if credits.is_null() {
+    let container = &value["rateLimitResetCredits"];
+    if container.is_null() {
         return Ok(Vec::new());
     }
-    let credits = credits
+    object(container)?;
+    let credits = container["credits"]
         .as_array()
         .ok_or(Error::Protocol("Codex reset credit list"))?;
     require(credits.len() <= 16, "Codex reset credit bound")?;
@@ -429,7 +430,8 @@ fn reset_credit_ids(value: &Value) -> Result<Vec<String>> {
         object(credit)?;
         let id = credit["id"]
             .as_str()
-            .or_else(|| credit["creditId"].as_str());
+            .or_else(|| credit["creditId"].as_str())
+            .or_else(|| credit["credit_id"].as_str());
         if let Some(id) = id {
             require(id.len() <= 120, "Codex reset credit id bound")?;
             ids.push(id.to_string());

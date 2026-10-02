@@ -711,11 +711,12 @@ mod tests {
             pin.version = "0.0.0".into();
             assert!(runtime_admitted(&pin).is_err());
         }
-        let schemas: BTreeSet<_> = REVIEWED_BUILDS
-            .iter()
-            .map(|(_, _, schema)| schema)
-            .collect();
-        assert_eq!(schemas.len(), REVIEWED_BUILDS.len());
+        // Distinct versions may share a schema when the generated schema is
+        // unchanged; version and executable digests stay unique.
+        let versions: BTreeSet<_> = REVIEWED_BUILDS.iter().map(|(v, _, _)| v).collect();
+        let executables: BTreeSet<_> = REVIEWED_BUILDS.iter().map(|(_, s, _)| s).collect();
+        assert_eq!(versions.len(), REVIEWED_BUILDS.len());
+        assert_eq!(executables.len(), REVIEWED_BUILDS.len());
     }
 
     #[test]

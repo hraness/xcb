@@ -1064,7 +1064,7 @@ fn reset_credit_consume_only_spends_on_exhaustion_and_stays_bounded() {
     let pool = Id::new("account1").unwrap();
     let limited = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100,"resetsAt":2000}}},
         "ordinaryUsageAllowed":false,
-        "rateLimitResetCredits":[{"id":"credit-one","resetType":"primary","grantedAt":1}]});
+        "rateLimitResetCredits":{"availableCount":1,"credits":[{"id":"credit-one","resetType":"primary","grantedAt":1}]}});
     let points = parse_quotas(&limited, &pool, 1000).unwrap();
     let request = reset_credit_consume(&limited, &pool, &points)
         .unwrap()
@@ -1081,7 +1081,7 @@ fn reset_credit_consume_only_spends_on_exhaustion_and_stays_bounded() {
     );
     // Under-limit or credit-less reads never spend.
     let healthy = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":40,"resetsAt":2000}}},
-        "rateLimitResetCredits":[{"id":"credit-one"}]});
+        "rateLimitResetCredits":{"availableCount":1,"credits":[{"id":"credit-one"}]}});
     let points = parse_quotas(&healthy, &pool, 1000).unwrap();
     assert!(
         reset_credit_consume(&healthy, &pool, &points)
@@ -1089,7 +1089,7 @@ fn reset_credit_consume_only_spends_on_exhaustion_and_stays_bounded() {
             .is_none()
     );
     let broke = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100,"resetsAt":2000}}},
-        "rateLimitResetCredits":[]});
+        "rateLimitResetCredits":{"availableCount":0,"credits":[]}});
     let points = parse_quotas(&broke, &pool, 1000).unwrap();
     assert!(
         reset_credit_consume(&broke, &pool, &points)
@@ -1107,7 +1107,7 @@ fn reset_credit_consume_only_spends_on_exhaustion_and_stays_bounded() {
     );
     // Malformed credit shapes and oversized lists still fail closed.
     let bad = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100,"resetsAt":2000}}},
-        "rateLimitResetCredits":"yes"});
+        "rateLimitResetCredits":{"availableCount":1,"credits":"yes"}});
     let points = parse_quotas(&bad, &pool, 1000).unwrap();
     assert!(reset_credit_consume(&bad, &pool, &points).is_err());
 }
