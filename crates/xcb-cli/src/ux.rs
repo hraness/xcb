@@ -271,7 +271,7 @@ Start here
   doctor         Check providers, accounts and unfinished runs
 
 Accounts and models
-  accounts       List accounts; add, sign in and manage them
+  accounts       List accounts; add, sign in, remove and manage them
   models         List models; refresh catalogs and set the default
   routing        Show which models each kind of task prefers; exclude routes
   offers         Show public plan offers (not checked against your account)

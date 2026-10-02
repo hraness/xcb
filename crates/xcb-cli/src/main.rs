@@ -168,7 +168,7 @@ enum Commands {
         /// Session to reopen; the latest session when omitted.
         id: Option<Id>,
     },
-    /// List accounts; subcommands add, connect, and manage them.
+    /// List accounts; subcommands add, sign in, remove, and manage them.
     Accounts {
         #[command(subcommand)]
         command: Option<AccountCommand>,
@@ -586,6 +586,14 @@ enum AccountCommand {
     Refresh {
         /// Account name or id (listed by `xcb accounts`).
         account: String,
+    },
+    /// Permanently remove an account and its stored credentials.
+    Remove {
+        /// Account name or id (listed by `xcb accounts`).
+        account: String,
+        /// Allow removing the account currently selected as the default.
+        #[arg(long)]
+        force: bool,
     },
     /// Copy agentmixer-era accounts and sessions from a legacy state root.
     ImportAgentmixer {
@@ -2192,6 +2200,48 @@ async fn dispatch_inner(
                     let models = runner::probe(&store, &pin, Some(&account.id)).await?;
                     store.set_account_models(&account.id, &models)?;
                     accounts(&store, &config, cli.json)?;
+                }
+                Some(AccountCommand::Remove { account, force }) => {
+                    let account = store.resolve_account(&account)?;
+                    let (config_before, _) = Config::load(store.root())?;
+                    let was_default = config_before.default_account.as_ref() == Some(&account.id);
+                    if was_default && !force {
+                        return Err(Error::guided(
+                            "cannot remove the default account without --force",
+                            format!("xcb accounts remove {} --force", account.id),
+                        ));
+                    }
+                    let removed = store.remove_account(&account.id)?;
+                    let mut default_cleared = false;
+                    if was_default && force {
+                        // Re-read after removal so a concurrent config update is
+                        // never overwritten while clearing the removed id.
+                        let (mut current, revision) = Config::load(store.root())?;
+                        if current.default_account.as_ref() == Some(&removed.id) {
+                            current.default_account = None;
+                            current.save(store.root(), revision.as_deref())?;
+                            default_cleared = true;
+                        }
+                    }
+                    if cli.json {
+                        print_json(json!({
+                            "version": 1,
+                            "account": &removed.id,
+                            "provider": removed.provider,
+                            "name": removed.name(),
+                            "removed": ["account_record", "stored_credentials"],
+                            "defaultCleared": default_cleared,
+                        }))?;
+                    } else {
+                        println!(
+                            "Removed account {} ({}) and its stored credentials.",
+                            xcb_core::display_text(&removed.name(), 80),
+                            removed.id
+                        );
+                        if default_cleared {
+                            println!("Default account cleared.");
+                        }
+                    }
                 }
                 Some(AccountCommand::ImportAgentmixer { source }) => {
                     // This is a generated public routing ID, never a credential
