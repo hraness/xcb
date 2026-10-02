@@ -331,7 +331,7 @@ async fn execute(
     let mut command = Command::new(&request.argv[0]);
     command.args(&request.argv[1..]).current_dir(cwd);
     if let Err(error) = child_environment(&mut command, env_root, &credentials, &home, &path) {
-        let effects = if matches!(error, Error::CleanupUnproven) {
+        let effects = if error.is_cleanup_unproven() {
             EffectState::Uncertain
         } else {
             EffectState::None
@@ -396,7 +396,7 @@ pub(super) async fn call(
     let (credentials, home, path) = match credentials().await {
         Ok(values) => values,
         Err(error) => {
-            let effects = if matches!(error, Error::CleanupUnproven) {
+            let effects = if error.is_cleanup_unproven() {
                 EffectState::Uncertain
             } else {
                 EffectState::None
