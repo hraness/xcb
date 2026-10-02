@@ -8,6 +8,13 @@ An immutable annotated `v<version>` tag at a commit in current `main` history
 (every `main` commit was admitted by the `Required` check) is a release request. The tag version must equal `package.json`'s
 `version`; no other tag shape is admitted.
 
+Merging a version bump is enough to release. When `Check` passes on a `main`
+push whose `package.json` version differs from its parent's,
+`.github/workflows/auto-tag.yml` creates the annotated `v<version>` tag at that
+commit through the `hraness-release-tagger` GitHub App. Tags pushed with the
+workflow's own `GITHUB_TOKEN` would not start `release.yml`. An existing tag is
+left unchanged, and an owner can still push the tag by hand.
+
 ## Release contract
 
 `.github/workflows/release.yml` runs the whole pipeline. Its jobs:
