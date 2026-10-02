@@ -15,7 +15,7 @@ export function compatibilityUpdateOptions(input: Readonly<{
   // Unknown positional commands are workspace paths in this CLI's chat parser.
   const interactiveCommand = command === undefined
     || ["chat", "run", "resume", "doctor", "--provider", "--model"].includes(command)
-    || (!command.startsWith("-") && !["auth", "sessions", "judge", "migrate", "update", "help"].includes(command));
+    || (!command.startsWith("-") && !["auth", "sessions", "judge", "update", "help"].includes(command));
   const effectFree = command !== undefined && ["--help", "help", "-h", "--version", "-v"].includes(command);
   return {
     packageName: "@hraness/xcb",

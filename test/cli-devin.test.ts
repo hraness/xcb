@@ -18,7 +18,7 @@ import { admitCliProvider, openCliProvider } from "../src/cli/provider.ts";
 import { buildQualificationRecord, writeCliQualification } from "../src/cli/qualification.ts";
 import type { CliBinaryInspection } from "../src/cli/binaries.ts";
 
-async function dir(prefix = "agentmixer-devin-") {
+async function dir(prefix = "xcb-devin-") {
   const root = await realpath(await mkdtemp(join(tmpdir(), prefix)));
   await chmod(root, 0o700);
   return root;

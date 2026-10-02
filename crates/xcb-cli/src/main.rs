@@ -595,12 +595,6 @@ enum AccountCommand {
         #[arg(long)]
         force: bool,
     },
-    /// Copy agentmixer-era accounts and sessions from a legacy state root.
-    ImportAgentmixer {
-        /// Absolute path to the legacy .agentmixer state directory.
-        #[arg(long)]
-        source: PathBuf,
-    },
     /// Copy an existing Codex CLI sign-in (auth.json) into xcb.
     ImportCodex {
         /// Absolute path to the Codex auth.json to copy.
@@ -1070,7 +1064,7 @@ fn no_reply_error(provider: Provider, session: &Id) -> Error {
 }
 
 fn import_acknowledgement(id: &Id) -> serde_json::Value {
-    json!({"version":1,"account":id,"sourcePreserved":true,"sessionsMigrated":false})
+    json!({"version":1,"account":id,"sourcePreserved":true})
 }
 
 async fn broker_stdio() -> Result<i32> {
@@ -2241,18 +2235,6 @@ async fn dispatch_inner(
                         if default_cleared {
                             println!("Default account cleared.");
                         }
-                    }
-                }
-                Some(AccountCommand::ImportAgentmixer { source }) => {
-                    // This is a generated public routing ID, never a credential
-                    // or an internal account record.
-                    let id: Id = auth::import_agentmixer_token(&store, &source)?;
-                    if cli.json {
-                        print_json(import_acknowledgement(&id))?;
-                    } else {
-                        println!(
-                            "Imported one Claude account as {id}. Original state and sessions are unchanged."
-                        );
                     }
                 }
                 Some(AccountCommand::ImportCodex { source, account }) => {
@@ -5618,7 +5600,7 @@ mod tests {
         let id = Id::new("a_public_routing_id").unwrap();
         assert_eq!(
             import_acknowledgement(&id),
-            json!({"version":1,"account":"a_public_routing_id","sourcePreserved":true,"sessionsMigrated":false}),
+            json!({"version":1,"account":"a_public_routing_id","sourcePreserved":true}),
         );
     }
 

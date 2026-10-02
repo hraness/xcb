@@ -672,7 +672,7 @@ const commandGroups: readonly Readonly<{ id: string; title: string; commands: re
     ["doctor", "Check provider builds and unfinished runs; --provider, --executable"],
   ] },
   { id: "commands-accounts", title: "Accounts and models", commands: [
-    ["accounts", "List accounts; add, login, token, refresh, default, disable, enable, remove, import-codex, import-devin, import-agentmixer"],
+    ["accounts", "List accounts; add, login, token, refresh, default, disable, enable, remove, import-codex, import-devin"],
     ["models", "List models; refresh, default, tiers, route"],
     ["routing", "Show which models each kind of task prefers; never add, never remove"],
     ["offers", "Show public plan offers (not checked against your account)"],
