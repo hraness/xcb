@@ -211,6 +211,30 @@ fn native_computer_tools_require_exact_config_and_bound_item_lifecycle() {
 }
 
 #[test]
+fn codex_server_admits_only_read_only_mcp_introspection() {
+    let mut c = started();
+    c.options.native_mcp = Some(native_definition());
+    for tool in [
+        "list_mcp_resources",
+        "list_mcp_resource_templates",
+        "read_mcp_resource",
+    ] {
+        let id = format!("introspection_{tool}");
+        let item = json!({"id":id,"type":"mcpToolCall","server":"codex","tool":tool,
+            "arguments":{},"status":"inProgress"});
+        c.accept(notice("item/started", item)).unwrap();
+    }
+    for tool in ["exec_command", "js", "shell"] {
+        let mut item = json!({"id":"denied","type":"mcpToolCall","server":"codex","tool":tool,
+            "arguments":{},"status":"inProgress"});
+        assert!(c.native_item(&item, false).is_err());
+        item["server"] = json!("other");
+        item["tool"] = json!("list_mcp_resources");
+        assert!(c.native_item(&item, false).is_err());
+    }
+}
+
+#[test]
 fn native_configuration_readback_rejects_extra_authority() {
     let definition = native_definition();
     let catalog = std::path::Path::new("/synthetic/catalog.json");

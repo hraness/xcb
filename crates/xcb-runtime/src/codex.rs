@@ -798,14 +798,26 @@ impl CodexProtocol {
                 .all(|review| review.action["toolName"] == tool),
             "Codex reviewed native tool changed",
         )?;
-        if !(item["server"] == "cua_repl"
+        // Codex's own server carries read-only MCP introspection builtins the
+        // model may call regardless of configured connectors; outside xcb these
+        // are always available, so parity requires admitting them here. They
+        // never reach a configured MCP server, so enabled_tools does not apply.
+        let codex_introspection = item["server"] == "codex"
+            && [
+                "list_mcp_resources",
+                "list_mcp_resource_templates",
+                "read_mcp_resource",
+            ]
+            .contains(&tool.as_str());
+        let cua_repl_tool = item["server"] == "cua_repl"
             && ["js", "js_reset", "turn_ended"].contains(&tool.as_str())
             && self
                 .options
                 .native_mcp
                 .as_ref()
                 .and_then(|config| config["enabled_tools"].as_array())
-                .is_some_and(|tools| tools.contains(&json!(tool)))
+                .is_some_and(|tools| tools.contains(&json!(tool)));
+        if !((codex_introspection || cua_repl_tool)
             && item["arguments"].is_object()
             && serde_json::to_vec(&item["arguments"])?.len() <= MAX_JSON_BYTES
             && item["appContext"].is_null()
