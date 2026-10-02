@@ -1809,14 +1809,18 @@ async fn dispatch_inner(
         _ => {}
     }
     let store = Arc::new(Store::open(&root)?);
-    // Interactive launches keep the pinned provider build current: adopt a
+    // Interactive commands keep the pinned provider build current: adopt a
     // newly discovered binary only when it is an admitted build, so an
-    // auto-update can never strand a task on the pin check.
+    // auto-update can never strand a task or make doctor report stale state.
     if matches!(
         &cli.command,
         None | Some(Commands::Chat { .. })
             | Some(Commands::Resume { .. })
             | Some(Commands::Run { .. })
+            | Some(Commands::Doctor {
+                executable: None,
+                ..
+            })
     ) {
         let home = root.join("metadata-home");
         // One catalog fetch per sweep, at most hourly; failures keep the

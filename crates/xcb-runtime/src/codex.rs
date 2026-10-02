@@ -6,7 +6,8 @@ pub(crate) use config::configuration_with_native;
 pub(crate) use config::static_catalog_with_native;
 pub use config::{
     ARGS, Admission, BINARY_SHA256, QUALIFIED_MODELS, SCHEMA_SHA256, StaticCatalog, VERSION,
-    configuration, runtime_admitted, static_catalog, thread_configuration, version_admitted,
+    configuration, runtime_admitted, runtime_admitted_with_catalog, static_catalog,
+    thread_configuration, version_admitted,
 };
 #[cfg(all(test, unix))]
 pub(crate) use config::{fixture_catalog_source, static_catalog_bound};

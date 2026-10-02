@@ -63,6 +63,26 @@ pub fn runtime_admitted(pin: &Pin) -> Result<()> {
     Ok(())
 }
 
+/// Admit an exact reviewed pair from the baked release set or the shared
+/// catalog. This lets provider updates land without an xcb release while
+/// preserving the exact digest and version boundary.
+pub fn runtime_admitted_with_catalog(root: &std::path::Path, pin: &Pin) -> Result<()> {
+    if crate::catalog::denied(root, &pin.sha256) {
+        return Err(Error::Unavailable(
+            "Devin build is denied by the reviewed-builds catalog",
+        ));
+    }
+    if runtime_admitted(pin).is_ok()
+        || (pin.provider == Provider::Devin
+            && crate::catalog::admitted(root, Provider::Devin, &pin.version, &pin.sha256))
+    {
+        return Ok(());
+    }
+    Err(Error::Unavailable(
+        "Devin build has no exact runtime qualification; run xcb doctor after a reviewed update",
+    ))
+}
+
 pub fn configuration() -> Value {
     json!({
         "auto_update":false,"subagents_enabled":false,"notify":"never",
@@ -155,5 +175,51 @@ mod tests {
             assert!(runtime_admitted(&pin).is_err());
         }
         assert!(!version_admitted("3000.11.2"));
+    }
+
+    #[test]
+    fn catalog_admission_accepts_exact_updates_and_honors_denials() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        crate::private::directory(&root.join("providers")).unwrap();
+        let digest = "a".repeat(64);
+        crate::private::create(
+            &root.join("providers/catalog.json"),
+            serde_json::json!({
+                "version": 1,
+                "devin": [{"version": "3000.12.0", "sha256": digest.clone()}],
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        let pin = Pin {
+            provider: Provider::Devin,
+            executable: "/synthetic/devin".into(),
+            sha256: digest.clone(),
+            version: "3000.12.0".into(),
+            host_sha256: "0".repeat(64),
+            observed_at_ms: 0,
+        };
+        runtime_admitted_with_catalog(&root, &pin).unwrap();
+        let mut unknown = pin.clone();
+        unknown.version = "3000.12.1".into();
+        assert!(runtime_admitted_with_catalog(&root, &unknown).is_err());
+
+        crate::private::replace(
+            &root.join("providers/catalog.json"),
+            serde_json::json!({
+                "version": 1,
+                "devin": [{"version": "3000.12.0", "sha256": digest.clone()}],
+                "deny": {"devin": [digest]},
+            })
+            .to_string()
+            .as_bytes(),
+            &crate::digest(
+                &crate::private::read(&root.join("providers/catalog.json"), 64 * 1024).unwrap(),
+            ),
+        )
+        .unwrap();
+        assert!(runtime_admitted_with_catalog(&root, &pin).is_err());
     }
 }

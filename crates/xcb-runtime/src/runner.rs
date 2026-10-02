@@ -668,11 +668,7 @@ pub(crate) async fn prepare(
     token: Option<&str>,
     tools: bool,
 ) -> Result<Launch> {
-    if pin.provider != Provider::Claude || !claude::version_admitted(&pin.version) {
-        return Err(Error::Unavailable(
-            "native execution requires an admitted Claude adapter; other providers remain unqualified",
-        ));
-    }
+    claude::runtime_admitted_with_catalog(root, pin)?;
     if !sandbox::available() {
         return Err(Error::Unavailable(
             "native OS confinement is not qualified on this platform; no unsandboxed fallback",
@@ -729,11 +725,7 @@ pub(crate) async fn prepare(
     token: Option<&str>,
     tools: bool,
 ) -> Result<Launch> {
-    if pin.provider != Provider::Claude || !claude::version_admitted(&pin.version) {
-        return Err(Error::Unavailable(
-            "native execution requires an admitted Claude adapter; other providers remain unqualified",
-        ));
-    }
+    claude::runtime_admitted_with_catalog(root, pin)?;
     let status = sandbox::linux_sandbox(root);
     if !status.qualified {
         return Err(Error::Unavailable(
@@ -853,7 +845,7 @@ fn prepare_codex_native(
     proxy: Option<&crate::native_mcp::NativeMcpProxy>,
 ) -> Result<(Launch, crate::codex::CodexProtocol)> {
     use crate::codex::{self, CodexOptions, CodexProtocol};
-    codex::runtime_admitted(pin)?;
+    codex::runtime_admitted_with_catalog(store.root(), pin)?;
     if !sandbox::available() {
         return Err(Error::Unavailable(
             "Codex requires qualified native OS confinement",
@@ -983,7 +975,7 @@ pub(crate) async fn prepare_devin(
     run: Option<&RunRecord>,
 ) -> Result<(Launch, crate::devin::DevinProtocol)> {
     use crate::devin::{self, DevinBridge, DevinOptions, DevinProtocol};
-    devin::runtime_admitted(pin)?;
+    devin::runtime_admitted_with_catalog(store.root(), pin)?;
     if !sandbox::available() {
         return Err(Error::Unavailable(
             "Devin requires qualified native OS confinement",
@@ -1177,22 +1169,21 @@ pub fn provider_admitted(root: &Path, pin: &Pin) -> bool {
     if crate::catalog::denied(root, &pin.sha256) {
         return false;
     }
-    let listed = || crate::catalog::admitted(root, pin.provider, &pin.version, &pin.sha256);
     match pin.provider {
         Provider::Claude => {
-            claude::version_admitted(&pin.version)
+            claude::runtime_admitted_with_catalog(root, pin).is_ok()
                 && (sandbox::available()
                     || (cfg!(target_os = "linux") && sandbox::linux_sandbox(root).qualified))
         }
         Provider::Codex => {
             cfg!(target_os = "macos")
                 && sandbox::available()
-                && (crate::codex::runtime_admitted(pin).is_ok() || listed())
+                && crate::codex::runtime_admitted_with_catalog(root, pin).is_ok()
         }
         Provider::Devin => {
             cfg!(target_os = "macos")
                 && sandbox::available()
-                && (crate::devin::runtime_admitted(pin).is_ok() || listed())
+                && crate::devin::runtime_admitted_with_catalog(root, pin).is_ok()
         }
     }
 }
@@ -1510,7 +1501,7 @@ async fn login_codex_inner(
     {
         return Err(Error::Unavailable("Codex sign-in cancelled before launch"));
     }
-    crate::codex::runtime_admitted(pin)?;
+    crate::codex::runtime_admitted_with_catalog(store.root(), pin)?;
     let status_output = std::io::stderr().as_fd().try_clone_to_owned()?;
     let mut artifacts = LaunchArtifacts::create(store.root())?;
     let snapshot_pin = Pin {
@@ -2489,7 +2480,7 @@ pub async fn run(
     let workspace = Workspace::open(Path::new(&session.workspace))?;
     if session.model.provider == Provider::Codex {
         let pin = Pin::load(store.root(), Provider::Codex)?;
-        crate::codex::runtime_admitted(&pin)?;
+        crate::codex::runtime_admitted_with_catalog(store.root(), &pin)?;
         let run = store.prepare_run(&session.id, session.revision, now_ms())?;
         #[cfg(target_os = "macos")]
         let mut native_proxy = if !input.pane_generation {
@@ -2572,7 +2563,7 @@ pub async fn run(
     }
     if session.model.provider == Provider::Devin {
         let pin = Pin::load(store.root(), Provider::Devin)?;
-        crate::devin::runtime_admitted(&pin)?;
+        crate::devin::runtime_admitted_with_catalog(store.root(), &pin)?;
         let run = store.prepare_run(&session.id, session.revision, now_ms())?;
         let (launch, protocol) = match prepare_devin(
             &store,

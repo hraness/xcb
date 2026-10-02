@@ -43,6 +43,26 @@ pub fn version_admitted(version: &str) -> bool {
     got[1] > min[1] || (got[1] == min[1] && got[2] >= min[2])
 }
 
+/// Claude releases within the admitted major-version floor can be adopted
+/// without an xcb release. A reviewed catalog denial still revokes a saved
+/// pin before launch, so provider self-updates do not create a bypass.
+pub fn runtime_admitted_with_catalog(
+    root: &std::path::Path,
+    pin: &crate::process::Pin,
+) -> Result<()> {
+    if pin.provider != xcb_core::Provider::Claude || !version_admitted(&pin.version) {
+        return Err(Error::Unavailable(
+            "Claude build has no runtime qualification",
+        ));
+    }
+    if crate::catalog::denied(root, &pin.sha256) {
+        return Err(Error::Unavailable(
+            "Claude build is denied by the reviewed-builds catalog",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuotaObservation {
     pub window: String,
@@ -458,6 +478,34 @@ mod tests {
             } => (observations, failure, notice),
             _ => panic!("rate_limit_event must stay a quota observation"),
         }
+    }
+
+    #[test]
+    fn runtime_admission_keeps_the_version_floor_and_honors_catalog_denials() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = xcb_core::canonical(directory.path()).unwrap();
+        crate::private::directory(&root.join("providers")).unwrap();
+        let digest = "a".repeat(64);
+        let pin = crate::process::Pin {
+            provider: xcb_core::Provider::Claude,
+            executable: "/synthetic/claude".into(),
+            sha256: digest.clone(),
+            version: "2.1.300".into(),
+            host_sha256: "0".repeat(64),
+            observed_at_ms: 0,
+        };
+        super::runtime_admitted_with_catalog(&root, &pin).unwrap();
+        let mut future = pin.clone();
+        future.version = "3.0.0".into();
+        assert!(super::runtime_admitted_with_catalog(&root, &future).is_err());
+        crate::private::create(
+            &root.join("providers/catalog.json"),
+            serde_json::json!({"version":1,"deny":{"claude":[digest]}})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert!(super::runtime_admitted_with_catalog(&root, &pin).is_err());
     }
 
     fn meters(observations: &[QuotaObservation]) -> Vec<(&str, f64, Option<u64>)> {
