@@ -760,6 +760,7 @@ fn picker_account(
             reason: "unknown".into(),
         },
         busy: false,
+        active_runs: 0,
         enabled,
     }
 }

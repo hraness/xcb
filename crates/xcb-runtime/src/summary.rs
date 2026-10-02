@@ -14,11 +14,11 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
         reduced_motion: config.reduced_motion,
         ..View::default()
     };
-    let busy: BTreeSet<_> = store
-        .unsettled_runs()?
-        .into_iter()
-        .map(|run| run.account)
-        .collect();
+    let mut active_runs: BTreeMap<Id, u32> = BTreeMap::new();
+    for run in store.unsettled_runs()? {
+        *active_runs.entry(run.account).or_default() += 1;
+    }
+    let busy: BTreeSet<_> = active_runs.keys().cloned().collect();
     let mut independent_pools = BTreeMap::new();
     for account in store.accounts()? {
         let authentication_required = store.authentication_required(&account.id)?;
@@ -71,6 +71,7 @@ pub fn snapshot(store: &Store, current: Option<&Id>, config: &Config, now: u64) 
             quota_blocked_until_ms: store.quota_blocked_until(&account.id, now)?,
             runway: estimate,
             busy: busy.contains(&account.id),
+            active_runs: *active_runs.get(&account.id).unwrap_or(&0),
             enabled: account.enabled,
             authentication_required,
         });

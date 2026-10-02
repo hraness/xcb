@@ -5900,16 +5900,19 @@ impl Supervisor {
                 }
             }
         };
-        if self
+        // In-memory occupancy hint only; `prepare_run` stays the atomic
+        // custody gate against the configured per-account run limit.
+        let account_load = self
             .active_accounts
             .values()
-            .any(|account| account == &session.account)
-        {
+            .filter(|account| *account == &session.account)
+            .count() as u32;
+        if account_load >= config.max_runs_per_account {
             if created_session {
                 store.remove_session(&session.id)?;
             }
             return Ok(Dispatch::Deferred(
-                "waiting for an eligible worker: the selected account is busy with another task"
+                "waiting for an eligible worker: the selected account is at its concurrent run limit"
                     .into(),
             ));
         }
@@ -6467,11 +6470,11 @@ fn managed_view(
     // honestly unknown because managed workers do not feed the direct-mode
     // velocity estimator.
     let now = now_ms();
-    let busy: BTreeSet<_> = store
-        .unsettled_runs()?
-        .into_iter()
-        .map(|run| run.account)
-        .collect();
+    let mut active_runs: BTreeMap<Id, u32> = BTreeMap::new();
+    for run in store.unsettled_runs()? {
+        *active_runs.entry(run.account).or_default() += 1;
+    }
+    let busy: BTreeSet<_> = active_runs.keys().cloned().collect();
     view.accounts = store
         .accounts()?
         .iter()
@@ -6487,6 +6490,7 @@ fn managed_view(
                 quota_blocked_until_ms: store.quota_blocked_until(&account.id, now)?,
                 runway: Estimate::unknown("runway is not estimated for managed accounts"),
                 busy: busy.contains(&account.id),
+                active_runs: *active_runs.get(&account.id).unwrap_or(&0),
                 enabled: account.enabled,
                 authentication_required: store.authentication_required(&account.id)?,
             })

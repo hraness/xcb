@@ -103,7 +103,7 @@ pub async fn auto_route(
     for model in &view.models {
         for view_account in &view.accounts {
             if view_account.provider != model.provider
-                || view_account.busy
+                || view_account.active_runs >= config.max_runs_per_account
                 || !view_account.enabled
                 || view_account.authentication_required
                 || view_account.quota_blocked_until_ms.is_some()
@@ -471,11 +471,17 @@ fn usable_account(
     current: Option<&Id>,
     config: &Config,
 ) -> Result<Option<Id>> {
-    let held: BTreeSet<_> = store
-        .unsettled_runs()?
-        .into_iter()
-        .map(|run| run.account)
-        .collect();
+    // Session runs share an account up to the configured limit; a probe run
+    // (no session) holds its account alone.
+    let mut held: BTreeMap<Id, u32> = BTreeMap::new();
+    let mut probing: BTreeSet<Id> = BTreeSet::new();
+    for run in store.unsettled_runs()? {
+        if run.session.is_none() {
+            probing.insert(run.account);
+        } else {
+            *held.entry(run.account).or_default() += 1;
+        }
+    }
     let now = now_ms();
     let mut accounts = store.accounts()?;
     let mut remaining: BTreeMap<Id, f64> = BTreeMap::new();
@@ -512,7 +518,8 @@ fn usable_account(
         if provider.is_none_or(|provider| account.provider == provider)
             && account.enabled
             && !store.authentication_required(&account.id)?
-            && !held.contains(&account.id)
+            && !probing.contains(&account.id)
+            && held.get(&account.id).copied().unwrap_or(0) < config.max_runs_per_account
             && store.quota_blocked_until(&account.id, now_ms())?.is_none()
             && auth::has_credentials(store, &account.id)?
         {
@@ -587,12 +594,23 @@ fn ready(store: &Store, session: &Session) -> Result<()> {
             session.model.provider,
         )));
     }
-    if store
-        .unsettled_runs()?
-        .iter()
-        .any(|run| run.account == session.account)
-    {
-        return Err(Error::Conflict("account has an unsettled run"));
+    // Mirrors `Store::prepare_run`: session runs share the account up to the
+    // configured limit, while a probe run still holds the account alone.
+    let capacity = Config::load(store.root())?.0.max_runs_per_account;
+    let mut held = 0u32;
+    for run in store.unsettled_runs()? {
+        if run.account != session.account {
+            continue;
+        }
+        if run.session.is_none() {
+            return Err(Error::Conflict("account has an unsettled probe"));
+        }
+        held += 1;
+    }
+    if held >= capacity {
+        return Err(Error::Conflict(
+            "account has reached its concurrent run limit",
+        ));
     }
     Ok(())
 }
@@ -1140,7 +1158,12 @@ async fn execute_inner(
                     let row = view.accounts.iter().find(|row| row.id == route.account)?;
                     let admitted = admitted_providers.contains(&route.model.provider)
                         && credentialed.contains(&row.id);
-                    Some(failover_candidate(row, route.model, admitted))
+                    Some(failover_candidate(
+                        row,
+                        route.model,
+                        admitted,
+                        current_config.max_runs_per_account,
+                    ))
                 })
                 .collect();
             let eligible = eligible_failover_routes(&source, &candidates, &tried, &outcome);
@@ -1156,6 +1179,7 @@ async fn execute_inner(
                         admitted: &admitted_providers,
                         credentialed: &credentialed,
                         required_provider,
+                        run_limit: current_config.max_runs_per_account,
                         now,
                     },
                 )));
@@ -1337,7 +1361,12 @@ fn checkpointed(outcome: &Outcome) -> bool {
 /// The facts the failover gate reads about one route, taken from the account
 /// view the terminal shows. The router already applied the same rules; the
 /// gate re-reads them so a candidate can never be admitted by construction.
-fn failover_candidate(account: &AccountRow, model: ModelChoice, admitted: bool) -> RouteCandidate {
+fn failover_candidate(
+    account: &AccountRow,
+    model: ModelChoice,
+    admitted: bool,
+    run_limit: u32,
+) -> RouteCandidate {
     RouteCandidate {
         account: account.id.clone(),
         model,
@@ -1346,7 +1375,7 @@ fn failover_candidate(account: &AccountRow, model: ModelChoice, admitted: bool) 
             && account
                 .remaining_percent
                 .is_none_or(|remaining| remaining > 0.0),
-        available: account.enabled && !account.busy,
+        available: account.enabled && account.active_runs < run_limit,
     }
 }
 
@@ -1403,6 +1432,9 @@ pub struct FailoverNoticeInput<'a> {
     /// Accounts with usable credentials.
     pub credentialed: &'a BTreeSet<Id>,
     pub required_provider: Option<Provider>,
+    /// Configured per-account concurrent run limit; a row counts as held
+    /// only when its unsettled runs reach it.
+    pub run_limit: u32,
     pub now: u64,
 }
 
@@ -1431,6 +1463,7 @@ pub fn failover_unavailable_notice(input: &FailoverNoticeInput<'_>) -> String {
         admitted,
         credentialed,
         required_provider,
+        run_limit,
         now,
     } = input;
     let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
@@ -1455,8 +1488,8 @@ pub fn failover_unavailable_notice(input: &FailoverNoticeInput<'_>) -> String {
             "on a provider build xcb has not checked"
         } else if required_provider.is_some_and(|provider| provider != row.provider) {
             "outside the pinned provider"
-        } else if row.busy {
-            "busy with another task"
+        } else if row.active_runs >= *run_limit {
+            "at its run limit"
         } else if row.quota_blocked_until_ms.is_some()
             || row
                 .remaining_percent
@@ -2497,6 +2530,7 @@ mod tests {
             quota_blocked_until_ms: None,
             runway: xcb_core::usage::Estimate::unknown("quota_or_burn_unmeasured"),
             busy: false,
+            active_runs: 0,
             enabled: true,
             authentication_required: false,
         }
@@ -2527,45 +2561,46 @@ mod tests {
     fn failover_candidate_treats_unmeasured_accounts_as_clear() {
         let model = route_candidate(0).1;
         let devin = account_row(1, Provider::Devin);
-        let candidate = failover_candidate(&devin, model.clone(), true);
+        let candidate = failover_candidate(&devin, model.clone(), true, 1);
         assert!(candidate.admitted && candidate.quota_clear && candidate.available);
         let stale = AccountRow {
             remaining_percent: None,
             resets_at_ms: None,
             ..account_row(2, Provider::Claude)
         };
-        assert!(failover_candidate(&stale, model.clone(), true).quota_clear);
+        assert!(failover_candidate(&stale, model.clone(), true, 1).quota_clear);
         let measured = AccountRow {
             remaining_percent: Some(12.5),
             ..account_row(3, Provider::Claude)
         };
-        assert!(failover_candidate(&measured, model.clone(), true).quota_clear);
+        assert!(failover_candidate(&measured, model.clone(), true, 1).quota_clear);
         let blocked = AccountRow {
             quota_blocked_until_ms: Some(u64::MAX),
             ..account_row(4, Provider::Claude)
         };
-        assert!(!failover_candidate(&blocked, model.clone(), true).quota_clear);
+        assert!(!failover_candidate(&blocked, model.clone(), true, 1).quota_clear);
         let exhausted = AccountRow {
             remaining_percent: Some(0.0),
             ..account_row(5, Provider::Claude)
         };
-        assert!(!failover_candidate(&exhausted, model.clone(), true).quota_clear);
+        assert!(!failover_candidate(&exhausted, model.clone(), true, 1).quota_clear);
         let busy = AccountRow {
             busy: true,
+            active_runs: 1,
             ..account_row(6, Provider::Claude)
         };
-        assert!(!failover_candidate(&busy, model.clone(), true).available);
+        assert!(!failover_candidate(&busy, model.clone(), true, 1).available);
         let disabled = AccountRow {
             enabled: false,
             ..account_row(7, Provider::Claude)
         };
-        assert!(!failover_candidate(&disabled, model.clone(), true).available);
+        assert!(!failover_candidate(&disabled, model.clone(), true, 1).available);
         let signed_out = AccountRow {
             authentication_required: true,
             ..account_row(8, Provider::Claude)
         };
-        assert!(!failover_candidate(&signed_out, model.clone(), true).admitted);
-        assert!(!failover_candidate(&devin, model, false).admitted);
+        assert!(!failover_candidate(&signed_out, model.clone(), true, 1).admitted);
+        assert!(!failover_candidate(&devin, model, false, 1).admitted);
     }
 
     /// Continuation keeps its elapsed budget; failover does not share it. A
@@ -2676,6 +2711,7 @@ mod tests {
                 account_row(3, Provider::Devin),
                 AccountRow {
                     busy: true,
+                    active_runs: 1,
                     ..account_row(4, Provider::Claude)
                 },
                 account_row(5, Provider::Claude),
@@ -2705,11 +2741,12 @@ mod tests {
             admitted: &admitted,
             credentialed: &credentialed,
             required_provider: None,
+            run_limit: 1,
             now,
         });
         assert_eq!(
             notice,
-            "Usage limit on claude · claude/a0 · no other account is able to take the task now · 1 at a usage limit · 1 signed out · 1 on a provider build xcb has not checked · 1 busy with another task · 1 already tried on this task · earliest known reset in ~2h 5m"
+            "Usage limit on claude · claude/a0 · no other account is able to take the task now · 1 at a usage limit · 1 signed out · 1 on a provider build xcb has not checked · 1 at its run limit · 1 already tried on this task · earliest known reset in ~2h 5m"
         );
         for internal in ["lease", "custody", "eligible", "admitted", "credential"] {
             assert!(!notice.contains(internal), "{notice}");
@@ -2727,6 +2764,7 @@ mod tests {
             admitted: &Provider::ALL.into_iter().collect(),
             credentialed: &credentialed,
             required_provider: Some(Provider::Devin),
+            run_limit: 1,
             now,
         });
         assert!(pinned.starts_with("Usage limit for Model 0 on claude · claude/a0 · "));
@@ -2750,6 +2788,7 @@ mod tests {
             admitted: &admitted,
             credentialed: &credentialed,
             required_provider: None,
+            run_limit: 1,
             now,
         });
         assert_eq!(

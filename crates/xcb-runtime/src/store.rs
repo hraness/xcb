@@ -676,7 +676,9 @@ impl Store {
         connection.busy_timeout(Duration::from_secs(2))?;
         connection.pragma_update(None, "query_only", true)?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != 1 {
+        // Versions one and two read identically: the lease rekey to
+        // (run, account) only changes which rows writers may insert.
+        if !(1..=2).contains(&version) {
             return Err(Error::Unavailable(
                 "existing xcb database schema is unavailable",
             ));
@@ -752,7 +754,7 @@ impl Store {
         }
         connection.pragma_update(None, "synchronous", "FULL")?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version > 1 {
+        if version > 2 {
             return Err(Error::Unavailable("database was written by a newer xcb"));
         }
         if version == 0 {
@@ -776,6 +778,24 @@ impl Store {
                 CREATE TABLE velocity(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, at_ms INTEGER NOT NULL, output_total INTEGER NOT NULL, PRIMARY KEY(session,at_ms));
                 PRAGMA user_version=1;")?;
             }
+            tx.commit()?;
+        }
+        let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version == 1 {
+            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // Version two rekeys custody by run so one account may hold
+            // several concurrent unsettled runs (config
+            // `max_runs_per_account`). Every other lease read and write was
+            // already (account, run)-scoped, so only this primary key moved.
+            tx.execute_batch(
+                "CREATE TABLE leases_v2(
+                run TEXT PRIMARY KEY REFERENCES runs(id),
+                account TEXT NOT NULL REFERENCES accounts(id));
+                INSERT INTO leases_v2(run,account) SELECT run,account FROM leases;
+                DROP TABLE leases;
+                ALTER TABLE leases_v2 RENAME TO leases;
+                PRAGMA user_version=2;",
+            )?;
             tx.commit()?;
         }
         // Additive extension: older readers can still inspect version-one
@@ -1385,6 +1405,9 @@ impl Store {
         expected_revision: u64,
         now: u64,
     ) -> Result<RunRecord> {
+        let capacity = crate::config::Config::load(&self.root)?
+            .0
+            .max_runs_per_account;
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut session =
@@ -1392,14 +1415,23 @@ impl Store {
         if session.revision != expected_revision {
             return Err(Error::Conflict("session revision changed"));
         }
-        let held: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM leases WHERE account=?1)",
+        // Sessions keep independent leases up to the configured account
+        // capacity. Probe runs (runs with no session) hold the account alone:
+        // they may rotate credentials or rewrite provider state that live
+        // workers depend on.
+        let (held, probes): (u32, u32) = tx.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(r.session IS NULL),0)
+            FROM leases l JOIN runs r ON r.id=l.run AND r.account=l.account
+            WHERE l.account=?1",
             [session.account.as_str()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        if held {
+        if probes > 0 {
+            return Err(Error::Conflict("account has an unsettled probe"));
+        }
+        if held >= capacity {
             return Err(Error::Conflict(
-                "account has an unsettled run; time alone cannot release custody",
+                "account is at its configured concurrent run limit",
             ));
         }
         let account_json: String = tx.query_row(
@@ -1450,8 +1482,8 @@ impl Store {
             ],
         )?;
         tx.execute(
-            "INSERT INTO leases VALUES(?1,?2)",
-            params![session.account.as_str(), run.id.as_str()],
+            "INSERT INTO leases(run,account) VALUES(?1,?2)",
+            params![run.id.as_str(), session.account.as_str()],
         )?;
         update_session(&tx, &session, expected_revision)?;
         tx.commit()?;
@@ -1475,6 +1507,9 @@ impl Store {
         }
         let mut db = self.db()?;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Probes keep exclusive custody at any configured run capacity: a
+        // sign-in or health check may rewrite the credential and provider
+        // state that live runs read.
         let held: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM leases WHERE account=?1)",
             [account.as_str()],
@@ -1506,8 +1541,8 @@ impl Store {
             ],
         )?;
         tx.execute(
-            "INSERT INTO leases VALUES(?1,?2)",
-            params![account.as_str(), run.id.as_str()],
+            "INSERT INTO leases(run,account) VALUES(?1,?2)",
+            params![run.id.as_str(), account.as_str()],
         )?;
         tx.commit()?;
         Ok(run)
@@ -4846,5 +4881,171 @@ mod observation_tests {
             .record_observations(&run, &session.id, &[], &[point(40.0, 9_000_000)])
             .unwrap();
         assert_eq!(store.dropped_observations(), 2);
+    }
+
+    fn concurrent_sessions(
+        store: &Store,
+        account: &Id,
+        workspace: &Path,
+        count: usize,
+    ) -> Vec<Session> {
+        (0..count)
+            .map(|index| {
+                store
+                    .create_session(
+                        account,
+                        ModelChoice {
+                            provider: Provider::Codex,
+                            id: Id::new("gpt-6-astra").unwrap(),
+                            label: "Astra".into(),
+                            mode: Mode::Fixed,
+                            resolved: None,
+                            effort: None,
+                            observed_at_ms: 1,
+                        },
+                        workspace,
+                        index as u64 + 2,
+                    )
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    /// Above one, the configured account run limit admits concurrent session
+    /// runs on the same subscription while probes still hold it alone.
+    #[test]
+    fn account_run_limit_admits_concurrent_sessions_and_keeps_probes_exclusive() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let state = base.join("state");
+        crate::private::directory(&state).unwrap();
+        let workspace = crate::private::directory(&base.join("work")).unwrap();
+        let config = crate::config::Config {
+            max_runs_per_account: 2,
+            ..crate::config::Config::default()
+        };
+        crate::private::create(
+            &state.join("config.json"),
+            serde_json::to_string(&config).unwrap().as_bytes(),
+        )
+        .unwrap();
+        let store = Store::open(&state).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let sessions = concurrent_sessions(&store, &account.id, &workspace, 3);
+        let first = store
+            .prepare_run(&sessions[0].id, sessions[0].revision, 3)
+            .unwrap();
+        let second = store
+            .prepare_run(&sessions[1].id, sessions[1].revision, 3)
+            .unwrap();
+        let third = store
+            .prepare_run(&sessions[2].id, sessions[2].revision, 3)
+            .unwrap_err();
+        assert!(
+            third.to_string().contains("concurrent run limit"),
+            "{third}"
+        );
+        assert_eq!(store.unsettled_runs().unwrap().len(), 2);
+        // A probe is a credential-mutating operation: it is refused while any
+        // run is held, no matter the configured limit.
+        assert!(store.prepare_probe(&account.id, None, 4).is_err());
+        store.settle(&first, State::Idle, 5).unwrap();
+        // One run still holds the account: the probe stays refused.
+        assert!(store.prepare_probe(&account.id, None, 6).is_err());
+        store.settle(&second, State::Idle, 6).unwrap();
+        let probe = store.prepare_probe(&account.id, None, 7).unwrap();
+        // And while the probe is held, session runs cannot start.
+        let fourth = store
+            .prepare_run(&sessions[2].id, sessions[2].revision, 8)
+            .unwrap_err();
+        assert!(fourth.to_string().contains("unsettled probe"), "{fourth}");
+        store.settle(&probe, State::Idle, 9).unwrap();
+        store
+            .prepare_run(&sessions[2].id, sessions[2].revision, 10)
+            .unwrap();
+        assert_eq!(store.unsettled_runs().unwrap().len(), 1);
+    }
+
+    /// The default of one keeps the previous exclusive-account behavior.
+    #[test]
+    fn default_run_limit_keeps_one_session_run_per_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let state = base.join("state");
+        let workspace = crate::private::directory(&base.join("work")).unwrap();
+        let store = Store::open(&state).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let sessions = concurrent_sessions(&store, &account.id, &workspace, 2);
+        store
+            .prepare_run(&sessions[0].id, sessions[0].revision, 3)
+            .unwrap();
+        assert!(
+            store
+                .prepare_run(&sessions[1].id, sessions[1].revision, 4)
+                .is_err()
+        );
+    }
+
+    /// A version-one store rekeys `leases` by run on open, preserving the
+    /// held row; schema reads stay (account, run)-scoped either way.
+    #[test]
+    fn version_two_migration_rekeys_leases_by_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = xcb_core::canonical(directory.path()).unwrap();
+        let state = base.join("state");
+        let store = Store::open(&state).unwrap();
+        let account = store
+            .add_account(Provider::Codex, "Fixture", 1, None)
+            .unwrap();
+        let probe = store.prepare_probe(&account.id, None, 2).unwrap();
+        // Rebuild the version-one shape through the store's own connection:
+        // the store's file checks admit only files it opened itself.
+        store
+            .db()
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE leases_v1(
+                account TEXT PRIMARY KEY REFERENCES accounts(id),
+                run TEXT NOT NULL UNIQUE REFERENCES runs(id));
+                INSERT INTO leases_v1(account,run) SELECT account,run FROM leases;
+                DROP TABLE leases;
+                ALTER TABLE leases_v1 RENAME TO leases;
+                PRAGMA user_version=1;",
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&state).unwrap();
+        let version: u32 = store
+            .db()
+            .unwrap()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        // The held row migrated intact and still gates custody.
+        let kept: String = store
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT run FROM leases WHERE account=?1",
+                [account.id.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, probe.id.as_str());
+        let run_pk: bool = store
+            .db()
+            .unwrap()
+            .query_row(
+                "SELECT pk FROM pragma_table_info('leases') WHERE name='run'",
+                [],
+                |row| row.get::<_, u32>(0).map(|pk| pk == 1),
+            )
+            .unwrap();
+        assert!(run_pk);
+        assert!(store.prepare_probe(&account.id, None, 3).is_err());
     }
 }

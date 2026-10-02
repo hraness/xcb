@@ -3852,6 +3852,7 @@ mod quota_display_tests {
                 authentication_required: false,
                 runway: Estimate::unknown("stale"),
                 busy: false,
+                active_runs: 0,
                 enabled: true,
             }],
             ..View::default()

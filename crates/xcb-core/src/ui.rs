@@ -25,7 +25,11 @@ pub struct AccountRow {
     /// Known account-wide exhaustion, independent of telemetry freshness.
     pub quota_blocked_until_ms: Option<u64>,
     pub runway: Estimate,
+    /// The account holds at least one unsettled run. Display only; routing
+    /// compares `active_runs` against the configured account run limit.
     pub busy: bool,
+    /// Unsettled runs this account currently holds (0 when idle).
+    pub active_runs: u32,
     pub enabled: bool,
     pub authentication_required: bool,
 }

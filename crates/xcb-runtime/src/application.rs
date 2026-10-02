@@ -13,7 +13,7 @@ use crate::{
     store::{RunRecord, Store},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::{sync::watch, time::Instant};
 use xcb_core::{
     Id, Provider,
@@ -285,11 +285,13 @@ fn listed(model: &ModelChoice, now: u64) -> bool {
 pub fn capabilities(store: &Store) -> Result<Capabilities> {
     let mut result = empty_capabilities();
     let catalog = store.model_catalog()?;
-    let busy: BTreeSet<_> = store
-        .unsettled_runs()?
-        .into_iter()
-        .map(|run| run.account)
-        .collect();
+    let capacity = crate::config::Config::load(store.root())?
+        .0
+        .max_runs_per_account;
+    let mut active: BTreeMap<Id, u32> = BTreeMap::new();
+    for run in store.unsettled_runs()? {
+        *active.entry(run.account).or_default() += 1;
+    }
     let now = now_ms();
     for account in store.accounts()? {
         let connected = auth::has_credentials(store, &account.id).unwrap_or(false);
@@ -317,14 +319,15 @@ pub fn capabilities(store: &Store) -> Result<Capabilities> {
                 observed_at_ms: model.observed_at_ms,
             })
             .collect();
-        let busy = busy.contains(&account.id);
+        let active_runs = active.get(&account.id).copied().unwrap_or(0);
+        let busy = active_runs > 0;
         let reason = if qualified.is_none() {
             Some("application_not_qualified")
         } else if !account.enabled {
             Some("account_disabled")
         } else if store.authentication_required(&account.id)? {
             Some("authentication_required")
-        } else if busy {
+        } else if active_runs >= capacity {
             Some("account_busy")
         } else if !connected {
             Some("not_connected")

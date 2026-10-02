@@ -10,6 +10,23 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.17.3 - 2026-10-02
+
+Accounts can run more than one task at a time.
+
+- `max_runs_per_account` in `config.json` (default 1, up to 32) sets how
+  many tasks may share one subscription at once; every run keeps its own
+  provider profile while sharing the account's quota and rate limits.
+- Sign-in, credential checks, and other account operations still take the
+  account alone: they wait for running tasks to settle, and no task starts
+  while one holds the account.
+- Routing and failover now count an account's live runs instead of treating
+  any busy account as unavailable, and the no-route notice says when an
+  account is at its run limit.
+- The local database migrates on first open to schema version 2; xcb builds
+  before this release refuse it, so old and new versions cannot interleave
+  account writes.
+
 ## 0.17.2 - 2026-10-01
 
 Browser sign-in waits until Devin is ready for the code and reports rejected

@@ -111,6 +111,7 @@ fn account(authentication_required: bool) -> AccountRow {
         authentication_required,
         runway: Estimate::unknown("unmeasured"),
         busy: false,
+        active_runs: 0,
         enabled: true,
     }
 }
