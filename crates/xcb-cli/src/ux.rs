@@ -129,6 +129,7 @@ pub fn code(error: &Error) -> &'static str {
         Error::Unavailable(_) | Error::Message(_) | Error::Guided { .. } => "unavailable",
         Error::Protocol(_)
         | Error::CodexRpc { .. }
+        | Error::CodexUsage { .. }
         | Error::CodexNotification { .. }
         | Error::CodexNativeTool { .. }
         | Error::DevinModelChoices { .. }

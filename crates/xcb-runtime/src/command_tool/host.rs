@@ -131,10 +131,11 @@ async fn host_value(
     home: &Path,
     path: &str,
     limit: usize,
+    cancel: watch::Receiver<bool>,
 ) -> Result<Option<Zeroizing<String>>> {
-    // The sender must outlive the capture: a dropped sender resolves
-    // `cancel.changed()` and supervision reads it as cancellation.
-    let (_sender, cancel) = watch::channel(false);
+    if *cancel.borrow() {
+        return Err(Error::Unavailable("host credential lookup cancelled"));
+    }
     let output = match process::capture_supervised(
         host_command(program, args, home, path),
         limit,
@@ -159,7 +160,7 @@ async fn host_value(
     Ok(Some(Zeroizing::new(trimmed.to_owned())))
 }
 
-async fn credentials() -> Result<(Credentials, PathBuf, String)> {
+async fn credentials(cancel: watch::Receiver<bool>) -> Result<(Credentials, PathBuf, String)> {
     let home = PathBuf::from(std::env::var_os("HOME").ok_or(Error::PrivateState)?);
     if !home.is_absolute() || xcb_core::canonical(&home)? != home {
         return Err(Error::PrivateState);
@@ -169,7 +170,7 @@ async fn credentials() -> Result<(Credentials, PathBuf, String)> {
     if path.len() > 4096 || path.contains(['\0', '\n']) {
         return Err(Error::PrivateState);
     }
-    let token = host_value("gh", &["auth", "token"], &home, &path, 4096)
+    let token = host_value("gh", &["auth", "token"], &home, &path, 4096, cancel.clone())
         .await?
         .ok_or(Error::Unavailable(
             "host GitHub authentication is not ready",
@@ -185,6 +186,7 @@ async fn credentials() -> Result<(Credentials, PathBuf, String)> {
         &home,
         &path,
         512,
+        cancel.clone(),
     )
     .await?
     .map(|value| value.to_string());
@@ -194,6 +196,7 @@ async fn credentials() -> Result<(Credentials, PathBuf, String)> {
         &home,
         &path,
         512,
+        cancel,
     )
     .await?
     .map(|value| value.to_string());
@@ -393,7 +396,7 @@ pub(super) async fn call(
             EffectState::None,
         );
     }
-    let (credentials, home, path) = match credentials().await {
+    let (credentials, home, path) = match credentials(cancel.clone()).await {
         Ok(values) => values,
         Err(error) => {
             let effects = if error.is_cleanup_unproven() {

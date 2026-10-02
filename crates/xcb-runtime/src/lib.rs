@@ -105,6 +105,10 @@ pub enum Error {
     Protocol(&'static str),
     #[error("Codex unadmitted notification (method SHA-256 {method_sha256})")]
     CodexNotification { method_sha256: String },
+    /// Provider-reported counters that do not reconcile. Values are provider
+    /// telemetry only — evidence for diagnosing schema drift, never text.
+    #[error("Codex token counters inconsistent (input {input} + output {output} != total {total})")]
+    CodexUsage { input: u64, output: u64, total: u64 },
     #[error(
         "Codex unadmitted native tool (server SHA-256 {server_sha256}, tool SHA-256 {tool_sha256})"
     )]

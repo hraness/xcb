@@ -1410,6 +1410,28 @@ fn usage_tolerates_new_provider_counters_while_reconciling_known_ones() {
     ] {
         assert!(usage(&broken).is_err());
     }
+    // An unreconciled total reports the provider's own counters so the next
+    // drift incident is evidence, not an unlabeled failure.
+    let error = usage(
+        &json!({"totalTokens":200,"inputTokens":120,"cachedInputTokens":80,"outputTokens":30}),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            Error::CodexUsage {
+                input: 120,
+                output: 30,
+                total: 200
+            }
+        ),
+        "{error:?}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("input 120 + output 30 != total 200")
+    );
 }
 
 #[test]
