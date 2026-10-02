@@ -66,15 +66,15 @@ impl QuotaPoint {
 
 /// The windows that carry account-scope quota for each provider. Claude uses
 /// `five_hour`/`seven_day`; Codex's account-level ChatGPT windows arrive as
-/// `codex.primary`/`codex.secondary`; Devin has no account-scope meter. The
-/// same vocabulary gates admission (`quota_blocked_until`) and feeds the
-/// read-only usage projection so a window that can block a lease is the same
-/// window a projection reports.
+/// `codex.primary`/`codex.secondary`; Devin's plan windows arrive as
+/// `devin.daily`/`devin.weekly`. The same vocabulary gates admission
+/// (`quota_blocked_until`) and feeds the read-only usage projection so a
+/// window that can block a lease is the same window a projection reports.
 pub fn account_windows(provider: Provider) -> &'static [&'static str] {
     match provider {
         Provider::Claude => &["five_hour", "seven_day"],
         Provider::Codex => &["codex.primary", "codex.secondary"],
-        Provider::Devin => &[],
+        Provider::Devin => &["devin.daily", "devin.weekly"],
     }
 }
 

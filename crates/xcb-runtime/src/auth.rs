@@ -124,6 +124,17 @@ pub fn store_token(store: &Store, id: &Id, bytes: &[u8]) -> Result<()> {
     result
 }
 
+/// The provider's own subscription meter for browser-signed-in Claude
+/// accounts. `None` means the account holds a setup token, which the usage
+/// endpoint refuses by scope — those accounts stay passively metered by
+/// rate-limit events observed during runs.
+pub(crate) async fn claude_usage(store: &Store, id: &Id) -> Result<Option<serde_json::Value>> {
+    let Some(token) = claude_oauth::cached_token(store, id)? else {
+        return Ok(None);
+    };
+    claude_oauth::fetch_usage(&token).await.map(Some)
+}
+
 pub(crate) fn token(store: &Store, id: &Id) -> Result<Zeroizing<String>> {
     if store.account(id)?.provider != Provider::Claude {
         return Err(Error::Conflict("subscription token provider mismatch"));

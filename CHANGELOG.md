@@ -10,6 +10,18 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## Unreleased
+
+- `xcb accounts refresh` now reports Devin plan quota: the refresh probe
+  reads the provider's own account status and records daily and weekly
+  remaining-quota windows with their reset times and the account's email and
+  plan name, so listings show real remaining percentage instead of an
+  unmeasured meter. An exhausted window the service omits (a reset timestamp
+  with no remaining percentage) is recorded as fully used.
+- Claude accounts signed in through the browser OAuth flow fall back to the
+  provider's usage endpoint when the in-band `get_usage` reply carries no
+  windows; setup-token accounts remain metered by observed rate-limit events.
+
 ## 0.17.6 - 2026-10-02
 
 Supersedes 0.17.5, whose tag was created before its changelog sections were
