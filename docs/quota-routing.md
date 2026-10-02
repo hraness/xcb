@@ -227,7 +227,14 @@ fallback.
 
 **Pins and constraints.** An opening “Use Claude/Codex/Devin”, `--account`,
 `--provider`, and `--model` still narrow the routes first; the stack orders
-what remains. A pinned model that matches no pattern still runs.
+what remains. A pinned model that matches no pattern still runs. Managed
+backlog tasks take the same pin: `xcb backlog add <target> "<task>" --model
+provider/model/effort` records an exact observed key on the task, requires
+its provider, and stamps it on every worker session, so failover stays
+inside the pin. The pin resolves to one catalog entry at admission — bare
+ids and labels work only when they name one model — and a `never`-matched
+pin is refused up front; if the never list changes while a pinned task is
+queued, dispatch fails the task rather than widening it.
 
 ## Automatic capability selection
 

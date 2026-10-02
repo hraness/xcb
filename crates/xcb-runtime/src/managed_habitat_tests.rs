@@ -758,6 +758,7 @@ async fn worker_in_a_cannot_get_update_complete_or_search_memory_of_b() {
             "Held in B".into(),
             true,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -815,6 +816,7 @@ async fn worker_in_a_cannot_get_update_complete_or_search_memory_of_b() {
             "Done in B".into(),
             true,
             0,
+            None,
         )
         .await
         .unwrap();
@@ -1065,4 +1067,176 @@ async fn thread_children_carry_inherited_bindings_and_replay_exactly() {
     );
     managed.verify_task(&daemon_child.id).await.unwrap();
     assert_eq!(managed.project_dispatch_block(&daemon_child).unwrap(), None);
+}
+
+fn pin_model(provider: Provider, id: &str, effort: Option<&str>) -> xcb_core::models::ModelChoice {
+    xcb_core::models::ModelChoice {
+        provider,
+        id: Id::new(id).unwrap(),
+        label: id.into(),
+        mode: xcb_core::models::Mode::Fixed,
+        resolved: None,
+        effort: effort.map(|effort| Id::new(effort).unwrap()),
+        observed_at_ms: 1,
+    }
+}
+
+#[tokio::test]
+async fn backlog_add_resolves_a_model_pin_to_its_observed_key() {
+    let f = fixture().await;
+    let xcb = Store::open(f.managed.root()).unwrap();
+    xcb.set_models(
+        Provider::Codex,
+        &[
+            pin_model(Provider::Codex, "gpt-6-sol", Some("ultra")),
+            pin_model(Provider::Codex, "gpt-6-sol", Some("low")),
+        ],
+    )
+    .unwrap();
+    let task = f
+        .managed
+        .enqueue_backlog_at(
+            &f.conversation,
+            None,
+            BindingOrigin::Cli,
+            new_id("m"),
+            "Pinned work".into(),
+            true,
+            0,
+            Some("codex/gpt-6-sol/ultra".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        task.required_model.as_deref(),
+        Some("codex/gpt-6-sol/ultra")
+    );
+    assert_eq!(task.provider_preference, Some(Provider::Codex));
+    assert!(task.provider_required);
+    assert_eq!(task.route.as_deref(), Some("codex/gpt-6-sol/ultra"));
+    assert_eq!(
+        task.route_reason.as_deref(),
+        Some("user required codex/gpt-6-sol/ultra")
+    );
+    f.managed.verify_task(&task.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn backlog_add_refuses_unresolvable_or_ambiguous_model_pins() {
+    let f = fixture().await;
+    let xcb = Store::open(f.managed.root()).unwrap();
+    xcb.set_models(
+        Provider::Codex,
+        &[
+            pin_model(Provider::Codex, "gpt-6-sol", Some("ultra")),
+            pin_model(Provider::Codex, "gpt-6-sol", Some("low")),
+        ],
+    )
+    .unwrap();
+    assert!(
+        f.managed
+            .enqueue_backlog_at(
+                &f.conversation,
+                None,
+                BindingOrigin::Cli,
+                new_id("m"),
+                "Pinned work".into(),
+                true,
+                0,
+                Some("codex/gpt-9-missing/ultra".into()),
+            )
+            .await
+            .is_err_and(|error| error.to_string().contains("not observed"))
+    );
+    // A bare id matching two efforts names no single route.
+    assert!(
+        f.managed
+            .enqueue_backlog_at(
+                &f.conversation,
+                None,
+                BindingOrigin::Cli,
+                new_id("m"),
+                "Pinned work".into(),
+                true,
+                0,
+                Some("gpt-6-sol".into()),
+            )
+            .await
+            .is_err_and(|error| error.to_string().contains("ambiguous"))
+    );
+}
+
+#[tokio::test]
+async fn backlog_add_refuses_a_never_excluded_pin() {
+    let f = fixture().await;
+    let xcb = Store::open(f.managed.root()).unwrap();
+    xcb.set_models(
+        Provider::Codex,
+        &[pin_model(Provider::Codex, "gpt-6-sol", Some("ultra"))],
+    )
+    .unwrap();
+    let (mut config, revision) = Config::load(f.managed.root()).unwrap();
+    config.routing.never.push("codex/gpt-*-sol/*".into());
+    config.save(f.managed.root(), revision.as_deref()).unwrap();
+    assert!(
+        f.managed
+            .enqueue_backlog_at(
+                &f.conversation,
+                None,
+                BindingOrigin::Cli,
+                new_id("m"),
+                "Pinned work".into(),
+                true,
+                0,
+                Some("codex/gpt-6-sol/ultra".into()),
+            )
+            .await
+            .is_err_and(|error| error.to_string().contains("routing.never"))
+    );
+}
+
+#[tokio::test]
+async fn backlog_add_refuses_a_pin_that_contradicts_a_required_provider() {
+    let f = fixture().await;
+    let xcb = Store::open(f.managed.root()).unwrap();
+    xcb.set_models(
+        Provider::Codex,
+        &[pin_model(Provider::Codex, "gpt-6-sol", Some("ultra"))],
+    )
+    .unwrap();
+    assert!(
+        f.managed
+            .enqueue_backlog_at(
+                &f.conversation,
+                None,
+                BindingOrigin::Cli,
+                new_id("m"),
+                "Use Claude. Pinned work".into(),
+                true,
+                0,
+                Some("codex/gpt-6-sol/ultra".into()),
+            )
+            .await
+            .is_err_and(|error| error.to_string().contains("required provider"))
+    );
+    // The same pin on a matching directive is admitted.
+    let task = f
+        .managed
+        .enqueue_backlog_at(
+            &f.conversation,
+            None,
+            BindingOrigin::Cli,
+            new_id("m"),
+            "Use Codex. Pinned work".into(),
+            true,
+            0,
+            Some("codex/gpt-6-sol/ultra".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        task.required_model.as_deref(),
+        Some("codex/gpt-6-sol/ultra")
+    );
+    assert!(task.provider_required);
 }
