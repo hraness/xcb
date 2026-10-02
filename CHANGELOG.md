@@ -10,6 +10,33 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.17.8 - 2026-10-02
+
+Command snapshots stop rejecting entire workspaces over committed files that
+are too large or hardlinked — they are excluded with an explicit report — and
+managed Codex tasks gain a strictly admitted host-execution lane for the
+repositories that still need real network and GitHub credentials.
+
+- `workspace_exec` snapshots now exclude regular files over the per-file byte
+  bound and files with extra hard links instead of failing the whole
+  workspace, recording one bounded report of the excluded paths. Publication
+  still conflicts a guest-authored output that collides with an excluded file,
+  so a worker can never silently clobber content it never saw.
+- New `workspace_host_exec` runs a bounded command in the real worktree with
+  host networking only when the trusted host process names the exact task:
+  `XCB_HOST_CREDENTIALS_TASK` must equal the persisted task ID, the session
+  must be managed Codex in an owned run, and the workspace binding must match.
+  `gh` token, Git author identity, and `SSH_AUTH_SOCK` are read on the host at
+  execution time, staged through a private mode-0600 environment file consumed
+  before launch, zeroized, and scrubbed from captured output. Commands that
+  fail, cancel, or time out retain uncertain effects and account custody and
+  are never silently retried.
+- Codex protocol failures now carry evidence instead of opaque labels: an
+  unreconciled `tokenUsage` reports the provider's own counter values through
+  a typed `CodexUsage` error, and the ambiguous "duplicate or excessive tool
+  call" split into "duplicate tool call identifier" and "tool call limit
+  exceeded".
+
 ## 0.17.7 - 2026-10-02
 
 Claude browser sign-in now completes through the provider's own loopback
