@@ -105,6 +105,13 @@ pub enum Error {
     Protocol(&'static str),
     #[error("Codex unadmitted notification (method SHA-256 {method_sha256})")]
     CodexNotification { method_sha256: String },
+    #[error(
+        "Codex unadmitted native tool (server SHA-256 {server_sha256}, tool SHA-256 {tool_sha256})"
+    )]
+    CodexNativeTool {
+        server_sha256: String,
+        tool_sha256: String,
+    },
     #[error("Codex {method} failed (RPC {code}): {category}")]
     CodexRpc {
         method: &'static str,

@@ -130,6 +130,7 @@ pub fn code(error: &Error) -> &'static str {
         Error::Protocol(_)
         | Error::CodexRpc { .. }
         | Error::CodexNotification { .. }
+        | Error::CodexNativeTool { .. }
         | Error::DevinModelChoices { .. }
         | Error::DevinRpc { .. } => "provider-protocol",
     }

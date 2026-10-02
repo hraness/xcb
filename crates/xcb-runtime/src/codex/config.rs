@@ -20,6 +20,11 @@ pub const SCHEMA_SHA256: &str = "ca6bdd8786588a11b8b0713d697a211a703f688e20776d2
 pub const REVIEWED_BUILDS: &[(&str, &str, &str)] = &[
     (VERSION, BINARY_SHA256, SCHEMA_SHA256),
     (
+        "0.159.3",
+        "4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878",
+        "ca6bdd8786588a11b8b0713d697a211a703f688e20776d2d1cb5054dc749f139",
+    ),
+    (
         "0.158.0",
         "788a818fbb9596869c7a487554507cb8bdca17584b8671112b23f9e225ba35c8",
         "b245d4b027cf8d1624c0c6733e6918c042bc278886251e7f2d90a3f29abfac2d",
@@ -706,11 +711,12 @@ mod tests {
             pin.version = "0.0.0".into();
             assert!(runtime_admitted(&pin).is_err());
         }
-        let schemas: BTreeSet<_> = REVIEWED_BUILDS
-            .iter()
-            .map(|(_, _, schema)| schema)
-            .collect();
-        assert_eq!(schemas.len(), REVIEWED_BUILDS.len());
+        // Distinct versions may share a schema when the generated schema is
+        // unchanged; version and executable digests stay unique.
+        let versions: BTreeSet<_> = REVIEWED_BUILDS.iter().map(|(v, _, _)| v).collect();
+        let executables: BTreeSet<_> = REVIEWED_BUILDS.iter().map(|(_, s, _)| s).collect();
+        assert_eq!(versions.len(), REVIEWED_BUILDS.len());
+        assert_eq!(executables.len(), REVIEWED_BUILDS.len());
     }
 
     #[test]
