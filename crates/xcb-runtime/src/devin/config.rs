@@ -216,7 +216,7 @@ mod tests {
             .to_string()
             .as_bytes(),
             &crate::digest(
-                &crate::private::read(&root.join("providers/catalog.json"), 64 * 1024).unwrap(),
+                crate::private::read(&root.join("providers/catalog.json"), 64 * 1024).unwrap(),
             ),
         )
         .unwrap();
