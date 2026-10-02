@@ -35,7 +35,10 @@ const AUTH_CUSTODY: &str = "claude_oauth_auth";
 const KEYCHAIN_CUSTODY: &str = "claude_oauth_keychain";
 const MAX_RECORD: usize = 64 * 1024;
 const REFRESH_MARGIN_MS: u64 = 5 * 60 * 1000;
-const SUPPORTED_VERSION: &str = "2.1.285";
+// Qualified against the installed 2.1.287 build: `auth login --claudeai`, the
+// hidden `--project-config-root` global option, `.claude.json` storage strings
+// and the credential error surface all match the pinned 2.1.285 binary.
+const SUPPORTED_VERSION: &str = "2.1.287";
 
 // The refresh token remains in the exact official Keychain namespace. This
 // private record is both the active-generation pointer and the access cache,
@@ -249,7 +252,7 @@ impl Generation {
         let home = root.join("home");
         let profile = root.join("profile");
         let path = profile.to_str().ok_or(Error::PrivateState)?;
-        // Official 2.1.285 normalizes the storage path before hashing it.
+        // Official 2.1.287 normalizes the storage path before hashing it.
         let normalized = ComposingNormalizer::new_nfc().normalize(path);
         let digest = crate::digest(normalized.as_bytes());
         // Upstream's service suffix has only 32 bits. An independently unique
@@ -310,7 +313,7 @@ fn supported(pin: &Pin) -> Result<()> {
     }
     if pin.provider != Provider::Claude || pin.version != SUPPORTED_VERSION {
         return Err(Error::Unavailable(
-            "Claude browser sign-in requires supported Claude Code 2.1.285",
+            "Claude browser sign-in requires supported Claude Code 2.1.287",
         ));
     }
     pin.verify()
@@ -463,7 +466,7 @@ fn official_auth_command(
     env: BTreeMap<String, String>,
 ) -> Command {
     let mut command = Command::new(executable);
-    // Official 2.1.285's hidden global option is parsed before auth preAction:
+    // Official 2.1.287's hidden global option is parsed before auth preAction:
     // it confines both project and local settings during auth initialization.
     command
         .arg("--project-config-root")
