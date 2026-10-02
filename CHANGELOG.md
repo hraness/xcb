@@ -10,8 +10,20 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
-## Unreleased
+## 0.17.7 - 2026-10-02
 
+Claude browser sign-in now completes through the provider's own loopback
+handoff instead of hanging at a code prompt, and account refresh reports
+real remaining quota for Devin and OAuth-signed Claude accounts.
+
+- `xcb accounts login` no longer suppresses the provider's browser launch:
+  Claude's sign-in child opens its own `redirect_uri` pointing at its local
+  callback listener, so completing the page finishes the login. The printed
+  link is the manual fallback variant whose page cannot reach that listener,
+  so it is shown for headless setups but no longer auto-opened. A pasted
+  code that lands before the provider's input reader mounts is redelivered
+  on a bounded cadence, and the CLI prints a heartbeat while the exchange
+  runs instead of sitting silent.
 - `xcb accounts refresh` now reports Devin plan quota: the refresh probe
   reads the provider's own account status and records daily and weekly
   remaining-quota windows with their reset times and the account's email and
