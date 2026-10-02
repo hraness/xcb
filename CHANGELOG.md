@@ -10,6 +10,20 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.17.6 - 2026-10-02
+
+Provider self-updates are adopted automatically when their reviewed runtime
+contract is available, so routine Claude, Codex, and Devin updates no longer
+require an xcb release.
+
+- Claude keeps its supported major-version floor while honoring reviewed
+  catalog denials.
+- Codex and Devin accept exact reviewed `(version, sha256)` catalog entries
+  without waiting for a new xcb binary release; unknown or denied builds stay
+  blocked and the last working pin continues routing.
+- `xcb doctor` refreshes provider admission during normal use, and login,
+  metadata, and task launch paths share the same admission check.
+
 ## 0.17.5 - 2026-10-02
 
 Managed tasks can pin an exact model, and provider self-updates are adopted
