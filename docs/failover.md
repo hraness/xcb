@@ -59,7 +59,7 @@ that already qualify; it cannot add one.
 
 If no other account can take the task now, xcb stops and says why, naming
 the limited account and each reason it passed over the others: at a usage
-limit, signed out, disabled, busy with another task, on a provider build
+limit, signed out, disabled, at its run limit, on a provider build
 xcb has not checked, outside the pinned provider, or already tried on this
 task. The notice ends with the earliest known reset. Reaching a reset lets
 xcb try again; it does not prove the provider will accept the turn.

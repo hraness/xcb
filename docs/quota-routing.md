@@ -58,6 +58,13 @@ ownership, so a second terminal cannot race a newly recorded exhaustion.
 Configured continuation retains its existing cleanup, effect, checkpoint and
 quota-evidence gates; this change only removes blocked candidates.
 
+By default an account runs one task at a time. `max_runs_per_account` in
+`config.json` (1 to 32) raises how many tasks may share one account; every
+run still gets its own provider profile, so concurrent tasks do not share
+provider state. Sign-in, credential checks, and other account operations
+still take the account alone: no task starts while one is held, and none of
+them start while tasks are running.
+
 Managed tasks then rank the accounts and models that remain. xcb derives
 relative quality, cost, and latency profiles from observed model identities and
 sorts the models into Pareto layers: a model is in the first layer when no other

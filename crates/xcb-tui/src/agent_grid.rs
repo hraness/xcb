@@ -1647,6 +1647,7 @@ mod tests {
                 quota_blocked_until_ms: blocked,
                 runway: Estimate::unknown("unmeasured"),
                 busy: false,
+                active_runs: 0,
                 enabled: true,
                 authentication_required: false,
             });

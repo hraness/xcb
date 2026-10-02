@@ -126,7 +126,7 @@ async fn twenty_terminals_share_account_custody_and_remote_resume_cannot_cancel_
                     .err()
                     .unwrap()
                     .to_string()
-                    .contains("account has an unsettled run")
+                    .contains("concurrent run limit")
             );
             assert_eq!(
                 current.revision, session.revision,

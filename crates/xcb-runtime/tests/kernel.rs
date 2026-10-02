@@ -241,6 +241,7 @@ fn a_usage_limit_without_a_fallback_is_explained_not_silent() {
         quota_blocked_until_ms: None,
         runway: Estimate::unknown("quota_or_burn_unmeasured"),
         busy: false,
+        active_runs: 0,
         enabled: true,
         authentication_required: false,
     };
@@ -253,6 +254,7 @@ fn a_usage_limit_without_a_fallback_is_explained_not_silent() {
             },
             AccountRow {
                 busy: true,
+                active_runs: 1,
                 ..row("working", Provider::Claude)
             },
             AccountRow {
@@ -274,11 +276,12 @@ fn a_usage_limit_without_a_fallback_is_explained_not_silent() {
         admitted: &Provider::ALL.into_iter().collect(),
         credentialed: &credentialed,
         required_provider: None,
+        run_limit: 1,
         now,
     });
     assert_eq!(
         notice,
-        "Usage limit on claude · claude/limited · no other account is able to take the task now · 1 busy with another task · 1 disabled · earliest known reset in ~1h 30m"
+        "Usage limit on claude · claude/limited · no other account is able to take the task now · 1 at its run limit · 1 disabled · earliest known reset in ~1h 30m"
     );
     for internal in ["lease", "custody", "eligible", "admitted", "credential"] {
         assert!(!notice.contains(internal), "{notice}");
