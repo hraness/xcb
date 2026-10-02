@@ -10,6 +10,17 @@ workflow copies that section onto the GitHub Release page and refuses to
 publish when it is missing, empty, or still says Unreleased. Write it in the
 version bump pull request by renaming `## Unreleased` to the version.
 
+## 0.17.11 - 2026-10-02
+
+Real Codex turns no longer die on an internal call budget far below the
+provider's own admission bound.
+
+- The per-turn unique tool-call cap rises from 128 to 1024, matching the
+  Codex adapter's `MAX_CALLS` admission limit. A managed turn doing real
+  work (bounded file edits and command calls) was being settled uncertain
+  after ~130 calls; the duplicate-identifier rejection and every other
+  protocol guard are unchanged.
+
 ## 0.17.10 - 2026-10-02
 
 Aggregate host heartbeats now power a compact activity view with task and resource signals.
