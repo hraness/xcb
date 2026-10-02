@@ -999,6 +999,7 @@ async fn grant_for_workspace_a_never_admits_backlog_or_children_in_b_from_thread
             "User idea in B".into(),
             true,
             5,
+            None,
         )
         .await
         .unwrap();

@@ -190,6 +190,9 @@ pub(super) struct CreateOptions<'a> {
     pub proposal: Option<ProjectProposal>,
     /// Why a thread task runs in its workspace; required in the thread.
     pub binding: Option<crate::workspace_infer::WorkspaceBinding>,
+    /// A `provider/model[/effort]` value the task is pinned to; resolved to
+    /// its canonical observed key at admission.
+    pub model: Option<String>,
     pub hold_until_ms: Option<u64>,
     pub moved_from: Option<Id>,
 }
@@ -568,6 +571,7 @@ impl ManagedStore {
                         prompt,
                         deferred,
                         priority,
+                        None,
                     )
                     .await?;
                 Ok(format!("{} · {}", task.id, task.habitat_status()))
@@ -592,6 +596,7 @@ impl ManagedStore {
                         prompt,
                         deferred,
                         priority,
+                        None,
                     )
                     .await?;
                 Ok(format!("{} · {}", task.id, task.habitat_status()))
@@ -777,12 +782,14 @@ impl ManagedStore {
             prompt,
             deferred,
             priority,
+            None,
         )
         .await
     }
 
     /// Queue work in `workspace` (see [`Self::entry_workspace`]). A thread
-    /// task records `origin` in its explicit binding.
+    /// task records `origin` in its explicit binding. `model` pins the task
+    /// to one observed `provider/model[/effort]` key.
     #[allow(clippy::too_many_arguments)]
     pub async fn enqueue_backlog_at(
         &self,
@@ -793,6 +800,7 @@ impl ManagedStore {
         prompt: String,
         deferred: bool,
         priority: u8,
+        model: Option<String>,
     ) -> Result<ManagedTask> {
         validate_prompt(&prompt)?;
         let workspace = self.entry_workspace(conversation, workspace)?;
@@ -826,6 +834,7 @@ impl ManagedStore {
                 priority,
                 ui: Some(&action),
                 binding,
+                model,
                 ..CreateOptions::default()
             },
         )
@@ -1531,6 +1540,9 @@ impl ManagedStore {
             prompt: String,
             #[serde(default)]
             priority: u8,
+            /// Optional `provider/model[/effort]` pin for the held task.
+            #[serde(default)]
+            model: Option<String>,
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1560,6 +1572,7 @@ impl ManagedStore {
                         CreateOptions {
                             deferred: true,
                             priority: args.priority,
+                            model: args.model,
                             worker: Some(&mutation),
                             binding: inherited_binding(
                                 &source.conversation,
