@@ -3010,7 +3010,10 @@ pub(crate) async fn run_prepared<P: Protocol>(
                         if !seen_calls.insert(call_id.clone()) {
                             return Err(Error::Protocol("duplicate tool call identifier"));
                         }
-                        if seen_calls.len() > 128 {
+                        // The Codex adapter already admits at most MAX_CALLS
+                        // tool calls per turn; this cap only backstops other
+                        // providers against an unbounded unique-call storm.
+                        if seen_calls.len() > 1024 {
                             return Err(Error::Protocol("tool call limit exceeded"));
                         }
                         tool_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
