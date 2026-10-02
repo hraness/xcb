@@ -1060,6 +1060,59 @@ fn quota_read_prefers_multi_bucket_data_without_inventing_recovery() {
 }
 
 #[test]
+fn reset_credit_consume_only_spends_on_exhaustion_and_stays_bounded() {
+    let pool = Id::new("account1").unwrap();
+    let limited = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100,"resetsAt":2000}}},
+        "ordinaryUsageAllowed":false,
+        "rateLimitResetCredits":[{"id":"credit-one","resetType":"primary","grantedAt":1}]});
+    let points = parse_quotas(&limited, &pool, 1000).unwrap();
+    let request = reset_credit_consume(&limited, &pool, &points)
+        .unwrap()
+        .unwrap();
+    assert_eq!(request["creditId"], "credit-one");
+    assert_eq!(request["idempotencyKey"].as_str().unwrap().len(), 64);
+    // The same account, credit, and window reproduce one key; a new credit or
+    // window is a new spend.
+    assert_eq!(
+        reset_credit_consume(&limited, &pool, &points)
+            .unwrap()
+            .unwrap()["idempotencyKey"],
+        request["idempotencyKey"]
+    );
+    // Under-limit or credit-less reads never spend.
+    let healthy = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":40,"resetsAt":2000}}},
+        "rateLimitResetCredits":[{"id":"credit-one"}]});
+    let points = parse_quotas(&healthy, &pool, 1000).unwrap();
+    assert!(
+        reset_credit_consume(&healthy, &pool, &points)
+            .unwrap()
+            .is_none()
+    );
+    let broke = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100,"resetsAt":2000}}},
+        "rateLimitResetCredits":[]});
+    let points = parse_quotas(&broke, &pool, 1000).unwrap();
+    assert!(
+        reset_credit_consume(&broke, &pool, &points)
+            .unwrap()
+            .is_none()
+    );
+    // A missing credits field is the pre-feature response shape, not an error.
+    let no_field =
+        json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100,"resetsAt":2000}}}});
+    let points = parse_quotas(&no_field, &pool, 1000).unwrap();
+    assert!(
+        reset_credit_consume(&no_field, &pool, &points)
+            .unwrap()
+            .is_none()
+    );
+    // Malformed credit shapes and oversized lists still fail closed.
+    let bad = json!({"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":100,"resetsAt":2000}}},
+        "rateLimitResetCredits":"yes"});
+    let points = parse_quotas(&bad, &pool, 1000).unwrap();
+    assert!(reset_credit_consume(&bad, &pool, &points).is_err());
+}
+
+#[test]
 fn selected_task_catalog_never_replaces_the_account_catalog() {
     assert!(!codec().refreshes_catalog());
     let mut probe = codec();
