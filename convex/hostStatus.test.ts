@@ -80,8 +80,8 @@ describe("anonymous host availability", () => {
     expect(payload).toEqual({
       version: 1, configured: true, checkedAt: START,
       machines: [
-        { id: "laptop-1", label: "laptop 1", lastReceivedAt: START, health: "ok", state: "online", sampleAgeSeconds: 15 },
-        { id: "laptop-2", label: "laptop 2", lastReceivedAt: null, health: "unknown", state: "never", sampleAgeSeconds: null },
+        { id: "laptop-1", label: "laptop 1", lastReceivedAt: START, health: "ok", state: "online", sampleAgeSeconds: 15, tasks: { running: 0, queued: 0, needsInput: 0, uncertain: 0 }, resources: { pressure: "unknown", swapUsedBytes: 0, physicalTotalBytes: 0, disksFreeBytes: [] }, activity: [{ observedAt: START, running: 0, queued: 0, needsInput: 0, uncertain: 0 }] },
+        { id: "laptop-2", label: "laptop 2", lastReceivedAt: null, health: "unknown", state: "never", sampleAgeSeconds: null, tasks: { running: 0, queued: 0, needsInput: 0, uncertain: 0 }, resources: { pressure: "unknown", swapUsedBytes: 0, physicalTotalBytes: 0, disksFreeBytes: [] }, activity: [] },
       ],
     });
     const text = JSON.stringify(payload);
