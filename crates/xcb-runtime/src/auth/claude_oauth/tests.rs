@@ -78,7 +78,7 @@ set -eu
 [ "$TMPDIR" = "$PWD/tmp" ]
 [ "$XDG_CONFIG_HOME" = "$PWD/.config" ]
 [ "$ANTHROPIC_CONFIG_DIR" = "$PWD/.config/anthropic" ]
-[ "$BROWSER" = /usr/bin/true ]
+[ -z "${BROWSER+x}" ]
 [ "$NO_COLOR" = 1 ]
 case "$USER" in xcb-*) ;; *) exit 8 ;; esac
 printf contract-ok

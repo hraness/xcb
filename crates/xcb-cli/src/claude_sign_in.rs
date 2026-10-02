@@ -80,14 +80,11 @@ pub async fn serve(
     while let Some(event) = events.recv().await {
         match event {
             ClaudeLoginEvent::AuthorizationUrl(url) => {
+                // The provider launches its own browser handoff whose
+                // redirect_uri targets the loopback listener; the printed
+                // link is the manual fallback variant whose page cannot
+                // reach it, so it is shown but not auto-opened.
                 eprintln!("Claude sign-in page: {url}");
-                if super::device_sign_in::open_browser(&url).await {
-                    eprintln!(
-                        "Sent the page to your browser. If it does not appear, open the link above."
-                    );
-                } else {
-                    eprintln!("Open the link above in your browser to sign in.");
-                }
             }
             ClaudeLoginEvent::CodeRequested => {
                 eprintln!("Finish signing in in your browser.");
@@ -98,6 +95,14 @@ pub async fn serve(
                     return true;
                 }
                 eprintln!("Code submitted. Finishing Claude sign-in; Ctrl+C cancels.");
+                // The exchange can sit behind a late provider input mount or a
+                // slow endpoint; keep a heartbeat so a wait never looks dead.
+                tokio::spawn(async {
+                    loop {
+                        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                        eprintln!("Still finishing Claude sign-in; Ctrl+C cancels.");
+                    }
+                });
             }
         }
     }

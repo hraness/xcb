@@ -471,7 +471,8 @@ fn official_auth_command(
         .args(["auth", "login", "--claudeai"])
         .env_clear()
         .envs(env)
-        .env("BROWSER", "/usr/bin/true")
+        // Same rule as `setup-token`: the provider's loopback handoff only
+        // completes when it can launch a browser, so BROWSER stays unsuppressed.
         .env("COLUMNS", "4096")
         .current_dir(&generation.home);
     command

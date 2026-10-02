@@ -1261,7 +1261,10 @@ impl Drop for StreamProcess {
 }
 
 async fn group_absent(group: &Group) -> bool {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    // Killed members stay visible until init reaps orphaned zombies, which can
+    // lag on a loaded host; 15s keeps the bound comfortable without letting a
+    // genuinely stuck group hang the caller.
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if group.empty() == Some(true) {
                 return true;
@@ -1504,6 +1507,36 @@ async fn read_login_terminal(_terminal: &(), _buffer: &mut [u8]) -> std::io::Res
     std::future::pending().await
 }
 
+/// Writes one pasted sign-in code and Enter through the provider's private
+/// terminal. Appending Enter to the secret String could leave its previous
+/// allocation unwiped after growth, so each part is written separately.
+#[cfg(unix)]
+async fn write_login_code(
+    terminal: &tokio::io::unix::AsyncFd<std::fs::File>,
+    code: &str,
+) -> std::io::Result<()> {
+    for part in [code.as_bytes(), b"\r"] {
+        let mut written = 0;
+        while written < part.len() {
+            let mut ready = terminal.writable().await?;
+            match ready.try_io(|fd| {
+                rustix::io::write(fd.get_ref(), &part[written..]).map_err(std::io::Error::from)
+            }) {
+                Ok(Ok(0)) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "sign-in input stalled",
+                    ));
+                }
+                Ok(Ok(n)) => written += n,
+                Ok(Err(error)) => return Err(error),
+                Err(_) => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn capture_supervised_interactive(
     command: Command,
     max: usize,
@@ -1609,6 +1642,13 @@ pub(crate) async fn capture_supervised_interactive_diagnosed(
                 let mut terminal_closed = terminal.is_none();
                 let mut code_submitted = false;
                 let mut input_closed = false;
+                // A provider that mounts its input listener after the paste
+                // prompt renders discards every byte written during that
+                // window. Redeliver the retained code on a fixed cadence for
+                // the whole capture: output cannot prove delivery, and a late
+                // mount is the only safe landing for a dropped write.
+                let mut pending_resend: Option<zeroize::Zeroizing<String>> = None;
+                let mut resend_at: Option<tokio::time::Instant> = None;
                 loop {
                     if out_closed && err_closed && terminal_closed {
                         return Ok(bytes);
@@ -1663,22 +1703,32 @@ pub(crate) async fn capture_supervised_interactive_diagnosed(
                             }
                             #[cfg(unix)]
                             if let Some(terminal) = terminal {
-                                // Appending Enter to the secret String could leave
-                                // its previous allocation unwiped after growth.
-                                for part in [code.as_bytes(), b"\r"] {
-                                    let mut written = 0;
-                                    while written < part.len() {
-                                        let mut ready = terminal.writable().await?;
-                                        match ready.try_io(|fd| rustix::io::write(fd.get_ref(), &part[written..]).map_err(std::io::Error::from)) {
-                                            Ok(Ok(0)) => return Err(Error::Protocol("sign-in input stalled")),
-                                            Ok(Ok(n)) => written += n,
-                                            Ok(Err(error)) => return Err(error.into()),
-                                            Err(_) => {},
-                                        }
+                                write_login_code(terminal, &code).await?;
+                            }
+                            pending_resend = Some(code);
+                            resend_at = Some(tokio::time::Instant::now() + Duration::from_secs(8));
+                            code_submitted = true;
+                        }
+                        _ = async {
+                            match resend_at {
+                                Some(at) => tokio::time::sleep_until(at).await,
+                                None => std::future::pending().await,
+                            }
+                        }, if pending_resend.is_some() => {
+                            #[cfg(unix)]
+                            if let (Some(terminal), Some(code)) = (terminal, pending_resend.as_ref()) {
+                                match write_login_code(terminal, code).await {
+                                    // The child is gone; its pipes close the loop.
+                                    Err(error) if error.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error())
+                                        || error.kind() == std::io::ErrorKind::BrokenPipe => {
+                                        pending_resend = None;
                                     }
+                                    other => other?,
                                 }
                             }
-                            code_submitted = true;
+                            resend_at = pending_resend
+                                .as_ref()
+                                .map(|_| tokio::time::Instant::now() + Duration::from_secs(8));
                         }
                     }
                 }
