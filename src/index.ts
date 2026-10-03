@@ -21,7 +21,6 @@ export { createCodexTaskAdapter } from "./codex-task-adapter.ts";
 export type { CodexTaskAdapterOptions } from "./codex-task-adapter.ts";
 export { canonicalJson } from "./codex-config.ts";
 export * from "./protocol.ts";
-export * from "./assurance.ts";
 export * from "./codex-account.ts";
 export { createCodexAccountStdioTransport } from "./codex-account-transport.ts";
 export type { CodexAccountTransportOptions, CodexAccountProcessPort, CodexAccountProcessCloseReceipt } from "./codex-account-transport.ts";
@@ -51,7 +50,7 @@ export type { DevinFact, DevinPromptResult, DevinPermissionRequest, DevinPermiss
 export { startDevinToolRelay, DEVIN_MCP_BRIDGE_SOURCE } from "./devin-mcp.ts";
 export type { DevinToolRelay, DevinToolRelayOptions } from "./devin-mcp.ts";
 export { browserSessionArgv, browserSessionEnvironment, createBrowserSession, purgeBrowserSession, recoverBrowserSession } from "./browser-session.ts";
-export type { BrowserSessionBinding, BrowserSessionCloseReceipt, BrowserSessionOptions, BrowserSessionPhase, BrowserSessionPort, BrowserSessionRuntimeAdmission, BrowserSessionSpawn, BrowserSessionSystem } from "./browser-session.ts";
+export type { BrowserSessionBinding, BrowserSessionCloseReceipt, BrowserSessionOptions, BrowserSessionPhase, BrowserSessionPort, BrowserSessionReceipt, BrowserSessionRuntimeAdmission, BrowserSessionSpawn, BrowserSessionSystem } from "./browser-session.ts";
 export { createSystemOneJudge, checkJudgeAnswers, checkJudgeQuestions, checkJudgeState,
   checkJudgeKeyTarget, parseJudgeEndpoint, parseJudgeResponse, resolveJudge, resolveJudgeKey,
   storeJudgeKey, removeJudgeKey, hasJudgeKey,
