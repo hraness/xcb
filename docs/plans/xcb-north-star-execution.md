@@ -19,8 +19,10 @@ custody, or release gates.
   worker that finds a shared contract mismatch stops at a proposal and records
   the dependency rather than guessing.
 - A scheduler wake-up may inspect, implement one bounded slice, and review the
-  resulting evidence. It may propose follow-ups, but it cannot expand the
-  project grant, publish a release, or declare live Valhalla/quality evidence.
+  resulting evidence. A converged integration owner may then hand the exact
+  tree to the delivery cell for normal branch, PR, auto-merge, and release
+  automation. It may not force-push, bypass `Required`, create an ad-hoc tag,
+  expand the project grant, or declare live Valhalla/quality evidence.
 - Failed experiments remain named seeds or regression cases. A metric moves
   only when its workload, host limits, provider observation, and receipt are
   comparable with the baseline.
@@ -120,8 +122,23 @@ The controller must inspect the current tree, grant, backlog, receipts, and
 validation state before selecting work. It should keep at most one integration
 owner active, release independent lanes when their dependencies are met, and
 leave held work untouched when the tree or evidence is not ready. A schedule
-run is not a merge or release; normal branch, review, CI, and production gates
-still apply.
+run is not permission to bypass delivery gates. When a candidate is converged,
+the delivery cell commits only task-owned changes, pushes its branch through
+the configured workload identity, opens a pull request, and enables the
+repository's required-check auto-merge. A merged `main` version bump is left
+to the repository's annotated-tag and release workflow; the controller never
+creates release tags directly. If network, credentials, checks, or merge state
+are unavailable, it records the exact blocker and leaves the candidate
+replayable for the next wake-up.
+
+## Continuous delivery
+
+Every herder cycle evaluates delivery after verification. The delivery cell
+must report the exact branch and commit, push result, pull-request number and
+auto-merge state, merge SHA when available, and release workflow/tag evidence.
+It may publish only through the repository's normal gates and workload
+identity. A failed or uncertain push is held for evidence-based reconciliation;
+the controller never retries an ambiguous publication or creates a second tag.
 
 ## Definition of done
 

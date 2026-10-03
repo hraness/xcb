@@ -29,15 +29,24 @@
       "prompt": "Write a concise settled report for the project backlog: lane, tree/commit, files changed, validation, metrics or receipt paths, unresolved risks, and the next dependency-ordered task. Keep claims below evidence and leave unrelated held work unchanged.",
       "inputs": { "verification": "text" },
       "output": { "kind": "text" }
+    },
+    {
+      "id": "deliver",
+      "kind": "agent",
+      "prompt": "Evaluate the settled report for delivery. If the exact tree is converged, task-owned, and its required gates passed, commit only those changes, push the branch with the configured workload identity, open a pull request, and enable the repository's required-check auto-merge. Never force-push, bypass Required, create an ad-hoc release tag, or claim release success before the verified main/tag workflow proves it. If network, credentials, checks, or merge state are unavailable, leave the tree replayable and record the exact blocker instead of retrying an uncertain publication. Return exact branch, commit, push, PR/auto-merge, merge, and release evidence.",
+      "inputs": { "verification": "text", "report": "text" },
+      "output": { "kind": "text" }
     }
   ],
   "edges": [
     { "from": { "cell": "inspect", "port": "out" }, "to": { "cell": "advance", "port": "inspection" } },
     { "from": { "cell": "advance", "port": "out" }, "to": { "cell": "verify", "port": "advance" } },
-    { "from": { "cell": "verify", "port": "out" }, "to": { "cell": "report", "port": "verification" } }
+    { "from": { "cell": "verify", "port": "out" }, "to": { "cell": "report", "port": "verification" } },
+    { "from": { "cell": "report", "port": "out" }, "to": { "cell": "deliver", "port": "report" } },
+    { "from": { "cell": "verify", "port": "out" }, "to": { "cell": "deliver", "port": "verification" } }
   ],
   "interface": {
     "inputs": {},
-    "outputs": { "summary": { "cell": "report", "port": "out" } }
+    "outputs": { "summary": { "cell": "deliver", "port": "out" } }
   }
 }
