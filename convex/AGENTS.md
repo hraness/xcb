@@ -19,8 +19,8 @@
 
 ## Host availability
 
-- `hostStatus.ts` is separate, opt-in product telemetry. Its two fixed
-  anonymous aliases, HTTP routes and `xcbHostStatus` table do not change
+- `hostStatus.ts` is separate, opt-in product telemetry. Its two bounded
+  public aliases, HTTP routes and `xcbHostStatus` table do not change
   relay authentication, commands, device presence or encrypted projections.
 - Store only each alias's latest accepted receipt. Keep reads and writes
   bounded to the two fixed ids, enforce the one-minute minimum write interval,

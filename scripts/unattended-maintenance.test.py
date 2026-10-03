@@ -121,6 +121,23 @@ class MaintenanceTests(unittest.TestCase):
             self.assertIn("telemetry_unavailable", m.incident_codes(self.config, [sample]))
         self.assertFalse(m.sanitize_sample(resources("unknown"), service(), 10000)["resource_ok"])
 
+    def test_task_probe_counts_active_states_and_defaults_to_zero(self):
+        def probe(config, argv, runner, **kwargs):
+            if "service" in argv:
+                return service()
+            if "tasks" in argv:
+                return [{"state": "running"}, {"state": "queued"}, {"state": "queued"},
+                        {"state": "needs_input"}, {"state": "uncertain"}, {"state": "completed"},
+                        {"state": "failed"}, {"state": "running"}, "not-a-row"]
+            return resources()
+        with patch.object(m, "probe", side_effect=probe):
+            result = m.sample_tick(self.config, 10000)
+        self.assertEqual(result["sample"]["tasks"],
+                         {"running": 2, "queued": 2, "needsInput": 1, "uncertain": 1})
+        with patch.object(m, "probe", side_effect=[resources(), service()]):
+            result = m.sample_tick(self.config, 10060)
+        self.assertEqual(result["sample"]["tasks"], {"running": 0, "queued": 0, "needsInput": 0, "uncertain": 0})
+
     def test_malformed_and_timeout_probes_still_record_failure(self):
         responses = [{"outcome": "timeout", "code": None, "stdout": b"secret"},
                      {"outcome": "completed", "code": 0, "stdout": b"{bad json"}]
@@ -228,7 +245,7 @@ class MaintenanceTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(), raw)
 
     def test_review_start_during_native_probes_uses_fresh_clock(self):
-        def probe(config, argv, runner):
+        def probe(config, argv, runner, **kwargs):
             if "service" in argv:
                 m.write(self.root / "reviews.json", {**m.review_default(), "pending": {"started_s": 10001}})
                 return service()
