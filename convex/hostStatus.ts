@@ -1,11 +1,11 @@
-/** Independent, opt-in availability reporting for two anonymous home hosts.
+/** Independent, opt-in availability reporting for a bounded fleet of hosts.
  * This module never reads relay devices, account keys or task projections. */
 import { httpActionGeneric as httpAction, makeFunctionReference } from "convex/server";
 import { v } from "convex/values";
 
 import { internalMutation, internalQuery } from "./server";
 
-type MachineId = "laptop-1" | "laptop-2";
+type MachineId = string;
 type Health = "ok" | "degraded" | "unknown";
 type HostKey = Readonly<{ id: MachineId; label: string; tokenSha256: string }>;
 type TaskCounts = Readonly<{ running: number; queued: number; needsInput: number; uncertain: number }>;
@@ -28,7 +28,14 @@ export const FRESH_MS = 7 * 60_000;
 export const OFFLINE_MS = 15 * 60_000;
 const MIN_WRITE_MS = 60_000;
 const MAX_BODY_BYTES = 1024;
-const MAX_CONFIG_BYTES = 1024;
+const MAX_MACHINES = 100;
+const MAX_CONFIG_BYTES = 32 * 1024;
+/** History kept per machine is 24h of five-minute samples; the public payload
+ * shares one bounded point budget across the fleet so it stays small. */
+const HISTORY_WINDOW_MS = 24 * 60 * 60_000;
+const HISTORY_PER_MACHINE = 288;
+const ACTIVITY_POINT_BUDGET = 6144;
+const MACHINE_ID = /^[a-z0-9][a-z0-9-]{0,31}$/u;
 const ENV = "XCB_HOST_STATUS_KEYS";
 
 function plain(value: unknown): value is Record<string, unknown> {
@@ -40,26 +47,29 @@ function closed(value: Record<string, unknown>, keys: readonly string[]): boolea
   return fields.length === keys.length && fields.every((field) => keys.includes(field));
 }
 
-/** The public label is the fixed alias or the alias plus one owner-chosen
- * lowercase suffix. It can never be a hostname, path or arbitrary text. */
-function validLabel(id: MachineId, label: unknown): boolean {
-  const base = id === "laptop-1" ? "laptop 1" : "laptop 2";
-  return typeof label === "string"
-    && (label === base || new RegExp(`^${base} \\([a-z0-9][a-z0-9-]{0,23}\\)$`, "u").test(label));
+/** The public label is owner-chosen display text: printable, non-blank and
+ * short. The machine id stays a lowercase slug so it is safe in URLs, indexes
+ * and JSON keys. */
+function validId(id: unknown): id is MachineId {
+  return typeof id === "string" && MACHINE_ID.test(id);
 }
 
-/** A malformed entry disables the whole configuration. Bounded public aliases
- * prevent a configuration mistake from exposing a hostname or private label. */
+function validLabel(label: unknown): label is string {
+  return typeof label === "string" && label.trim().length > 0 && label.length <= 48
+    && !/[\p{Cc}\p{Cf}]/u.test(label);
+}
+
+/** A malformed entry disables the whole configuration. Bounded ids and labels
+ * keep a configuration mistake from exposing a hostname, path or secret. */
 export function parseKeys(raw: string | undefined): readonly HostKey[] {
   if (raw === undefined || raw === "") return [];
   if (new TextEncoder().encode(raw).length > MAX_CONFIG_BYTES) throw new Error("invalid host status configuration");
   const values: unknown = JSON.parse(raw);
-  if (!Array.isArray(values) || values.length > 2) throw new Error("invalid host status configuration");
+  if (!Array.isArray(values) || values.length > MAX_MACHINES) throw new Error("invalid host status configuration");
   const keys: HostKey[] = [];
   for (const value of values) {
     if (!plain(value) || !closed(value, ["id", "label", "tokenSha256"])
-      || (value.id !== "laptop-1" && value.id !== "laptop-2")
-      || !validLabel(value.id, value.label)
+      || !validId(value.id) || !validLabel(value.label)
       || typeof value.tokenSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(value.tokenSha256)
       || keys.some((key) => key.id === value.id || key.tokenSha256 === value.tokenSha256)) {
       throw new Error("invalid host status configuration");
@@ -97,7 +107,7 @@ export function parseHeartbeat(value: unknown): Heartbeat | null {
 }
 
 /** Compare every character in a fixed-size digest. Do not early-return on the
- * first matching machine: both configured credentials take the same path. */
+ * first matching machine: every configured credential takes the same path. */
 export function digestEqual(a: string, b: string): boolean {
   if (a.length !== 64 || b.length !== 64) return false;
   let difference = 0;
@@ -122,7 +132,7 @@ async function authenticate(request: Request, keys: readonly HostKey[]): Promise
   return matched;
 }
 
-const machineValidator = v.union(v.literal("laptop-1"), v.literal("laptop-2"));
+const machineValidator = v.string();
 const healthValidator = v.union(v.literal("ok"), v.literal("degraded"), v.literal("unknown"));
 const taskCountsValidator = v.object({ running: v.number(), queued: v.number(), needsInput: v.number(), uncertain: v.number() });
 const resourcesValidator = v.object({ pressure: v.union(v.literal("normal"), v.literal("warning"), v.literal("critical"), v.literal("unknown")), swapUsedBytes: v.number(), physicalTotalBytes: v.number(), disksFreeBytes: v.array(v.number()) });
@@ -151,10 +161,9 @@ export const record = internalMutation({
     if (parseHeartbeat({ version: 1, sequence: args.sequence, health: args.health, sampleAgeSeconds: args.sampleAgeSeconds, tasks, resources }) === null) {
       return { status: 409 };
     }
-    const rows = (await Promise.all((["laptop-1", "laptop-2"] as const).map(async (id) =>
-      await ctx.db.query("xcbHostStatus").withIndex("by_alias", (q) => q.eq("id", id)).take(2)))).flat();
-    if (rows.length > 2 || new Set(rows.map((row) => row.id)).size !== rows.length) return { status: 503 };
-    const existing = rows.find((row) => row.id === key.id);
+    const rows = await ctx.db.query("xcbHostStatus").withIndex("by_alias", (q) => q.eq("id", key.id)).take(2);
+    if (rows.length > 1) return { status: 503 };
+    const existing = rows[0];
     const now = Date.now();
     if (existing !== undefined) {
       if (digestEqual(existing.keyGeneration, key.tokenSha256) && args.sequence <= existing.sequence) return { status: 409 };
@@ -171,7 +180,6 @@ export const record = internalMutation({
       lastReceivedAt: now,
     };
     if (existing === undefined) {
-      if (rows.length >= 2) return { status: 503 };
       await ctx.db.insert("xcbHostStatus", next);
     } else {
       await ctx.db.replace(existing._id, next);
@@ -183,17 +191,29 @@ export const record = internalMutation({
   },
 });
 
-/** Internal reads return at most the fixed two rows. The HTTP action derives
- * freshness using its current server clock after this query, so a cached
- * database query cannot leave an offline host permanently marked online. */
+/** Points served per machine share one fleet-wide budget, so a large fleet
+ * cannot make the public payload unbounded. Small fleets keep the full 24h. */
+export function activityPerMachine(machineCount: number): number {
+  return Math.min(HISTORY_PER_MACHINE, Math.max(48, Math.floor(ACTIVITY_POINT_BUDGET / Math.max(1, machineCount))));
+}
+
+/** Internal reads stay bounded by the configured fleet. Each machine's
+ * activity is capped so the shared point budget is never exceeded. The HTTP
+ * action derives freshness using its current server clock after this query,
+ * so a cached database query cannot leave an offline host permanently marked
+ * online. */
 export const latest = internalQuery({
   args: {},
   handler: async (ctx): Promise<{ hosts: StoredHost[]; history: Array<{ id: MachineId; observedAt: number; running: number; queued: number; needsInput: number; uncertain: number }> } | null> => {
-    const rows = (await Promise.all((["laptop-1", "laptop-2"] as const).map(async (id) =>
-      await ctx.db.query("xcbHostStatus").withIndex("by_alias", (q) => q.eq("id", id)).take(2)))).flat();
-    if (rows.length > 2 || new Set(rows.map((row) => row.id)).size !== rows.length) return null;
-    const history = (await Promise.all((['laptop-1', 'laptop-2'] as const).map(async (id) =>
-      await ctx.db.query('xcbHostStatusHistory').withIndex('by_alias_time', (q) => q.eq('id', id).gte('observedAt', Date.now() - 24 * 60 * 60_000)).take(288)))).flat();
+    const keys = configured();
+    if (keys === null || keys.length === 0) return null;
+    const rows = (await Promise.all(keys.map(async (key) =>
+      await ctx.db.query("xcbHostStatus").withIndex("by_alias", (q) => q.eq("id", key.id)).take(2)))).flat();
+    if (rows.length > keys.length || new Set(rows.map((row) => row.id)).size !== rows.length) return null;
+    const perMachine = activityPerMachine(keys.length);
+    const since = Date.now() - HISTORY_WINDOW_MS;
+    const history = (await Promise.all(keys.map(async (key) =>
+      await ctx.db.query("xcbHostStatusHistory").withIndex("by_alias_time", (q) => q.eq("id", key.id).gte("observedAt", since)).take(perMachine)))).flat();
     return { hosts: rows.map(({ id, keyGeneration, sequence, lastReceivedAt, health, sampleAgeSeconds, tasks, resources }) => ({
       id, keyGeneration, sequence, lastReceivedAt, health, sampleAgeSeconds, tasks, resources,
     })), history };

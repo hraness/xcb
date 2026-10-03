@@ -2,12 +2,12 @@ import { relaySchema } from "@hraness/relay/backend";
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
-// The product's two opt-in availability rows are independent of relay users,
-// devices, keys and retention. Every relay table is retained unchanged.
+// The product's bounded opt-in availability rows are independent of relay
+// users, devices, keys and retention. Every relay table is retained unchanged.
 export default defineSchema({
   ...relaySchema().tables,
   xcbHostStatus: defineTable({
-    id: v.union(v.literal("laptop-1"), v.literal("laptop-2")),
+    id: v.string(),
     keyGeneration: v.string(),
     sequence: v.number(),
     lastReceivedAt: v.number(),
@@ -17,7 +17,7 @@ export default defineSchema({
     resources: v.optional(v.object({ pressure: v.union(v.literal("normal"), v.literal("warning"), v.literal("critical"), v.literal("unknown")), swapUsedBytes: v.number(), physicalTotalBytes: v.number(), disksFreeBytes: v.array(v.number()) })),
   }).index("by_alias", ["id"]),
   xcbHostStatusHistory: defineTable({
-    id: v.union(v.literal("laptop-1"), v.literal("laptop-2")),
+    id: v.string(),
     observedAt: v.number(),
     running: v.number(),
     queued: v.number(),
