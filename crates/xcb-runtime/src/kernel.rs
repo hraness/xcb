@@ -1954,9 +1954,9 @@ pub async fn serve(
                                     queue(&outbox, Update::Notice("This turn is running in another terminal; cancel it there.".into()));
                                 }
                             }
-                            Intent::Conversation(_) => return Err(Error::Unavailable("managed conversations are available from plain xcb chat")),
-                            Intent::Habitat(_) | Intent::HabitatAt { .. } => return Err(Error::Unavailable("persistent backlog and schedules are available from plain xcb chat")),
-                            Intent::Focus(_) | Intent::MoveTask { .. } | Intent::ReleaseHold { .. } | Intent::AddWorkspace { .. } | Intent::NewProjectView { .. } => return Err(Error::Unavailable("projects are available from plain xcb chat")),
+                            Intent::Conversation(_) => return Err(Error::Unavailable("managed conversations are available through the JSON protocol or SDK")),
+                            Intent::Habitat(_) | Intent::HabitatAt { .. } => return Err(Error::Unavailable("persistent backlog and schedules are available through the JSON protocol or SDK")),
+                            Intent::Focus(_) | Intent::MoveTask { .. } | Intent::ReleaseHold { .. } | Intent::AddWorkspace { .. } | Intent::NewProjectView { .. } => return Err(Error::Unavailable("projects are available through the JSON protocol or SDK")),
                             Intent::Resume(id) => { if store.session(&id)?.is_none() { return Err(Error::Unavailable("session not found")); } current = Some(id); }
                             Intent::NewSession => current = Some(new_session(&store, &workspace, &config, None, None, None)?.id),
                             Intent::Account(account) => {

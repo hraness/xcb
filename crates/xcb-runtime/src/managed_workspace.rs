@@ -2121,24 +2121,6 @@ impl ManagedStore {
     /// Submit a prompt to the thread. An `Ask` writes nothing; a bound
     /// prompt commits its message, task, receipt and registry touch in one
     /// transaction. A retry of the same message id replays the committed task.
-    /// The committed thread task for a retried operation, before any
-    /// workspace resolution or admission runs (I3): a registry change since
-    /// the first attempt never turns a committed dispatch into a failure.
-    pub(crate) fn replay_thread_submission(
-        &self,
-        message: &Id,
-        text: &str,
-    ) -> Result<Option<(ManagedTask, WorkspaceBinding)>> {
-        let thread = Id::new(GLOBAL_THREAD_ID)?;
-        let Some(task) = self.replay_intake(&thread, message, text, Some(&[]))? else {
-            return Ok(None);
-        };
-        let binding = task.binding.clone().ok_or(Error::Conflict(
-            "message id was reused with different input",
-        ))?;
-        Ok(Some((task, binding)))
-    }
-
     pub async fn submit_to_thread(
         &self,
         message: Id,

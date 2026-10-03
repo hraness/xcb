@@ -1,0 +1,43 @@
+{
+  "contract": "algal.organism.v1",
+  "key": "organism:xcb-north-star-herder",
+  "name": "Inspect, advance, and review one xcb north-star lane",
+  "cells": [
+    {
+      "id": "inspect",
+      "kind": "agent",
+      "prompt": "Inspect docs/plans/xcb-north-star-execution.md, the exact Git tree, current xcb grant/backlog, recent receipts, and required repository gates. Select one bounded lane whose dependencies are satisfied. Identify the owner, worktree/module boundary, acceptance criteria, and exact validation command. Do not modify files in this inspection.",
+      "output": { "kind": "text" }
+    },
+    {
+      "id": "advance",
+      "kind": "agent",
+      "prompt": "Advance the selected xcb north-star lane within the existing project grant. Preserve unrelated work, use a disjoint worktree/module when parallel work is active, and make one reviewable change or produce an evidence receipt. Do not claim Valhalla parity, provider quality, or release readiness without the plan's gates.",
+      "inputs": { "inspection": "text" },
+      "output": { "kind": "text" }
+    },
+    {
+      "id": "verify",
+      "kind": "agent",
+      "prompt": "Review the attempted lane against the plan and repository rules. Run the narrow validation named by the worker, inspect the diff for scope, custody, replay, migration, and evidence errors, and either repair a bounded issue or record a precise blocker and follow-up. Return exact commands and results.",
+      "inputs": { "advance": "text" },
+      "output": { "kind": "text" }
+    },
+    {
+      "id": "report",
+      "kind": "agent",
+      "prompt": "Write a concise settled report for the project backlog: lane, tree/commit, files changed, validation, metrics or receipt paths, unresolved risks, and the next dependency-ordered task. Keep claims below evidence and leave unrelated held work unchanged.",
+      "inputs": { "verification": "text" },
+      "output": { "kind": "text" }
+    }
+  ],
+  "edges": [
+    { "from": { "cell": "inspect", "port": "out" }, "to": { "cell": "advance", "port": "inspection" } },
+    { "from": { "cell": "advance", "port": "out" }, "to": { "cell": "verify", "port": "advance" } },
+    { "from": { "cell": "verify", "port": "out" }, "to": { "cell": "report", "port": "verification" } }
+  ],
+  "interface": {
+    "inputs": {},
+    "outputs": { "summary": { "cell": "report", "port": "out" } }
+  }
+}

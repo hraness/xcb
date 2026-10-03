@@ -43,9 +43,6 @@ pub struct Status {
     /// Where the supervisor's output goes; current services retain at most
     /// three 2 MiB files. `None` for the oldest declaration, which discards it.
     pub log: Option<PathBuf>,
-    /// An unresolved remote-relay failure, independent of local worker faults.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub relay_fault: Option<String>,
 }
 
 fn xml(value: &str) -> String {
@@ -486,7 +483,6 @@ pub fn status(root: &Path, home: &Path) -> Result<Status> {
         supervisor_watched: supervisor_running && crate::managed_supervisor::watched(root),
         service,
         log,
-        relay_fault: crate::managed::relay_fault(&root.join("managed")),
     })
 }
 

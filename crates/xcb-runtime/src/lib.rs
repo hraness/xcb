@@ -38,7 +38,6 @@ pub mod judge;
 pub mod kernel;
 pub mod managed;
 pub mod managed_program;
-pub(crate) mod managed_relay;
 mod managed_supervisor;
 #[cfg(unix)]
 pub mod native_mcp;

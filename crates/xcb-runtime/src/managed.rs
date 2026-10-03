@@ -551,8 +551,6 @@ struct ViewStamp {
     workspaces: (i64, i64, i64),
     config: Option<std::time::SystemTime>,
     fault: Option<std::time::SystemTime>,
-    relay_fault: Option<std::time::SystemTime>,
-    relay_projection_fault: Option<std::time::SystemTime>,
     progress: Option<std::time::SystemTime>,
     progress_time: Option<u64>,
     direct_database: Option<std::time::SystemTime>,
@@ -1386,8 +1384,6 @@ impl ManagedStore {
             workspaces,
             config: modified(state_root.join("config.json")),
             fault: modified(self.root.join(SUPERVISOR_FAULT_FILE)),
-            relay_fault: modified(self.root.join(RELAY_FAULT_FILE)),
-            relay_projection_fault: modified(self.root.join(RELAY_PROJECTION_FAULT_FILE)),
             progress,
             // Expired heartbeats stop presenting a stale thinking/tool phase
             // even when a supervisor stopped without rewriting the file.
@@ -3512,9 +3508,6 @@ impl ManagedStore {
         if let Some(fault) = supervisor_fault(&self.root) {
             lines.push(format!("Last supervisor fault: {fault}"));
         }
-        if let Some(fault) = relay_fault(&self.root) {
-            lines.push(format!("Remote relay: {fault}"));
-        }
         Ok(lines.join("\n"))
     }
 
@@ -4979,8 +4972,6 @@ struct PendingUncertain {
 }
 
 const SUPERVISOR_FAULT_FILE: &str = "supervisor.fault.json";
-const RELAY_FAULT_FILE: &str = "relay.fault.json";
-const RELAY_PROJECTION_FAULT_FILE: &str = "relay.projection.fault.json";
 const MAX_FAULT_BYTES: usize = 4096;
 /// An unchanged fault is rewritten at most this often, so a row that fails
 /// on every 250 ms tick costs one small write a minute, not four a second.
@@ -4999,10 +4990,6 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
 /// backup or daily cleanup) keeps running and is checked by the next probe.
 const DAEMON_CONFIRM: Duration = Duration::from_millis(1500);
 const DAEMON_CONFIRM_POLL: Duration = Duration::from_millis(20);
-/// Remote-command lane shutdown bound: an in-flight pass gets this long to
-/// finish before it is dropped (the relay closes an interrupted command as
-/// ambiguous on the next boot, never as applied).
-const RELAY_SHUTDOWN: Duration = Duration::from_secs(5);
 /// Detail prefix for a queued task no connected account can serve; the UI
 /// shows it as needing action instead of an endless spinner.
 const NO_ACCOUNT_DETAIL: &str = "no eligible account: add or reconnect one (xcb accounts add <provider>, xcb doctor --provider <provider>, xcb accounts login <account>)";
@@ -5025,17 +5012,6 @@ pub(crate) fn record_supervisor_fault(root: &Path, message: &str) {
 
 fn write_supervisor_fault(root: &Path, message: &str, coalesce: bool) {
     write_fault(root, SUPERVISOR_FAULT_FILE, message, coalesce);
-}
-
-/// Relay failures have their own record: neither local worker faults nor
-/// repeated connection failures may hide the other kind of problem.
-pub(crate) fn record_relay_fault(root: &Path, message: &str, projection: bool) {
-    let filename = if projection {
-        RELAY_PROJECTION_FAULT_FILE
-    } else {
-        RELAY_FAULT_FILE
-    };
-    write_fault(root, filename, message, true);
 }
 
 fn write_fault(root: &Path, filename: &str, message: &str, coalesce: bool) {
@@ -5102,19 +5078,6 @@ fn recently_recorded(root: &Path, message: &str, now: u64) -> bool {
 
 fn clear_supervisor_fault(root: &Path) {
     let _ = fs::remove_file(root.join(SUPERVISOR_FAULT_FILE));
-}
-
-pub(crate) fn clear_relay_fault(root: &Path) {
-    clear_relay_connection_fault(root);
-    clear_relay_projection_fault(root);
-}
-
-pub(crate) fn clear_relay_connection_fault(root: &Path) {
-    let _ = fs::remove_file(root.join(RELAY_FAULT_FILE));
-}
-
-pub(crate) fn clear_relay_projection_fault(root: &Path) {
-    let _ = fs::remove_file(root.join(RELAY_PROJECTION_FAULT_FILE));
 }
 
 /// A supervisor that fails before it holds its lock exits with stderr going
@@ -5207,16 +5170,6 @@ pub fn supervisor_fault(root: &Path) -> Option<String> {
 /// written.
 pub(crate) fn supervisor_fault_record(root: &Path) -> Option<(u64, String)> {
     read_fault(root, SUPERVISOR_FAULT_FILE)
-}
-
-/// The unresolved relay failure, independent of the local supervisor fault.
-/// A successful relay operation clears only the failure it proves recovered.
-pub fn relay_fault(root: &Path) -> Option<String> {
-    let faults: Vec<_> = [RELAY_FAULT_FILE, RELAY_PROJECTION_FAULT_FILE]
-        .into_iter()
-        .filter_map(|filename| read_fault(root, filename).map(|(_, message)| message))
-        .collect();
-    (!faults.is_empty()).then(|| faults.join("; "))
 }
 
 fn read_fault(root: &Path, filename: &str) -> Option<(u64, String)> {
@@ -6304,9 +6257,6 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
     let mut tick_faults = 0u32;
     let mut heartbeat_noted = false;
     let mut interval = tokio::time::interval(Duration::from_millis(250));
-    // Remote commands run in their own task: a relay call that waits on the
-    // network (up to 30 s each) never holds up dispatch or the heartbeat.
-    let relay = crate::managed_relay::RelayTask::spawn(&root, managed.clone());
     let outcome = loop {
         tokio::select! {
             _ = interval.tick() => {
@@ -6352,9 +6302,7 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
                 }
                 let nonterminal = managed.has_habitat_work().unwrap_or(true);
                 if supervisor.active.is_empty() && draining { break Ok(0); }
-                // A linked relay keeps retrying through outages — exiting
-                // while it connects or backs off would strand the fleet.
-                if supervisor.active.is_empty() && !nonterminal && !relay.keeps_resident() {
+                if supervisor.active.is_empty() && !nonterminal {
                     if idle_since.elapsed() >= IDLE_EXIT {
                         // Settle the in-flight offer refresh while still holding
                         // the lock, then re-check: a client that committed a task
@@ -6375,7 +6323,6 @@ pub async fn daemon(root: PathBuf) -> Result<i32> {
             }
         }
     };
-    relay.shutdown(RELAY_SHUTDOWN).await;
     if let Some(handle) = offer_refresh.take() {
         // Bounded: a refresh stuck on the network must not hold the lock.
         let _ = tokio::time::timeout(Duration::from_secs(10), handle).await;
@@ -6743,9 +6690,6 @@ fn managed_view(
     }
     if let Some(fault) = supervisor_fault(managed.root()) {
         status.push_str(&format!(" · last supervisor fault: {fault}"));
-    }
-    if let Some(fault) = relay_fault(managed.root()) {
-        status.push_str(&format!(" · remote relay: {fault}"));
     }
     view.extensions
         .insert(0, ("algal supervisor".into(), status));
@@ -7328,7 +7272,7 @@ pub async fn serve_ui(
                 | Intent::SavePane { .. }
                 | Intent::GeneratePane(_)
                 | Intent::Extension { .. } => {
-                    output.try_send(Update::Notice("The global dispatcher routes managed tasks automatically. Use `xcb resume` for direct provider-session controls.".into())).ok();
+                    output.try_send(Update::Notice("The global dispatcher routes managed tasks automatically. Use `xcb run --json` or the SDK for provider-session controls.".into())).ok();
                 }
             }
         }

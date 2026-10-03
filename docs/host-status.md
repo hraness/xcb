@@ -1,4 +1,10 @@
-# Host availability
+# Host availability (legacy migration reference)
+
+The Convex host-status endpoint is retired from the active xcb path. This page
+preserves its wire contract for migration and evidence review; do not deploy a
+new heartbeat sender or treat this endpoint as the current status surface. The
+replacement status projection belongs to the Valhalla-backed protocol described
+in the [north-star vision](vision.md).
 
 The optional host status endpoint records when each of two home laptops last
 reported to the xcb deployment. A website can read it while both laptops or
@@ -12,7 +18,7 @@ observed about the local supervisor and resources. The relay's existing device
 presence remains independent because its network thread can keep running while
 the supervisor loop has stopped.
 
-## Configure the deployment
+## Configure the legacy deployment (migration reference only)
 
 Deploy the backend through the repository's release and deployment process.
 The existing relay tables, authentication and encrypted fleet data keep their

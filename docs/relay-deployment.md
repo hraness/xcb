@@ -1,4 +1,8 @@
-# Relay deployment
+# Relay deployment (legacy migration reference)
+
+The Convex relay is retired from the active xcb path. Keep this document only
+for migration inventory and recovery review; new deployments belong to the
+Valhalla transport plan in [the north-star vision](vision.md).
 
 This is a reference for running your own Convex relay that
 [remote operations](remote-operations.md) connect to. The relay code is this

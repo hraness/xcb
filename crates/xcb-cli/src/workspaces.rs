@@ -23,7 +23,7 @@ pub enum WorkspaceCommand {
     Add {
         /// Directory to register; relative paths start at --cwd.
         dir: PathBuf,
-        /// Name to match in prompts and `xcb dispatch`; defaults to the directory name.
+        /// Name to match in prompts and the JSON protocol; defaults to the directory name.
         #[arg(long)]
         name: Option<String>,
     },
