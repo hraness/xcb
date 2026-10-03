@@ -7,7 +7,7 @@ import { internalMutation, internalQuery } from "./server";
 
 type MachineId = "laptop-1" | "laptop-2";
 type Health = "ok" | "degraded" | "unknown";
-type HostKey = Readonly<{ id: MachineId; label: "laptop 1" | "laptop 2"; tokenSha256: string }>;
+type HostKey = Readonly<{ id: MachineId; label: string; tokenSha256: string }>;
 type TaskCounts = Readonly<{ running: number; queued: number; needsInput: number; uncertain: number }>;
 type Resources = Readonly<{ pressure: "normal" | "warning" | "critical" | "unknown"; swapUsedBytes: number; physicalTotalBytes: number; disksFreeBytes: number[] }>;
 type Heartbeat = Readonly<{ version: 1; sequence: number; health: Health; sampleAgeSeconds: number; tasks: TaskCounts; resources: Resources }>;
@@ -40,7 +40,15 @@ function closed(value: Record<string, unknown>, keys: readonly string[]): boolea
   return fields.length === keys.length && fields.every((field) => keys.includes(field));
 }
 
-/** A malformed entry disables the whole configuration. Fixed public aliases
+/** The public label is the fixed alias or the alias plus one owner-chosen
+ * lowercase suffix. It can never be a hostname, path or arbitrary text. */
+function validLabel(id: MachineId, label: unknown): boolean {
+  const base = id === "laptop-1" ? "laptop 1" : "laptop 2";
+  return typeof label === "string"
+    && (label === base || new RegExp(`^${base} \\([a-z0-9][a-z0-9-]{0,23}\\)$`, "u").test(label));
+}
+
+/** A malformed entry disables the whole configuration. Bounded public aliases
  * prevent a configuration mistake from exposing a hostname or private label. */
 export function parseKeys(raw: string | undefined): readonly HostKey[] {
   if (raw === undefined || raw === "") return [];
@@ -51,7 +59,7 @@ export function parseKeys(raw: string | undefined): readonly HostKey[] {
   for (const value of values) {
     if (!plain(value) || !closed(value, ["id", "label", "tokenSha256"])
       || (value.id !== "laptop-1" && value.id !== "laptop-2")
-      || value.label !== (value.id === "laptop-1" ? "laptop 1" : "laptop 2")
+      || !validLabel(value.id, value.label)
       || typeof value.tokenSha256 !== "string" || !/^[0-9a-f]{64}$/u.test(value.tokenSha256)
       || keys.some((key) => key.id === value.id || key.tokenSha256 === value.tokenSha256)) {
       throw new Error("invalid host status configuration");
