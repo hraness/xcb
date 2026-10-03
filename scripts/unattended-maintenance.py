@@ -289,13 +289,13 @@ def command(argv, cwd, env, timeout, input_data=b"", maximum=MAX_OUTPUT):
     return {"outcome": result, "code": proc.returncode, "stdout": bytes(output[:maximum])}
 
 
-def probe(config, arguments, runner=command):
+def probe(config, arguments, runner=command, maximum=256 * 1024):
     try:
-        result = runner([config["xcb"], "--json", *arguments], config["workspace"], environment(config), 15, maximum=256 * 1024)
+        result = runner([config["xcb"], "--json", *arguments], config["workspace"], environment(config), 15, maximum=maximum)
         if result["outcome"] != "completed" or result["code"] != 0:
             return None
         data = decode(result["stdout"])
-        return data if isinstance(data, dict) else None
+        return data if isinstance(data, (dict, list)) else None
     except (ValueError, OSError):
         return None
 
@@ -418,7 +418,7 @@ def sample_tick(config, at_s=None, runner=command, review_binding_warnings=None)
         service = probe(config, ["service", "status"], runner)
         sample = sanitize_sample(resources, service, at_s)
         try:
-            task_rows = probe(config, ["tasks"], runner)
+            task_rows = probe(config, ["tasks"], runner, maximum=MAX_OUTPUT)
         except (StopIteration, IndexError, ValueError, OSError):
             task_rows = None
         counts = {key: 0 for key in TASK_KEYS}
